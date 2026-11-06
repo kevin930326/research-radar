@@ -1,0 +1,980 @@
+[
+  {
+    "short": "MISQ",
+    "expected": "MIS Quarterly",
+    "issns": [
+      "0276-7783",
+      "2162-9730"
+    ],
+    "origin": "AIS",
+    "candidates": [
+      {
+        "id": "https://openalex.org/S57293258",
+        "display_name": "MIS Quarterly",
+        "issn_l": "0276-7783",
+        "issn": [
+          "0276-7783",
+          "2162-9730"
+        ],
+        "host_organization_name": "MIS Quarterly",
+        "type": "journal",
+        "works_count": 2403
+      }
+    ],
+    "source": {
+      "id": "https://openalex.org/S57293258",
+      "display_name": "MIS Quarterly",
+      "issn_l": "0276-7783",
+      "issn": [
+        "0276-7783",
+        "2162-9730"
+      ],
+      "host_organization_name": "MIS Quarterly",
+      "type": "journal",
+      "works_count": 2403
+    },
+    "status": "OK",
+    "counts": {
+      "2024": 94,
+      "2022": 82,
+      "2021": 76,
+      "2018": 69,
+      "2020": 69,
+      "2017": 67,
+      "2019": 65,
+      "2025": 63,
+      "2016": 61,
+      "2023": 56
+    },
+    "with_abstract": {
+      "2024": 87,
+      "2022": 78,
+      "2021": 62,
+      "2025": 62,
+      "2020": 61,
+      "2017": 57,
+      "2018": 55,
+      "2019": 54,
+      "2023": 54,
+      "2016": 51
+    },
+    "sanity": {
+      "true": {
+        "sampled": 25,
+        "non_empty": 25
+      },
+      "false": {
+        "sampled": 25,
+        "non_empty": 0
+      }
+    }
+  },
+  {
+    "short": "ISR",
+    "expected": "Information Systems Research",
+    "issns": [
+      "1047-7047",
+      "1526-5536"
+    ],
+    "origin": "AIS",
+    "candidates": [
+      {
+        "id": "https://openalex.org/S202812398",
+        "display_name": "Information Systems Research",
+        "issn_l": "1047-7047",
+        "issn": [
+          "1047-7047",
+          "1526-5536"
+        ],
+        "host_organization_name": "Institute for Operations Research and the Management Sciences",
+        "type": "journal",
+        "works_count": 1994
+      }
+    ],
+    "source": {
+      "id": "https://openalex.org/S202812398",
+      "display_name": "Information Systems Research",
+      "issn_l": "1047-7047",
+      "issn": [
+        "1047-7047",
+        "1526-5536"
+      ],
+      "host_organization_name": "Institute for Operations Research and the Management Sciences",
+      "type": "journal",
+      "works_count": 1994
+    },
+    "status": "OK",
+    "counts": {
+      "2025": 117,
+      "2022": 110,
+      "2023": 101,
+      "2021": 95,
+      "2024": 91,
+      "2019": 88,
+      "2020": 82,
+      "2017": 74,
+      "2016": 73,
+      "2018": 63
+    },
+    "with_abstract": {
+      "2025": 109,
+      "2023": 91,
+      "2022": 85,
+      "2024": 82,
+      "2021": 79,
+      "2019": 62,
+      "2020": 59,
+      "2016": 50,
+      "2017": 45,
+      "2018": 40
+    },
+    "sanity": {
+      "true": {
+        "sampled": 25,
+        "non_empty": 25
+      },
+      "false": {
+        "sampled": 25,
+        "non_empty": 0
+      }
+    }
+  },
+  {
+    "short": "JMIS",
+    "expected": "Journal of Management Information Systems",
+    "issns": [
+      "0742-1222",
+      "1557-928X"
+    ],
+    "origin": "AIS",
+    "candidates": [
+      {
+        "id": "https://openalex.org/S9954729",
+        "display_name": "Journal of Management Information Systems",
+        "issn_l": "0742-1222",
+        "issn": [
+          "0742-1222",
+          "1557-928X"
+        ],
+        "host_organization_name": "Taylor & Francis",
+        "type": "journal",
+        "works_count": 1811
+      }
+    ],
+    "source": {
+      "id": "https://openalex.org/S9954729",
+      "display_name": "Journal of Management Information Systems",
+      "issn_l": "0742-1222",
+      "issn": [
+        "0742-1222",
+        "1557-928X"
+      ],
+      "host_organization_name": "Taylor & Francis",
+      "type": "journal",
+      "works_count": 1811
+    },
+    "status": "OK",
+    "counts": {
+      "2021": 44,
+      "2019": 43,
+      "2017": 42,
+      "2020": 42,
+      "2016": 41,
+      "2018": 41,
+      "2023": 41,
+      "2024": 41,
+      "2025": 41,
+      "2022": 40
+    },
+    "with_abstract": {
+      "2021": 43,
+      "2020": 42,
+      "2016": 41,
+      "2024": 41,
+      "2017": 40,
+      "2019": 40,
+      "2023": 40,
+      "2025": 40,
+      "2018": 39,
+      "2022": 39
+    },
+    "sanity": {
+      "true": {
+        "sampled": 25,
+        "non_empty": 25
+      },
+      "false": {
+        "sampled": 11,
+        "non_empty": 0
+      }
+    }
+  },
+  {
+    "short": "JAIS",
+    "expected": "Journal of the Association for Information Systems",
+    "issns": [
+      "1536-9323"
+    ],
+    "origin": "AIS",
+    "candidates": [
+      {
+        "id": "https://openalex.org/S30879505",
+        "display_name": "Journal of the Association for Information Systems",
+        "issn_l": "1536-9323",
+        "issn": [
+          "1536-9323"
+        ],
+        "host_organization_name": "Association for Information Systems",
+        "type": "journal",
+        "works_count": 45881
+      }
+    ],
+    "source": {
+      "id": "https://openalex.org/S30879505",
+      "display_name": "Journal of the Association for Information Systems",
+      "issn_l": "1536-9323",
+      "issn": [
+        "1536-9323"
+      ],
+      "host_organization_name": "Association for Information Systems",
+      "type": "journal",
+      "works_count": 45881
+    },
+    "status": "OK",
+    "counts": {
+      "2020": 103,
+      "2019": 95,
+      "2018": 75,
+      "2021": 74,
+      "2025": 73,
+      "2024": 72,
+      "2023": 54,
+      "2022": 53,
+      "2017": 45,
+      "2016": 36
+    },
+    "with_abstract": {
+      "2020": 102,
+      "2019": 95,
+      "2021": 74,
+      "2018": 73,
+      "2025": 72,
+      "2024": 68,
+      "2022": 53,
+      "2023": 53,
+      "2017": 45,
+      "2016": 36
+    },
+    "sanity": {
+      "true": {
+        "sampled": 25,
+        "non_empty": 25
+      },
+      "false": {
+        "sampled": 9,
+        "non_empty": 0
+      }
+    }
+  },
+  {
+    "short": "EJIS",
+    "expected": "European Journal of Information Systems",
+    "issns": [
+      "0960-085X",
+      "1476-9344"
+    ],
+    "origin": "AIS",
+    "candidates": [
+      {
+        "id": "https://openalex.org/S116712389",
+        "display_name": "European Journal of Information Systems",
+        "issn_l": "0960-085X",
+        "issn": [
+          "0960-085X",
+          "1476-9344"
+        ],
+        "host_organization_name": "Palgrave Macmillan",
+        "type": "journal",
+        "works_count": 1542
+      }
+    ],
+    "source": {
+      "id": "https://openalex.org/S116712389",
+      "display_name": "European Journal of Information Systems",
+      "issn_l": "0960-085X",
+      "issn": [
+        "0960-085X",
+        "1476-9344"
+      ],
+      "host_organization_name": "Palgrave Macmillan",
+      "type": "journal",
+      "works_count": 1542
+    },
+    "status": "OK",
+    "counts": {
+      "2020": 63,
+      "2021": 56,
+      "2022": 50,
+      "2017": 46,
+      "2023": 38,
+      "2018": 36,
+      "2024": 33,
+      "2025": 32,
+      "2019": 19,
+      "2016": 18
+    },
+    "with_abstract": {
+      "2020": 63,
+      "2021": 55,
+      "2022": 49,
+      "2017": 45,
+      "2023": 38,
+      "2018": 36,
+      "2024": 33,
+      "2025": 32,
+      "2019": 19,
+      "2016": 18
+    },
+    "sanity": {
+      "true": {
+        "sampled": 25,
+        "non_empty": 25
+      },
+      "false": {
+        "sampled": 3,
+        "non_empty": 0
+      }
+    }
+  },
+  {
+    "short": "ISJ",
+    "expected": "Information Systems Journal",
+    "issns": [
+      "1350-1917",
+      "1365-2575"
+    ],
+    "origin": "AIS",
+    "candidates": [
+      {
+        "id": "https://openalex.org/S92260147",
+        "display_name": "Information Systems Journal",
+        "issn_l": "1350-1917",
+        "issn": [
+          "1350-1917",
+          "1365-2575"
+        ],
+        "host_organization_name": "Wiley",
+        "type": "journal",
+        "works_count": 1391
+      }
+    ],
+    "source": {
+      "id": "https://openalex.org/S92260147",
+      "display_name": "Information Systems Journal",
+      "issn_l": "1350-1917",
+      "issn": [
+        "1350-1917",
+        "1365-2575"
+      ],
+      "host_organization_name": "Wiley",
+      "type": "journal",
+      "works_count": 1391
+    },
+    "status": "OK",
+    "counts": {
+      "2024": 74,
+      "2023": 58,
+      "2018": 51,
+      "2021": 49,
+      "2025": 47,
+      "2022": 38,
+      "2019": 37,
+      "2020": 37,
+      "2016": 33,
+      "2017": 31
+    },
+    "with_abstract": {
+      "2024": 69,
+      "2023": 58,
+      "2018": 51,
+      "2021": 49,
+      "2025": 43,
+      "2022": 38,
+      "2020": 37,
+      "2019": 35,
+      "2016": 33,
+      "2017": 31
+    },
+    "sanity": {
+      "true": {
+        "sampled": 25,
+        "non_empty": 25
+      },
+      "false": {
+        "sampled": 11,
+        "non_empty": 0
+      }
+    }
+  },
+  {
+    "short": "JIT",
+    "expected": "Journal of Information Technology",
+    "issns": [
+      "0268-3962",
+      "1466-4437"
+    ],
+    "origin": "AIS",
+    "candidates": [
+      {
+        "id": "https://openalex.org/S135086714",
+        "display_name": "Journal of Information Technology",
+        "issn_l": "0268-3962",
+        "issn": [
+          "0268-3962",
+          "1466-4437"
+        ],
+        "host_organization_name": "SAGE Publishing",
+        "type": "journal",
+        "works_count": 1357
+      }
+    ],
+    "source": {
+      "id": "https://openalex.org/S135086714",
+      "display_name": "Journal of Information Technology",
+      "issn_l": "0268-3962",
+      "issn": [
+        "0268-3962",
+        "1466-4437"
+      ],
+      "host_organization_name": "SAGE Publishing",
+      "type": "journal",
+      "works_count": 1357
+    },
+    "status": "OK",
+    "counts": {
+      "2023": 43,
+      "2016": 25,
+      "2021": 24,
+      "2019": 23,
+      "2020": 23,
+      "2017": 19,
+      "2022": 19,
+      "2024": 14,
+      "2025": 13,
+      "2018": 7
+    },
+    "with_abstract": {
+      "2023": 42,
+      "2021": 24,
+      "2016": 23,
+      "2019": 21,
+      "2020": 21,
+      "2017": 19,
+      "2022": 17,
+      "2024": 14,
+      "2025": 13,
+      "2018": 7
+    },
+    "sanity": {
+      "true": {
+        "sampled": 25,
+        "non_empty": 25
+      },
+      "false": {
+        "sampled": 9,
+        "non_empty": 0
+      }
+    }
+  },
+  {
+    "short": "JSIS",
+    "expected": "Journal of Strategic Information Systems",
+    "issns": [
+      "0963-8687",
+      "1873-1198"
+    ],
+    "origin": "AIS",
+    "candidates": [
+      {
+        "id": "https://openalex.org/S6144335",
+        "display_name": "The Journal of Strategic Information Systems",
+        "issn_l": "0963-8687",
+        "issn": [
+          "0963-8687",
+          "1873-1198"
+        ],
+        "host_organization_name": "Elsevier BV",
+        "type": "journal",
+        "works_count": 1151
+      }
+    ],
+    "source": {
+      "id": "https://openalex.org/S6144335",
+      "display_name": "The Journal of Strategic Information Systems",
+      "issn_l": "0963-8687",
+      "issn": [
+        "0963-8687",
+        "1873-1198"
+      ],
+      "host_organization_name": "Elsevier BV",
+      "type": "journal",
+      "works_count": 1151
+    },
+    "status": "OK",
+    "counts": {
+      "2016": 26,
+      "2017": 26,
+      "2024": 24,
+      "2025": 24,
+      "2018": 22,
+      "2020": 21,
+      "2021": 19,
+      "2023": 19,
+      "2022": 16,
+      "2019": 15
+    },
+    "with_abstract": {
+      "2024": 20,
+      "2025": 16,
+      "2023": 11,
+      "2020": 8,
+      "2022": 8,
+      "2017": 2,
+      "2018": 2,
+      "2021": 2,
+      "2016": 1,
+      "2019": 1
+    },
+    "sanity": {
+      "true": {
+        "sampled": 25,
+        "non_empty": 25
+      },
+      "false": {
+        "sampled": 25,
+        "non_empty": 0
+      }
+    }
+  },
+  {
+    "short": "DSS",
+    "expected": "Decision Support Systems",
+    "issns": [
+      "0167-9236",
+      "1873-5797"
+    ],
+    "origin": "AIS（2023 加入）",
+    "candidates": [
+      {
+        "id": "https://openalex.org/S11479521",
+        "display_name": "Decision Support Systems",
+        "issn_l": "0167-9236",
+        "issn": [
+          "0167-9236",
+          "1873-5797"
+        ],
+        "host_organization_name": "Elsevier BV",
+        "type": "journal",
+        "works_count": 4967
+      }
+    ],
+    "source": {
+      "id": "https://openalex.org/S11479521",
+      "display_name": "Decision Support Systems",
+      "issn_l": "0167-9236",
+      "issn": [
+        "0167-9236",
+        "1873-5797"
+      ],
+      "host_organization_name": "Elsevier BV",
+      "type": "journal",
+      "works_count": 4967
+    },
+    "status": "OK",
+    "counts": {
+      "2024": 141,
+      "2023": 126,
+      "2019": 122,
+      "2021": 122,
+      "2020": 121,
+      "2017": 118,
+      "2016": 116,
+      "2025": 114,
+      "2018": 104,
+      "2022": 92
+    },
+    "with_abstract": {
+      "2024": 33,
+      "2025": 23,
+      "2023": 18,
+      "2021": 16,
+      "2020": 14,
+      "2022": 7,
+      "2019": 6,
+      "2017": 5,
+      "2018": 4,
+      "2016": 2
+    },
+    "sanity": {
+      "true": {
+        "sampled": 25,
+        "non_empty": 25
+      },
+      "false": {
+        "sampled": 25,
+        "non_empty": 0
+      }
+    }
+  },
+  {
+    "short": "I&M",
+    "expected": "Information & Management",
+    "issns": [
+      "0378-7206",
+      "1872-7530"
+    ],
+    "origin": "AIS（2023 加入）",
+    "candidates": [
+      {
+        "id": "https://openalex.org/S38883057",
+        "display_name": "Information & Management",
+        "issn_l": "0378-7206",
+        "issn": [
+          "0378-7206",
+          "1872-7530"
+        ],
+        "host_organization_name": "Elsevier BV",
+        "type": "journal",
+        "works_count": 3665
+      }
+    ],
+    "source": {
+      "id": "https://openalex.org/S38883057",
+      "display_name": "Information & Management",
+      "issn_l": "0378-7206",
+      "issn": [
+        "0378-7206",
+        "1872-7530"
+      ],
+      "host_organization_name": "Elsevier BV",
+      "type": "journal",
+      "works_count": 3665
+    },
+    "status": "OK",
+    "counts": {
+      "2025": 133,
+      "2024": 116,
+      "2021": 105,
+      "2023": 104,
+      "2018": 102,
+      "2016": 97,
+      "2022": 97,
+      "2020": 94,
+      "2019": 88,
+      "2017": 69
+    },
+    "with_abstract": {
+      "2025": 34,
+      "2024": 26,
+      "2023": 20,
+      "2019": 9,
+      "2020": 9,
+      "2021": 9,
+      "2022": 7,
+      "2018": 5,
+      "2016": 1
+    },
+    "sanity": {
+      "true": {
+        "sampled": 25,
+        "non_empty": 25
+      },
+      "false": {
+        "sampled": 25,
+        "non_empty": 0
+      }
+    }
+  },
+  {
+    "short": "I&O",
+    "expected": "Information and Organization",
+    "issns": [
+      "1471-7727",
+      "1873-7919"
+    ],
+    "origin": "AIS（2023 加入）",
+    "candidates": [
+      {
+        "id": "https://openalex.org/S35363033",
+        "display_name": "Information and Organization",
+        "issn_l": "1471-7727",
+        "issn": [
+          "1471-7727",
+          "1873-7919"
+        ],
+        "host_organization_name": "Elsevier BV",
+        "type": "journal",
+        "works_count": 497
+      }
+    ],
+    "source": {
+      "id": "https://openalex.org/S35363033",
+      "display_name": "Information and Organization",
+      "issn_l": "1471-7727",
+      "issn": [
+        "1471-7727",
+        "1873-7919"
+      ],
+      "host_organization_name": "Elsevier BV",
+      "type": "journal",
+      "works_count": 497
+    },
+    "status": "OK",
+    "counts": {
+      "2025": 25,
+      "2024": 23,
+      "2021": 21,
+      "2023": 20,
+      "2019": 19,
+      "2018": 17,
+      "2022": 17,
+      "2017": 16,
+      "2016": 11,
+      "2020": 11
+    },
+    "with_abstract": {
+      "2025": 18,
+      "2024": 10,
+      "2023": 9,
+      "2019": 4,
+      "2022": 4,
+      "2016": 1,
+      "2017": 1,
+      "2021": 1
+    },
+    "sanity": {
+      "true": {
+        "sampled": 25,
+        "non_empty": 25
+      },
+      "false": {
+        "sampled": 25,
+        "non_empty": 0
+      }
+    }
+  },
+  {
+    "short": "PMJ",
+    "expected": "Project Management Journal",
+    "issns": [
+      "8756-9728",
+      "1938-9507"
+    ],
+    "origin": "王老師",
+    "candidates": [
+      {
+        "id": "https://openalex.org/S196205230",
+        "display_name": "Project Management Journal",
+        "issn_l": "1938-9507",
+        "issn": [
+          "1938-9507",
+          "8756-9728"
+        ],
+        "host_organization_name": "SAGE Publishing",
+        "type": "journal",
+        "works_count": 1775
+      }
+    ],
+    "source": {
+      "id": "https://openalex.org/S196205230",
+      "display_name": "Project Management Journal",
+      "issn_l": "1938-9507",
+      "issn": [
+        "1938-9507",
+        "8756-9728"
+      ],
+      "host_organization_name": "SAGE Publishing",
+      "type": "journal",
+      "works_count": 1775
+    },
+    "status": "OK",
+    "counts": {
+      "2016": 68,
+      "2019": 51,
+      "2024": 51,
+      "2023": 48,
+      "2017": 47,
+      "2018": 46,
+      "2020": 41,
+      "2025": 41,
+      "2022": 40,
+      "2021": 38
+    },
+    "with_abstract": {
+      "2019": 50,
+      "2024": 49,
+      "2016": 47,
+      "2023": 46,
+      "2018": 44,
+      "2017": 41,
+      "2020": 40,
+      "2025": 40,
+      "2022": 38,
+      "2021": 36
+    },
+    "sanity": {
+      "true": {
+        "sampled": 25,
+        "non_empty": 25
+      },
+      "false": {
+        "sampled": 25,
+        "non_empty": 0
+      }
+    }
+  },
+  {
+    "short": "TEM",
+    "expected": "IEEE Transactions on Engineering Management",
+    "issns": [
+      "0018-9391",
+      "1558-0040"
+    ],
+    "origin": "王老師",
+    "candidates": [
+      {
+        "id": "https://openalex.org/S154533451",
+        "display_name": "IEEE Transactions on Engineering Management",
+        "issn_l": "0018-9391",
+        "issn": [
+          "0018-9391",
+          "1558-0040"
+        ],
+        "host_organization_name": "Institute of Electrical and Electronics Engineers",
+        "type": "journal",
+        "works_count": 6159
+      }
+    ],
+    "source": {
+      "id": "https://openalex.org/S154533451",
+      "display_name": "IEEE Transactions on Engineering Management",
+      "issn_l": "0018-9391",
+      "issn": [
+        "0018-9391",
+        "1558-0040"
+      ],
+      "host_organization_name": "Institute of Electrical and Electronics Engineers",
+      "type": "journal",
+      "works_count": 6159
+    },
+    "status": "OK",
+    "counts": {
+      "2023": 390,
+      "2022": 368,
+      "2021": 355,
+      "2024": 349,
+      "2025": 340,
+      "2020": 322,
+      "2019": 218,
+      "2018": 138,
+      "2017": 85,
+      "2016": 51
+    },
+    "with_abstract": {
+      "2023": 388,
+      "2024": 348,
+      "2022": 346,
+      "2021": 339,
+      "2025": 336,
+      "2020": 308,
+      "2019": 197,
+      "2018": 110,
+      "2017": 67,
+      "2016": 36
+    },
+    "sanity": {
+      "true": {
+        "sampled": 25,
+        "non_empty": 25
+      },
+      "false": {
+        "sampled": 25,
+        "non_empty": 0
+      }
+    }
+  },
+  {
+    "short": "DATABASE",
+    "expected": "The DATA BASE for Advances in Information Systems",
+    "issns": [
+      "0095-0033",
+      "1532-0936"
+    ],
+    "origin": "王老師",
+    "candidates": [
+      {
+        "id": "https://openalex.org/S4210234096",
+        "display_name": "ACM SIGMIS Database the DATABASE for Advances in Information Systems",
+        "issn_l": "0095-0033",
+        "issn": [
+          "0095-0033",
+          "1532-0936",
+          "2331-1584",
+          "2331-1622"
+        ],
+        "host_organization_name": "Association for Computing Machinery",
+        "type": "journal",
+        "works_count": 1311
+      }
+    ],
+    "source": {
+      "id": "https://openalex.org/S4210234096",
+      "display_name": "ACM SIGMIS Database the DATABASE for Advances in Information Systems",
+      "issn_l": "0095-0033",
+      "issn": [
+        "0095-0033",
+        "1532-0936",
+        "2331-1584",
+        "2331-1622"
+      ],
+      "host_organization_name": "Association for Computing Machinery",
+      "type": "journal",
+      "works_count": 1311
+    },
+    "status": "名稱不符",
+    "counts": {
+      "2018": 31,
+      "2021": 29,
+      "2019": 28,
+      "2020": 25,
+      "2022": 24,
+      "2017": 21,
+      "2023": 20,
+      "2024": 20,
+      "2025": 19,
+      "2016": 18
+    },
+    "with_abstract": {
+      "2018": 31,
+      "2021": 29,
+      "2019": 28,
+      "2020": 25,
+      "2022": 24,
+      "2017": 21,
+      "2023": 20,
+      "2024": 20,
+      "2025": 19,
+      "2016": 18
+    },
+    "sanity": {
+      "true": {
+        "sampled": 25,
+        "non_empty": 25
+      },
+      "false": {
+        "sampled": 0,
+        "non_empty": 0
+      }
+    }
+  }
+]

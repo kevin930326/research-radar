@@ -21,6 +21,7 @@ import os
 import re
 import sys
 import time
+import http.client
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -37,9 +38,12 @@ API = "https://api.openalex.org"
 YEAR_FROM, YEAR_TO = 2016, 2025
 # 「期刊論文」：OpenAlex 的 article 與 review（不含 editorial、erratum、letter 等）
 WORK_TYPES = "article|review"
+# 只算有 DOI 的論文：OpenAlex 把大量無 DOI 的 AIS 研討會論文錯掛到 JAIS 底下（2016–2025 約 9,200 篇），
+# 其他期刊無 DOI 的只有 0–19 篇
 MIN_INTERVAL = 0.25  # 秒；OpenAlex 上限 10 次/秒，這裡保守用 4 次/秒
 
 # (簡稱, 期刊全名, [ISSN...], 來源)
+# AIS 資深學者清單：前 8 本為原始清單；DSS、I&M、I&O 於 2023 年加入
 JOURNALS = [
     ("MISQ", "MIS Quarterly", ["0276-7783", "2162-9730"], "AIS"),
     ("ISR", "Information Systems Research", ["1047-7047", "1526-5536"], "AIS"),
@@ -49,9 +53,9 @@ JOURNALS = [
     ("ISJ", "Information Systems Journal", ["1350-1917", "1365-2575"], "AIS"),
     ("JIT", "Journal of Information Technology", ["0268-3962", "1466-4437"], "AIS"),
     ("JSIS", "Journal of Strategic Information Systems", ["0963-8687", "1873-1198"], "AIS"),
-    ("DSS", "Decision Support Systems", ["0167-9236", "1873-5797"], "AIS"),
-    ("I&M", "Information & Management", ["0378-7206", "1872-7530"], "AIS"),
-    ("I&O", "Information and Organization", ["1471-7727", "1873-7919"], "AIS"),
+    ("DSS", "Decision Support Systems", ["0167-9236", "1873-5797"], "AIS（2023 加入）"),
+    ("I&M", "Information & Management", ["0378-7206", "1872-7530"], "AIS（2023 加入）"),
+    ("I&O", "Information and Organization", ["1471-7727", "1873-7919"], "AIS（2023 加入）"),
     ("PMJ", "Project Management Journal", ["8756-9728", "1938-9507"], "王老師"),
     ("TEM", "IEEE Transactions on Engineering Management", ["0018-9391", "1558-0040"], "王老師"),
     ("DATABASE", "The DATA BASE for Advances in Information Systems", ["0095-0033", "1532-0936"], "王老師"),
@@ -100,6 +104,12 @@ def get(path: str, params: dict, api_key: str) -> dict:
                 continue
             # 錯誤訊息裡不要印出含金鑰的網址
             raise RuntimeError(f"OpenAlex {path} 回傳 HTTP {e.code}: {e.read()[:300]!r}") from None
+        except (http.client.IncompleteRead, urllib.error.URLError, TimeoutError) as e:
+            if attempt < 4:
+                print(f"  網路錯誤（{type(e).__name__}），{2 ** (attempt + 1)} 秒後重試", file=sys.stderr)
+                time.sleep(2 ** (attempt + 1))
+                continue
+            raise
     raise RuntimeError("重試次數用完")
 
 
@@ -146,7 +156,7 @@ def resolve_sources(api_key: str) -> list[dict]:
 def year_counts(source_id: str, extra_filter: str, api_key: str) -> dict[int, int]:
     sid = source_id.rsplit("/", 1)[-1]
     flt = (f"primary_location.source.id:{sid},"
-           f"publication_year:{YEAR_FROM}-{YEAR_TO},type:{WORK_TYPES}{extra_filter}")
+           f"publication_year:{YEAR_FROM}-{YEAR_TO},type:{WORK_TYPES},has_doi:true{extra_filter}")
     data = get("/works", {"filter": flt, "group_by": "publication_year"}, api_key)
     return {int(g["key"]): g["count"] for g in data.get("group_by", [])}
 
@@ -154,7 +164,7 @@ def year_counts(source_id: str, extra_filter: str, api_key: str) -> dict[int, in
 def sanity_check(source_id: str, api_key: str) -> dict:
     """抽樣確認 has_abstract 篩選器 = abstract_inverted_index 不為空。"""
     sid = source_id.rsplit("/", 1)[-1]
-    base = f"primary_location.source.id:{sid},publication_year:{YEAR_FROM}-{YEAR_TO},type:{WORK_TYPES}"
+    base = f"primary_location.source.id:{sid},publication_year:{YEAR_FROM}-{YEAR_TO},type:{WORK_TYPES},has_doi:true"
     out = {}
     for flag in ("true", "false"):
         data = get("/works", {"filter": f"{base},has_abstract:{flag}",
@@ -177,17 +187,19 @@ def build_report(rows: list[dict]) -> str:
     L.append("# OQ-02 驗證：OpenAlex 對 14 本追蹤期刊的摘要覆蓋率\n")
     L.append(f"- 資料抓取日期：{date.today().isoformat()}（OpenAlex 資料會更新，數字只代表當天）")
     L.append(f"- 範圍：{YEAR_FROM}–{YEAR_TO} 年、OpenAlex type 為 `article` 或 `review`、"
-             "且主要出處（primary_location）是該期刊的論文")
+             "有 DOI、且主要出處（primary_location）是該期刊的論文")
+    L.append("- 為什麼要求有 DOI：OpenAlex 把大量 AIS 研討會論文（AMCIS、ICIS 等，沒有 DOI）錯掛到 JAIS，"
+             "不加這個條件 JAIS 會變成 9,898 篇（實際約 680 篇）；其他 13 本加條件前後只差 0–19 篇")
     L.append("- 「有摘要」＝ `abstract_inverted_index` 不為空（用 OpenAlex 的 `has_abstract` 篩選器統計，"
              "並抽樣比對欄位內容）")
     L.append("- 程式：`spikes/oq-02/check_coverage.py`；原始數字：`spikes/oq-02/output/results.json`\n")
 
     L.append("## 1. 期刊對應（ISSN → OpenAlex source）\n")
-    L.append("| 簡稱 | 期刊（預期） | ISSN | OpenAlex 名稱 | source ID | 出版者 | 狀態 |")
-    L.append("|---|---|---|---|---|---|---|")
+    L.append("| 簡稱 | 期刊（預期） | 清單來源 | ISSN | OpenAlex 名稱 | source ID | 出版者 | 狀態 |")
+    L.append("|---|---|---|---|---|---|---|---|")
     for r in rows:
         s = r["source"] or {}
-        L.append(f"| {r['short']} | {r['expected']} | {', '.join(r['issns'])} | "
+        L.append(f"| {r['short']} | {r['expected']} | {r['origin']} | {', '.join(r['issns'])} | "
                  f"{s.get('display_name', '-')} | {(s.get('id') or '-').rsplit('/', 1)[-1]} | "
                  f"{s.get('host_organization_name') or '-'} | {r['status']} |")
     flagged = [r for r in rows if r["status"] != "OK"]
