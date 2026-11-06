@@ -65,13 +65,25 @@ Elsevier 4 本合併 OpenAlex 與 Semantic Scholar 後的覆蓋率（分母為 O
 ## 6. 對 PRD 範圍的建議
 
 1. **「多來源互補」不列為日常追蹤的必要功能。** 對新論文補回不到 5%，每天多查一個來源不划算。Elsevier 4 本的新論文照 OQ-02 的降級處理（標題＋關鍵字、顯示覆蓋率、重要論文靠上傳 PDF 補）。
-2. **第一次匯入時，可以加一個一次性的 Semantic Scholar 補摘要步驟（選配）。** 成本很低（約 2,200 個 DOI、5 次批次請求），能讓 2018–2021 年的 Elsevier 覆蓋率從 9% 提高到 83%，整體從 72% 提高到 81%。要不要放進第一版由 Kevin 決定。
-3. **如果採用第 2 點，PRD 要註明兩件事：**
-   - 摘要要記錄「來自哪個來源」，介面上的覆蓋率才算得對。
-   - 要先確認 Semantic Scholar API 的授權條款，看能不能儲存並在平台上顯示它提供的摘要。這次沒有確認。
+2. **第一次匯入時，加一個一次性的 Semantic Scholar 補摘要步驟，PRD 列為 Could。**（Kevin 於 2026-11-06 決定）成本很低（約 2,200 個 DOI、5 次批次請求），能讓 2018–2021 年的 Elsevier 覆蓋率從 9% 提高到 83%，整體從 72% 提高到 81%。**實作前必須先確認授權**（見第 7 節）；授權不允許就不做，照降級處理。
+3. **PRD 的論文資料要有「摘要來源」欄位**（例如 OpenAlex、Semantic Scholar、使用者上傳的 PDF）。用途：
+   - 介面上的覆蓋率可以依來源分開計算。
+   - 公開顯示 Semantic Scholar 的摘要時，可以依授權條款標示來源（見第 7 節）。
+   - 日後授權有變，可以只移除特定來源的摘要。
 4. **Elsevier 近年論文的根本解法仍是第二版評估 Elsevier TDM API**（前提是學校合約允許），OQ-02b 的結果讓這件事變得更重要。
 
-## 7. 未驗證事項
+## 7. 待確認：Semantic Scholar API 授權
+
+Kevin 閱讀 [Semantic Scholar API License Agreement](https://api.semanticscholar.org/license) 後整理的重點（2026-11-06）：
+
+- **摘要屬於授權範圍內的 Data**，版權歸原出版社（Elsevier 論文的摘要仍是 Elsevier 的）。
+- **限非商業使用。**
+- **公開顯示要標示 Semantic Scholar，並連回 Semantic Scholar 網站。**
+- **條款禁止 share 資料。** 實驗室 4 人共用同一個文獻庫算不算 share，條款寫得不明確。
+
+**實作前要做的事：寫信詢問 Semantic Scholar**，確認實驗室內部共用是否允許；得到書面答覆後，才能實作第 6 節第 2 點。若不允許，就不使用 Semantic Scholar 的摘要。
+
+## 8. 未驗證事項
 
 - Semantic Scholar 摘要集中在 2018–2021 年的原因。
 - 有 Semantic Scholar API 金鑰時結果是否不同（這次是用無金鑰的公用額度查）。
