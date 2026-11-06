@@ -1,0 +1,30 @@
+# 專案規則（Claude Code 與 Codex 共用）
+
+## 專案
+- 文獻研究助理平台（暫名）：自動追蹤資管頂尖期刊的新論文，分類、看趨勢，並用問答協助找論文題目，實驗室成員共用。
+- 產品構想在 `docs/input/brief-input.md`，BMAD 產出放在 `_bmad-output/`。
+- 開發者：Kevin，1 人開發。採 BMAD 流程，Claude Code 實作、Codex 審查（額度不足時可對調）。
+
+## 溝通
+- 一律用繁體中文回覆，用白話說明，專有名詞第一次出現時簡短解釋。
+- 遇到需要決定的事，列出選項、各自的取捨和你的建議，等我決定。
+- 需求不清楚或與構想文件矛盾時，先問我，不要自行假設。
+
+## 工作流程
+- 每個 BMAD skill 都開新的對話。
+- 一件事一個分支、一個 PR；commit 訊息清楚描述做了什麼。
+- 重要的技術決策寫成 ADR，放在 `docs/adr/`，內容包含：考慮過的選項、決定、理由、取捨。
+- 完成一項工作後，說明你怎麼驗證，以及需要我手動確認的事項。
+
+## 安全紅線（任何模式都要遵守）
+- 不把 API key、密碼、`.env`、使用者上傳的 PDF、實驗室資料 commit 進 repo。
+- 只用官方 API（OpenAlex、Semantic Scholar、Crossref、Unpaywall 等），遵守速率限制。
+- 不寫程式繞過機器人驗證（CAPTCHA），不透過學校 VPN 大量下載付費期刊全文。
+- 除非我明確要求，否則不部署、不改雲端設定、不刪除或覆寫資料庫的資料。
+- 測試一律使用測試資料，不碰真實資料。
+- `tests/fixtures/` 只能放自己產生或開放取用授權（例如 CC BY）的 PDF，不可放付費期刊的 PDF。
+
+## 技術約束
+- 開發環境：Mac（Apple Silicon），用 Docker Compose 啟動整個系統。
+- 正式主機只有 1 GB 記憶體：docker-compose 裡的 api 和 worker 要設定 `mem_limit`，加總不超過 750 MB。
+- LLM 預設用 Claude Haiku（Max 附贈的 API 額度），不急的工作走 Batch API；Claude API 沒有向量化功能，向量化用 Cloudflare Workers AI 或開源模型。
