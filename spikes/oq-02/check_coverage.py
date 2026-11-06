@@ -61,6 +61,9 @@ JOURNALS = [
     ("DATABASE", "The DATA BASE for Advances in Information Systems", ["0095-0033", "1532-0936"], "王老師"),
 ]
 
+# 名稱比對沒過、但 Kevin 已確認是同一本的期刊（簡稱 → source ID）
+USER_CONFIRMED = {"DATABASE": "S4210234096"}  # 2026-11-06 確認：ISSN 完全吻合，OpenAlex 名稱含 ACM SIGMIS 舊名
+
 
 # ---------------------------------------------------------------- 基本工具
 
@@ -182,6 +185,10 @@ def pct(n: int, d: int) -> str:
 
 
 def build_report(rows: list[dict]) -> str:
+    for r in rows:
+        sid = ((r.get("source") or {}).get("id") or "").rsplit("/", 1)[-1]
+        if r["status"] == "名稱不符" and USER_CONFIRMED.get(r["short"]) == sid:
+            r["status"] = "OK（名稱不符，已人工確認）"
     years = list(range(YEAR_FROM, YEAR_TO + 1))
     L = []
     L.append("# OQ-02 驗證：OpenAlex 對 14 本追蹤期刊的摘要覆蓋率\n")
@@ -202,7 +209,7 @@ def build_report(rows: list[dict]) -> str:
         L.append(f"| {r['short']} | {r['expected']} | {r['origin']} | {', '.join(r['issns'])} | "
                  f"{s.get('display_name', '-')} | {(s.get('id') or '-').rsplit('/', 1)[-1]} | "
                  f"{s.get('host_organization_name') or '-'} | {r['status']} |")
-    flagged = [r for r in rows if r["status"] != "OK"]
+    flagged = [r for r in rows if not r["status"].startswith("OK")]
     if flagged:
         L.append("\n**需要確認的期刊：**\n")
         for r in flagged:
@@ -213,7 +220,7 @@ def build_report(rows: list[dict]) -> str:
             if not r["candidates"]:
                 L.append("  - （OpenAlex 沒有任何符合的 source）")
     else:
-        L.append("\n14 本都以 ISSN 找到唯一一筆、且名稱相符的 source。")
+        L.append("\n14 本都以 ISSN 找到唯一一筆 source，名稱相符或已人工確認，沒有待確認的期刊。")
 
     L.append("\n## 2. 總覽（10 年合計）\n")
     L.append("| 簡稱 | 論文數 | 有摘要 | 覆蓋率 | 最低年份覆蓋率 |")

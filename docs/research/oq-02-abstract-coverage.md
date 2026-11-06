@@ -23,12 +23,9 @@
 | I&O | Information and Organization | AIS（2023 加入） | 1471-7727, 1873-7919 | Information and Organization | S35363033 | Elsevier BV | OK |
 | PMJ | Project Management Journal | 王老師 | 8756-9728, 1938-9507 | Project Management Journal | S196205230 | SAGE Publishing | OK |
 | TEM | IEEE Transactions on Engineering Management | 王老師 | 0018-9391, 1558-0040 | IEEE Transactions on Engineering Management | S154533451 | Institute of Electrical and Electronics Engineers | OK |
-| DATABASE | The DATA BASE for Advances in Information Systems | 王老師 | 0095-0033, 1532-0936 | ACM SIGMIS Database the DATABASE for Advances in Information Systems | S4210234096 | Association for Computing Machinery | 名稱不符 |
+| DATABASE | The DATA BASE for Advances in Information Systems | 王老師 | 0095-0033, 1532-0936 | ACM SIGMIS Database the DATABASE for Advances in Information Systems | S4210234096 | Association for Computing Machinery | OK（名稱不符，已人工確認） |
 
-**需要確認的期刊：**
-
-- DATABASE（名稱不符）候選：
-  - ACM SIGMIS Database the DATABASE for Advances in Information Systems｜S4210234096｜ISSN 0095-0033, 1532-0936, 2331-1584, 2331-1622｜works 1311
+14 本都以 ISSN 找到唯一一筆 source，名稱相符或已人工確認，沒有待確認的期刊。
 
 ## 2. 總覽（10 年合計）
 
@@ -121,7 +118,16 @@
 
 觀察：
 
-1. **Elsevier 缺口是系統性的，不是個別期刊的問題。** 4 本 Elsevier 期刊每一年都偏低，抽樣看到的缺摘要論文都是正式研究論文。這和 Elsevier 在 2022 年底要求 OpenAlex 撤下摘要的情況相符。近 3 年（2023–2025）略有回升（DSS 14–23%、I&M 19–26%、JSIS 58–83%、I&O 43–72%），但仍不足以支撐分類與問答。
+1. **Elsevier 缺口是系統性的，原因是出版社要求移除摘要。** 4 本 Elsevier 期刊每一年都偏低，抽樣看到的缺摘要論文都是正式研究論文。Elsevier 在 2024 年 11 月要求 OpenAlex 移除**非開放取用**論文的摘要，開放取用論文的摘要仍保留（來源：Bianca Kramer, ["More open abstracts?"](https://bmkramer.github.io/SesameOpenScience_site/thought/202411_open_abstracts/), 2024-11-24）。（另一個常被混淆的事件：2022 年 11 月撤下 OpenAlex 摘要的是 Springer Nature，不是 Elsevier。）
+
+   本次資料完全符合這個說法：
+
+   | Elsevier 4 本（2016–2025） | 論文數 | 有摘要 | 覆蓋率 |
+   |---|---:|---:|---:|
+   | 開放取用（`is_oa:true`） | 979 | 367 | 37% |
+   | 非開放取用（`is_oa:false`） | 1,594 | 0 | 0% |
+
+   各刊非開放取用的覆蓋率都是 0%（JSIS 0/92、DSS 0/718、I&M 0/713、I&O 0/71），有摘要的全部是開放取用論文。這也解釋了為什麼 JSIS、I&O 近年覆蓋率回升（JSIS 2024 年 83%、I&O 2025 年 72%）：近年開放取用的比例變高。但開放取用論文也只有 37% 有摘要，原因這次沒有查明（可能和 OpenAlex 對開放取用的認定範圍較寬有關）。整體來說仍不足以支撐分類與問答。
 2. **非 Elsevier 期刊的缺口大多不是真的缺。** MISQ（88%）和 ISR（79%）缺摘要的條目，抽樣約一半是「Editor's Comments」「Research Spotlights」「About Our Authors」等非研究文章（OpenAlex 仍標為 article）。扣掉這些，研究論文的實際覆蓋率更高。PMJ 和 TEM 只有 2016–2017 年偏低（69–87%），之後都在 90% 以上。
 3. **OpenAlex 的期刊歸屬有雜訊。** JAIS 底下掛了約 9,200 篇沒有 DOI 的 AIS 研討會論文（AMCIS、ICIS 等），不篩掉的話 JAIS 會從 680 篇膨脹成 9,898 篇。加上「必須有 DOI」的條件就能乾淨排除，對其他 13 本影響很小（0–19 篇）。
 4. **資料量不大。** 14 本期刊 10 年合計約 9,600 篇，平均每年約 1,000 篇（TEM 近年每年 340–390 篇，是最大宗）。以這個量來看，第一次匯入 10 年在儲存和 LLM 處理量上都不是瓶頸。
@@ -134,12 +140,13 @@
    - 沒摘要的論文仍收進書目與趨勢統計（用標題＋關鍵字），標記「無摘要」，不做結構化筆記。
    - 介面和趨勢圖顯示每本期刊的摘要覆蓋率（brief 已列為原則），讓使用者知道 DSS、I&M 的趨勢只根據標題。
    - 重要論文靠使用者上傳 PDF 補。
-3. **在寫 PRD 之前，建議再做一個小 spike（OQ-02b）**：只針對 Elsevier 4 本、約 2,200 篇缺摘要的論文，測 Semantic Scholar 和 Crossref 能補回多少。這決定「多來源互補」要不要列為第一版的必要功能；若補回不多，就直接接受降級處理，第二版再評估 Elsevier TDM API（前提是學校合約允許）。
+3. **在寫 PRD 之前，再做一個小 spike（OQ-02b，另開分支）**：只針對 Elsevier 4 本、約 2,200 篇缺摘要的論文，測 Semantic Scholar 能補回多少。這決定「多來源互補」要不要列為第一版的必要功能；若補回不多，就直接接受降級處理，第二版再評估 Elsevier TDM API（前提是學校合約允許）。
+   - **不測 Crossref**：Elsevier 沒有把摘要提交給 Crossref，從 Crossref 補不回這 4 本的摘要。
 4. **把以下資料品質規則寫進 PRD 的匯入需求：**
    - 期刊用 OpenAlex source ID 綁定（設定檔，不寫死在程式），並只收 `primary_location` 是該期刊、且有 DOI 的論文。
    - 排除非研究文章：OpenAlex 的 type 不夠準，需要再用標題規則（Editor's Comments、Research Spotlights、About Our Authors、Erratum 等）或 Crossref 的類型過濾。
    - 覆蓋率要定期重算並記錄日期，因為 OpenAlex 的資料會變動。
 
-## 8. 待確認
+## 8. 已確認事項
 
-- **DATABASE 名稱不符**：OpenAlex 名稱為「ACM SIGMIS Database the DATABASE for Advances in Information Systems」，兩個 ISSN 都完全吻合，判斷是同一本期刊（OpenAlex 把 ACM SIGMIS 的舊名併在一起），只是名稱比對規則沒有認出來。請確認後即可視為 OK。
+- **DATABASE 名稱不符**：OpenAlex 名稱為「ACM SIGMIS Database the DATABASE for Advances in Information Systems」（S4210234096），兩個 ISSN 完全吻合。Kevin 已於 2026-11-06 確認是同一本期刊。
