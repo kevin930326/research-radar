@@ -8,9 +8,9 @@
 
 | 時機（觸發點） | Skill | 來源 | 用途 | 狀態 |
 |---|---|---|---|---|
-| 跑 `bmad-architecture` 之前 | `supabase-postgres-best-practices` | [supabase/agent-skills](https://github.com/supabase/agent-skills) | 通用 PostgreSQL 規則：索引、連線、鎖、schema | [ ] |
-| 跑 `bmad-architecture` 之前 | `postgresql-table-design` | [wshobson/agents](https://github.com/wshobson/agents) | 資料表設計與審查：型別、鍵、約束、JSONB | [ ] |
-| 跑 `bmad-architecture` 之前 | `hybrid-search-implementation` | [wshobson/agents](https://github.com/wshobson/agents) | 向量搜尋＋關鍵字搜尋並用（pgvector＋全文檢索） | [ ] |
+| 跑 `bmad-architecture` 之前 | `supabase-postgres-best-practices` | [supabase/agent-skills](https://github.com/supabase/agent-skills) | 通用 PostgreSQL 規則：索引、連線、鎖、schema | [x] 2026-11-12，來源 commit `c9be0e9` |
+| 跑 `bmad-architecture` 之前 | `postgresql-table-design` | [wshobson/agents](https://github.com/wshobson/agents) | 資料表設計與審查：型別、鍵、約束、JSONB | [x] 2026-11-12，來源 commit `9c61ab2` |
+| 跑 `bmad-architecture` 之前 | `hybrid-search-implementation` | [wshobson/agents](https://github.com/wshobson/agents) | 向量搜尋＋關鍵字搜尋並用（pgvector＋全文檢索） | [x] 2026-11-12，來源 commit `9c61ab2` |
 | 第一個實作 Story 開始前 | `modern-python` | [trailofbits/skills](https://github.com/trailofbits/skills) | uv、ruff、pytest | [ ] |
 | 第一個實作 Story 開始前 | `claude-api` | [anthropics/skills](https://github.com/anthropics/skills) | 串接 Haiku、Batch API | [ ] |
 | 第一個前端 Story 開始前 | `frontend-design` | [anthropics/skills](https://github.com/anthropics/skills) | 照設計稿寫 React | [ ] |
