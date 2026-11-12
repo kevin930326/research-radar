@@ -1,5 +1,6 @@
-"""抓 14 本期刊 2016–2025 的論文標題與年份（OpenAlex 公開目錄，不帶金鑰）。
-篩選條件與 spikes/oq-10/check_expansion.py 的 journal_filter 相同。"""
+"""抓 14 本期刊 2016–2025 的論文標題、年份與累計被引用次數（OpenAlex 公開目錄，不帶金鑰）。
+篩選條件與 spikes/oq-10/check_expansion.py 的 journal_filter 相同。
+輸出的每篇論文是 [出版年, 有無摘要(1/0), 標題, 累計被引用次數]；被引用次數用來決定首頁星星的大小。"""
 import json, sys, time, urllib.parse, urllib.request
 
 OUT = sys.argv[1]
@@ -36,9 +37,9 @@ for short, sid in JOURNALS:
         page = 1
         while True:
             d = get("/works", {"filter": f"primary_location.source.id:{sid},publication_year:2016-2025,type:article|review,has_doi:true,has_abstract:{has}",
-                               "select": "id,title,publication_year", "per-page": 200, "page": page, "sort": "publication_date:asc"})
+                               "select": "id,title,publication_year,cited_by_count", "per-page": 200, "page": page, "sort": "publication_date:asc"})
             for w in d["results"]:
-                papers.append([w["publication_year"], 1 if has == "true" else 0, (w.get("title") or "").strip()[:220]])
+                papers.append([w["publication_year"], 1 if has == "true" else 0, (w.get("title") or "").strip()[:220], w.get("cited_by_count") or 0])
             if page * 200 >= d["meta"]["count"] or not d["results"]:
                 break
             page += 1
