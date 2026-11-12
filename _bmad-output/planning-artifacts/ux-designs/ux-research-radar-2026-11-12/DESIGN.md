@@ -127,6 +127,11 @@ typography:
     fontSize: 12px
     fontWeight: '400'
     letterSpacing: 0.1em
+  label-mono-reading:
+    fontFamily: DM Mono
+    fontSize: 13px
+    fontWeight: '400'
+    letterSpacing: 0.08em
   micro-mono:
     fontFamily: DM Mono
     fontSize: 11px
@@ -152,9 +157,10 @@ spacing:
   gutter-desktop: 96px
   gutter-tablet: 48px
   gutter-mobile: 20px
-  reading-width: 720px
-  rail-width: 320px
+  reading-width: 760px
+  rail-width: 248px
   button-height: 50px
+  button-height-compact: 44px
   tap-target: 44px
 components:
   button-primary:
@@ -202,6 +208,14 @@ components:
     border: '1px solid {colors.border}'
     typography: '{typography.label-mono}'
     rounded: '{rounded.none}'
+  classification-tag:
+    color: '{colors.text-reading}'
+    hoverColor: '{colors.text-primary}'
+    border: '1px solid {colors.border}'
+    hoverBorder: '1px solid {colors.text-primary}'
+    typography: '{typography.label-mono-reading}'
+    height: 26px
+    rounded: '{rounded.full}'
   caution-line:
     color: '{colors.text-tertiary}'
     typography: '{typography.caption}'
@@ -212,8 +226,8 @@ components:
     metaColor: '{colors.text-tertiary}'
     divider: '{colors.hairline}'
   summary-block:
-    labelTypography: '{typography.label-mono}'
-    labelColor: '{colors.text-tertiary}'
+    labelTypography: '{typography.label-mono-reading}'
+    labelColor: '{colors.text-secondary}'
     textTypography: '{typography.reading-zh}'
     textColor: '{colors.text-reading}'
     divider: '{colors.hairline}'
@@ -397,7 +411,8 @@ v1 的 Must 畫面裡只有示範站首頁是探索類。之後的 2D 鄰居圖�
 | `nav` | 14 | 導覽、連結 | 首頁規格 |
 | `table-number` | 14 | 表格裡的數字（等寬） | 延伸 |
 | `caption` | 13 | 說明小字、警語列、說明框 | 首頁規格 |
-| `label-mono` | 12 | 小標籤、欄位名稱、日期列 | 首頁規格 |
+| `label-mono-reading` | 13 | 閱讀類畫面的欄位名稱、輔助欄的小標題、分類標籤 | 延伸（論文頁定稿，2026-11-12） |
+| `label-mono` | 12 | 小標籤、日期列；探索類畫面的欄位名稱 | 首頁規格 |
 | `micro-mono` | 11 | 頁尾、圖表刻度、星星旁的標籤 | 首頁規格 |
 
 規則：
@@ -412,7 +427,13 @@ v1 的 Must 畫面裡只有示範站首頁是探索類。之後的 2D 鄰居圖�
 - 間距只用 `spacing` 裡的值：4、8、12、16、24、32、48、64、96。
 - 頁面左右留白：桌機 `{spacing.gutter-desktop}`、平板 `{spacing.gutter-tablet}`、手機 `{spacing.gutter-mobile}`。
 - 斷點：寬度 1200px 以上是桌機，768–1199px 是平板，767px 以下是手機。
-- **閱讀類畫面的版面**：主要欄最寬 `{spacing.reading-width}`（中文一行約 38–40 字）；右側可以有一條輔助欄 `{spacing.rail-width}`，放動作與附屬資訊。平板與手機上輔助欄移到主要欄第一個區塊（論文頁是書目）的下方、其餘內容之前，最常用的動作固定在畫面底部。
+- **閱讀類畫面的版面**（論文頁定稿，2026-11-12）：
+  - 主要欄最寬 `{spacing.reading-width}`；右側可以有一條輔助欄，內容寬 `{spacing.rail-width}`，左邊 32px 內距加一條直的髮線，放動作與附屬資訊。輔助欄要比主要欄輕：裡面的按鈕高 `{spacing.button-height-compact}`、字 14px，不用 `{spacing.button-height}`。
+  - 輔助欄在捲動時固定在畫面上（離頂端 32px），往下讀的時候動作一直按得到。
+  - 兩欄版面用到寬度 900px 為止，不照上面的平板斷點切：1232px 以上左右留白是 `{spacing.gutter-desktop}`；900–1231px 左右留白縮成 40px，主要欄跟著視窗變窄，輔助欄寬度不變，兩欄至少隔 48px。
+  - 899px 以下輔助欄移到主要欄第一個區塊（論文頁是書目）的下方、其餘內容之前，最常用的動作固定在畫面底部；固定在底部的按鈕維持 `{spacing.button-height}`。
+  - 閱讀類畫面的欄位名稱與輔助欄的小標題用 `{typography.label-mono-reading}`、`{colors.text-secondary}`；12px 的 `{colors.text-tertiary}` 在長時間閱讀的畫面上太吃力。
+  - 英文論文標題的換行要平均（`text-wrap: balance`），不讓最後一行只剩一個字。
 - **表格與圖表頁**可以用到整個內容寬度，但說明文字仍限制在 `{spacing.reading-width}` 以內。
 - 區塊之間用 `{spacing.12}` 的留白加一條 `{colors.hairline}` 分隔，不用卡片外框，也不用色塊。
 - 每頁最上面是導覽列（上方留 30px），最下面是頁尾；有數字的頁面，資料日期列放在頁面標題的上方。
@@ -427,7 +448,7 @@ v1 的 Must 畫面裡只有示範站首頁是探索類。之後的 2D 鄰居圖�
 
 ## Shapes
 
-- 兩種圓角：`{rounded.full}` 給可以按的東西（按鈕、篩選標籤）；`{rounded.none}` 給其他全部（說明框、彈出視窗、輸入框、狀態標記、表格）。
+- 兩種圓角：`{rounded.full}` 給可以按的東西（按鈕、篩選標籤、分類標籤）；`{rounded.none}` 給其他全部（說明框、彈出視窗、輸入框、狀態標記、表格）。
 - 分隔一律用 1px 的髮線。
 - 圖示用 1px 線條的空心圖示；實心圖示只用來表示「完整」（原則 8）。
 
@@ -447,9 +468,10 @@ v1 的 Must 畫面裡只有示範站首頁是探索類。之後的 2D 鄰居圖�
 | **AI 標章**（`ai-badge`） | 空心菱形 ◇＋「AI 整理」是未經人工核對；實心菱形 ◆＋「已核對」是人工核對過。DM Mono 小字，`{colors.text-secondary}`。閱讀類畫面空間夠時寫全文「AI 生成・未經人工核對」 |
 | **覆蓋率標記**（`coverage-mark`） | 「摘要覆蓋率 98%」。前面一個小圓：50% 以上是實心，未滿 50% 是金色空心並加一個金色空心三角 △ |
 | **狀態標記**（`status-tag`） | 1px 框、直角、DM Mono 小字，高 22px。例如「追蹤範圍外」「只有你看得到」「本資料庫中少見（≤2 篇）」「合併未完成」「資料不足」。全部同一個樣式，不用顏色區分種類 |
+| **分類標籤**（`classification-tag`） | 論文頁上的主題與方法標籤，可以點：到找論文，帶入這個分類當條件。全圓角、1px 框、高 26px、`{typography.label-mono-reading}`、`{colors.text-reading}`，字後面一個小箭頭 ›。滑過：框與字變成 `{colors.text-primary}`，沒有底線；提示文字「看全部『電子商務』的論文」。「未分類」不是一個分類，不能點：直角、`{colors.hairline}` 的框、`{colors.text-tertiary}` 的字，沒有箭頭 |
 | **警語列**（`caution-line`） | 一行 `{typography.caption}`、`{colors.text-tertiary}` 的字，前面一個空心圓圈 i 圖示。固定在它說明的圖表或表格正下方 |
 | **論文列**（`paper-row`） | 第一行：論文標題（`{typography.paper-title-row}`）。第二行：期刊簡稱 · 年份 · ● 有摘要／○ 沒有摘要，加上狀態標記（DM Mono）。第三行（有的話）：AI 標章＋中文重點的「研究問題」一欄，`{colors.text-secondary}`，最多兩行。右側是動作。示範站的論文清單裡，第二行後面接這篇的主題與方法標籤（樣式同第二行的其他小字，前面一個 AI 標章），右側改成 DOI 連結與「● 有完整內容／○ 只有書目」。列與列之間一條髮線，沒有外框 |
-| **中文重點區塊**（`summary-block`） | 四欄直排：研究問題、方法、理論、發現。每欄左邊是 DM Mono 的欄位名稱（寬 96px），右邊是 `{typography.reading-zh}`、`{colors.text-reading}` 的內容；欄與欄之間一條髮線。「摘要未提及」用 `{colors.text-tertiary}`。手機上欄位名稱移到內容上方 |
+| **中文重點區塊**（`summary-block`） | 四欄直排：研究問題、方法、理論、發現。每欄左邊是 DM Mono 的欄位名稱（寬 96px，`{typography.label-mono-reading}`、`{colors.text-secondary}`），右邊是 `{typography.reading-zh}`、`{colors.text-reading}` 的內容；欄與欄之間一條髮線。「摘要未提及」用 `{colors.text-tertiary}`。手機上欄位名稱移到內容上方 |
 | **篩選列**（`filter-bar`） | 一排小的篩選標籤：高 32px、全圓角、1px 框、`{typography.caption}`。選取中是暖白底、深色字。兩選一的切換（例如「占比／原始篇數」）是並排的兩個文字，選取中的有 1px 金色底線 |
 | **文字輸入**（`text-input`） | 透明底，只有下緣一條 1px `{colors.border}` 的線；聚焦時這條線變金色。搜尋框的字級用 `{typography.section-title-zh}` 的大小（24px）但用內文字體。多行輸入（問答）是 1px 框的直角方框 |
 | **資料表**（`data-table`） | 沒有外框與直線，只有列與列之間的髮線。表頭是 DM Mono 小字、`{colors.text-tertiary}`。數字靠右、用 `{typography.table-number}`。列高至少 `{spacing.12}`。滑過的列底色是 `{colors.text-primary}` 不透明度 4%。展開的列左邊有一條 1px 金線 |
