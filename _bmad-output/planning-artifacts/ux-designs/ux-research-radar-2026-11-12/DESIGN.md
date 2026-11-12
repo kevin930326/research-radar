@@ -244,8 +244,8 @@ components:
     focusBorder: '{colors.accent-gold}'
     typography: '{typography.body}'
   data-table:
-    headerTypography: '{typography.label-mono}'
-    headerColor: '{colors.text-tertiary}'
+    headerTypography: '{typography.label-mono-reading}'
+    headerColor: '{colors.text-secondary}'
     numberTypography: '{typography.table-number}'
     rowDivider: '{colors.hairline}'
   trend-chart:
@@ -430,7 +430,7 @@ v1 的 Must 畫面裡只有示範站首頁是探索類。之後的 2D 鄰居圖�
 - **閱讀類畫面的版面**（論文頁定稿，2026-11-12）：
   - 主要欄最寬 `{spacing.reading-width}`；右側可以有一條輔助欄，內容寬 `{spacing.rail-width}`，左邊 32px 內距加一條直的髮線，放動作與附屬資訊。輔助欄要比主要欄輕：裡面的按鈕高 `{spacing.button-height-compact}`、字 14px，不用 `{spacing.button-height}`。
   - 輔助欄在捲動時固定在畫面上（離頂端 32px），往下讀的時候動作一直按得到。
-  - 兩欄版面用到寬度 900px 為止，不照上面的平板斷點切：1232px 以上左右留白是 `{spacing.gutter-desktop}`；900–1231px 左右留白縮成 40px，主要欄跟著視窗變窄，輔助欄寬度不變，兩欄至少隔 48px。
+  - 兩欄版面用到寬度 900px 為止，不照上面的平板斷點切：1232px 以上左右留白是 `{spacing.gutter-desktop}`；900–1231px 左右留白縮成 `{spacing.gutter-tablet}`，主要欄跟著視窗變窄，輔助欄寬度不變，兩欄至少隔 48px。
   - 899px 以下輔助欄移到主要欄第一個區塊（論文頁是書目）的下方、其餘內容之前，最常用的動作固定在畫面底部；固定在底部的按鈕維持 `{spacing.button-height}`。
   - 閱讀類畫面的欄位名稱與輔助欄的小標題用 `{typography.label-mono-reading}`、`{colors.text-secondary}`；12px 的 `{colors.text-tertiary}` 在長時間閱讀的畫面上太吃力。
   - 英文論文標題的換行要平均（`text-wrap: balance`），不讓最後一行只剩一個字。
@@ -465,16 +465,16 @@ v1 的 Must 畫面裡只有示範站首頁是探索類。之後的 2D 鄰居圖�
 | **範圍標示**（`scope-label`） | 品牌名右邊的一行 DM Mono 小字，例如「示範站 · 靜態快照」。`{colors.text-tertiary}` |
 | **資料日期列**（`data-date-line`） | 金色實心小圓點＋「資料截至 2026-11-12」＋第三層文字色的「· #12」。樣式同首頁（首頁規格 §4.2） |
 | **讀數**（`readout`） | 小標籤（編號＋名稱）、大數字＋「篇」、一行說明。多個讀數並排時，上緣一條髮線、欄與欄之間一條直的髮線。數字是連結，但平常看起來和一般數字一樣（`{colors.text-primary}`、沒有底線）；滑過或鍵盤聚焦時，數字與「篇」下方淡入一條 1px、`{colors.text-primary}`、不透明度 70% 的底線（0.2 秒），游標變成手指。數值以首頁原型的 `.rr-num` 為準 |
-| **AI 標章**（`ai-badge`） | 空心菱形 ◇＋「AI 整理」是未經人工核對；實心菱形 ◆＋「已核對」是人工核對過。DM Mono 小字，`{colors.text-secondary}`。閱讀類畫面空間夠時寫全文「AI 生成・未經人工核對」 |
+| **AI 標章**（`ai-badge`） | 空心菱形 ◇＋「AI 整理」是未經人工核對；實心菱形 ◆＋「已核對」是人工核對過。DM Mono 小字，`{colors.text-secondary}`。同一個畫面上，未核對的 AI 標章第一次出現時寫全文「AI 生成・未經人工核對」，之後的寫「AI 整理」；已核對的一律是「◆ 已核對」，不管是不是第一次出現 |
 | **覆蓋率標記**（`coverage-mark`） | 「摘要覆蓋率 98%」。前面一個小圓：50% 以上是實心，未滿 50% 是金色空心並加一個金色空心三角 △ |
 | **狀態標記**（`status-tag`） | 1px 框、直角、DM Mono 小字，高 22px。例如「追蹤範圍外」「只有你看得到」「本資料庫中少見（≤2 篇）」「合併未完成」「資料不足」。全部同一個樣式，不用顏色區分種類 |
-| **分類標籤**（`classification-tag`） | 論文頁上的主題與方法標籤，可以點：到找論文，帶入這個分類當條件。全圓角、1px 框、高 26px、`{typography.label-mono-reading}`、`{colors.text-reading}`，字後面一個小箭頭 ›。滑過：框與字變成 `{colors.text-primary}`，沒有底線；提示文字「看全部『電子商務』的論文」。「未分類」不是一個分類，不能點：直角、`{colors.hairline}` 的框、`{colors.text-tertiary}` 的字，沒有箭頭 |
+| **分類標籤**（`classification-tag`） | 論文頁上的主題與方法標籤，可以點，帶入這個分類當條件：成員版到找論文，示範站到論文清單（找論文是成員功能）。一篇可以有多個主題或多個方法（PRD FR-15 多標籤），每個標籤各自可以點，放不下就換行。全圓角、1px 框、高 26px、`{typography.label-mono-reading}`、`{colors.text-reading}`，字後面一個小箭頭 ›。滑過：框與字變成 `{colors.text-primary}`，沒有底線；提示文字「看全部『電子商務』的論文」。「未分類」不是一個分類，不能點：直角、`{colors.hairline}` 的框、`{colors.text-tertiary}` 的字，沒有箭頭 |
 | **警語列**（`caution-line`） | 一行 `{typography.caption}`、`{colors.text-tertiary}` 的字，前面一個空心圓圈 i 圖示。固定在它說明的圖表或表格正下方 |
 | **論文列**（`paper-row`） | 第一行：論文標題（`{typography.paper-title-row}`）。第二行：期刊簡稱 · 年份 · ● 有摘要／○ 沒有摘要，加上狀態標記（DM Mono）。第三行（有的話）：AI 標章＋中文重點的「研究問題」一欄，`{colors.text-secondary}`，最多兩行。右側是動作。示範站的論文清單裡，第二行後面接這篇的主題與方法標籤（樣式同第二行的其他小字，前面一個 AI 標章），右側改成 DOI 連結與「● 有完整內容／○ 只有書目」。列與列之間一條髮線，沒有外框 |
 | **中文重點區塊**（`summary-block`） | 四欄直排：研究問題、方法、理論、發現。每欄左邊是 DM Mono 的欄位名稱（寬 96px，`{typography.label-mono-reading}`、`{colors.text-secondary}`），右邊是 `{typography.reading-zh}`、`{colors.text-reading}` 的內容；欄與欄之間一條髮線。「摘要未提及」用 `{colors.text-tertiary}`。手機上欄位名稱移到內容上方 |
 | **篩選列**（`filter-bar`） | 一排小的篩選標籤：高 32px、全圓角、1px 框、`{typography.caption}`。選取中是暖白底、深色字。兩選一的切換（例如「占比／原始篇數」）是並排的兩個文字，選取中的有 1px 金色底線 |
 | **文字輸入**（`text-input`） | 透明底，只有下緣一條 1px `{colors.border}` 的線；聚焦時這條線變金色。搜尋框的字級用 `{typography.section-title-zh}` 的大小（24px）但用內文字體。多行輸入（問答）是 1px 框的直角方框 |
-| **資料表**（`data-table`） | 沒有外框與直線，只有列與列之間的髮線。表頭是 DM Mono 小字、`{colors.text-tertiary}`。數字靠右、用 `{typography.table-number}`。列高至少 `{spacing.12}`。滑過的列底色是 `{colors.text-primary}` 不透明度 4%。展開的列左邊有一條 1px 金線 |
+| **資料表**（`data-table`） | 沒有外框與直線，只有列與列之間的髮線。表頭是 `{typography.label-mono-reading}`、`{colors.text-secondary}`（和閱讀類畫面的其他欄位名稱一致）。數字靠右、用 `{typography.table-number}`。列高至少 `{spacing.12}`。滑過的列底色是 `{colors.text-primary}` 不透明度 4%。展開的列左邊有一條 1px 金線 |
 | **趨勢圖**（`trend-chart`） | 小倍數圖（把同一種小圖排成一排來比較，一個主題一張，座標軸相同）。完整年度：`{colors.data-white}` 1.5px 實線＋實心點。未滿一年的當年度：虛線＋空心點；長條模式只畫外框。比較用的背景線：`{colors.data-dim}` 1px。座標軸與格線：髮線。滑鼠所在的年份：一條 1px 金色直線加金色刻度字。不用填色漸層、不用圖例色塊（線的旁邊直接標名稱） |
 | **說明框**（`popover`） | `{colors.popover-surface}` 的底、1px 框、直角、`{typography.caption}`、內距 7px 11px，淡入 0.2 秒。最寬 320px |
 | **彈出視窗**（`overlay`） | 後面是 `{colors.scrim}`；視窗本身是 `{colors.background}` 的底加 1px 框、直角，右上角一個關閉按鈕（可點範圍 `{spacing.tap-target}`）。桌機最寬 960px，手機滿版 |
