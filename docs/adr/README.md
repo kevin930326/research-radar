@@ -1,0 +1,48 @@
+# 架構決策紀錄（ADR）
+
+每份 ADR 記一個重要的技術決策：考慮過哪些選項、選了哪個、理由、放棄了什麼。決策改了不回頭改舊的，而是寫一份新的，並在舊的那份標明「已被 ADR-00NN 取代」。
+
+整體的架構規則（各部分要一起遵守的不變量）在
+`_bmad-output/planning-artifacts/architecture/architecture-research-radar-2026-11-12/ARCHITECTURE-SPINE.md`；這裡的 ADR 是那些規則背後的理由。
+
+| 編號 | 決策 | 狀態 | 對應的架構規則 |
+|---|---|---|---|
+| [0001](0001-architecture-style.md) | 模組化單體＋分層，只有外部服務做成可替換（含 C1–C5 比較表） | 提議 | AD-1、AD-2 |
+| [0002](0002-read-authorization-viewer.md) | 讀取權限用 viewer 參數＋架構測試，不用資料庫的列層級權限 | 提議 | AD-3、AD-4 |
+| [0003](0003-deployment-topology.md) | 服務跑在 1 GB 主機，資料庫放在主機外面；備份、還原、換版 | 提議（資料庫位置已決定：Azure 託管） | AD-17、AD-28、AD-29 |
+| [0004](0004-background-jobs-and-scheduling.md) | 背景工作用 Procrastinate，排程由外部 cron 呼叫 `radar` 指令 | 提議 | AD-14、AD-15 |
+| [0005](0005-hybrid-retrieval.md) | 搜尋、找相似論文、問答共用一套檢索（向量＋關鍵字） | 提議 | AD-11、AD-12 |
+| [0006](0006-qa-streaming-citation-verification.md) | 問答邊串流邊驗證出處；回答只存一種形狀 | 提議 | AD-13 |
+| [0007](0007-demo-static-snapshot.md) | 示範站是白名單匯出的靜態檔，每週自動更新 | 提議 | AD-20 |
+| [0008](0008-login-google-oidc.md) | 登入用 Google 帳號＋允許名單，登入狀態存在資料庫 | 提議 | AD-23 |
+| [0009](0009-model-choice-and-llm-gateway.md) | 模型用 Claude Haiku 5.5，所有 LLM 呼叫只走一個閘門（含價格核對） | 提議 | AD-8、AD-9 |
+| [0010](0010-frontend-stack.md) | 前端一份程式、兩種建置；頁面只透過資料來源層拿資料 | 提議 | AD-21、AD-22 |
+| [0011](0011-snapshots-and-number-definitions.md) | 每個數字只有一個定義：計數在資料庫，比例在前端的一個模組 | 提議 | AD-5、AD-19 |
+| [0012](0012-construct-identity-and-merging.md) | 構念的身分、合併與關係的識別方式 | 提議 | AD-10、AD-16 |
+| [0013](0013-pdf-upload-and-identification.md) | PDF 經由 API 上傳；沒有下載聲明的檔案讀完就刪 | 提議 | AD-24 |
+| [0014](0014-raw-first-ingest-and-weekly-rescan.md) | 原始資料先存再解析；每週更新把 14 本期刊整本重掃 | 提議 | AD-25 |
+| [0015](0015-ai-output-tables-and-processing-plan.md) | AI 產出怎麼存、怎麼換版；哪一種論文做哪些處理 | 提議 | AD-7、AD-30 |
+
+「提議」表示還沒經過 Kevin 確認；PR 合併後改成「已接受」。
+
+同一條架構規則和 ADR 的寫法不一樣時，細節以 ADR 的「決定」一節為準，並回頭把兩邊改成一致。
+
+## 沒有另寫 ADR 的架構規則
+
+下面幾條規則沒有對應的 ADR，因為它們沒有需要比較的替代方案，或理由已經寫在別的 ADR 裡；當時的考量記在架構資料夾的 `.memlog.md`。
+
+| 架構規則 | 內容 | 相關的說明在 |
+|---|---|---|
+| AD-6 | 識別碼正規化與論文寫入的單一入口 | PRD FR-6 已經定了做法；ADR-0014 說明論文怎麼寫入 |
+| AD-18 | 設定、秘密與遷移 | 慣例類的規則；代號與顯示名稱的部分在 ADR-0010 |
+| AD-26 | 稽核與刪除 | ADR-0002（管理者讀取）、ADR-0006（問答紀錄） |
+| AD-27 | 寫入權限表只有一份 | ADR-0002（`actor` 與 viewer 是同一個物件）、ADR-0012（合併） |
+
+## 還沒寫的 ADR
+
+addendum 列的待寫清單裡，下面兩份留到之後：
+
+- **夜間代理人（/goal）的隔離規則**（FR-47）：等真的要啟用夜間代理人時寫。
+- **授權條款（MIT 或 Apache-2.0）**：要 Kevin 決定，repo 公開之前寫。
+
+addendum 清單裡的其他項目已經併入上面的 ADR：「主機只做服務層、重運算在桌機」在 0003；「GitHub Actions 只做 CI、排程放主機」與「不引入 Redis、用 Procrastinate」在 0004；「資料來源先不做註冊表、LLM 與 embedding 可以先做」在 0001；「模型選擇」在 0009；「部署拓撲」在 0003；「試用環境的資料怎麼搬到正式環境」在 0003。
