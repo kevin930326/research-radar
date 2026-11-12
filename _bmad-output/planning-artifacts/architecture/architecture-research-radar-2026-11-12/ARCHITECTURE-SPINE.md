@@ -130,9 +130,9 @@ flowchart TD
 - **Rule:** 可見條件只寫在 `repo/visibility.py`，其他查詢從它組合。
   - 成員看得到一篇論文 ⇔ `paper.lab_visible` 為真，或這位成員的 `library_item` 有它。
   - `PublicViewer` 看得到的論文 ⇔ 在 `counted_paper` 裡（AD-5）。
-  - 論文的衍生資料（摘要、AI 產出、向量、構念提及、假設）跟隨論文。例外：`paper_abstract` 的來源是成員上傳的 PDF 時，只有上傳者讀得到。
+  - 論文的衍生資料（摘要、AI 產出、向量、構面提及、假設）跟隨論文。例外：`paper_abstract` 的來源是成員上傳的 PDF 時，只有上傳者讀得到。
   - `pdf_file`、`upload_batch`、`upload_item`、`library_item`、`qa_log`、`qa_usage` 只有擁有者讀得到；這些表都有 NOT NULL 的 `owner_id`（schema 體檢測試）。需要讓別人知道「來源檔案已刪除」時，由衍生事實自己記這個狀態，不靠讀別人的 `pdf_file`。
-  - `library_item` 對（成員, 論文）唯一，記 `added_via`（`upload` 勾了下載聲明的上傳、`shared_list` 沒勾聲明的推薦清單、`manual` 自己按加入）與來源的 `upload_item`（可以是空的）。同一篇再加入一次時不改原本那一筆，所以 `added_via` 只代表第一次怎麼加入。「我上傳的」篩選與「看有檔案的論文」看的是這位成員對這篇有沒有還沒刪的 `pdf_file`，不看 `added_via`。`paper.origin` 是論文怎麼進資料庫的，不代表某位成員怎麼加入的。
+  - `library_item` 對（成員, 論文）唯一，記 `added_via`（`upload` 勾了下載聲明的上傳、`shared_list` 沒勾聲明的推薦清單、`manual` 自己按加入）與來源的 `upload_item`（可以是空的）。同一篇再加入一次時不改原本那一筆，所以 `added_via` 只代表第一次怎麼加入。文獻庫的「我上傳的／別人分享的／我自己加入的」篩選看 `added_via`，一次選一個；「有我的 PDF」開關與「看有 PDF 的論文」看的是這位成員對這篇有沒有還沒刪的 `pdf_file`，不看 `added_via`，兩者可以同時用（Kevin 2026-11-13 定案）。`paper.origin` 是論文怎麼進資料庫的，不代表某位成員怎麼加入的。
   - `lab_visible` 只由 `repo/papers.py` 寫，只在三種情況設為真：追蹤範圍內的論文入庫、引用擴展、上傳批次勾了分享（AD-24）。設為真之後不改回去。`in_scope` 為真的論文 `lab_visible` 必為真（`CHECK` 約束）。手填書目的論文 `lab_visible` 為假。
   - 架構測試：`lab_visible` 這個欄位名只出現在 `repo/visibility.py` 與 `repo/papers.py`。
   - 不加 `workspace_id`。
@@ -204,7 +204,7 @@ flowchart TD
 - **Rule:**
   - 人工判斷都寫進同一張 `judgment_event`，`kind` 固定四個值：`classification_fix`、`merge_decision`、`summary_report`、`summary_report_resolution`。共同欄位：成員、當時的角色（`member`／`admin`）、理由、時間。對象用（種類, ID）表示，不限論文。
     - `classification_fix`：論文、`field`（`topic` 或 `method`）、新的整組標籤 `key`、被修正的那筆 AI 產出。
-    - `merge_decision`：兩個構念（ID 小的在前）、決定、證據層級。
+    - `merge_decision`：兩個構面（ID 小的在前）、決定、證據層級。
     - `summary_report`：被回報的那筆 `zh_summary` 與欄位；只對那一筆有效，重新產生後不跟過去。
     - `summary_report_resolution`：管理者對一筆回報的處理結果（`confirmed_ok` 或 `regenerated`），指向原本那筆回報，只經 CLI 寫入。「有成員回報此欄可能有誤」＝有回報而沒有處理結果，由 `effective_zh_summary` 算出。
   - 應用程式的資料庫角色對 `judgment_event` 與 `audit_event` 沒有 UPDATE、DELETE 權限（AD-17 的兩個角色；遷移裡設定，有測試）。
@@ -221,7 +221,7 @@ flowchart TD
   - 兩條腿（向量、英文全文檢索）各取前 N 名，用 RRF 在一條 SQL 內融合；N 與 RRF 的 k 是設定值（預設 100 與 60）。不用重排模型。全文檢索的 `tsvector` 一篇一列，內容是標題加目前的摘要。
   - 向量腿有相似度下限（設定值），低於下限的不算結果。回傳排序後的論文 ID、名次與 `total`（算得上結果的篇數，最多到上限），不回傳內容。分頁用融合後名次的位移，不用 cursor。
   - embedding 服務連不上時不降級成只用關鍵字，回固定的錯誤代碼。
-  - 唯一的另一個向量查詢是構念相似度：`repo/retrieval.py` 的另一個函式，同樣強制帶 `model_id`，只由 `services/merges.py` 呼叫（AD-16）。
+  - 唯一的另一個向量查詢是構面相似度：`repo/retrieval.py` 的另一個函式，同樣強制帶 `model_id`，只由 `services/merges.py` 呼叫（AD-16）。
 
 ### AD-12 — 向量的寫入與查詢
 
@@ -271,21 +271,21 @@ flowchart TD
 - **Prevents:** 排程藏在 worker 裡，開兩個 worker 就重複觸發，也搬不上 K8s；一個工作的心跳蓋掉另一個工作的失敗
 - **Rule:** 不使用 Procrastinate 的週期任務。所有排程都是外部排程器（Compose 用主機 cron，K8s 用 CronJob）執行 `radar enqueue <工作>`。排程表只有一份：`deploy/crontab`。服務啟動時不執行遷移，也不排任何工作；遷移是 `radar migrate`。心跳以檢查名稱區分：送心跳的函式（AD-2）收檢查名稱，一個排程一個網址，放設定。每個排程工作成功後送自己的心跳，失敗時不送；示範站匯出有自己的心跳 `demo-export`。
 
-### AD-16 — 構念的身分、合併與關係的識別
+### AD-16 — 構面的身分、合併與關係的識別
 
 - **Binds:** FR-17～FR-21、ARCH-3、ARCH-8
-- **Prevents:** 合併之後無法推翻；關係的網址在合併後失效；研究篇數的規則在排行表、簡報、示範站各寫一份；新構念不在排行表上
+- **Prevents:** 合併之後無法推翻；關係的網址在合併後失效；研究篇數的規則在排行表、簡報、示範站各寫一份；新構面不在排行表上
 - **Rule:**
-  - **構念身分**：以 `domain/constructs.py` 的 `normalize_name` 結果為唯一鍵（不做字根還原）。`construct_mention` 與 `hypothesis` 永遠指向原本的構念，不因合併而改。`construct.canonical_id` 不可為空；新構念由 `repo/constructs.py` 建立時指向自己。
-  - **合併**：合併是 `judgment_event`。`canonical_id` 之後只由 `repo.constructs.rebuild_canonical()` 改寫：從全部合併事件整個重算，每對取最新決定，管理者蓋過成員；接受的配對連成一組，代表是 ID 最小的構念；組內有任何一對的最新決定是拒絕時，這一組不合併，並列入 CLI 的待處理清單。它只由 `services/merges.py` 在寫入合併事件的同一個交易裡呼叫，開頭先取 advisory lock。
-  - **關係**：關係＝（代表構念 A, 代表構念 B）有方向的一對，沒有自己的 ID；網址由兩個構念 ID 組成；用非代表的 ID 查詢時回應帶 `merged_into`，不自動跳轉。API 回傳的是關係的清單，畫法由前端決定（ARCH-3）。
-  - **關係的數字只有一個定義**：view `relation_stats`。它的列只來自 `counted_paper` 的論文、有效的研究模型。它定義：研究篇數、支持篇數、混合支持、本資料庫中少見、合併未完成（任一端有沒審的合併建議，或落在有衝突而沒合併的那一組）、覆蓋率警告、最新年份、關係的主題、未出現的情境、情境未知的篇數。「已審合併的構念占比」是 `repo/relations.py` 的一個函式。排行表、證據簡報、示範站都讀它們。
+  - **構面身分**：以 `domain/constructs.py` 的 `normalize_name` 結果為唯一鍵（不做字根還原）。`construct_mention` 與 `hypothesis` 永遠指向原本的構面，不因合併而改。`construct.canonical_id` 不可為空；新構面由 `repo/constructs.py` 建立時指向自己。
+  - **合併**：合併是 `judgment_event`。`canonical_id` 之後只由 `repo.constructs.rebuild_canonical()` 改寫：從全部合併事件整個重算，每對取最新決定，管理者蓋過成員；接受的配對連成一組，代表是 ID 最小的構面；組內有任何一對的最新決定是拒絕時，這一組不合併，並列入 CLI 的待處理清單。它只由 `services/merges.py` 在寫入合併事件的同一個交易裡呼叫，開頭先取 advisory lock。
+  - **關係**：關係＝（代表構面 A, 代表構面 B）有方向的一對，沒有自己的 ID；網址由兩個構面 ID 組成；用非代表的 ID 查詢時回應帶 `merged_into`，不自動跳轉。API 回傳的是關係的清單，畫法由前端決定（ARCH-3）。
+  - **關係的數字只有一個定義**：view `relation_stats`。它的列只來自 `counted_paper` 的論文、有效的研究模型。它定義：研究篇數、支持篇數、混合支持、本資料庫中少見、合併未完成（任一端有沒審的合併建議，或落在有衝突而沒合併的那一組）、覆蓋率警告、最新年份、關係的主題、未出現的情境、情境未知的篇數。「已審合併的構面占比」是 `repo/relations.py` 的一個函式。排行表、證據簡報、示範站都讀它們。
   - 證據簡報全部由程式計算，不呼叫 LLM，不存在伺服器；回應帶產生時間。
   - **證據簡報可以匯出成一個固定的檔案**（`services/evidence_brief.py` 的匯出函式）。格式是單一 HTML 檔，裡面附一份機器可讀的 JSON（有自己的 Pydantic 模型與格式版本號）。檔案自己就看得懂、不需要再連回系統，內容：畫面上的完整簡報、快照編號與產生時間、每篇來源論文的 ID 與 DOI、用到的每一筆 AI 產出的 ID（`research_model` 表頭與它的 `run_id`）、影響這份簡報的人工判斷事件 ID（合併決定、分類修正）、設定檔版本（情境值清單、門檻）。檔案不含成員的姓名與 email。
   - **匯出只用匯出者的 viewer 讀資料**，走和畫面相同的 `repo` 函式；匯出者在畫面上看不到的內容，檔案裡也不會有，不得為了匯出另外用 `SystemViewer` 讀。金絲雀測試涵蓋匯出檔（AD-3）。
   - **匯出檔完全自給自足**：不向外載入任何字體、圖片、樣式或程式，也不含會執行的 script；樣式寫在檔案裡，字體用系統字體，JSON 放在不會執行的資料區塊。DOI 這類要人點了才開的連結可以有。來自論文與 AI 產出的文字一律跳脫後才寫進 HTML。測試檢查匯出檔裡沒有任何會自動載入的外部網址。
   - **整份匯出在同一個 REPEATABLE READ 的唯讀交易裡讀完**（和 AD-20 相同），數字、來源清單與各種 ID 來自同一個時間點。
-  - **合併建議**分三層（名稱相同、相似度、LLM 判斷），第三層拿掉後前兩層必須照常運作。出現次數與候選只算 `counted_paper` 的論文裡的構念。已經有決定的配對不再建議。
+  - **合併建議**分三層（名稱相同、相似度、LLM 判斷），第三層拿掉後前兩層必須照常運作。出現次數與候選只算 `counted_paper` 的論文裡的構面。已經有決定的配對不再建議。
 
 ### AD-17 — 部署：服務無狀態，資料庫在外面
 
@@ -415,7 +415,7 @@ flowchart TD
 - **Rule:**
   - FR-7 的權限表寫成 `domain/permissions.py` 的資料。每個會改資料的 services 函式，第一個參數叫 `actor`，型別就是 AD-3 的 Viewer（同一個物件）；動資料之前先呼叫 `permissions.require(actor, 動作, 資源擁有者)`。
   - 只有管理者能做的事（推翻合併、維護允許名單、改設定、切換有效版本）只有 CLI 入口，沒有 API 路由；需要記名的 CLI 指令帶 `--as <管理者 email>`。
-  - 已經有決定的構念配對，只有管理者能再做決定。
+  - 已經有決定的構面配對，只有管理者能再做決定。
   - 架構測試：services 的公開函式只要呼叫寫入類的 `repo` 函式，第一個參數必須是 `actor`；每張表的寫入類 `repo` 函式只出現在一個模組。
 
 ### AD-28 — 備份與還原
@@ -443,7 +443,7 @@ flowchart TD
 ### AD-30 — 哪一種論文做哪些處理
 
 - **Binds:** FR-8、FR-14、FR-15、FR-17、FR-18、FR-49
-- **Prevents:** 匯入、上傳、合併建議、檢索各自決定哪些論文要跑 AI，非研究文章被拿去花預算，或私人論文的構念影響共用的排名
+- **Prevents:** 匯入、上傳、合併建議、檢索各自決定哪些論文要跑 AI，非研究文章被拿去花預算，或私人論文的構面影響共用的排名
 - **Rule:** 一篇論文要做哪些處理，只由 `domain/processing.py` 的 `plan_for(論文)` 回答；呼叫端不得自己判斷。
 
   | 論文的種類（由上往下，先符合的算） | 中文重點 | 分類 | 研究模型 | 向量 |
@@ -454,7 +454,7 @@ flowchart TD
   | 其餘的論文，沒有摘要 | 不做 | 做（只根據標題） | 不做 | 只有標題 |
 
   - 「其餘的論文」不分追蹤範圍內外，也不看有沒有進已發佈的快照：成員先上傳的本週新論文、成員匯入或引用擴展進來的追蹤範圍外論文，都照後兩列處理。
-  - **做不做處理，和算不算進統計是兩件事。** 統計只看 `counted_paper`（AD-5）：構念的出現次數、合併建議、`relation_stats` 只算 `counted_paper` 的論文（AD-16）。
+  - **做不做處理，和算不算進統計是兩件事。** 統計只看 `counted_paper`（AD-5）：構面的出現次數、合併建議、`relation_stats` 只算 `counted_paper` 的論文（AD-16）。
   - 能被哪個 scope 檢索照 AD-11 與 AD-4；被排除的非研究文章不進任何檢索。
   - 不做的工作，AI 區塊的 `state` 是 `not_applicable`（前兩列）或 `no_input`（最後一列，AD-7）。
 
@@ -694,7 +694,7 @@ erDiagram
   member ||--o{ audit_event : "操作者"
 ```
 
-`judgment_event` 的對象用（種類, ID）表示，可以是論文、一筆 AI 產出或一對構念，所以圖上沒有畫它和對象的線。
+`judgment_event` 的對象用（種類, ID）表示，可以是論文、一筆 AI 產出或一對構面，所以圖上沒有畫它和對象的線。
 
 沒畫在圖上的獨立表：`raw_fetch`（以外部鍵記，先於論文存在）、`ingest_staging`（每週更新解析好、還沒寫入的結果）、`login_attempt`、`deleted_record`、`api_call`、`demo_qa`、`demo_export`（每次匯出的編號與狀態）、`burst_run` 與 `burst_result`、`gold_label`、`eval_run`。view：`counted_paper`、`demo_full_paper`、`effective_zh_summary`、`effective_classification`、`effective_research_model`、`relation_stats`。
 
@@ -716,7 +716,7 @@ erDiagram
 | FR-13 全文處理規則 | `domain/policy.py` | AD-9、AD-24、AD-4 |
 | FR-14、FR-15、FR-17 中文重點、分類、研究模型 | `services/llm_gateway.py`、`services/ai_results.py`、`domain/processing.py`、各工作的 validators 與 prompt | AD-7、AD-8、AD-9、AD-14、AD-30 |
 | FR-16 人工修正分類 | `services/judgments.py`、`effective_classification` | AD-10、AD-27 |
-| FR-18 構念合併 | `services/merges.py`、`domain/constructs.py`、`merge_suggestion`、`merge_judgment` | AD-16、AD-10、AD-11 |
+| FR-18 構面合併 | `services/merges.py`、`domain/constructs.py`、`merge_suggestion`、`merge_judgment` | AD-16、AD-10、AD-11 |
 | FR-19、FR-20 關係排行表、混合支持 | `repo/relations.py`（`relation_stats`） | AD-16、AD-5 |
 | FR-21 證據簡報與匯出 | `services/evidence_brief.py` | AD-16、AD-3 |
 | FR-22、FR-23、FR-25 趨勢、主題交叉、覆蓋率標示 | `repo/stats.py`（計數方塊）、`web/src/stats/` | AD-5、AD-19 |
@@ -746,11 +746,11 @@ erDiagram
 | ARCH-1 訪客辨識 | — | Deferred |
 | ARCH-2 示範站放哪裡、多久更新 | `services/demo_export.py`、`deploy/demo-worker/` | AD-20、ADR-0007 |
 | ARCH-3 關係的資料與畫法分開 | `repo/relations.py`、關係的 API | AD-16 |
-| ARCH-4 構念數千個時的圖 | — | Deferred |
+| ARCH-4 構面數千個時的圖 | — | Deferred |
 | ARCH-5 突現偵測的來源與演算法分開 | `domain/burst.py`、`paper_keyword` 的來源欄位、`config/` 的關鍵字來源 | AD-18；見 FR-24 一列 |
 | ARCH-6 檢索共用 | `services/retrieval.py` | AD-11 |
 | ARCH-7 登入 | `services/auth.py` | AD-23 |
-| ARCH-8 構念比對方法 | `services/merges.py` | AD-16 |
+| ARCH-8 構面比對方法 | `services/merges.py` | AD-16 |
 | ARCH-9 從 PDF 讀 DOI 與標題 | `adapters/pdf/` | AD-24 |
 | ARCH-10 全文版本 | `pdf_file` 的版本欄位 | Deferred |
 | ARCH-11 Compose 或 k3s | `deploy/` | AD-17；重新評估見 Deferred |
@@ -770,14 +770,14 @@ erDiagram
 | 免費期結束後資料庫留在 Azure 還是搬走（ARCH-16） | 現在用 Azure 託管 PostgreSQL。程式只認兩個連線字串（AD-17）。候選必須滿足：PostgreSQL 18、pgvector 不低於 0.8.0、`pg_trgm`、能建兩個角色、能維持長連線（佇列靠資料庫通知叫醒 worker） | 2027-12，免費期結束前一個月 |
 | 正式環境改用 Oracle 或 k3s（ARCH-11） | PRD 要求先看試用環境跑數週 | 2027-12，寫新的 ADR |
 | 即時訪客問答怎麼辨識同一位訪客（ARCH-1） | S12 是 Should；v1 的示範站沒有後端；回答的形狀已固定（`QaAnswer`） | S12 開工時 |
-| 構念數千個時圖的效能（ARCH-4） | 圖是 Should；排行表是分頁的表格 | 2D 鄰居圖開工時 |
+| 構面數千個時圖的效能（ARCH-4） | 圖是 Should；排行表是分頁的表格 | 2D 鄰居圖開工時 |
 | 全文版本的優先規則（ARCH-10） | v1 不擷取全文；`pdf_file` 已有版本欄位 | 全文管線開工時 |
 | 圖書館回覆「不允許」時原文摘要怎麼處理、本機與雲端算的向量怎麼共存（ARCH-13） | 原文摘要是 Should；放行的位置固定在 AD-9，目前用的摘要只有一筆（AD-7），向量依 `model_id` 分開（AD-12）。到時假設原句要不要放行，看它的來歷（`input_kind` 與檔案的取得方式） | 全文管線開工時 |
 | 桌機連到正式資料庫的方式 | v1 沒有需要在桌機跑的工作 | 全文管線開工時 |
 | `workspace_id` 與多實驗室 | PRD §7 明寫不做；可見範圍已由 AD-4 表達 | L01 排進範圍時 |
 | K9（單人上線、先不做登入）的做法 | 還沒觸發；登入只是建立 `MemberViewer` 的那一個相依項。觸發時的護欄：成員版不得公開（只綁本機，或在 Cloudflare 那一層先擋），一律用一筆固定的 Kevin 成員資料建立 `MemberViewer` | K9 觸發時 |
 | K6 沒觸發時，示範站的突現偵測 | K6 預期會觸發。沒觸發時：後端算固定兩組期刊（全部 14 本、AIS 核心 11 本），示範站多一個 `burst.json`，不提供「自己選」；要先問 Kevin | FR-24 開工前 |
-| 構念的拆分（同名但意思不同） | 靠名稱本來就分不開；要先有實際案例 | 審合併建議時遇到再說 |
+| 構面的拆分（同名但意思不同） | 靠名稱本來就分不開；要先有實際案例 | 審合併建議時遇到再說 |
 | 首頁在手機上「跑不順」的門檻 | 首頁規格寫明要實測 | 首頁那個 Story，量完寫回首頁規格 |
 | 中文標題字體與子集流程 | `DESIGN.md` 標為待選；AD-22 已限制必須能自己放。要一起定：固定文字的子集在前端建置時產生；發現卡的關係名稱每週會變，字要由匯出時另出一個小字體檔 | 設計稿定案時 |
 | Semantic Scholar 的摘要上線時的幾個定義（示範站的「有摘要」、計數方塊算哪個主題、論文頁的狀態、覆蓋率加來源維度） | Could；要先有書面答覆。答覆前這類內容不放行（AD-9） | 拿到書面答覆時 |
