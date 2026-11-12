@@ -18,12 +18,12 @@ updated: 2026-11-10
 |---|---|---|
 | ARCH-1 | 如何辨識「同一位訪客」以計算每人每日問答上限（IP、session 等）。只有 S12 即時訪客問答需要，v1 靜態快照不需要 | 訪客示範站（S12） |
 | ARCH-2 | 靜態快照示範站放在哪裡、多久更新一次（原 OQ-06「獨立站或訪客帳號」已由 K1 改為靜態快照，不再需要選） | 訪客示範站 |
-| ARCH-3 | 構念關係網的資料 API 與呈現方式分開，2D 鄰居圖、3D 全景圖共用同一份資料 | 構念關係網 |
-| ARCH-4 | 構念數量達數千個時的效能做法（例如伺服器端分群） | 構念關係網 |
-| ARCH-5 | 突現偵測的關鍵字來源（OpenAlex、LLM 擷取、構念）與演算法分開、可替換；結果記錄來源與參數，方便重算與比較 | 趨勢分析 |
+| ARCH-3 | 構面關係網的資料 API 與呈現方式分開，2D 鄰居圖、3D 全景圖共用同一份資料 | 構面關係網 |
+| ARCH-4 | 構面數量達數千個時的效能做法（例如伺服器端分群） | 構面關係網 |
+| ARCH-5 | 突現偵測的關鍵字來源（OpenAlex、LLM 擷取、構面）與演算法分開、可替換；結果記錄來源與參數，方便重算與比較 | 趨勢分析 |
 | ARCH-6 | 問答的檢索與語意搜尋共用同一套（使用者要求，不另做第二套）；架構階段設計共用的方式 | 問答、語意搜尋 |
 | ARCH-7 | 登入方式：成員用既有帳號（例如 Google）登入、管理者只維護允許名單、系統盡量不保存密碼；具體機制待架構決定 | 帳號與可見範圍 |
-| ARCH-8 | 構念合併除了名稱也比對構念定義（有定義時），參考 Larsen & Bong (2016, MISQ) 的 construct identity 做法；待決定的是具體比對方法 | 構念合併（FR-18） |
+| ARCH-8 | 構面合併除了名稱也比對構面定義（有定義時），參考 Larsen & Bong (2016, MISQ) 的 construct identity 做法；待決定的是具體比對方法 | 構面合併（FR-18） |
 | ARCH-9 | 從 PDF 讀出 DOI／標題的方式（K5 縮小版後 v1 不用 GROBID，例如改從第一頁文字找 DOI）。推薦清單（FR-49）也用同一套，而且辨認完要確實刪除暫存檔 | PDF 上傳（FR-12、FR-49） |
 | ARCH-10 | 全文版本（預印本／接受稿／正式版）的記錄方式，以及有正式版時如何優先 | 擁有權與授權（FR-7）、S13 |
 | ARCH-11 | 正式環境用 Docker Compose（Azure for Students，1 GB）還是 Oracle 主機上的 k3s；Oracle staging 穩定數週後以 ADR 決定。若改用 Oracle，NFR-1 的記憶體限制要依新主機重訂，並留意 Oracle 的閒置回收規則 | K8s 部署（4.16）、NFR-1 |
@@ -43,7 +43,7 @@ PRD 只定驗收條件；以下是報告建議的具體設計，架構階段可�
 - R1：`derivation_run`（task、task_version、provider、model_id、prompt_ref、prompt_sha256、output_schema、params、git_sha、provider_batch_id、status、cost_usd、時間）；AI 表加 NOT NULL `run_id`、`input_kind`、`input_sha256`、`lang`、`status`（active／superseded／rejected）、`superseded_by`，部分唯一索引保證單一 active；Batch `custom_id` 用 `w{openalexId}_{task}_{promptVersion}`（≤64 字元）；`llm_calls` 帳本。
 - R2：原始 JSON＋`fetched_at`、LLM 原始回應，以 sha256 為鍵存到 R2 儲存空間（或 jsonb）。
 - R3：萃取 schema v1 的欄位定義見 PRD FR-3（含審稿 B-10 新增的題數、α、CR、AVE、量表題目位置）。
-- R4：`correction`（workspace、user、paper_id、task、field_path、corrected_run_id、新舊值、reason、時間、review_status）；`merge_decision`（構念 A／B、建議 run、accept／reject、evidence_level、理由、決定者、時間）。
+- R4：`correction`（workspace、user、paper_id、task、field_path、corrected_run_id、新舊值、reason、時間、review_status）；`merge_decision`（構面 A／B、建議 run、accept／reject、evidence_level、理由、決定者、時間）。
 - R5：`embedding(item_type, item_id, model_id, input_sha256, run_id, vec)`，主鍵 (item_type, item_id, model_id)；`embedding_model` 登錄表；每模型一個 partial HNSW 索引；全文切塊上限 4,096 token；查詢一定要帶 `model_id` 條件，才用得到 partial 索引。
 - R6：`external_id(entity_type, entity_id, scheme, value_norm, value_raw)`，`UNIQUE(scheme, value_norm)`；`identifiers.py` 也正規化 ISSN-L 與 OpenAlex ID。
 - R7：`workspace_id`（書目資料不帶）、visibility enum、`policy.can_read(user, resource)`；PDF 欄位 `access_type`、`license`、`attested_at`、`processing_mode`；設定旗標 `PAYWALLED_FULLTEXT_LLM` 預設關閉；bronze OA 不視為可再利用。
@@ -150,7 +150,7 @@ Python SDK v2 的 `MCPServer`；本機 stdio＋個人存取 token，或公開唯
 | 靜態快照產生器（FR-42，獨立建置流程） | 4–8 h |
 | 前端各畫面（論文頁至少 8 個動作、上傳頁、排行表、趨勢頁等）是否已含在報告基準 | 待核對 |
 | 金標準標註人力（摘要層級 50 篇每篇 5–10 分鐘、全文層級 20 篇針對性閱讀每篇 15–30 分鐘、試標 5 篇、中文摘要人工判定、分類專用 100 篇每篇 2–3 分鐘） | Kevin 約 14–26 h、同學約 1.5–2.5 h，不計入功能預算（PRD 8.4） |
-| 構念合併審核人力（前 200 名＋長尾掛靠建議；建議筆數由 OQ-10 試擷取推估） | 待推估，屬 Kevin 的人工時間 |
+| 構面合併審核人力（前 200 名＋長尾掛靠建議；建議筆數由 OQ-10 試擷取推估） | 待推估，屬 Kevin 的人工時間 |
 
 ### 剩下的槓桿
 
@@ -184,12 +184,12 @@ Python SDK v2 的 `MCPServer`；本機 stdio＋個人存取 token，或公開唯
 | S01 | AI 文獻驗證器 |
 | S02 | 文獻整理表＋RIS／BibTeX／CSV 批次匯出（含證據層級欄） |
 | S03 | RIS／BibTeX 匯入 |
-| S04 | 中文查詢管線＋構念中英對照 |
+| S04 | 中文查詢管線＋構面中英對照 |
 | S05 | 參數化 SQL 工具回答計數題，並顯示算法 |
 | S06 | 原生引用：`search_result` 區塊＋伺服器端驗證＋顯示原句 |
 | S07 | 公開評估報告 |
 | S08 | 撤稿警示 |
-| S09 | 證據缺口地圖（構念×構念） |
+| S09 | 證據缺口地圖（構面×構面） |
 | S10 | 交接包：網頁管理介面、LLM 關閉模式、每週自動還原演練、中文 runbook、完整匯出、外部 uptime 檢查 |
 | S11 | 「我的點子落在哪？」 |
 | S12 | 即時訪客問答 |
@@ -198,7 +198,7 @@ Python SDK v2 的 `MCPServer`；本機 stdio＋個人存取 token，或公開唯
 | S15 | 研究雷達期刊版（首頁的掃描動畫在 PRD R2 移到 FR-44，列入 Must） |
 | S16 | 受 GRADE 啟發的證據理由標籤 |
 | S17 | 合集與入門必讀 |
-| S18 | 依合併證據層級篩選＋外部構念工具連結 |
+| S18 | 依合併證據層級篩選＋外部構面工具連結 |
 | S19 | 工程證據包（Sentry、SLO、runbook＋RCA、ADR、負載測試、AI 協作說明、招募用 README） |
 | S20 | AISeL OAI-PMH 研討會序列（若要清理 JAIS 誤歸則提前） |
 

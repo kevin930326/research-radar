@@ -18,7 +18,7 @@
 | [0009](0009-model-choice-and-llm-gateway.md) | 模型用 Claude Haiku 5.5，所有 LLM 呼叫只走一個閘門（含價格核對） | 提議 | AD-8、AD-9 |
 | [0010](0010-frontend-stack.md) | 前端一份程式、兩種建置；頁面只透過資料來源層拿資料 | 提議 | AD-21、AD-22 |
 | [0011](0011-snapshots-and-number-definitions.md) | 每個數字只有一個定義：計數在資料庫，比例在前端的一個模組 | 提議 | AD-5、AD-19 |
-| [0012](0012-construct-identity-and-merging.md) | 構念的身分、合併與關係的識別方式 | 提議 | AD-10、AD-16 |
+| [0012](0012-construct-identity-and-merging.md) | 構面的身分、合併與關係的識別方式 | 提議 | AD-10、AD-16 |
 | [0013](0013-pdf-upload-and-identification.md) | PDF 經由 API 上傳；沒有下載聲明的檔案讀完就刪 | 提議 | AD-24 |
 | [0014](0014-raw-first-ingest-and-weekly-rescan.md) | 原始資料先存再解析；每週更新把 14 本期刊整本重掃 | 提議 | AD-25 |
 | [0015](0015-ai-output-tables-and-processing-plan.md) | AI 產出怎麼存、怎麼換版；哪一種論文做哪些處理 | 提議 | AD-7、AD-30 |

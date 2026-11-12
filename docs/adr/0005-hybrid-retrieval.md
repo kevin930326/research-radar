@@ -29,7 +29,7 @@
 
 選 **B**。
 
-1. **只有一個入口**：`services/retrieval.py` 的 `retrieve(viewer, query 或 paper_id, scope, filters, k, offset)`。搜尋、找相似論文、問答、展示問答都呼叫它；其他地方不得自己寫向量或全文檢索的 SQL。唯一的例外是合併建議要用的「構念相似度」（ADR-0012）：它比的是構念不是論文，簽名對不上，所以是同一個 repo 模組裡的另一個函式，同樣強制帶 `model_id`，只給合併建議用。
+1. **只有一個入口**：`services/retrieval.py` 的 `retrieve(viewer, query 或 paper_id, scope, filters, k, offset)`。搜尋、找相似論文、問答、展示問答都呼叫它；其他地方不得自己寫向量或全文檢索的 SQL。唯一的例外是合併建議要用的「構面相似度」（ADR-0012）：它比的是構面不是論文，簽名對不上，所以是同一個 repo 模組裡的另一個函式，同樣強制帶 `model_id`，只給合併建議用。
 2. **`scope` 是固定的四種**：
 
    | scope | 範圍 |

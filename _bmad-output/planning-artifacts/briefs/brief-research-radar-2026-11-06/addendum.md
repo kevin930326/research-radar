@@ -40,7 +40,7 @@ updated: 2026-11-06
 
 - **F1**：arxiv-sanity-lite（只用 CPU 的推薦）、Litmaps（新論文寄信）、自己的校園小幫手（Discord 推播每週摘要）。
 - **F2**：GROBID（PDF 解析）。
-- **F3**：OpenAlex Topics（免費的基本分類，LLM 只做資管專屬的分類）、Elicit（「論文 × 欄位」表格）、TheoryOn／INN（構念關係）。
+- **F3**：OpenAlex Topics（免費的基本分類，LLM 只做資管專屬的分類）、Elicit（「論文 × 欄位」表格）、TheoryOn／INN（構面關係）。
 - **F4**：BERTopic／BERTrend（新興主題）、CiteSpace（突現偵測）、ASReview（主動學習篩選，PRD 再決定要不要納入）。
 - **F5**：PaperQA2（檢索 → 重排 → 回答）、OpenScholar（檢查引用是否存在）、Consensus（支持比例；只是計票，要標明限制）、Stanford 研究（AI 點子新穎但可行性較弱）。
 - **工程品質**：Langfuse＋Ragas（追蹤費用、量化 RAG 品質）。
