@@ -470,7 +470,7 @@ v1 的 Must 畫面裡只有示範站首頁是探索類。之後的 2D 鄰居圖�
 | **狀態標記**（`status-tag`） | 1px 框、直角、DM Mono 小字，高 22px。例如「追蹤範圍外」「只有你看得到」「少見」「構面未核對」「資料不足」。全部同一個樣式，不用顏色區分種類 |
 | **分類標籤**（`classification-tag`） | 論文頁上的主題與方法標籤，可以點，帶入這個分類當條件：成員版到找論文，示範站到論文清單（找論文是成員功能）。一篇可以有多個主題或多個方法（PRD FR-15 多標籤），每個標籤各自可以點，放不下就換行。全圓角、1px 框、高 26px、`{typography.label-mono-reading}`、`{colors.text-reading}`，字後面一個小箭頭 ›。滑過：框與字變成 `{colors.text-primary}`，沒有底線；提示文字「看全部『電子商務』的論文」。「未分類」不是一個分類，不能點：直角、`{colors.hairline}` 的框、`{colors.text-tertiary}` 的字，沒有箭頭 |
 | **警語列**（`caution-line`） | 一行 `{typography.caption}`、`{colors.text-tertiary}` 的字，前面一個空心圓圈 i 圖示。固定在它說明的圖表或表格正下方 |
-| **論文列**（`paper-row`） | 第一行：論文標題（`{typography.paper-title-row}`）。第二行：期刊簡稱 · 年份 · ● 有摘要／○ 沒有摘要，加上狀態標記（DM Mono）。第三行（有的話）：AI 標章＋中文重點的「研究問題」一欄，`{colors.text-secondary}`，最多兩行。右側是動作。示範站的論文清單裡，第二行後面接這篇的主題與方法標籤（樣式同第二行的其他小字，前面一個 AI 標章），右側改成 DOI 連結與「● 有完整內容／○ 只有書目」。列與列之間一條髮線，沒有外框 |
+| **論文列**（`paper-row`） | 第一行：論文標題（`{typography.paper-title-row}`）。第二行：期刊簡稱 · 年份，加上狀態標記（DM Mono）；沒有摘要的多標「沒有摘要」，有摘要的不另外標（找論文定稿，2026-11-12）。第三行（有的話）：AI 標章＋中文重點的「研究問題」一欄，`{colors.text-secondary}`，最多兩行。右側是動作。示範站的論文清單裡，第二行後面接這篇的主題與方法標籤（樣式同第二行的其他小字，前面一個 AI 標章），右側改成 DOI 連結與「● 有完整內容／○ 只有書目」。列與列之間一條髮線，沒有外框 |
 | **中文重點區塊**（`summary-block`） | 四欄直排：研究問題、方法、理論、發現。每欄左邊是 DM Mono 的欄位名稱（寬 96px，`{typography.label-mono-reading}`、`{colors.text-secondary}`），右邊是 `{typography.reading-zh}`、`{colors.text-reading}` 的內容；欄與欄之間一條髮線。「摘要未提及」用 `{colors.text-tertiary}`。手機上欄位名稱移到內容上方 |
 | **篩選列**（`filter-bar`） | 一排小的篩選標籤：高 32px、全圓角、1px 框、`{typography.caption}`。選取中是暖白底、深色字。兩選一的切換（例如「占比／原始篇數」）是並排的兩個文字，選取中的有 1px 金色底線 |
 | **文字輸入**（`text-input`） | 透明底，只有下緣一條 1px `{colors.border}` 的線；聚焦時這條線變金色。搜尋框的字級用 `{typography.section-title-zh}` 的大小（24px）但用內文字體。多行輸入（問答）是 1px 框的直角方框 |
