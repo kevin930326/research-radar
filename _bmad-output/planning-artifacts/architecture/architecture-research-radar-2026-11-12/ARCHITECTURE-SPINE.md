@@ -98,11 +98,15 @@ flowchart TD
   - `radar.config` 只被入口與 `bootstrap.py` import。設定的型別定義在 `radar/domain/settings.py`，services 從參數收設定物件。
   - 入口只做三件事：解析輸入、組裝、呼叫一個 services 函式。每週更新、匯入、匯出、評估、備份、還原、遷移都有對應的 `radar` 指令（NFR-11）。
 
-### AD-2 — 外部服務只經 port，每個 port 都有 Fake
+### AD-2 — 外部服務只經 port 或注入的函式，都有測試替身
 
 - **Binds:** FR-8～FR-10、FR-12～FR-17、FR-26～FR-28、FR-34、FR-48、NFR-6
 - **Prevents:** 某個功能直接呼叫 SDK，離線測試跑不起來；各 adapter 回傳各家自己的資料形狀
-- **Rule:** port 只定義在 `radar/ports.py`（`typing.Protocol`），目前八個：`PaperSource`、`LlmProvider`、`EmbeddingProvider`、`ObjectStore`、`PdfReader`、`IdentityProvider`、`Heartbeat`、`JobQueue`。services 從參數收 port，不 import adapters；只有 `entrypoints/bootstrap.py` 建立 adapter 實例，用設定值選實作。adapter 的回傳值一律是 `radar.domain` 的型別（`PaperSource` 回傳的是還沒解析的原始紀錄，見 AD-25）。新增 port 的條件：同時交出真實實作與 `adapters/fake/` 的實作（含負面樣本）。不建 registry 或 factory 類別。CI 用 pytest-socket 封鎖網路。
+- **Rule:**
+  - **port 只有四個**，定義在 `radar/ports.py`（`typing.Protocol`）：`PaperSource`、`LlmProvider`、`EmbeddingProvider`、`ObjectStore`。前三個是設計原則文件點名的三類；`ObjectStore` 是明列的例外（理由見 ADR-0001）。
+  - **其餘外部服務不建 Protocol，用函式注入**：讀 PDF、登入（換授權碼並驗 ID token）、送心跳、排入背景工作。services 的參數型別是 `Callable`，簽名只用 `radar.domain` 的型別；真實的函式在 `radar/adapters/`，測試替身在 `adapters/fake/`。
+  - services 從參數收 port 與函式，不 import adapters；只有 `entrypoints/bootstrap.py` 建立 adapter、選實作。adapter 的回傳值一律是 `radar.domain` 的型別（`PaperSource` 回傳的是還沒解析的原始紀錄，見 AD-25）。
+  - 新增 port 的條件：有第二種真實的實作（不同的來源或供應商）；測試替身不算。不建 registry 或 factory 類別。CI 用 pytest-socket 封鎖網路。
 
 ### AD-3 — 讀取一律帶 viewer
 
@@ -128,6 +132,7 @@ flowchart TD
   - `PublicViewer` 看得到的論文 ⇔ 在 `counted_paper` 裡（AD-5）。
   - 論文的衍生資料（摘要、AI 產出、向量、構念提及、假設）跟隨論文。例外：`paper_abstract` 的來源是成員上傳的 PDF 時，只有上傳者讀得到。
   - `pdf_file`、`upload_batch`、`upload_item`、`library_item`、`qa_log`、`qa_usage` 只有擁有者讀得到；這些表都有 NOT NULL 的 `owner_id`（schema 體檢測試）。需要讓別人知道「來源檔案已刪除」時，由衍生事實自己記這個狀態，不靠讀別人的 `pdf_file`。
+  - `library_item` 對（成員, 論文）唯一，記 `added_via`（`upload` 勾了下載聲明的上傳、`shared_list` 沒勾聲明的推薦清單、`manual` 自己按加入）與來源的 `upload_item`（可以是空的）。同一篇再加入一次時不改原本那一筆，所以 `added_via` 只代表第一次怎麼加入。「我上傳的」篩選與「看有檔案的論文」看的是這位成員對這篇有沒有還沒刪的 `pdf_file`，不看 `added_via`。`paper.origin` 是論文怎麼進資料庫的，不代表某位成員怎麼加入的。
   - `lab_visible` 只由 `repo/papers.py` 寫，只在三種情況設為真：追蹤範圍內的論文入庫、引用擴展、上傳批次勾了分享（AD-24）。設為真之後不改回去。`in_scope` 為真的論文 `lab_visible` 必為真（`CHECK` 約束）。手填書目的論文 `lab_visible` 為假。
   - 架構測試：`lab_visible` 這個欄位名只出現在 `repo/visibility.py` 與 `repo/papers.py`。
   - 不加 `workspace_id`。
@@ -152,13 +157,13 @@ flowchart TD
   - **一次產出一列表頭。** AI 表頭表有四張：`zh_summary`、`classification`、`research_model`、`merge_judgment`。一次產出多列的資料掛在表頭底下，不帶自己的狀態：`classification_label`（`field` 是 `topic` 或 `method`，加 `key`）掛在 `classification`；`construct_mention` 與 `hypothesis` 掛在 `research_model`。
   - **表頭的欄位**（都是 NOT NULL，`abstract_id` 除外）：`run_id`（指向 `derivation_run`）、`input_kind`（`title`／`abstract`／`fulltext`）、`input_sha256`、`abstract_id`（用的是哪一筆摘要）、`lang`（BCP 47：`zh-Hant`、`en`，沒有語言的產出用 `zxx`）、`status`（`candidate`／`active`／`superseded`／`rejected`）。
   - **單一有效版本**：每張表頭表對（對象, `lang`）有部分唯一索引，保證只有一筆 `active`。對象是論文；`merge_judgment` 的對象是一筆合併建議。內容欄位不 UPDATE：重跑是新增一筆，再把舊的標成 `superseded`。
-  - **候選**：換模型與「同一篇跑兩次」的結果存成 `candidate`，不顯示、不進統計。`candidate` 變成 `active` 只經一個 CLI 指令（`radar runs promote`），它先核對 `eval_run` 裡的一致率與同意率不低於門檻（FR-4）。
+  - **候選**：換模型與「同一篇跑兩次」的結果存成 `candidate`，不顯示、不進統計；評估用的重複執行怎麼跑見 AD-8。`candidate` 變成 `active` 只經一個 CLI 指令（`radar runs promote`）：要指定是哪一次 `eval_run`，先核對那一次的一致率與同意率不低於門檻（FR-4）；同一個對象在那一次有多筆候選時用最早執行的那一筆，其餘改成 `superseded`；每一筆都經 AD-8 的寫入函式啟用，輸入已經變了的跳過並計數。
   - **不算 AI 表頭表的**：`embedding` 只帶 `run_id` 與 `input_sha256`，同一個主鍵直接覆寫（AD-12）；`merge_suggestion` 的前兩層不是模型產出，沒有 `run_id`。
   - **論文層級的擷取結果**（研究情境、研究限制、是不是文獻回顧或後設分析）放在 `research_model` 表頭。研究情境的國家、產業、研究設計、分析單位只能是 `config/` 情境值清單裡的 `key`，對不上就存空值。
   - **沒提到就存空值。** 模型不得把「摘要未提及」這類字寫進欄位；畫面上的字由 i18n 出。
   - **摘要**存在 `paper_abstract`（一篇可以有多個來源）。每篇最多一筆 `is_current`（部分唯一索引），只由 `repo/papers.py` 在寫入摘要時依設定檔的來源優先順序決定。LLM 輸入、向量輸入、全文檢索、問答內容、畫面顯示、「有摘要」的計數與篩選、示範站匯出，都只用這一筆；換了一筆等同摘要變動。
   - **讀取**：每張表頭表有一個 `effective_*` view（AD-10）；`repo` 裡除了該表的寫入模組，其他查詢不得直接讀 AI 表（架構測試）。
-  - **API 與示範站檔案裡的 AI 區塊是同一個信封**：`state`、`value`、`provenance`（模型、產生時間、`input_kind`、是否經人工核對）。`state` 固定八個值：`ready`、`empty`（跑過了，沒有可擷取的內容）、`pending_interactive`、`pending_batch`、`deferred_budget`、`no_input`、`failed`（被拒收）、`not_applicable`（這種論文不做這個工作，AD-30）。只有 `ready` 與 `empty` 帶 `provenance`，只有 `ready` 帶 `value`。判定只寫在 `repo/ai_blocks.py` 的一個函式，所有端點與示範站匯出共用。`failed` 是終點狀態：同一份輸入不會自動重跑（AD-8），畫面不得把它顯示成還在產生；`pending_*` 只用在一定會再跑的情況。舊的 `active` 不因為新的一次被拒收而失效。
+  - **API 與示範站檔案裡的 AI 區塊是同一個信封**：`state`、`value`、`provenance`（模型、產生時間、`input_kind`、是否經人工核對）。`state` 固定八個值：`ready`、`empty`（跑過了，沒有可擷取的內容）、`pending_interactive`、`pending_batch`、`deferred_budget`、`no_input`、`failed`（被拒收，或所屬的批次停在 `needs_attention`）、`not_applicable`（這種論文不做這個工作，AD-30）。只有 `ready` 與 `empty` 帶 `provenance`，只有 `ready` 帶 `value`。判定只寫在 `repo/ai_blocks.py` 的一個函式，所有端點與示範站匯出共用。`failed` 是終點狀態：不會自動再跑，要等管理者處理（AD-8、AD-14），畫面不得把它顯示成還在產生；`pending_*` 只用在一定會再跑的情況。舊的 `active` 不因為新的一次被拒收而失效。
   - schema 體檢測試檢查表頭表的欄位與索引；契約測試檢查 API 模型。
 
 ### AD-8 — 所有 LLM 呼叫只走一個閘門
@@ -167,12 +172,16 @@ flowchart TD
 - **Prevents:** 某個功能繞過預算、帳本、來歷或輸出驗證；同一份輸入被互動呼叫與 Batch 各跑一次
 - **Rule:**
   - `LlmProvider` 只能被 `services/llm_gateway.py` 呼叫（架構測試）。
-  - **要不要跑只有一個判定。** 閘門的 `should_run(對象, 工作代碼, prompt 版本, 模型, input_sha256)`：這組鍵已經有 `active`、`candidate` 或 `rejected` 的結果，或有還沒結束的 `batch_item`，就不跑。`rejected` 只有 CLI（`radar runs retry`）能要求重跑。互動呼叫與 Batch 都先問它。每週更新對所有 `plan_for`（AD-30）要做的論文問一次，不只問這一週新收的；所以暫時性的失敗下一週自動補跑，被拒收的不會。
+  - **要不要跑只有一個判定。** 閘門的 `should_run(對象, 工作代碼, prompt 版本, 模型, input_sha256)`：這組鍵已經有 `active` 的結果、有不屬於評估的 `rejected` 結果，或有不屬於評估的進行中 `derivation_run`，就不跑。評估留下的 `candidate` 不算，不會擋住平常的流程。`input_sha256` 是送給模型的內容加上會影響結果的設定檔版本（分類表、情境值清單）一起算的指紋，所以分類表改版等於輸入變了。`rejected` 只有 CLI（`radar runs retry`）能要求重跑。互動呼叫與 Batch 都先問它。每週更新對所有 `plan_for`（AD-30）要做的論文問一次，不只問這一週新收的；所以暫時性的失敗下一週自動補跑，被拒收的不會。
+  - **同一份輸入同時只有一個在跑。** `derivation_run` 有狀態（`running`、`succeeded`、`failed`），對這組鍵有部分唯一索引，只算 `running` 的。取得執行資格是一個短交易：先對這組鍵取 advisory lock，重新問一次 `should_run`，還是要跑才新增 `running` 的那一筆；不用跑或新增失敗，這一次直接結束、不呼叫。只靠唯一索引不夠：先查過的另一個工作可以等前一個做完、`running` 消失後再新增。互動呼叫與 Batch 都走這一步（Batch 在建立 `batch_item` 的同一個短交易）。
+  - **`running` 怎麼結束。** 互動呼叫有硬性時間上限（設定值，含連線層的重試）；`sweep` 的時限比它長，超過還是 `running` 的改成 `failed`（AD-14），不交人工。結果寫入時那一筆 `derivation_run` 必須還是 `running`，寫入的同一個交易把它改成 `succeeded`；已經被改成 `failed` 才回來的結果不啟用，只存成 `superseded`，帳照記。`derivation_run` 是 `failed` 的結果永遠不能啟用，新結果入庫與 `promote` 都一樣。Batch 的 `running` 不看時限，跟著批次的結果走。
+  - **評估的重複執行是唯一的例外。** `radar eval` 帶著 `eval_run` 的 ID 呼叫閘門：不問 `should_run`，那一筆 `derivation_run` 記 `eval_run_id`、不算進上面的唯一索引，結果一律存成 `candidate`；外送檢查、預算、帳本、驗證照舊。
   - **拒收與暫時性失敗分開。** 模型拒答、長度截斷、格式或規則驗證沒過、請求本身不合法：寫一筆 `rejected`（帶失敗原因的代碼），不自動重試。逾時、限流、服務端錯誤、Batch 項目過期或被取消：不寫結果，由連線層與工作層重試，再不行就留給下一次每週更新。
-  - **固定步驟**：外送檢查（AD-9）→ 預算檢查 → 從 `prompts/<工作>/v<N>.md` 組 prompt → 寫 `derivation_run` → 呼叫 → 寫 `llm_call`（費用由 `domain/pricing.py` 依 `config/models.yaml` 計算）→ Pydantic 驗格式 → 該工作的 domain 驗證 → 寫入結果。任一步驗證沒過，該筆標 `rejected`，不成為有效資料。
-  - **三種呼叫方式對應同一組步驟**：同步呼叫照上面的順序；串流（問答）邊送邊驗（AD-13），`llm_call` 在串流結束或中斷時寫；Batch 在送出時替每個 `batch_item` 寫 `derivation_run`，匯入結果時寫 `llm_call` 並驗證。
+  - **固定步驟**：外送檢查（AD-9）→ 預算檢查 → 從 `prompts/<工作>/v<N>.md` 組 prompt → 寫 `derivation_run` → 呼叫 → 寫 `llm_call`（費用由 `domain/pricing.py` 依 `config/models.yaml` 計算）→ Pydantic 驗格式 → 該工作的 domain 驗證 → 寫入結果。任一步驗證沒過，該筆標 `rejected`，不成為有效資料。例外：清單外的分類標籤與研究情境值只丟掉那一個並計數，不算拒收（FR-15）；標籤全部被丟掉時這篇是 `unclassified`。
+  - **三種呼叫方式對應同一組步驟**：同步呼叫照上面的順序；串流（問答）邊送邊驗（AD-13），`llm_call` 在串流結束或中斷時寫；Batch 在建立 `batch_item` 時寫 `derivation_run`，匯入結果時寫 `llm_call` 並驗證。
   - **帳本不跟著回滾。** `derivation_run`、`llm_call` 用自己的短交易寫入並立刻 commit；呼叫模型時不佔著開著的交易。
-  - **結果只有一個寫入處。** 每個工作代碼的結果只經 `services/ai_results.py` 的一個函式寫進 AI 表（它負責把舊的標成 `superseded`）；互動呼叫與 Batch 匯入共用。
+  - **結果只有一個寫入處。** 每個工作代碼的結果只經 `services/ai_results.py` 的一個函式寫進 AI 表（它負責把舊的標成 `superseded`）；互動呼叫與 Batch 匯入共用。要寫成 `active` 之前，它在同一個短交易裡先鎖住這個對象（論文那一列；合併判斷鎖那一筆合併建議），再核對這筆結果的 `input_sha256`（實際送給模型的內容加設定檔版本）、prompt 版本、模型仍然是這個對象現在該用的，然後才切換；不是的話存成 `superseded`，不動現有的 `active`。核對和切換之間因此插不進別的寫入。
+  - **啟用有兩個入口，上鎖、核對輸入與 prompt 版本、切換共用，只有兩處不同。** 新結果入庫（互動呼叫、Batch 匯入）：它的 `derivation_run` 必須還是 `running`，核對的模型是這個工作現在該用的。`radar runs promote`：那一筆結果必須還是 `candidate`、它的 `derivation_run` 必須是 `succeeded`，核對的模型是指定的那一次評估要切過去的。`derivation_run` 是 `failed` 的結果（被 `sweep` 判定失敗）兩個入口都不啟用。
   - `derivation_run` 一次模型呼叫一筆，記工作代碼、prompt 版本與雜湊、模型、參數、用到的設定檔版本（分類表、情境值清單）、程式版本。
   - 模型 ID 寫在 `config/models.yaml`（一種工作一個設定）；思考設定、effort、長度上限寫在 prompt 檔的設定區，屬於 prompt 版本的一部分。模板或設定區改了卻沒升版，測試失敗。
   - 模型拒答與長度截斷是各自的錯誤型別。所有呼叫都不給工具。單次輸入預估（含系統提示與快取的部分）超過 100,000 tokens 時拒絕送出，該工作設定明確允許者除外。
@@ -193,10 +202,11 @@ flowchart TD
 - **Binds:** FR-4、FR-14 附則、FR-16、FR-18、FR-21、NFR-16
 - **Prevents:** 各頁面各自決定用人工值還是 AI 值；重跑 AI 蓋掉人工修正；修正被改寫或刪除
 - **Rule:**
-  - 人工判斷都寫進同一張 `judgment_event`，`kind` 固定三個值：`classification_fix`、`merge_decision`、`summary_report`。共同欄位：成員、當時的角色（`member`／`admin`）、理由、時間。對象用（種類, ID）表示，不限論文。
+  - 人工判斷都寫進同一張 `judgment_event`，`kind` 固定四個值：`classification_fix`、`merge_decision`、`summary_report`、`summary_report_resolution`。共同欄位：成員、當時的角色（`member`／`admin`）、理由、時間。對象用（種類, ID）表示，不限論文。
     - `classification_fix`：論文、`field`（`topic` 或 `method`）、新的整組標籤 `key`、被修正的那筆 AI 產出。
     - `merge_decision`：兩個構念（ID 小的在前）、決定、證據層級。
     - `summary_report`：被回報的那筆 `zh_summary` 與欄位；只對那一筆有效，重新產生後不跟過去。
+    - `summary_report_resolution`：管理者對一筆回報的處理結果（`confirmed_ok` 或 `regenerated`），指向原本那筆回報，只經 CLI 寫入。「有成員回報此欄可能有誤」＝有回報而沒有處理結果，由 `effective_zh_summary` 算出。
   - 應用程式的資料庫角色對 `judgment_event` 與 `audit_event` 沒有 UPDATE、DELETE 權限（AD-17 的兩個角色；遷移裡設定，有測試）。
   - 有效值只由 `effective_*` view 決定：`effective_zh_summary`、`effective_classification`、`effective_research_model`。有效分類以（論文, `field`）為單位取最新一筆人工值，沒有才用 `active` 的 AI 值；「已核對」與「成員意見不同」也是這個單位，由同一個 view 算出。所有讀取（API、統計、示範站匯出）讀這些 view。
   - 合併是例外：有效值存在 `construct.canonical_id`（AD-16）。
@@ -246,10 +256,11 @@ flowchart TD
     - `weekly_run`：`fetching`、`published`、`ai_done`、`exported`、`failed`。同一時間只能有一個 `fetching`（部分唯一索引）。
     - `batch_submission`：`queued`、`submitting`、`submitted`、`ended`、`imported`、`failed`、`needs_attention`。
     - `upload_item`：`received`、`identifying`、`matched`、`duplicate`、`needs_confirm`、`needs_manual`、`mismatch_confirm`、`lookup_deferred`、`failed`、`expired`。
-  - 順序一律是：寫狀態列並完成交易 → 經 `JobQueue` 排入。
-  - **`sweep`**（每 15 分鐘，由 cron 觸發）做兩件事：(a) 依一份登記清單（狀態表、起始狀態、要排入的工作、多久算卡住）把卡住的項目重新排入，新增狀態表的 Story 必須加一列；(b) 找出 worker 已經不在、卻還停在執行中的工作（Procrastinate 的 stalled job）並重試。
-  - **Batch**：`batch_item` 對（對象, 工作代碼, prompt 版本, 模型, `input_sha256`）有部分唯一索引，不含已失敗的項目；`custom_id` 就是 `batch_item` 的 ID（32 個十六進位字元）。送出前先寫意圖列；狀態停在 `submitting` 且沒有供應商的 batch ID 時不自動重送，標成 `needs_attention`。`batch_submission` 記它屬於哪一次 `weekly_run`（可以是空的）。
-  - **誰推進每週更新**：`poll-batches` 每次結束時呼叫 `weekly_run` 的狀態函式，由它判斷「這一週的 Batch 都結束了，或發佈後已滿 24 小時」並排入示範站匯出。其他地方不排這個工作（手動的 `radar export-demo` 除外）。
+  - 順序一律是：寫狀態列並完成交易 → 用注入的排入函式（AD-2）排入。
+  - **`sweep`**（每 15 分鐘，由 cron 觸發）做兩件事：(a) 依一份登記清單（狀態表、起始狀態、要排入的工作、多久算卡住）把卡住的項目重新排入，新增狀態表的 Story 必須加一列；互動呼叫留下、超過時限的 `running` `derivation_run` 也在清單上，處理方式是改成 `failed`（時限比呼叫的硬性時間上限長，AD-8）；排隊中或執行中卡住的 `demo_export` 也在清單上；(b) 找出 worker 已經不在、卻還停在執行中的工作（Procrastinate 的 stalled job）並重試。
+  - **Batch**：每個 `batch_item` 指向一筆 `running` 的 `derivation_run`，同一份輸入不重送由它的唯一索引保證（AD-8）；`custom_id` 就是 `batch_item` 的 ID（32 個十六進位字元）。送出前先寫意圖列；狀態停在 `submitting` 且沒有供應商的 batch ID 時不自動重送，標成 `needs_attention`。
+  - **`needs_attention` 不會自己好。** 有這種批次時 `poll-batches` 不送心跳（管理者因此收到通知），底下項目的 AI 區塊是 `failed`（AD-7）。只由 `radar batches resolve` 解除：補上供應商的 batch ID 繼續等，或標成失敗、把項目的 `derivation_run` 改成 `failed`，留給下一次每週更新。`batch_submission` 記它屬於哪一次 `weekly_run`（可以是空的）。
+  - **誰推進每週更新**：`poll-batches` 每次結束時呼叫 `weekly_run` 的狀態函式，由它判斷「這一週的 Batch 都結束了，或發佈後已滿 24 小時」並排入示範站匯出。其他地方不排這個工作（手動的 `radar export-demo` 除外）。已經匯出過的那一週之後又匯入了結果時，同一個函式判斷要不要再匯出一次：這一週沒有未結束的 Batch，而且最後一次匯入結果的時間晚於最近一次成功匯出的開始時間。排入匯出的順序固定，前三步在同一個交易裡：先鎖住那一筆 `weekly_run`；拿到鎖之後才讀最後匯入時間、最近成功匯出時間與進行中的 `demo_export` 並判斷，鎖之前讀到的不算數；還需要才新增一筆 `queued` 的 `demo_export`；交易完成後才排入工作。`demo_export` 對同一個快照有只算 `queued`、`running` 的部分唯一索引，已經有一筆就不再排。手動的 `radar export-demo` 走同一步。
   - **哪些走 Batch**：第一次匯入與每週更新的 AI 工作走 Batch；問答、使用者觸發的工作（上傳、推薦清單）走互動呼叫；之後新增的工作預設走 Batch。
   - 佇列四條：`ingest`、`ai`、`pdf`、`maintenance`。`pdf` 用同一把 Procrastinate `lock`，同時只跑一個。
   - 工作層的重試只處理「整個工作失敗」，次數與間隔放設定；連線層的重試見 Conventions。
@@ -258,7 +269,7 @@ flowchart TD
 
 - **Binds:** FR-9、FR-48、FR-49、NFR-11、NFR-18
 - **Prevents:** 排程藏在 worker 裡，開兩個 worker 就重複觸發，也搬不上 K8s；一個工作的心跳蓋掉另一個工作的失敗
-- **Rule:** 不使用 Procrastinate 的週期任務。所有排程都是外部排程器（Compose 用主機 cron，K8s 用 CronJob）執行 `radar enqueue <工作>`。排程表只有一份：`deploy/crontab`。服務啟動時不執行遷移，也不排任何工作；遷移是 `radar migrate`。心跳以檢查名稱區分：`Heartbeat` 的方法收檢查名稱，一個排程一個網址，放設定。每個排程工作成功後送自己的心跳，失敗時不送；示範站匯出有自己的心跳 `demo-export`。
+- **Rule:** 不使用 Procrastinate 的週期任務。所有排程都是外部排程器（Compose 用主機 cron，K8s 用 CronJob）執行 `radar enqueue <工作>`。排程表只有一份：`deploy/crontab`。服務啟動時不執行遷移，也不排任何工作；遷移是 `radar migrate`。心跳以檢查名稱區分：送心跳的函式（AD-2）收檢查名稱，一個排程一個網址，放設定。每個排程工作成功後送自己的心跳，失敗時不送；示範站匯出有自己的心跳 `demo-export`。
 
 ### AD-16 — 構念的身分、合併與關係的識別
 
@@ -268,8 +279,12 @@ flowchart TD
   - **構念身分**：以 `domain/constructs.py` 的 `normalize_name` 結果為唯一鍵（不做字根還原）。`construct_mention` 與 `hypothesis` 永遠指向原本的構念，不因合併而改。`construct.canonical_id` 不可為空；新構念由 `repo/constructs.py` 建立時指向自己。
   - **合併**：合併是 `judgment_event`。`canonical_id` 之後只由 `repo.constructs.rebuild_canonical()` 改寫：從全部合併事件整個重算，每對取最新決定，管理者蓋過成員；接受的配對連成一組，代表是 ID 最小的構念；組內有任何一對的最新決定是拒絕時，這一組不合併，並列入 CLI 的待處理清單。它只由 `services/merges.py` 在寫入合併事件的同一個交易裡呼叫，開頭先取 advisory lock。
   - **關係**：關係＝（代表構念 A, 代表構念 B）有方向的一對，沒有自己的 ID；網址由兩個構念 ID 組成；用非代表的 ID 查詢時回應帶 `merged_into`，不自動跳轉。API 回傳的是關係的清單，畫法由前端決定（ARCH-3）。
-  - **關係的數字只有一個定義**：view `relation_stats`。它的列只來自 `counted_paper` 的論文、有效的研究模型。它定義：研究篇數、支持篇數、混合支持、本資料庫中少見、合併未完成、覆蓋率警告、最新年份、關係的主題、未出現的情境、情境未知的篇數。「已審合併的構念占比」是 `repo/relations.py` 的一個函式。排行表、證據簡報、示範站都讀它們。
-  - 證據簡報全部由程式計算，不呼叫 LLM，回應帶產生時間。
+  - **關係的數字只有一個定義**：view `relation_stats`。它的列只來自 `counted_paper` 的論文、有效的研究模型。它定義：研究篇數、支持篇數、混合支持、本資料庫中少見、合併未完成（任一端有沒審的合併建議，或落在有衝突而沒合併的那一組）、覆蓋率警告、最新年份、關係的主題、未出現的情境、情境未知的篇數。「已審合併的構念占比」是 `repo/relations.py` 的一個函式。排行表、證據簡報、示範站都讀它們。
+  - 證據簡報全部由程式計算，不呼叫 LLM，不存在伺服器；回應帶產生時間。
+  - **證據簡報可以匯出成一個固定的檔案**（`services/evidence_brief.py` 的匯出函式）。格式是單一 HTML 檔，裡面附一份機器可讀的 JSON（有自己的 Pydantic 模型與格式版本號）。檔案自己就看得懂、不需要再連回系統，內容：畫面上的完整簡報、快照編號與產生時間、每篇來源論文的 ID 與 DOI、用到的每一筆 AI 產出的 ID（`research_model` 表頭與它的 `run_id`）、影響這份簡報的人工判斷事件 ID（合併決定、分類修正）、設定檔版本（情境值清單、門檻）。檔案不含成員的姓名與 email。
+  - **匯出只用匯出者的 viewer 讀資料**，走和畫面相同的 `repo` 函式；匯出者在畫面上看不到的內容，檔案裡也不會有，不得為了匯出另外用 `SystemViewer` 讀。金絲雀測試涵蓋匯出檔（AD-3）。
+  - **匯出檔完全自給自足**：不向外載入任何字體、圖片、樣式或程式，也不含會執行的 script；樣式寫在檔案裡，字體用系統字體，JSON 放在不會執行的資料區塊。DOI 這類要人點了才開的連結可以有。來自論文與 AI 產出的文字一律跳脫後才寫進 HTML。測試檢查匯出檔裡沒有任何會自動載入的外部網址。
+  - **整份匯出在同一個 REPEATABLE READ 的唯讀交易裡讀完**（和 AD-20 相同），數字、來源清單與各種 ID 來自同一個時間點。
   - **合併建議**分三層（名稱相同、相似度、LLM 判斷），第三層拿掉後前兩層必須照常運作。出現次數與候選只算 `counted_paper` 的論文裡的構念。已經有決定的配對不再建議。
 
 ### AD-17 — 部署：服務無狀態，資料庫在外面
@@ -299,7 +314,9 @@ flowchart TD
 - **Binds:** FR-22、FR-23、FR-25、FR-40、FR-42、FR-44、UX 文件 H2、H6
 - **Prevents:** 成員版與示範站的同一個數字算法不同；數字點下去的篇數和數字不一樣；匯入到一半的論文被算進去；某條入庫的路沒設快照，論文永遠不算數
 - **Rule:**
-  - **快照只有一個建立者。** `snapshot` 有遞增的 `number`、`as_of`、狀態；只由 `services/weekly_update.py` 建立與發佈，第一次匯入就是它的第一次執行（快照 1）。抓取與寫入成功時發佈，不等 AI，這時送 `weekly-update` 的心跳。
+  - **快照只有一個建立者。** `snapshot` 有遞增的 `number`、`as_of`、狀態；只由 `services/weekly_update.py` 建立與發佈，第一次匯入就是它的第一次執行（快照 1）。寫入成功時發佈，不等 AI，這時送 `weekly-update` 的心跳。
+  - **抓取和寫入分兩段。** 抓取階段只寫 `raw/`、`raw_fetch` 與暫存表 `ingest_staging`（解析好的結果），不動論文資料，可以中斷後續跑。14 本都抓完後，在一個交易裡把暫存表套用到論文資料、寫 `first_snapshot_id`、發佈快照。中途失敗時，成員看到的資料與截至日期都不變。套用時舊資料不蓋掉新資料（AD-25）。
+  - **唯一的例外是開放成員登入之前的第一次匯入。** 套用時間超過門檻（設定值，預設 10 分鐘）時，第一次匯入可以改成一本期刊一個交易；那時沒有成員、快照 1 還沒發佈，沒有人看得到寫到一半的資料。開放登入之後的每週更新一律是一個交易、最後一次切換，沒有這條退路。
   - **`first_snapshot_id` 只由每週更新寫。** 建立新快照時，把所有 `in_scope` 為真、而 `first_snapshot_id` 是空的或指向沒發佈成功的快照的論文，一律指到新快照。上傳、推薦清單、`rescope`、`reparse` 都不寫這個欄位。
   - 「本週新增」＝`first_snapshot_id` 是目前已發佈的快照。
   - **計數方塊**：後端與示範站只提供計數，不提供比例。形狀是列的清單，每列是（`journal`, `year`, `dim`, `key_a`, `key_b`, `n`）；`dim` 是 `total`、`with_abstract`、`topic`、`topic_pair`、`method`、`pending_classification` 之一；`topic_pair` 的 `key_a` 字母順序在前。
@@ -315,7 +332,7 @@ flowchart TD
 - **Rule:**
   - 產生器是 `services/demo_export.py`，只用 `PublicViewer` 經 repo 讀資料，不寫自己的 SQL。全部讀取（含自我檢查）在同一個 REPEATABLE READ 的唯讀交易裡完成。
   - **白名單**：每一種資料檔對應一個「多餘欄位即報錯」的 Pydantic 模型，全部列在 `demo-openapi.json`。論文層級的內容只有兩層：`DemoPaperBiblio`（全部論文，含論文 ID）與 `DemoPaperFull`（只有 `demo_full_paper` 的論文）。關係用 `DemoRelation`，問答用 `QaAnswer`。摘要來源是 Semantic Scholar 的論文，不輸出完整內容與分類標籤。
-  - **每次匯出寫新目錄**：目錄名是匯出編號（快照編號加當次的序號，例如 `data/12-2/`），寫出後不改。只有 `manifest.json` 會被覆寫，而且最後才寫；它記快照、匯出編號、匯出時間與首頁要用的摘要數字。每個資料檔最外層都有 `snapshot` 與匯出編號；前端的快取鍵用匯出編號。
+  - **每次匯出寫新目錄**：目錄名是匯出編號（快照編號加當次的序號，例如 `data/12-2/`），寫出後不改。舊目錄由匯出程式依 `demo_export` 的紀錄刪除，保留最近幾次（設定值），`manifest.json` 指向的那一次不刪。只有 `manifest.json` 會被覆寫，而且最後才寫；它記快照、匯出編號、匯出時間與首頁要用的摘要數字。每個資料檔最外層都有 `snapshot` 與匯出編號；前端的快取鍵用匯出編號。
   - **列順序是契約**：`papers-index.json`、`galaxy.json`、`titles.json` 的列順序相同；第 i 列的論文詳情在第 ⌊i÷200⌋ 個分片檔。
   - **關係**：`relations.json` 只輸出至少有一篇來源論文在 `demo_full_paper` 裡的關係，並帶全庫的關係總數；來源論文只列 `demo_full_paper` 裡的。
   - **寫 manifest 之前的自我檢查**：每個物件通過白名單模型；不在 `demo_full_paper` 的論文沒有完整內容欄位；找不到金絲雀字串與成員 email；每一格計數與首頁的讀數都能用 `papers-index.json` 重算；`relations.json`、`qa.json`、`home.json` 出現的每個論文 ID 都在 `demo_full_paper`；每條關係「計入研究篇數的可列出來源＋另有 N 篇」等於研究篇數。沒過就不換、不送 `demo-export` 心跳。
@@ -361,9 +378,9 @@ flowchart TD
   - 上傳經 api 串流到 `ObjectStore`，不用預先簽名的網址。大小、`%PDF-` 檔頭、配額在串流時檢查；不接受的檔案不建列，回固定的錯誤代碼。
   - **批次**：`upload_batch` 記擁有者、`declared`（下載聲明）、`share_out_of_scope`（把追蹤範圍外的論文也加入實驗室文獻庫；只有 `declared` 為假時可以為真）、看過的時間。`share_out_of_scope` 是 AD-4「上傳批次勾了分享」唯一的來源，只影響論文的 `lab_visible`。PDF 檔案本身沒有可見範圍的參數，一律只有擁有者。
   - 物件的路徑只由 `domain/storage_keys.py` 決定：有聲明是 `pdf/<擁有者>/<sha256>.pdf`，沒有是 `tmp/<upload_item>.pdf`。
-  - `PdfReader` 在有記憶體與時間上限的子行程裡執行，只回傳 DOI、推測的標題、頁數；PDF 內文不進日誌、不送任何外部服務。子行程的上限算在 worker 的 `mem_limit` 裡。
+  - 讀 PDF 的函式（`adapters/pdf/`，AD-2）在有記憶體與時間上限的子行程裡執行，只回傳 DOI、推測的標題、頁數；PDF 內文不進日誌、不送任何外部服務。子行程的上限算在 worker 的 `mem_limit` 裡。
   - `upload_item` 保存原始檔名與從檔案讀出的 DOI、推測標題、頁數，之後的重查與確認不需要檔案；`pdf_file` 也存原始檔名。檔名不進日誌。
-  - **`tmp/` 的檔案由三處負責刪**：辨認工作讀出需要的資料後立刻刪；每小時的 `purge-tmp`；bucket 的 lifecycle 規則。讀檔失敗（`failed`）的檔案留到 `purge-tmp`，這段時間可以重試。`purge-tmp` 刪掉一個檔案時，經 `upload_item` 的狀態函式把還沒讀完的那一項標成 `expired`；辨認工作開始時發現檔案不在，走同一個轉換，不重試。
+  - **`tmp/` 的檔案由三處負責刪**：辨認工作讀出需要的資料後立刻刪；每 15 分鐘的 `purge-tmp` 刪掉放了滿 60 分鐘的（所以最慢 75 分鐘）；bucket 的 lifecycle 規則。讀檔失敗（`failed`）的檔案留到 `purge-tmp`，檔案還在的時候可以重試。`purge-tmp` 刪掉一個檔案時，經 `upload_item` 的狀態函式把還沒讀完的那一項標成 `expired`；辨認工作開始時發現檔案不在，走同一個轉換，不重試。
   - 系統沒有任何下載付費全文的程式路徑。
 
 ### AD-25 — 原始資料先存、再解析
@@ -373,7 +390,8 @@ flowchart TD
 - **Rule:**
   - `PaperSource` 回傳原始紀錄（來源、外部鍵、原始位元組、抓取時間），不做解析；抓取時不縮減欄位（引用清單 `referenced_works` 至少留在原始資料裡）。
   - 每一筆回應（一篇論文一筆）先以 gzip 存進物件儲存，路徑是 `raw/<來源>/<sha256>.json.gz`，並在 `raw_fetch` 記一筆（來源、外部鍵、sha256、抓取時間）；sha256 沒變就只記抓取時間。
-  - 解析是 `domain/parsers/` 的純函式，輸入只有已存的原始內容；每個來源的解析函式輸出同一個 `ParsedPaper`。匯入流程固定是「抓 → 存原始 → 解析 → upsert」，`radar reparse` 可以不連外部來源重跑後兩步。
+  - 解析是 `domain/parsers/` 的純函式，輸入只有已存的原始內容；每個來源的解析函式輸出同一個 `ParsedPaper`。流程固定是「抓 → 存原始 → 解析 → 寫入」。每週更新與 `radar reparse` 把解析結果先放進暫存表 `ingest_staging`，全部完成後一個交易寫入（AD-19）；單篇查詢（上傳、推薦清單）解析後直接寫入。`radar reparse` 不連外部來源，只重跑後兩步；它和每週更新共用的只有「先放暫存表、最後一個交易套用」，不抓取、不寫 `first_snapshot_id`、不建立也不發佈快照。
+  - **舊的不蓋掉新的。** 論文記每個來源目前這份資料的抓取時間；`ingest_staging` 的每一列也帶抓取時間。寫入函式（AD-6）先鎖住那篇論文再比較：要寫的這份比論文上記的舊就不寫並計數，一樣新或比較新才寫。每週更新、`reparse`、單篇查詢都經過這個函式，所以都受這條規則保護；被引用次數的整批更新照同一個比較。
   - 是否要重新處理一篇論文，看解析後的「摘要、撤稿標記、書目欄位」算出的 `source_hash` 有沒有變；被引用次數等每晚變動的欄位不算在內。
   - 每週更新是依期刊整本重掃，不依賴 OpenAlex 的「只給有更新的」篩選。
   - 外部服務的用量（OpenAlex 的額度、Workers AI 的用量）記在 `api_call`。LLM 的原始回應存在 `llm_call`（問答除外，AD-13）。
@@ -428,15 +446,17 @@ flowchart TD
 - **Prevents:** 匯入、上傳、合併建議、檢索各自決定哪些論文要跑 AI，非研究文章被拿去花預算，或私人論文的構念影響共用的排名
 - **Rule:** 一篇論文要做哪些處理，只由 `domain/processing.py` 的 `plan_for(論文)` 回答；呼叫端不得自己判斷。
 
-  | 論文的種類 | 中文重點 | 分類 | 研究模型 | 向量 | 可以被哪些 scope 檢索 |
-  | --- | --- | --- | --- | --- | --- |
-  | 在 `counted_paper` 裡、有摘要 | 做 | 做 | 做 | 標題＋摘要 | `tracked`、`lab`、`personal`；`demo` 另看 AD-9 |
-  | 在 `counted_paper` 裡、沒有摘要 | 不做 | 做（只根據標題） | 不做 | 只有標題 | 同上 |
-  | 追蹤範圍內、被排除的非研究文章 | 不做 | 不做 | 不做 | 不做 | 都不行 |
-  | 追蹤範圍外（成員匯入、引用擴展）、有摘要 | 做 | 做 | 做 | 標題＋摘要 | `lab`（看得到的人）、`personal` |
-  | 手填書目 | 不做 | 不做 | 不做 | 只有標題 | `personal` |
+  | 論文的種類（由上往下，先符合的算） | 中文重點 | 分類 | 研究模型 | 向量 |
+  | --- | --- | --- | --- | --- |
+  | 被排除的非研究文章 | 不做 | 不做 | 不做 | 不做 |
+  | 手填書目 | 不做 | 不做 | 不做 | 只有標題 |
+  | 其餘的論文，有目前的摘要 | 做 | 做 | 做 | 標題＋摘要 |
+  | 其餘的論文，沒有摘要 | 不做 | 做（只根據標題） | 不做 | 只有標題 |
 
-  不做的工作，AI 區塊的 `state` 是 `not_applicable` 或 `no_input`（AD-7）。構念的出現次數、合併建議、`relation_stats` 只算 `counted_paper` 的論文（AD-16）。
+  - 「其餘的論文」不分追蹤範圍內外，也不看有沒有進已發佈的快照：成員先上傳的本週新論文、成員匯入或引用擴展進來的追蹤範圍外論文，都照後兩列處理。
+  - **做不做處理，和算不算進統計是兩件事。** 統計只看 `counted_paper`（AD-5）：構念的出現次數、合併建議、`relation_stats` 只算 `counted_paper` 的論文（AD-16）。
+  - 能被哪個 scope 檢索照 AD-11 與 AD-4；被排除的非研究文章不進任何檢索。
+  - 不做的工作，AI 區塊的 `state` 是 `not_applicable`（前兩列）或 `no_input`（最後一列，AD-7）。
 
 ## Consistency Conventions
 
@@ -676,7 +696,7 @@ erDiagram
 
 `judgment_event` 的對象用（種類, ID）表示，可以是論文、一筆 AI 產出或一對構念，所以圖上沒有畫它和對象的線。
 
-沒畫在圖上的獨立表：`raw_fetch`（以外部鍵記，先於論文存在）、`login_attempt`、`deleted_record`、`api_call`、`demo_qa`、`demo_export`（每次匯出的編號與狀態）、`burst_run` 與 `burst_result`、`gold_label`、`eval_run`。view：`counted_paper`、`demo_full_paper`、`effective_zh_summary`、`effective_classification`、`effective_research_model`、`relation_stats`。
+沒畫在圖上的獨立表：`raw_fetch`（以外部鍵記，先於論文存在）、`ingest_staging`（每週更新解析好、還沒寫入的結果）、`login_attempt`、`deleted_record`、`api_call`、`demo_qa`、`demo_export`（每次匯出的編號與狀態）、`burst_run` 與 `burst_result`、`gold_label`、`eval_run`。view：`counted_paper`、`demo_full_paper`、`effective_zh_summary`、`effective_classification`、`effective_research_model`、`relation_stats`。
 
 ## Capability → Architecture Map
 
@@ -698,7 +718,7 @@ erDiagram
 | FR-16 人工修正分類 | `services/judgments.py`、`effective_classification` | AD-10、AD-27 |
 | FR-18 構念合併 | `services/merges.py`、`domain/constructs.py`、`merge_suggestion`、`merge_judgment` | AD-16、AD-10、AD-11 |
 | FR-19、FR-20 關係排行表、混合支持 | `repo/relations.py`（`relation_stats`） | AD-16、AD-5 |
-| FR-21 證據簡報 | `services/evidence_brief.py` | AD-16、AD-3 |
+| FR-21 證據簡報與匯出 | `services/evidence_brief.py` | AD-16、AD-3 |
 | FR-22、FR-23、FR-25 趨勢、主題交叉、覆蓋率標示 | `repo/stats.py`（計數方塊）、`web/src/stats/` | AD-5、AD-19 |
 | FR-24 突現偵測（K6 可拿掉） | `domain/burst.py`（純函式）、`burst_run` 與 `burst_result`（記關鍵字來源與參數）、`config/` 的關鍵字來源；不納入當年度 | AD-1、AD-5、AD-18；示範站那一半見 Deferred |
 | FR-26、FR-27 搜尋、找相似論文 | `services/retrieval.py` | AD-11、AD-12、AD-3 |
@@ -761,6 +781,8 @@ erDiagram
 | 首頁在手機上「跑不順」的門檻 | 首頁規格寫明要實測 | 首頁那個 Story，量完寫回首頁規格 |
 | 中文標題字體與子集流程 | `DESIGN.md` 標為待選；AD-22 已限制必須能自己放。要一起定：固定文字的子集在前端建置時產生；發現卡的關係名稱每週會變，字要由匯出時另出一個小字體檔 | 設計稿定案時 |
 | Semantic Scholar 的摘要上線時的幾個定義（示範站的「有摘要」、計數方塊算哪個主題、論文頁的狀態、覆蓋率加來源維度） | Could；要先有書面答覆。答覆前這類內容不放行（AD-9） | 拿到書面答覆時 |
+| 示範站要不要有三項篩選（爆紅關鍵字自己選期刊、論文清單的關鍵字條件、關係依關鍵字篩選） | 都做得到，差別是資料檔要多帶多少、要不要在前端多寫一份演算法；粗估在 ADR-0007 | Kevin 決定；示範站匯出的 Story 之前 |
+| 分類表或研究情境清單改版時，單次每週更新的重跑上限，以及改版前怎麼先知道會重跑幾篇 | 改版等於輸入變了，下次每週更新會自動用 Batch 重跑（AD-8）；每月預算上限已經會擋住超支，問題只在要不要更早停下來。要用實測的呼叫量才定得出合理的數字（ADR-0015「取捨」） | 第一次匯入後，用實測的呼叫量來定；第一次改分類表之前一定要定 |
 | `raw/` 的保留規則與 R2 物件的第二份 | 粗估一年 1–4 GB，沒有實測；R2 免費 10 GB | 第一次匯入後量一次實際大小 |
 | 夜間代理人的隔離規則（FR-47）、授權條款的 ADR | 前者還沒啟用，後者要 Kevin 決定 | 啟用夜間代理人之前；repo 公開之前 |
 | 心跳監看用哪一家服務 | 契約已固定：一個排程一個網址，名稱在設定裡（AD-15） | 部署時，記進 FR-46 的清單 |
