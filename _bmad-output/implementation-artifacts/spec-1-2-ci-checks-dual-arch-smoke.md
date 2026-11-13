@@ -3,14 +3,22 @@ title: 'Story 1.2：CI 固定檢查與雙架構冒煙測試'
 type: 'feature'
 created: '2026-11-14'
 baseline_revision: 'd9a2aa6ecf4ca909433f12ed5e7af51241d5ece4'
-status: 'in-progress'
+status: 'done'
 review_loop_iteration: 0
-followup_review_recommended: false
+followup_review_recommended: true
 context:
   - '{project-root}/_bmad-output/implementation-artifacts/epic-1-context.md'
   - '{project-root}/docs/adr/0003-deployment-topology.md'
 warnings: ['oversized']
-deferred: []
+deferred:
+  - summary: >-
+      worker 的容器層（在 amd64／arm64 起得來、記憶體上限 400 MiB、stop 後退出碼 0 與「正常關機」）CI 沒有驗。
+    evidence: |-
+      smoke.sh 只起 db 與 api（AC 只要求這兩個）；Story 1.1 的 deferred 第 3 項「容器層驗收只有人工驗證」因此只有 api 那一半補上自動化。
+      worker 跑同一個映像，但入口不同；arm64 上 worker 能不能起來目前沒有任何 CI 證據。Story 1.4 接 Procrastinate 時把 worker 加進冒煙最自然。
+    location: >-
+      .github/scripts/smoke.sh
+    severity: medium
 ---
 
 <intent-contract>
@@ -95,6 +103,48 @@ deferred: []
 
 ## Review Triage Log
 
+### 2026-11-14 — Review pass
+- verdicts: 38 findings — high 0, medium 3, low 30, false 5, maybe-false 0（B=Blind Hunter、E=Edge Case Hunter、V=Verification Gap、I=Intent Alignment；同根的列共用路由）
+- findings:
+  - `[low]` `[reject]` B1 `test_database` 的逾時測試在 connect_timeout 沒傳下去時會卡到 job 的 20 分鐘上限，而不是快速失敗 — 仍然會失敗（只是慢）；connect_timeout 退化很少見，改成執行緒＋join 要加結構；`test_shutdown` 那個有 urlopen 逾時會快速失敗。
+  - `[low]` `[patch]` B2 `silent_port` fixture 複製了兩份 — 已修：移到 `tests/integration/conftest.py`。
+  - `[low]` `[patch]` B3 故意連網路的測試目標是真的公開主機 1.1.1.1 — 已修：改成 192.0.2.1（TEST-NET-1），封鎖失效時是逾時／OSError，strict xfail 仍判失敗，不會碰到真實主機。IPv6 的反向測試不加（低、不常見）。
+  - `[low]` `[reject]` B4 沒有 `concurrency` 設定，連推時舊的 run 不會取消 — 不是缺陷而是成本取捨；取消會讓中間 commit 沒有映像；列進給 Kevin 的分鐘數決定。
+  - `[low]` `[patch]` B5 一個架構失敗時另一個仍推 `-arch` 孤兒標籤；GHCR 沒有清理策略 — 已修：ADR 選項 2B 寫明孤兒標籤，「取捨」加 GHCR 儲存量與清理策略留給 Kevin。
+  - `[medium]` `[patch]` B6 前面任一步失敗，gitleaks 與 pip-audit 就不跑 — 已修：這兩步加 `if: ${{ !cancelled() }}`，順序不變、job 仍失敗；ADR 決定第 2 點同步。
+  - `[low]` `[patch]` B7 ADR 說 gitleaks-action 要 license，但個人帳號不用 — 已修：改寫成「組織帳號才要」，真正理由是少一個第三方 action、執行檔可驗 SHA-256。
+  - `[low]` `[patch]` B8 本機跑冒煙會和開著的 research-radar 搶 5432／8000 — 已修：smoke.sh 檔頭註明本機那套要先停（與 E2 同根）。
+  - `[medium]` `[defer]` B9 worker 完全沒有冒煙 — AC 只要求 db 與 api；列 deferred（Story 1.4 接 Procrastinate 時加）。
+  - `[low]` `[reject]` B10 沒有 shellcheck／actionlint — smoke.sh 與 workflow 每次都真的在 CI 執行；加工具會多一個檢查步驟與版本管理，之後需要再加。
+  - `[low]` `[reject]` B11 workflow 架構測試沒涵蓋每條 Always（標籤格式、persist-credentials、fail-fast、--env-file）、checkout 用索引找 — 對設定文字的加固，日常不會碰到；目前設定正確且 CI 實際跑過。
+  - `[low]` `[patch]` B12 gitleaks 放行規則對所有規則生效 — 已修：加 `targetRules = ["generic-api-key"]`，註解寫明放行範圍；本機重跑整段歷史仍 no leaks found。
+  - `[low]` `[patch]` B13 glossary 漏了 matrix、fail-fast、libpq、XFAIL — 已修：各補一行。
+  - `[low]` `[patch]` B14 `image` job 在 pull_request 時也有 `packages: write` — 已修：ADR「取捨」寫明這是接受的取捨（PR 作者只有 Kevin、checkout 不留憑證、token 只在推送步驟引用）。
+  - `[medium]` `[patch]` E1 `/readyz` 只打一次；db 的 healthcheck 用 unix socket，postgres 初始化的暫時伺服器期間就可能通過，api 的 TCP 連線被拒 → 偶發 503 — 已修：/readyz 也輪詢到 200 或逾時。
+  - `[low]` `[patch]` E2 本機埠衝突 — 與 B8 同根，同一個修法。
+  - `[low]` `[patch]` E3 上次被強制中止留下的 radar-smoke 容器／資料卷會被沿用 — 已修：`up` 前先 `down --volumes --remove-orphans`。
+  - `[low]` `[reject]` E4 映像參數剛好叫 radar-smoke-api 時收尾會刪掉它 — 不會有人這樣傳；加檢查是多一個分支。
+  - `[low]` `[reject]` E5 同一個 SHA 同時被推兩次（兩個分支）時標籤會互相覆蓋 — 要「同時」才會發生；兩次建的是同一個 commit，功能相同。
+  - `[low]` `[reject]` E6 fork 或改名後 IMAGE 寫死會推送失敗 — 私人 repo、沒有 fork；運算式沒有轉小寫函式，改法要多一步。
+  - `[low]` `[patch]` E7 `secrets.` 字串檢查抓不到 `secrets['X']`、`toJSON(secrets)` — 已修：改成 `\bsecrets\b` 正規表示式。
+  - `[low]` `[reject]` E8 推送順序測試抓不到 `docker image push`、`--push`、login action — 對設定文字的加固；目前只有 `docker push` 一種寫法。
+  - `[low]` `[reject]` E9 flow mapping 寫法的 `uses` 抓不到 — 沒有人這樣寫 workflow。
+  - `[low]` `[patch]` E10 allow_hosts 只管 `socket.connect`；DNS、`connect_ex`、UDP `sendto` 不受限 — 已修：ADR「取捨」寫明（與 E14 同根）。
+  - `[low]` `[patch]` E11 整合測試用 `localhost` 主機名會被擋 — 已修：LOCAL_HOSTS 加 `localhost`。
+  - `[low]` `[reject]` E12 刪掉的 192.0.2.1 測試原本涵蓋「TCP 握手階段逾時」 — 刻意的：保留就得真的送封包出去；connect_timeout 本身仍由不回應的本機埠驗到。
+  - `[low]` `[reject]` E13 api 的 /readyz 逾時測試同上 — 同 E12。
+  - `[low]` `[patch]` E14 spec／ADR 說「整合測試只放行本機」講得太滿 — 同 E10 的修法。
+  - `[low]` `[patch]` V1 conftest 對「測試不在三個資料夾」的報錯沒有測試 — 已修：`tests/arch/test_structure.py` 加一個測試，檢查每個 `tests/**/test_*.py` 都在三個資料夾之一。
+  - `[low]` `[patch]` V2 沒有測試讀 `.gitleaks.toml`，放行規則被放寬不會被發現 — 已修：`test_ci_workflow.py` 加測試核對唯一一條放行規則的 AND、路徑、regexTarget、regex、targetRules。
+  - `[low]` `[reject]` V3 沒測「推上去的就是冒煙跑過的那個映像」 — 目前 workflow 正確（tag `radar-ci-src` 後推）；屬設定文字的加固，日常不會被改壞。
+  - `[false]` `[reject]` I1 push 對所有分支，不只 main — AC 寫「每個推到 GitHub 的 commit」，主對話要求 push 到 main 要跑，全部分支是兩者的超集；要不要縮小列給 Kevin。
+  - `[false]` `[reject]` I2 冒煙測的是本機映像，不是 GHCR 上的多架構標籤 — 推上去的 `<sha>-<arch>` 就是同一個本機映像（重新標記後 push，digest 相同），manifest 只是把這兩個 digest 合在一起。
+  - `[low]` `[reject]` I3 失敗路徑與 pull_request 路徑沒有實際在 CI 跑過 — 開 PR 由主對話負責，PR 一開就會跑到；回報裡列為未驗證。
+  - `[low]` `[reject]` I4 libpq 與子行程不受 pytest-socket 管 — ADR「取捨」已寫明；CI 沒有任何外部資料庫。
+  - `[false]` `[reject]` I5 unit 的故意連網路測試在建 socket 時就被擋，不是在 connect — unit 規則本來就是「不能建網路 socket」；connect 層級的封鎖由 integration 那個測試驗。
+  - `[false]` `[reject]` I6 冒煙多驗了記憶體上限、退出碼、正常關機 — 不衝突，補的是 Story 1.1 deferred 的容器層驗收。
+  - `[false]` `[reject]` I7 AC 沒要求的附加改動（ruff format、conftest 報錯、本機埠、gitleaks 放行）— 都是讓 AC 成立所需（AC 的 ruff 檢查含排版、三次依標記跑、封鎖網路、gitleaks 掃得過）。
+
 ## Design Notes
 
 - **只在 push 事件推 GHCR**：PR 事件的 `github.sha` 是 GitHub 暫時產生的合併 commit，不是任何人推上來的 commit；以它標記會讓「SHA＝程式版本」對不上。PR 分支的每個 commit 本來就會觸發 push 事件，映像由那一次推。代價：同一個 commit 在開著 PR 時會跑兩次（push＋pull_request），私有 repo 多花分鐘數；列給 Kevin 決定要不要之後把 push 限制在 main。
@@ -115,3 +165,30 @@ deferred: []
 - `uv export --locked --all-groups --no-emit-project --format requirements-txt | pip-audit --disable-pip` -- 無已知漏洞
 - 本機 `docker build -t radar-smoke-src . && .github/scripts/smoke.sh radar-smoke-src arm64` -- 通過，之後 `docker compose -p radar-smoke down -v`
 - `git push -u origin feat/1-2-ci-smoke` 後 `gh run list`／`gh run view` -- checks、image (amd64)、image (arm64)、manifest 全綠；`docker buildx imagetools inspect ghcr.io/kevin930326/research-radar:<sha>` 有兩個平台
+
+## Auto Run Result
+
+Status: done
+
+**做了什麼：** 新增 GitHub Actions 的 CI（`.github/workflows/ci.yml`）。`checks` 在 amd64 依序跑 ruff（風格、排版）、mypy、import-linter、pytest（unit／integration／arch 分三次）、gitleaks（官方執行檔 8.30.1，驗 SHA-256，掃整段歷史）、pip-audit（`uv.lock` 全部套件）；通過後 `image` 在 `ubuntu-24.04` 與 `ubuntu-24.04-arm` 原生執行機各自建映像、用 `.github/scripts/smoke.sh` 以 Compose 起 `db`＋`api` 冒煙（`/healthz`、`/readyz` 200，另驗 api 350 MiB 與優雅關機）；push 事件才推 `<sha>-amd64`、`<sha>-arm64`，`manifest` 合併成 `<sha>` 多架構標籤。pytest 預設 `--disable-socket`，整合測試只放行本機；兩個 strict xfail 的故意連網路測試。不用任何 repo secret。
+
+**檔案：**
+- `.github/workflows/ci.yml` -- 三個 job、最小權限、action 釘 SHA
+- `.github/scripts/smoke.sh` -- 雙架構冒煙（radar-smoke 專案、不讀 `.env`、一定 `down -v`）
+- `.gitleaks.toml` -- 預設規則＋只放行 BMAD 安裝清單的 sha256（限 generic-api-key）
+- `pyproject.toml`、`uv.lock` -- dev 加 pytest-socket 0.8.1、pip-audit 2.10.1；addopts 加 `--disable-socket --allow-unix-socket`
+- `tests/conftest.py`、`tests/integration/conftest.py` -- 整合測試 allow_hosts 本機；不在三個資料夾的測試報錯；`silent_port` fixture
+- `tests/unit/test_network_blocked.py`、`tests/integration/test_network_blocked.py` -- 故意連網路、strict xfail
+- `tests/integration/test_database.py`、`tests/integration/test_shutdown.py` -- 192.0.2.1 改成本機不回應的埠
+- `tests/arch/test_ci_workflow.py`、`tests/arch/test_structure.py` -- workflow 與 gitleaks 設定、測試檔位置的架構測試
+- `docs/adr/0017-ci-pipeline.md`、`docs/adr/README.md`、`docs/glossary.md` -- ADR、索引、19 個新名詞
+
+**審查結果：** 38 筆（medium 3、low 30、false 5）。patch 18 列（實際修改見第二個 commit：冒煙輪詢 /readyz、起服務前清殘留、埠說明；gitleaks／pip-audit 必跑；gitleaks 放行收窄＋測試；故意連網路改連 192.0.2.1；localhost；fixture 共用；secrets 檢查；測試檔位置測試；ADR 五處；glossary 四詞）。patched 的 entry verdict：medium 2（B6、E1）、low 16。defer 1（worker 的容器層冒煙，見 frontmatter）。reject 19，理由見 Review Triage Log。
+
+**建議再審一次（true）：** 兩個 medium 修正（/readyz 輪詢、gitleaks／pip-audit 的 `!cancelled()`）只在成功路徑上跑過；「前面檢查失敗時安全掃描仍會跑」與 pull_request 事件（不推映像、不跑 manifest）都還沒有實際的 CI 執行紀錄，PR 開了之後才看得到。
+
+**驗證：**
+- 本機：ruff check／format、mypy（45 檔）、lint-imports 16 kept；pytest unit 44 passed＋1 xfailed、integration 12 passed＋1 xfailed、arch 64 passed；gitleaks 8.30.1 整段歷史 no leaks found；pip-audit No known vulnerabilities found；本機 arm64 冒煙通過（/healthz、/readyz 200，記憶體上限 367001600 bytes，退出碼 0），之後 radar-smoke 的容器與資料卷為 0。
+- CI（push 事件）：run 43513079757（4e1597d）與 43514645969（cda9788）都是 checks、image (amd64)、image (arm64)、manifest 全部 success；冒煙日誌顯示映像／執行機架構分別是 linux/amd64、linux/arm64，`/healthz → 200`、`/readyz → 200`；manifest 檢查列出 linux/amd64、linux/arm64。私有 repo 的 `ubuntu-24.04-arm` 執行機可用（約 40 秒跑完）。
+
+**剩下的風險：** pull_request 路徑未實跑；同一 commit 在 PR 分支會跑兩次（push＋PR），私有 repo 分鐘數與 GHCR 儲存量（無清理規則）要 Kevin 決定；libpq 與子行程不受 pytest-socket 管；worker 沒有冒煙（deferred）；Story 1.3 要在冒煙裡先跑 `radar migrate`。
