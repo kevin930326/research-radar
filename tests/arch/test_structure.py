@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from radar.config import env_name
-from radar.domain.settings import Settings
+from radar.domain.settings import MigrationSettings, Settings
 from tests.conftest import MARKED_DIRS
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -92,3 +92,15 @@ def test_every_test_file_sits_under_a_marked_dir() -> None:
         if path.relative_to(tests_root).parts[0] not in MARKED_DIRS
     ]
     assert misplaced == []
+
+
+def test_env_example_lists_migration_settings_without_values() -> None:
+    entries = dict(
+        line.split("=", 1)
+        for line in (ROOT / ".env.example").read_text(encoding="utf-8").splitlines()
+        if line and not line.startswith("#")
+    )
+
+    for field in MigrationSettings.model_fields:
+        assert env_name(field) in entries
+    assert entries["RADAR_MIGRATION_DATABASE_URL"] == ""

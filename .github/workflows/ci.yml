@@ -56,6 +56,11 @@ jobs:
         name: pytest（unit）
         run: uv run --no-sync pytest -m unit
 
+      # integration、arch 的測試資料庫與 alembic-check 都連這個 db（compose 的初始化腳本建好兩個角色
+      # 與擴充套件）。專案名稱另取，不和本機的 research-radar 混在一起。
+      - name: 起 compose 的 db（測試資料庫與 alembic check 用）
+        run: docker compose --env-file /dev/null --project-name radar-ci --file compose.yaml up --detach --wait db
+
       - id: pytest-integration
         name: pytest（integration）
         run: uv run --no-sync pytest -m integration
@@ -63,6 +68,16 @@ jobs:
       - id: pytest-arch
         name: pytest（arch）
         run: uv run --no-sync pytest -m arch
+
+      # 先遷移 compose 的 radar 資料庫（擁有者角色），再比對模型與遷移是否一致（AD-18）。
+      - id: alembic-check
+        name: alembic check（模型與遷移一致）
+        env:
+          RADAR_MIGRATION_DATABASE_URL: postgresql://radar_owner@127.0.0.1:5432/radar
+        run: |
+          set -euo pipefail
+          uv run --no-sync radar migrate
+          uv run --no-sync alembic check
 
       # gitleaks 與 pip-audit 在前面的檢查失敗時仍要跑：秘密外洩或有漏洞的套件不能因此沒被回報。
       - id: gitleaks
@@ -122,7 +137,7 @@ jobs:
             --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
             --tag radar-ci-src .
 
-      - name: 冒煙測試（db＋api，/healthz、/readyz）
+      - name: 冒煙測試（db＋api，/healthz、/readyz、radar migrate）
         env:
           ARCH: ${{ matrix.arch }}
         run: .github/scripts/smoke.sh radar-ci-src "${ARCH}"

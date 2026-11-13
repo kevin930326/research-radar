@@ -24,6 +24,8 @@ ENV PATH=/app/.venv/bin:$PATH \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1
 WORKDIR /app
+# radar migrate 與 api 的 /readyz 以工作目錄下的 migrations/ 找遷移檔。
+COPY migrations ./migrations
 USER radar
 EXPOSE 8000
 CMD ["python", "-m", "radar.entrypoints.api"]

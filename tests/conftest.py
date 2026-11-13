@@ -2,11 +2,16 @@
 
 網路：pyproject.toml 的 `--disable-socket` 讓所有測試預設不能建網路連線（pytest-socket）；
 integration 另外加 `allow_hosts`，只放行連到本機（127.0.0.1、::1、localhost）。
+
+資料庫：integration 與 arch 用的測試資料庫 fixture 在這裡（做法見 `tests/database.py`）。
 """
 
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+
+from tests.database import TestDatabase, create_database, drop_database, migrate
 
 TESTS_ROOT = Path(__file__).parent
 MARKED_DIRS = ("unit", "integration", "arch")
@@ -28,3 +33,34 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
         if top == "integration":
             # 只限制 connect：建 socket、bind 本機埠（例如找空埠）仍可以。
             item.add_marker(pytest.mark.allow_hosts(LOCAL_HOSTS))
+
+
+@pytest.fixture
+def fresh_database() -> Iterator[TestDatabase]:
+    """全新的資料庫：有兩個擴充套件、還沒遷移。"""
+    database = create_database(with_extensions=True)
+    try:
+        yield database
+    finally:
+        drop_database(database)
+
+
+@pytest.fixture
+def bare_database() -> Iterator[TestDatabase]:
+    """從 template0 建、沒有任何擴充套件的資料庫。"""
+    database = create_database(with_extensions=False)
+    try:
+        yield database
+    finally:
+        drop_database(database)
+
+
+@pytest.fixture(scope="session")
+def migrated_database() -> Iterator[TestDatabase]:
+    """已遷移到最新版本的資料庫，整個測試階段共用：只能讀，不要在裡面留下東西。"""
+    database = create_database(with_extensions=True)
+    try:
+        migrate(database)
+        yield database
+    finally:
+        drop_database(database)

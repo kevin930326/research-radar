@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Research Radar：追蹤資管頂尖期刊新論文的研究助理平台（後端）"
 requires-python = ">=3.14,<3.15"
 dependencies = [
+    "alembic==1.20.1",
     "fastapi==0.162.5",
     "psycopg[binary]==3.3.9",
     "pydantic==2.14.3",
@@ -49,10 +50,14 @@ select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF", "N", "PT"]
 # 中文字串與註解會用到全形標點，不算「容易看錯的字元」。
 ignore = ["RUF001", "RUF002", "RUF003"]
 
+[tool.ruff.lint.per-file-ignores]
+# 遷移檔名以四位數流水號開頭（0001_說明.py），不是合法的模組名稱，也不需要被 import。
+"migrations/versions/*" = ["N999"]
+
 [tool.mypy]
 python_version = "3.14"
 strict = true
-files = ["radar", "tests"]
+files = ["radar", "tests", "migrations"]
 plugins = ["pydantic.mypy"]
 
 [tool.pytest.ini_options]
@@ -87,6 +92,7 @@ forbidden_modules = [
     "radar.config",
     "radar.ports",
     "sqlalchemy",
+    "alembic",
     "pgvector",
     "psycopg",
     "httpx2",
@@ -219,6 +225,19 @@ ignore_imports = [
     "radar.repo.** -> pgvector",
     "radar.repo -> psycopg",
     "radar.repo.** -> psycopg",
+]
+unmatched_ignore_imports_alerting = "none"
+
+[[tool.importlinter.contracts]]
+id = "pkg-alembic"
+name = "alembic 只在 radar.repo"
+type = "forbidden"
+source_modules = ["radar"]
+forbidden_modules = ["alembic"]
+allow_indirect_imports = true
+ignore_imports = [
+    "radar.repo -> alembic",
+    "radar.repo.** -> alembic",
 ]
 unmatched_ignore_imports_alerting = "none"
 

@@ -4,6 +4,7 @@ from functools import partial
 import pytest
 from fastapi.testclient import TestClient
 
+from radar.domain.schema import SchemaState
 from radar.entrypoints.api.app import REQUEST_ID_HEADER, create_app, resolve_request_id
 from radar.entrypoints.logging_config import configure_logging
 from radar.services.health import check_readiness
@@ -38,7 +39,9 @@ def test_readyz_not_ready_when_database_down() -> None:
     def ping() -> bool:
         raise OSError("connection refused")
 
-    client = TestClient(create_app(readiness_check=partial(check_readiness, ping)))
+    client = TestClient(
+        create_app(readiness_check=partial(check_readiness, ping, lambda: SchemaState.CURRENT))
+    )
     response = client.get("/readyz")
 
     assert response.status_code == 503
