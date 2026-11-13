@@ -9,6 +9,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW_PATH = ROOT / ".github" / "workflows" / "ci.yml"
+GITLEAKS_CONFIG_PATH = ROOT / ".gitleaks.toml"
 PUSH_ONLY = "github.event_name == 'push'"
 # AC 規定的順序；ruff 分成「風格」與「排版」兩步。
 CHECK_ORDER = [
@@ -54,7 +55,8 @@ def test_triggers_on_every_branch_push_and_every_pull_request() -> None:
 
 
 def test_workflow_uses_no_repo_secrets() -> None:
-    assert "secrets." not in _text()
+    # 連 secrets['X']、toJSON(secrets) 這類寫法也擋。
+    assert re.search(r"\bsecrets\b", _text()) is None
 
 
 def test_third_party_actions_are_pinned_to_commit_sha() -> None:
@@ -128,3 +130,24 @@ def test_manifest_only_on_push_and_after_both_images() -> None:
 def test_pytest_blocks_network_by_default() -> None:
     pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     assert "--disable-socket" in pyproject["tool"]["pytest"]["ini_options"]["addopts"]
+
+
+def test_gitleaks_allowlist_only_covers_bmad_manifest_hashes() -> None:
+    config = tomllib.loads(GITLEAKS_CONFIG_PATH.read_text(encoding="utf-8"))
+    assert config["extend"] == {"useDefault": True}
+    assert "allowlist" not in config
+    assert len(config["allowlists"]) == 1
+    allowlist = config["allowlists"][0]
+    assert allowlist["condition"] == "AND"
+    assert allowlist["targetRules"] == ["generic-api-key"]
+    assert allowlist["paths"] == [r"^_bmad/_config/files-manifest\.csv$"]
+    assert allowlist["regexTarget"] == "secret"
+    assert allowlist["regexes"] == [r"^[0-9a-f]{64}$"]
+    assert set(allowlist) == {
+        "description",
+        "targetRules",
+        "condition",
+        "paths",
+        "regexTarget",
+        "regexes",
+    }

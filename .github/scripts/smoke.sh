@@ -6,6 +6,7 @@
 # - 先確認映像架構＝預期架構＝這台機器的架構（雙架構要在原生執行機上跑，不用模擬器）。
 # - 用獨立的 Compose 專案名稱 radar-smoke，不碰本機的 research-radar 專案；
 #   --env-file /dev/null 讓 Compose 不讀 repo 根目錄的 .env。不需要任何 API key。
+# - 會用到本機的 127.0.0.1:5432 與 127.0.0.1:8000；本機若有別的服務（例如 research-radar）占著，要先停掉。
 # - 另外確認 api 的記憶體上限是 350 MiB，以及 stop 後退出碼 0、日誌有「正常關機」。
 # - 不論成功或失敗，結束時一定 down -v；失敗時先印出 db 與 api 的日誌。
 set -euo pipefail
@@ -67,6 +68,8 @@ echo "映像 ${IMAGE}：${IMAGE_PLATFORM}；這台機器：linux/${HOST_ARCH}；
 trap cleanup EXIT
 
 docker tag "${IMAGE}" "${COMPOSE_IMAGE}"
+# 上一次被中斷而留下的 radar-smoke 容器與資料卷先清掉，不沿用。
+compose down --volumes --remove-orphans || true
 compose pull --quiet db
 compose up --detach --no-build --pull never --wait db api
 
@@ -74,12 +77,16 @@ http_status() {
   curl --silent --output /dev/null --write-out '%{http_code}' --max-time 5 "$1" || true
 }
 
-echo "等待 api 起來……"
+# db 的 healthcheck（pg_isready 走 Unix socket）可能在 postgres 映像初始化用的暫時伺服器
+# 還沒開 TCP 時就通過，所以 /readyz 也要等，不能只打一次。
 deadline=$((SECONDS + STARTUP_TIMEOUT_SECONDS))
-until [[ "$(http_status "${API_URL}/healthz")" == 200 ]]; do
-  [[ -n "$(compose ps --status running --quiet api)" ]] || fail "api 容器沒有在跑"
-  ((SECONDS < deadline)) || fail "api 沒有在 ${STARTUP_TIMEOUT_SECONDS} 秒內回應 /healthz"
-  sleep 1
+for path in /healthz /readyz; do
+  echo "等待 ${path} 回 200……"
+  until [[ "$(http_status "${API_URL}${path}")" == 200 ]]; do
+    [[ -n "$(compose ps --status running --quiet api)" ]] || fail "api 容器沒有在跑"
+    ((SECONDS < deadline)) || fail "${path} 沒有在 ${STARTUP_TIMEOUT_SECONDS} 秒內回 200"
+    sleep 1
+  done
 done
 
 for path in /healthz /readyz; do

@@ -431,3 +431,7 @@
 - **pip-audit**：把專案用到的每個 Python 套件和版本，拿去比對公開的漏洞資料庫，找出已知有安全問題的版本。
 - **Compose 專案名稱**：Docker Compose 用來區分「這是哪一套系統」的名字；容器、網路、資料卷都會帶這個前綴，所以冒煙測試用 `radar-smoke`，不會動到本機的 `research-radar`。
 - **多架構標籤合併**：把 amd64 和 arm64 兩個映像合在同一個標籤底下，主機拉映像時自動挑自己 CPU 能用的那一個。
+- **matrix（矩陣）**：GitHub Actions 的寫法，用一份 job 設定、換幾組參數各跑一次；本專案用它在 amd64 與 arm64 兩種執行機上各建一次映像。
+- **fail-fast**：matrix 的開關；打開時其中一組失敗就把其他組一起取消，關掉時每組都跑完，才看得出是不是全部都壞。
+- **libpq**：PostgreSQL 官方的 C 語言連線函式庫；psycopg 透過它連資料庫，所以它的連線不經過 Python 的 socket，pytest-socket 管不到。
+- **XFAIL**：pytest 報告裡「預期失敗、也真的失敗了」的結果，算通過；相反地，預期失敗卻通過叫 XPASS，在 strict 模式下算錯。

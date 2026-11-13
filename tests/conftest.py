@@ -1,7 +1,7 @@
 """依測試所在的資料夾自動加上 pytest 標記：tests/unit → unit，依此類推。
 
 網路：pyproject.toml 的 `--disable-socket` 讓所有測試預設不能建網路連線（pytest-socket）；
-integration 另外加 `allow_hosts`，只放行連到本機（127.0.0.1、::1）。
+integration 另外加 `allow_hosts`，只放行連到本機（127.0.0.1、::1、localhost）。
 """
 
 from pathlib import Path
@@ -10,7 +10,7 @@ import pytest
 
 TESTS_ROOT = Path(__file__).parent
 MARKED_DIRS = ("unit", "integration", "arch")
-LOCAL_HOSTS = ["127.0.0.1", "::1"]
+LOCAL_HOSTS = ["127.0.0.1", "::1", "localhost"]
 
 
 def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:

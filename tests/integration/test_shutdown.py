@@ -10,7 +10,6 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -25,16 +24,6 @@ def _free_port() -> int:
         sock.bind(("127.0.0.1", 0))
         port: int = sock.getsockname()[1]
         return port
-
-
-@pytest.fixture
-def silent_port() -> Iterator[int]:
-    """本機一個只 listen、不回應的埠：連得上，但永遠等不到資料庫的回覆。"""
-    with socket.socket() as server:
-        server.bind(("127.0.0.1", 0))
-        server.listen()
-        port: int = server.getsockname()[1]
-        yield port
 
 
 def _spawn(module: str, env: dict[str, str]) -> subprocess.Popen[str]:
