@@ -1,0 +1,285 @@
+[project]
+name = "radar"
+version = "0.1.0"
+description = "Research Radar：追蹤資管頂尖期刊新論文的研究助理平台（後端）"
+requires-python = ">=3.14,<3.15"
+dependencies = [
+    "fastapi==0.162.5",
+    "psycopg[binary]==3.3.9",
+    "pydantic==2.14.3",
+    "sqlalchemy==2.1.8",
+    "structlog==26.1.0",
+    "typer==0.29.1",
+    "uvicorn==0.54.0",
+]
+
+[project.scripts]
+# radar 是唯一的 CLI 入口（NFR-11）
+radar = "radar.entrypoints.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.9,<1"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "radar"
+module-root = ""
+
+[dependency-groups]
+dev = [
+    "httpx2==2.16.0",
+    "import-linter==2.16",
+    "mypy==2.4.1",
+    "pytest==9.2.0",
+    "pyyaml>=6.0.3",
+    "ruff==0.17.4",
+    "types-pyyaml>=6.0.12.20261113",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py314"
+# 只檢查專案程式；工具與實驗用的腳本不在範圍內。
+extend-exclude = [".agents", ".claude", "_bmad", "_bmad-output", "docs", "spikes"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF", "N", "PT"]
+# 中文字串與註解會用到全形標點，不算「容易看錯的字元」。
+ignore = ["RUF001", "RUF002", "RUF003"]
+
+[tool.mypy]
+python_version = "3.14"
+strict = true
+files = ["radar", "tests"]
+plugins = ["pydantic.mypy"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = ["--strict-markers", "-ra"]
+markers = [
+    "unit: 不連資料庫，外部服務用 Fake",
+    "integration: 真的行程、資料庫或容器",
+    "arch: 架構規則與 schema 體檢",
+]
+
+# ---------------------------------------------------------------------------
+# AD-1 的 import 方向與套件位置（ADR-0001）。圖上沒有的箭頭就是不可以。
+# protected 契約只看直接 import（「只有誰可以 import 它」）；forbidden 契約預設連間接也算。
+# ---------------------------------------------------------------------------
+[tool.importlinter]
+root_packages = ["radar"]
+include_external_packages = true
+
+[[tool.importlinter.contracts]]
+id = "domain-pure"
+name = "domain 只依賴標準函式庫與 Pydantic：不 import 其他層與外部服務套件（含間接）"
+type = "forbidden"
+source_modules = ["radar.domain"]
+forbidden_modules = [
+    "radar.services",
+    "radar.repo",
+    "radar.adapters",
+    "radar.entrypoints",
+    "radar.config",
+    "radar.ports",
+    "sqlalchemy",
+    "pgvector",
+    "psycopg",
+    "httpx2",
+    "anthropic",
+    "boto3",
+    "pypdf",
+    "joserfc",
+    "procrastinate",
+    "fastapi",
+    "starlette",
+    "uvicorn",
+    "typer",
+    "structlog",
+]
+
+[[tool.importlinter.contracts]]
+id = "services-boundary"
+name = "services 不 import adapters、入口與 config（含間接）"
+type = "forbidden"
+source_modules = ["radar.services"]
+forbidden_modules = ["radar.adapters", "radar.entrypoints", "radar.config"]
+
+[[tool.importlinter.contracts]]
+id = "repo-boundary"
+name = "repo 只依賴 domain"
+type = "forbidden"
+source_modules = ["radar.repo"]
+forbidden_modules = [
+    "radar.services",
+    "radar.adapters",
+    "radar.entrypoints",
+    "radar.config",
+    "radar.ports",
+]
+
+[[tool.importlinter.contracts]]
+id = "adapters-boundary"
+name = "adapters 只依賴 domain 與 ports"
+type = "forbidden"
+source_modules = ["radar.adapters"]
+forbidden_modules = ["radar.services", "radar.repo", "radar.entrypoints", "radar.config"]
+
+[[tool.importlinter.contracts]]
+id = "ports-boundary"
+name = "ports 只依賴 domain"
+type = "forbidden"
+source_modules = ["radar.ports"]
+forbidden_modules = [
+    "radar.services",
+    "radar.repo",
+    "radar.adapters",
+    "radar.entrypoints",
+    "radar.config",
+]
+
+[[tool.importlinter.contracts]]
+id = "config-boundary"
+name = "config 只依賴 domain"
+type = "forbidden"
+source_modules = ["radar.config"]
+forbidden_modules = [
+    "radar.services",
+    "radar.repo",
+    "radar.adapters",
+    "radar.entrypoints",
+    "radar.ports",
+]
+
+[[tool.importlinter.contracts]]
+id = "bootstrap-boundary"
+name = "bootstrap 只做組裝：不 import services 與三個入口"
+type = "forbidden"
+source_modules = ["radar.entrypoints.bootstrap"]
+forbidden_modules = [
+    "radar.services",
+    "radar.entrypoints.api",
+    "radar.entrypoints.cli",
+    "radar.entrypoints.worker",
+]
+
+[[tool.importlinter.contracts]]
+id = "entrypoints-independent"
+name = "api、cli、worker 互相不 import"
+type = "independence"
+modules = ["radar.entrypoints.api", "radar.entrypoints.cli", "radar.entrypoints.worker"]
+
+[[tool.importlinter.contracts]]
+id = "entrypoints-no-repo-adapters"
+name = "入口不直接 import repo 與 adapters（經 bootstrap 組裝；worker 可以用 adapters.jobs）"
+type = "forbidden"
+source_modules = ["radar.entrypoints.api", "radar.entrypoints.cli", "radar.entrypoints.worker"]
+forbidden_modules = ["radar.repo", "radar.adapters"]
+# 經 bootstrap 的間接 import 是允許的組裝路徑。
+allow_indirect_imports = true
+ignore_imports = [
+    "radar.entrypoints.worker -> radar.adapters.jobs",
+    "radar.entrypoints.worker.** -> radar.adapters.jobs",
+    "radar.entrypoints.worker -> radar.adapters.jobs.**",
+    "radar.entrypoints.worker.** -> radar.adapters.jobs.**",
+]
+unmatched_ignore_imports_alerting = "none"
+
+[[tool.importlinter.contracts]]
+id = "config-importers"
+name = "radar.config 只被入口與 bootstrap import"
+type = "protected"
+protected_modules = ["radar.config"]
+allowed_importers = ["radar.entrypoints"]
+
+[[tool.importlinter.contracts]]
+id = "repo-importers"
+name = "radar.repo 只被 services 與 bootstrap import"
+type = "protected"
+protected_modules = ["radar.repo"]
+allowed_importers = ["radar.services", "radar.entrypoints.bootstrap"]
+
+# 套件位置：外部套件還沒裝或還沒被用到時不在 import 圖裡，protected 契約會報錯，
+# 所以寫成「整個 radar 都不得直接 import，只有負責的那一層除外」。
+[[tool.importlinter.contracts]]
+id = "pkg-sqlalchemy"
+name = "sqlalchemy、pgvector、psycopg 只在 radar.repo"
+type = "forbidden"
+source_modules = ["radar"]
+forbidden_modules = ["sqlalchemy", "pgvector", "psycopg"]
+allow_indirect_imports = true
+ignore_imports = [
+    "radar.repo -> sqlalchemy",
+    "radar.repo.** -> sqlalchemy",
+    "radar.repo -> pgvector",
+    "radar.repo.** -> pgvector",
+    "radar.repo -> psycopg",
+    "radar.repo.** -> psycopg",
+]
+unmatched_ignore_imports_alerting = "none"
+
+[[tool.importlinter.contracts]]
+id = "pkg-adapters"
+name = "httpx2、anthropic、boto3、pypdf、joserfc 只在 radar.adapters"
+type = "forbidden"
+source_modules = ["radar"]
+forbidden_modules = ["httpx2", "anthropic", "boto3", "pypdf", "joserfc"]
+allow_indirect_imports = true
+ignore_imports = [
+    "radar.adapters -> httpx2",
+    "radar.adapters.** -> httpx2",
+    "radar.adapters -> anthropic",
+    "radar.adapters.** -> anthropic",
+    "radar.adapters -> boto3",
+    "radar.adapters.** -> boto3",
+    "radar.adapters -> pypdf",
+    "radar.adapters.** -> pypdf",
+    "radar.adapters -> joserfc",
+    "radar.adapters.** -> joserfc",
+]
+unmatched_ignore_imports_alerting = "none"
+
+[[tool.importlinter.contracts]]
+id = "pkg-procrastinate"
+name = "procrastinate 只在 radar.adapters.jobs 與 radar.entrypoints.worker"
+type = "forbidden"
+source_modules = ["radar"]
+forbidden_modules = ["procrastinate"]
+allow_indirect_imports = true
+ignore_imports = [
+    "radar.adapters.jobs -> procrastinate",
+    "radar.adapters.jobs.** -> procrastinate",
+    "radar.entrypoints.worker -> procrastinate",
+    "radar.entrypoints.worker.** -> procrastinate",
+]
+unmatched_ignore_imports_alerting = "none"
+
+[[tool.importlinter.contracts]]
+id = "pkg-fastapi"
+name = "fastapi、starlette、uvicorn 只在 radar.entrypoints.api"
+type = "forbidden"
+source_modules = ["radar"]
+forbidden_modules = ["fastapi", "starlette", "uvicorn"]
+allow_indirect_imports = true
+ignore_imports = [
+    "radar.entrypoints.api -> fastapi",
+    "radar.entrypoints.api.** -> fastapi",
+    "radar.entrypoints.api -> starlette",
+    "radar.entrypoints.api.** -> starlette",
+    "radar.entrypoints.api -> uvicorn",
+    "radar.entrypoints.api.** -> uvicorn",
+]
+unmatched_ignore_imports_alerting = "none"
+
+[[tool.importlinter.contracts]]
+id = "pkg-typer"
+name = "typer 只在 radar.entrypoints.cli"
+type = "forbidden"
+source_modules = ["radar"]
+forbidden_modules = ["typer"]
+allow_indirect_imports = true
+ignore_imports = [
+    "radar.entrypoints.cli -> typer",
+    "radar.entrypoints.cli.** -> typer",
+]
+unmatched_ignore_imports_alerting = "none"

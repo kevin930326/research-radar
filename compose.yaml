@@ -1,0 +1,75 @@
+# 本機開發用：`docker compose up -d --build` 起四個服務。
+# 正式／試用主機的 compose（只有 api、worker、cloudflared）在 Story 3.19 放 deploy/。
+# 規則：不用 env_file、不做變數替換；秘密不放這裡（本機資料庫用 trust 驗證、只綁 127.0.0.1）。
+name: research-radar
+
+x-logging: &logging
+  # 每個容器的日誌大小與份數上限（NFR-15、ADR-0003 決定第 10 點）。
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  db:
+    image: pgvector/pgvector:0.8.7-pg18-trixie
+    environment:
+      POSTGRES_USER: radar
+      POSTGRES_DB: radar
+      POSTGRES_HOST_AUTH_METHOD: trust
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - db-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "radar", "-d", "radar"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    logging: *logging
+
+  rustfs:
+    image: rustfs/rustfs:1.0.5
+    environment:
+      # 空字串：RustFS 的日誌改寫到 stdout，才受上面的日誌上限管理。
+      RUSTFS_OBS_LOG_DIRECTORY: ""
+    ports:
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
+    volumes:
+      - rustfs-data:/data
+    logging: *logging
+
+  api:
+    build: .
+    command: ["python", "-m", "radar.entrypoints.api"]
+    environment:
+      DATABASE_URL: postgresql://radar@db:5432/radar
+      RADAR_API_SHUTDOWN_GRACEFUL_TIMEOUT: "10"
+    ports:
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    mem_limit: 350m
+    # 比 RADAR_API_SHUTDOWN_GRACEFUL_TIMEOUT 長，Docker 才不會在請求做完前強制關掉。
+    stop_grace_period: 20s
+    logging: *logging
+
+  worker:
+    build: .
+    command: ["python", "-m", "radar.entrypoints.worker"]
+    environment:
+      DATABASE_URL: postgresql://radar@db:5432/radar
+      RADAR_WORKER_SHUTDOWN_GRACEFUL_TIMEOUT: "30"
+    depends_on:
+      db:
+        condition: service_healthy
+    mem_limit: 400m
+    # 比 RADAR_WORKER_SHUTDOWN_GRACEFUL_TIMEOUT 長（ADR-0004）。
+    stop_grace_period: 45s
+    logging: *logging
+
+volumes:
+  db-data:
+  rustfs-data:
