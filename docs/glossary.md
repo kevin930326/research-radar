@@ -398,3 +398,5 @@
 - **ResourceQuota／LimitRange（K8s）**：替一個 namespace 設的用量上限，像給一個房間裝電錶加總開關，避免它把整台主機的記憶體吃光。
 - **kubeconform**：檢查 Kubernetes 設定檔格式有沒有寫錯的工具，不用真的部署就能先擋下錯字。
 - **映像 digest**：容器映像內容算出來的唯一編號；用它指定版本，就保證部署的是同一個映像，不會因為標籤被改而換掉。
+- **sprint 進度檔（sprint-status.yaml）**：一張列出每個 epic 與 Story 目前狀態（還沒開始、做好準備、進行中、審查中、完成）的清單，像工地的進度看板；之後每做完一個 Story 就更新一格。
+- **開工前檢查（implementation readiness）**：真正寫程式之前，確認需求、設計、架構和 Story 對得起來，開發時不必自己補決定，像開工前核對施工圖。
