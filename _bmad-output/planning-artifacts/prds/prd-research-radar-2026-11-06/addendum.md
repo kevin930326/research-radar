@@ -34,7 +34,7 @@ updated: 2026-11-10
 | ARCH-16 | 正式主機只有 1 GB 時，PostgreSQL（pgvector）放在哪裡：同一台主機、Azure 託管的 PostgreSQL，或其他；影響 NFR-1 的 750 MB 能不能守住 | NFR-1、FR-48 |
 | ARCH-17 | Azure 託管 PostgreSQL 的版本（決定能不能用內建 `uuidv7()`）、pgvector 的 halfvec 支援、預設備份保留期 | NFR-7、FR-5、FR-48 |
 | ARCH-18 | CI 建立多架構映像（arm64 給 Oracle、amd64 給 Windows 桌機與 Azure）的方式 | NFR-18 |
-| ARCH-19 | staging 給同學試用期間產生的資料（人工判斷事件、個人文獻庫）怎麼搬到正式環境：論文資料從 OpenAlex 重新匯入，人工判斷事件用 CLI 匯出／匯入 | 8.4 時程、FR-4 |
+| ARCH-19 | staging 給同學試用期間產生的資料（人工判斷事件、個人文獻庫）怎麼搬到正式環境：整個資料庫備份後在正式環境還原，R2 的試用 bucket 由 Kevin 手動複製；不寫匯出／匯入人工判斷事件的指令（Kevin 2026-11-13 決定，ADR-0003 決定第 8 點；原本寫的是「論文資料從 OpenAlex 重新匯入，人工判斷事件用 CLI 匯出／匯入」）。試用時留下的測試資料怎麼清，上線前再決定 | 8.4 時程、FR-4 |
 
 ### 架構預留 R1–R7 與其他欄位建議（來源：報告第 5(a) 節、第 7 節第 3–9 點）
 

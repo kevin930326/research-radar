@@ -102,9 +102,9 @@ PRD 預定的正式主機是 Azure for Students 的 1 GB 虛擬機，並規定 a
 
 ## 和 PRD 不一致的地方
 
-- PRD §6 與 §8.4 寫「2027-01 下旬在 Oracle 的 **k3s** staging 給同學試用」；但 §4.16 把 Kustomize 設定與 k3s staging 列為上線後的 Should（2027-03 底前）。兩處對不起來。這裡照「Must 不能依賴 Should」處理：一月的試用環境用 Docker Compose。**請 Kevin 確認這個解讀。**
+- PRD §6 與 §8.4 寫「2027-01 下旬在 Oracle 的 **k3s** staging 給同學試用」；但 §4.16 把 Kustomize 設定與 k3s staging 列為上線後的 Should（2027-03 底前）。兩處對不起來。這裡照「Must 不能依賴 Should」處理：一月的試用環境用 Docker Compose。**Kevin 2026-11-13 已確認**：試用環境用 Compose，K8s 的兩個階段單獨成一個 epic、不在可砍的範圍；PRD R9 已同步（§6、§8.2、§8.4、§8.5）。
 - NFR-1 維持原樣（1 GB、750 MB）。如果 2027-12 決定搬到 Oracle，再依 NFR-1 的但書重訂。
-- addendum 的 ARCH-19 寫「論文資料從 OpenAlex 重新匯入，人工判斷事件用 CLI 匯出／匯入」。這裡改成**整個資料庫備份後還原**（決定第 8 點），理由寫在那裡。**請 Kevin 確認。**
+- addendum 的 ARCH-19 寫「論文資料從 OpenAlex 重新匯入，人工判斷事件用 CLI 匯出／匯入」。這裡改成**整個資料庫備份後還原**（決定第 8 點），理由寫在那裡。**Kevin 2026-11-13 已確認**；addendum 的 ARCH-19 已同步。試用時留下的測試資料怎麼清，上線前再決定。
 - PRD 寫 Oracle「穩定數週後」再評估要不要當正式環境；這裡把重新決定的時間定在 2027-12，比「數週」晚，因為 Azure 的免費期到那時才結束，中間沒有非換不可的理由。
 
 ## 名詞
