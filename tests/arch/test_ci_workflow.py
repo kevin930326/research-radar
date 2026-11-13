@@ -22,6 +22,7 @@ CHECK_ORDER = [
     "pytest-unit",
     "pytest-integration",
     "pytest-arch",
+    "alembic-check",
     "gitleaks",
     "pip-audit",
 ]
@@ -241,3 +242,53 @@ def test_gitleaks_allowlist_only_covers_bmad_manifest_hashes() -> None:
         "regexTarget",
         "regexes",
     }
+
+
+# ---------------------------------------------------------------------------
+# Story 1.3：alembic check 與冒煙測試前的遷移
+# ---------------------------------------------------------------------------
+
+SMOKE_PATH = ROOT / ".github" / "scripts" / "smoke.sh"
+
+
+def test_alembic_check_migrates_first_with_owner_role() -> None:
+    step = next(s for s in _steps("checks") if s.get("id") == "alembic-check")
+    run = step["run"]
+
+    assert "set -euo pipefail" in run
+    assert run.index("radar migrate") < run.index("alembic check")
+    assert step["env"]["RADAR_MIGRATION_DATABASE_URL"].startswith("postgresql://radar_owner@")
+
+
+def test_database_starts_before_tests_that_need_it() -> None:
+    steps = _steps("checks")
+    starts = [
+        i
+        for i, step in enumerate(steps)
+        if "docker compose" in step.get("run", "") and "--wait db" in step.get("run", "")
+    ]
+    integration = next(i for i, s in enumerate(steps) if s.get("id") == "pytest-integration")
+
+    assert len(starts) == 1
+    assert starts[0] < integration
+    assert "--env-file /dev/null" in steps[starts[0]]["run"]
+    assert "research-radar" not in steps[starts[0]]["run"]
+
+
+def test_smoke_migrates_before_waiting_for_ready() -> None:
+    text = SMOKE_PATH.read_text(encoding="utf-8")
+    # 遷移前的等待點：/readyz 是 503、日誌有 not_migrated 才往下；回 200 就失敗。
+    start = text.index("wait_until_not_migrated() {")
+    definition = text[start : text.index("\n}\n", start)]
+    assert '"schema_state": "not_migrated"' in definition
+    assert '[[ "${status}" == 503 ]]' in definition
+    assert '[[ "${status}" != 200 ]] || fail' in definition
+    not_ready = re.search(r"^wait_until_not_migrated$", text, re.MULTILINE)
+    assert not_ready is not None
+    migrate = text.index("api radar migrate")
+    ready = text.index("wait_for_status /readyz 200")
+
+    assert not_ready.start() < migrate < ready
+    # 擁有者的連線字串只交給執行 radar migrate 的那個一次性容器。
+    assert "-e RADAR_MIGRATION_DATABASE_URL=" in text
+    assert "MIGRATION_DATABASE_URL=postgresql://radar_owner@db:5432/radar" in text

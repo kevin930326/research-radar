@@ -1,21 +1,30 @@
-"""資料庫連線。連線數預算（api 8、worker 6、CLI 2）留給 Story 1.3。"""
+"""資料庫連線。連線數預算（api 8、worker 6、CLI 2）在 `radar/config.py`，由入口傳進 `pool_size`。"""
 
 import structlog
 from sqlalchemy import Engine, create_engine, make_url, text
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.pool import NullPool
+from sqlalchemy.pool import QueuePool
 
 log = structlog.get_logger(__name__)
 
 
 class Database:
-    """包一個 SQLAlchemy Engine。目前用 NullPool：每次用完就關，不留閒置連線。"""
+    """包一個 SQLAlchemy Engine，連線池最多 `pool_size` 條、不另外多開（`max_overflow=0`）。"""
 
-    def __init__(self, url: str, *, connect_timeout: int) -> None:
-        """`connect_timeout`（秒）是 ping 各段期限的基準，見 `ping()`。"""
+    def __init__(self, url: str, *, connect_timeout: int, pool_size: int = 1) -> None:
+        """`connect_timeout`（秒）是 ping 各段期限的基準，見 `ping()`；
+        也是池子滿了時等空出連線的上限（`pool_timeout`）。
+
+        `pool_size` 預設 1 條；入口一律依 `radar/config.py` 的連線數預算傳入。
+        """
         self._engine: Engine = create_engine(
             url,
-            poolclass=NullPool,
+            poolclass=QueuePool,
+            pool_size=pool_size,
+            max_overflow=0,
+            pool_timeout=connect_timeout,
+            # 借出前先確認連線還活著；資料庫重啟過也不會拿到斷掉的連線。
+            pool_pre_ping=True,
             connect_args=_connect_args(url, connect_timeout),
         )
 
@@ -29,7 +38,7 @@ class Database:
           （`tcp_user_timeout`，只在 Linux 有效，容器是 Linux；macOS 的 libpq 會忽略它）；
           另有 TCP keepalive 備援：閒置 T 秒後每秒探一次、T 次沒回應就斷，約 2T 秒。
         所以整體大約在 2T～3T 秒內結束（預設 T=3 → 約 6～9 秒）。
-        NullPool：離開 `with` 時連線一定關掉，逾時的那條也一樣。
+        斷線的連線會被連線池丟掉、不再借出；查詢被取消的連線退回交易後放回池子。
 
         日誌只記例外的類別名稱：例外訊息可能含主機與帳號，不記。
         """
@@ -40,6 +49,21 @@ class Database:
             log.warning("資料庫連線失敗", error_type=type(exc).__name__)
             return False
         return True
+
+    def schema_revisions(self) -> frozenset[str] | None:
+        """資料庫目前的遷移版本；沒有 `alembic_version`（還沒遷移）時回 None。只讀，不建表。
+
+        Raises:
+            SQLAlchemyError: 連不上或查詢失敗。
+        """
+        with self._engine.connect() as connection:
+            exists = connection.execute(
+                text("SELECT to_regclass('alembic_version') IS NOT NULL")
+            ).scalar_one()
+            if not exists:
+                return None
+            rows = connection.execute(text("SELECT version_num FROM alembic_version"))
+            return frozenset(str(value) for value in rows.scalars())
 
 
 def _connect_args(url: str, connect_timeout: int) -> dict[str, object]:

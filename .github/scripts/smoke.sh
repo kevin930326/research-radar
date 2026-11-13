@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# 冒煙測試：用 compose.yaml 把 db 與 api 跑起來，確認 /healthz、/readyz 都回 200。
+# 冒煙測試：用 compose.yaml 把 db 與 api 跑起來，確認 /healthz 回 200、/readyz 在遷移前回 503，
+# 以擁有者角色執行 radar migrate 之後 /readyz 回 200（Story 1.3、AD-15：服務不自己遷移）。
 #
 # 用法：.github/scripts/smoke.sh <映像> <預期架構 amd64|arm64>
 #
@@ -22,6 +23,8 @@ PROJECT=radar-smoke
 # compose.yaml 的 api 沒寫 image:，Compose 會把它的映像叫做「<專案名稱>-api」。
 COMPOSE_IMAGE="${PROJECT}-api"
 API_URL=http://127.0.0.1:8000
+# 擁有者角色的連線字串只在執行 radar migrate 的那個一次性容器裡出現；api 服務本身拿不到。
+MIGRATION_DATABASE_URL=postgresql://radar_owner@db:5432/radar
 API_MEMORY_LIMIT_BYTES=$((350 * 1024 * 1024))
 STARTUP_TIMEOUT_SECONDS=60
 
@@ -83,17 +86,48 @@ http_status() {
   curl --silent --output /dev/null --write-out '%{http_code}' --max-time 5 "$1" || true
 }
 
-# db 的 healthcheck（pg_isready 走 Unix socket）可能在 postgres 映像初始化用的暫時伺服器
-# 還沒開 TCP 時就通過，所以 /readyz 也要等，不能只打一次。
-deadline=$((SECONDS + STARTUP_TIMEOUT_SECONDS))
-for path in /healthz /readyz; do
-  echo "等待 ${path} 回 200……"
-  until [[ "$(http_status "${API_URL}${path}")" == 200 ]]; do
+# 等到 path 回 expected；api 容器停了或超過時間就失敗。
+wait_for_status() {
+  local path=$1 expected=$2
+  local deadline=$((SECONDS + STARTUP_TIMEOUT_SECONDS))
+  echo "等待 ${path} 回 ${expected}……"
+  until [[ "$(http_status "${API_URL}${path}")" == "${expected}" ]]; do
     [[ -n "$(compose ps --status running --quiet api)" ]] || fail "api 容器沒有在跑"
-    ((SECONDS < deadline)) || fail "${path} 沒有在 ${STARTUP_TIMEOUT_SECONDS} 秒內回 200"
+    ((SECONDS < deadline)) || fail "${path} 沒有在 ${STARTUP_TIMEOUT_SECONDS} 秒內回 ${expected}"
     sleep 1
   done
-done
+}
+
+wait_for_status /healthz 200
+
+# 還沒遷移：/readyz 必須是 503，而且原因是「沒遷移」（不是暫時連不上資料庫）。
+# 第一個 503 可能是暫時連線失敗造成的，所以在期限內重複打，直到日誌出現 not_migrated；
+# 遷移前不可能就緒，回 200 直接失敗。
+wait_until_not_migrated() {
+  local deadline=$((SECONDS + STARTUP_TIMEOUT_SECONDS))
+  local status
+  echo "等待 /readyz 因為還沒遷移而回 503……"
+  while true; do
+    status=$(http_status "${API_URL}/readyz")
+    [[ "${status}" != 200 ]] || fail "遷移前 /readyz 就回 200"
+    if [[ "${status}" == 503 ]] \
+      && [[ "$(compose logs --no-color api)" == *'"schema_state": "not_migrated"'* ]]; then
+      return 0
+    fi
+    [[ -n "$(compose ps --status running --quiet api)" ]] || fail "api 容器沒有在跑"
+    ((SECONDS < deadline)) || fail "/readyz 沒有在 ${STARTUP_TIMEOUT_SECONDS} 秒內因為「還沒遷移」回 503"
+    sleep 1
+  done
+}
+
+wait_until_not_migrated
+
+echo "以擁有者角色執行 radar migrate……"
+compose run --rm --no-deps --pull never \
+  -e RADAR_MIGRATION_DATABASE_URL="${MIGRATION_DATABASE_URL}" \
+  api radar migrate || fail "radar migrate 失敗"
+
+wait_for_status /readyz 200
 
 for path in /healthz /readyz; do
   status=$(http_status "${API_URL}${path}")

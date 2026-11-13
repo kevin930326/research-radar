@@ -1,6 +1,8 @@
 # 本機開發用：`docker compose up -d --build` 起四個服務。
 # 正式／試用主機的 compose（只有 api、worker、cloudflared）在 Story 3.19 放 deploy/。
 # 規則：不用 env_file、不做變數替換；秘密不放這裡（本機資料庫用 trust 驗證、只綁 127.0.0.1）。
+# api、worker 只拿應用程式角色（radar_app）的連線字串；擁有者（radar_owner）的只在執行
+# `radar migrate` 時用 `docker compose run -e RADAR_MIGRATION_DATABASE_URL=... api radar migrate` 傳入。
 name: research-radar
 
 x-logging: &logging
@@ -13,16 +15,19 @@ x-logging: &logging
 services:
   db:
     image: pgvector/pgvector:0.8.7-pg18-trixie
+    # 超級使用者是映像預設的 postgres；api、worker 用 radar_app，遷移用 radar_owner（ADR-0018）。
     environment:
-      POSTGRES_USER: radar
       POSTGRES_DB: radar
       POSTGRES_HOST_AUTH_METHOD: trust
     ports:
       - "127.0.0.1:5432:5432"
     volumes:
       - db-data:/var/lib/postgresql
+      # 資料卷第一次初始化時建兩個角色與擴充套件；之後不會重跑（要重建就 down -v）。
+      - ./deploy/db-init:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      test: ["CMD", "pg_isready", "-U", "radar", "-d", "radar"]
+      # 走 TCP：初始化期間的暫時伺服器只開 Unix socket，這樣初始化腳本跑完才算健康。
+      test: ["CMD", "pg_isready", "--host", "127.0.0.1", "--username", "postgres", "--dbname", "radar"]
       interval: 2s
       timeout: 3s
       retries: 30
@@ -44,7 +49,7 @@ services:
     build: .
     command: ["python", "-m", "radar.entrypoints.api"]
     environment:
-      DATABASE_URL: postgresql://radar@db:5432/radar
+      DATABASE_URL: postgresql://radar_app@db:5432/radar
       RADAR_API_SHUTDOWN_GRACEFUL_TIMEOUT: "10"
     ports:
       - "127.0.0.1:8000:8000"
@@ -60,7 +65,7 @@ services:
     build: .
     command: ["python", "-m", "radar.entrypoints.worker"]
     environment:
-      DATABASE_URL: postgresql://radar@db:5432/radar
+      DATABASE_URL: postgresql://radar_app@db:5432/radar
       RADAR_WORKER_SHUTDOWN_GRACEFUL_TIMEOUT: "30"
     depends_on:
       db:

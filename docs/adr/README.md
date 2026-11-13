@@ -24,6 +24,7 @@
 | [0015](0015-ai-output-tables-and-processing-plan.md) | AI 產出怎麼存、怎麼換版；哪一種論文做哪些處理 | 提議 | AD-7、AD-30 |
 | [0016](0016-keyword-stats-and-burst-detection.md) | 關鍵字統計只有一個來源；爆紅關鍵字當場算，空年從序列拿掉 | 提議（空年的算法、已經結束的爆紅怎麼列、兩個篇數的連結，Kevin 2026-11-13 已確認） | AD-5、AD-31 |
 | [0017](0017-ci-pipeline.md) | CI：固定檢查依序跑、amd64／arm64 原生執行機各自冒煙、冒煙通過且是 push 事件才推 GHCR；測試預設封鎖網路 | 提議 | AD-17、AD-18、AD-29 |
+| [0018](0018-database-migrations-and-roles.md) | 資料庫遷移用 Alembic、所有遷移在一個交易裡；第一個遷移只檢查功能並給應用程式角色預設權限；本機與 CI 也建 `radar_owner`、`radar_app` 兩個角色；`/readyz` 沒遷移或落後回 503、比程式新照常就緒；連線數預算 | 提議 | AD-15、AD-17、AD-18、AD-29 |
 
 「提議」表示還沒經過 Kevin 確認；PR 合併後改成「已接受」。
 

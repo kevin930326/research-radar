@@ -3,6 +3,7 @@
 import re
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import pytest
 import yaml
@@ -124,3 +125,49 @@ def test_image_excludes_env_files() -> None:
     assert ".env" in rules
     assert ".env.*" in rules
     assert not any(rule.startswith("!") and ".env" in rule for rule in rules)
+
+
+# ---------------------------------------------------------------------------
+# 兩個資料庫角色（ADR-0003 決定第 3 點、ADR-0018）
+# ---------------------------------------------------------------------------
+
+DB_INIT_MOUNT = "./deploy/db-init:/docker-entrypoint-initdb.d:ro"
+
+
+@pytest.mark.parametrize("name", ["api", "worker"])
+def test_services_use_app_role(name: str) -> None:
+    url = _services()[name]["environment"]["DATABASE_URL"]
+
+    assert urlsplit(url).username == "radar_app"
+
+
+def test_no_service_carries_owner_connection_string() -> None:
+    for name, service in _services().items():
+        environment = service.get("environment") or {}
+        assert "RADAR_MIGRATION_DATABASE_URL" not in environment, name
+        assert not any("radar_owner" in str(value) for value in environment.values()), name
+
+
+def test_db_runs_init_scripts_read_only() -> None:
+    db = _services()["db"]
+
+    assert DB_INIT_MOUNT in db["volumes"]
+    assert "POSTGRES_USER" not in db["environment"]  # 超級使用者是預設的 postgres，不是 radar_*
+    for script in ("10-roles.sql", "20-extensions.sql"):
+        assert (ROOT / "deploy" / "db-init" / script).is_file()
+
+
+def test_db_healthcheck_uses_tcp() -> None:
+    # 初始化期間的暫時伺服器只開 Unix socket；走 TCP 才會等初始化腳本跑完。
+    test = _services()["db"]["healthcheck"]["test"]
+
+    assert test[:2] == ["CMD", "pg_isready"]
+    assert test[test.index("--host") + 1] == "127.0.0.1"
+
+
+def test_image_includes_migrations() -> None:
+    rules = (ROOT / ".dockerignore").read_text(encoding="utf-8").splitlines()
+    dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+
+    assert "!migrations/" in rules
+    assert "COPY migrations ./migrations" in dockerfile

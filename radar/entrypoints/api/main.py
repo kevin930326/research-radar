@@ -7,9 +7,9 @@ from types import FrameType
 import structlog
 import uvicorn
 
-from radar.config import ConfigError, load_settings
+from radar.config import ConfigError, database_pool_size, load_settings
 from radar.entrypoints.api.app import create_app
-from radar.entrypoints.bootstrap import build_database_ping
+from radar.entrypoints.bootstrap import MigrationsNotFoundError, build_readiness_probes
 from radar.entrypoints.logging_config import configure_logging
 from radar.services.health import check_readiness
 
@@ -24,7 +24,14 @@ def main() -> int:
         log.error("設定錯誤，無法啟動", service="api", problems=exc.problems)
         return 1
 
-    app = create_app(readiness_check=partial(check_readiness, build_database_ping(settings)))
+    try:
+        probes = build_readiness_probes(settings, pool_size=database_pool_size(settings, "api"))
+    except MigrationsNotFoundError:
+        # /readyz 要拿資料庫的版本和程式帶的遷移檔比對；找不到就無法判斷，不啟動。
+        log.error("找不到遷移檔（工作目錄下的 migrations/），無法啟動", service="api")
+        return 1
+
+    app = create_app(readiness_check=partial(check_readiness, probes.ping, probes.schema_state))
 
     server = uvicorn.Server(
         uvicorn.Config(

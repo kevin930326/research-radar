@@ -66,7 +66,10 @@ def create_app(readiness_check: Callable[[], bool]) -> FastAPI:
 
     @app.get("/readyz")
     def readyz() -> JSONResponse:
-        """資料庫連得上回 200，否則 503。同步函式，FastAPI 會放到執行緒池跑。"""
+        """資料庫連得上、遷移版本不落後回 200，否則 503（AD-15）。
+
+        同步函式，FastAPI 會放到執行緒池跑。
+        """
         if readiness_check():
             return JSONResponse({"status": "ready"})
         return JSONResponse({"status": "not_ready"}, status_code=503)
