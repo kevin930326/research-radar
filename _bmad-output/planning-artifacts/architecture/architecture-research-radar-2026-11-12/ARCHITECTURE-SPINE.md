@@ -720,7 +720,7 @@ erDiagram
 | FR-19、FR-20 關係排行表、混合支持 | `repo/relations.py`（`relation_stats`） | AD-16、AD-5 |
 | FR-21 證據簡報與匯出 | `services/evidence_brief.py` | AD-16、AD-3 |
 | FR-22、FR-23、FR-25 趨勢、主題交叉、覆蓋率標示 | `repo/stats.py`（計數方塊）、`web/src/stats/` | AD-5、AD-19 |
-| FR-24 突現偵測（K6 可拿掉） | `domain/burst.py`（純函式）、`burst_run` 與 `burst_result`（記關鍵字來源與參數）、`config/` 的關鍵字來源；不納入當年度 | AD-1、AD-5、AD-18；示範站那一半見 Deferred |
+| FR-24 突現偵測（K6 可拿掉） | `domain/burst.py`（純函式）、`burst_run` 與 `burst_result`（記關鍵字來源與參數）、`config/` 的關鍵字來源；當年度有沒有納入照 PRD FR-22 (c)（滿 6 個月之後納入，R7） | AD-1、AD-5、AD-18；示範站那一半見 Deferred |
 | FR-26、FR-27 搜尋、找相似論文 | `services/retrieval.py` | AD-11、AD-12、AD-3 |
 | FR-28～FR-31 問答 | `services/qa.py`、`domain/citations.py`、api 的 SSE 路由 | AD-13、AD-8、AD-11 |
 | FR-32、FR-33 取得連結、引用匯出 | `services/exports.py`（一種格式一個函式）；示範站在前端 | AD-3、AD-21、Conventions（匯出格式） |
