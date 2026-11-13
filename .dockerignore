@@ -1,0 +1,10 @@
+# 白名單：預設全部排除，只放建映像需要的檔案進 build context。
+*
+!pyproject.toml
+!uv.lock
+!radar/
+**/__pycache__
+**/*.pyc
+# 保險：即使上面的白名單被改寬，.env 也不會進映像。
+.env
+.env.*
