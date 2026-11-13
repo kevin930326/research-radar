@@ -269,7 +269,7 @@
 
    | `status` | `prior_status` | 那一列的字 | 總結算在 |
    |---|---|---|---|
-   | `matched` | `replace_confirm` | 照「對到了」的寫法 | N 篇換了 PDF |
+   | `matched` | `replace_confirm` | 論文標題＋「● 已換成新的 PDF」（UX 上傳狀態表的「換好了」） | N 篇換了 PDF |
    | `declined` | `replace_confirm` | 沒有換，原本的 PDF 還在 | N 篇沒有換 PDF |
    | `expired` | `replace_confirm` | 沒有換，原本的 PDF 還在 | N 篇沒有換 PDF |
    | `declined` | `needs_manual` | 沒有加入 | N 個沒有加入 |
