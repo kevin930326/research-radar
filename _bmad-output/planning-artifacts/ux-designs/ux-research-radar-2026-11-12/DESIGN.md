@@ -5,7 +5,7 @@ status: final
 sources:
   - docs/ux/homepage-visual-spec.md
   - _bmad-output/planning-artifacts/prds/prd-research-radar-2026-11-06/prd.md
-updated: 2026-11-12
+updated: 2026-11-13
 colors:
   background: '#050609'
   background-glow-inner: '#0B0F19'
@@ -421,6 +421,19 @@ v1 的 Must 畫面裡只有示範站首頁是探索類。之後的 2D 鄰居圖�
 - 英文原文摘要用系統無襯線字（`reading-en`），不用 Instrument Serif：那是展示用的字，小字長段不好讀。
 - 手機上 `display-zh` 與 `readout-number` 要縮小，數值在首頁手機版設計時決定；`page-title-zh` 在手機上是 28／1.3，`paper-title` 是 26／1.25。內文字級不縮。
 - 內文最小 13px，只有 DM Mono 的小標籤可以到 11px。
+
+### 匯出檔
+
+證據簡報匯出的 HTML 檔不能向外載入任何東西（ADR-0011），所以不能用上面的網頁字體，改用電腦上本來就有的：
+
+| 用在哪裡 | 字體 |
+|---|---|
+| 中文標題 | Songti TC，沒有時用 Noto Serif TC、PMingLiU、系統襯線字 |
+| 英文論文標題、品牌字 | Iowan Old Style，沒有時用 Palatino、Georgia、系統襯線字 |
+| 內文 | PingFang TC，沒有時用 Microsoft JhengHei、Noto Sans TC、系統無襯線字 |
+| 數字、編號、日期 | 系統等寬字（ui-monospace、SF Mono、Menlo、Consolas） |
+
+字級與間距照閱讀類畫面；最小 12px，只用在編號與期刊年份。螢幕上的顏色和網站的深色相同。列印或存成 PDF 時換成一組淺色：底 `#FFFFFF`、主要文字 `#16171A`、內文 `#2B2C30`、次要文字 `#55575C`、最淡的文字 `#6B6D72`、連結 `#6F5218`（加底線）、髮線是黑色 16% 透明。這組淺色只給匯出檔的列印用，不是全站的淺色主題。
 
 ## Layout & Spacing
 
