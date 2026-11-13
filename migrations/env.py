@@ -17,8 +17,16 @@ target_metadata = Base.metadata
 
 
 def run_with_connection(connection: Connection) -> None:
-    """全部遷移在同一個交易裡：任何一步失敗就整個退回，連 alembic_version 都不留。"""
-    context.configure(connection=connection, target_metadata=target_metadata)
+    """全部遷移在同一個交易裡：任何一步失敗就整個退回，連 alembic_version 都不留。
+
+    `compare_server_default=True`：`alembic check` 也比對欄位預設值（Alembic 預設不比）。
+    """
+    context.configure(
+        connection=connection,
+        target_metadata=target_metadata,
+        compare_type=True,
+        compare_server_default=True,
+    )
     with context.begin_transaction():
         context.run_migrations()
 

@@ -170,6 +170,15 @@ deferred:
   - `[false]` `[reject]` I9 AC 範圍以外的改動 — 超級使用者改名、TCP healthcheck、映像帶 `migrations/` 都是讓 AC（兩個角色、冒煙先遷移、`/readyz`）成立所需；ADR、glossary 是專案規則要求。
   - `[false]` `[reject]` I10 冒煙在遷移前就打了健康檢查，和 AC 字面「之前」相反 — AC 的目的是「冒煙要先遷移才能通過」；必須回 200 的健康檢查都在遷移之後，遷移前多打的 `/healthz`、`/readyz 503` 是加強驗證 AC 第二段（沒遷移時 503），不是取代。
 
+### 2026-11-14 — Codex 審查（PR #40）
+- verdicts: 5 findings — high 0, medium 5, low 0, false 0, maybe-false 0（第 3 條由主對話判定不改）
+- findings:
+  - `[medium]` `[patch]` C1 `tests/database.py` 的 `URL.set(password=None)` 不會清掉密碼（None 代表「不改」），管理者連線字串有密碼時 `owner_url`／`app_url` 會帶著管理者密碼 — 已修：改用 `URL._replace(username=role, password=None)`；新增 `tests/unit/test_test_database_urls.py`，用合成的管理者密碼斷言兩個角色的連線字串不含密碼、管理者的仍保留。
+  - `[medium]` `[patch]` C2 `migrations/env.py` 沒開 `compare_server_default`，`alembic check` 不比對欄位預設值 — 已修：`context.configure` 加 `compare_type=True, compare_server_default=True`；新增 integration 測試，在子行程把一張探測表加進模型後跑真的 `alembic check`：預設值相同（含 `uuidv7()` 主鍵、`now()`）時通過、沒有誤報，只把一般欄位預設值改掉時失敗並出現 `modify_default`。確認過關掉這個設定時該測試會失敗。不需要額外的 render/compare 設定。
+  - `[medium]` `[reject]` C3 交易由 services 控制 — 不改（主對話判定）：遷移的交易是 Alembic 的機制（`upgrade_to_head` 在 repo 層開交易、交給 env.py），services 依 import 規則不能 import SQLAlchemy；業務寫入的交易函式在第一個有業務寫入的 Story 建立。
+  - `[medium]` `[patch]` C4 回滾測試只涵蓋「功能檢查失敗、還沒授權」 — 已修：新增 integration 測試，把正式遷移檔複製到暫存資料夾、接一個測試專用的 0002，先查出授權已生效（`granted=True`）再丟錯；斷言 `alembic_version`、預設權限、public schema 權限都和遷移前一樣。正式遷移檔沒動。
+  - `[medium]` `[patch]` C5 用 `DROP TABLE` 失敗證明不了最小權限 — 已修（原測試保留）：新增測試直接用 `has_table_privilege`／`has_sequence_privilege`／`has_schema_privilege` 與 `information_schema.role_table_grants` 查：`radar_app` 對擁有者之後建的表只有 SELECT、INSERT、UPDATE、DELETE（沒有 TRUNCATE、REFERENCES、TRIGGER），對 `alembic_version` 只有 SELECT，序列只有 USAGE、SELECT，schema 只有 USAGE、沒有 CREATE。
+
 ## Design Notes
 
 - **為什麼遷移只檢查、不建擴充套件**：`vector` 不是 trusted extension，非超級使用者的擁有者建不了；Azure 上也是管理者先把它加進允許清單再建立。把「建」放在建資料庫的步驟（本機／CI 是初始化腳本，Azure 是 Kevin 手動），遷移照 AC 只「檢查」，本機才不會因為擁有者是超級使用者而測不到 Azure 的限制。

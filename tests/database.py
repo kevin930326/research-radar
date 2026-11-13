@@ -38,8 +38,9 @@ def admin_url() -> str:
 def _url_for(database: str, role: str | None = None) -> str:
     url = make_url(admin_url()).set(database=database)
     if role is not None:
-        # 本機與 CI 用 trust 驗證，角色沒有密碼。
-        url = url.set(username=role, password=None)
+        # 本機與 CI 用 trust 驗證，角色沒有密碼。`URL.set(password=None)` 會保留原本的密碼
+        # （None 代表「不改」），所以用 `_replace` 明確清掉，避免帶著管理者的密碼。
+        url = url._replace(username=role, password=None)
     return url.render_as_string(hide_password=False)
 
 

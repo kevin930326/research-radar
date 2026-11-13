@@ -3,15 +3,17 @@
 """
 
 import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 import psycopg
+import pytest
 
 from radar.domain.schema import SchemaState
 from radar.repo.db import Database
-from radar.repo.migrations import MigrationScripts, read_schema_state
+from radar.repo.migrations import MigrationScripts, read_schema_state, upgrade_to_head
 from tests.database import MIGRATIONS_DIR, ROOT, TestDatabase, migrate
 
 BIN = Path(sys.executable).parent
@@ -212,3 +214,113 @@ def test_alembic_check_fails_when_database_differs_from_models(
     )
 
     assert result.returncode != 0, result.stdout + result.stderr
+
+
+# 在子行程裡把一張表加進模型再跑 `alembic check`（走真的 env.py），不污染這個行程的 Base.metadata。
+CHECK_WITH_PROBE_TABLE = """
+from pathlib import Path
+from alembic import command
+from sqlalchemy import Column, DateTime, Table, Text, Uuid, text
+from radar.repo.migrations import MigrationScripts
+from radar.repo.models import Base
+
+Table(
+    "default_probe",
+    Base.metadata,
+    Column("id", Uuid, primary_key=True, server_default=text("uuidv7()")),
+    Column("status", Text, nullable=False, server_default="new"),
+    Column("created_at", DateTime(timezone=True), server_default=text("now()")),
+)
+command.check(MigrationScripts.load(Path("migrations")).alembic_config())
+"""
+
+PROBE_TABLE_SQL = (
+    "CREATE TABLE default_probe ("
+    " id uuid PRIMARY KEY DEFAULT uuidv7(),"
+    " status text NOT NULL DEFAULT 'new',"
+    " created_at timestamptz DEFAULT now())"
+)
+
+
+def test_alembic_check_compares_server_defaults(fresh_database: TestDatabase) -> None:
+    migrate(fresh_database)
+    env = {"RADAR_MIGRATION_DATABASE_URL": fresh_database.owner_url}
+    with fresh_database.connect("radar_owner") as owner:
+        owner.execute(PROBE_TABLE_SQL)
+
+    # 預設值都一樣：uuidv7()、now() 這類函式預設值不能誤報。
+    same = _run("python", "-c", CHECK_WITH_PROBE_TABLE, env=env)
+    assert same.returncode == 0, same.stdout + same.stderr
+
+    with fresh_database.connect("radar_owner") as owner:
+        owner.execute("ALTER TABLE default_probe ALTER COLUMN status SET DEFAULT 'old'")
+
+    # 只有一般欄位的預設值不同：要被抓到。
+    differs = _run("python", "-c", CHECK_WITH_PROBE_TABLE, env=env)
+    assert differs.returncode != 0, differs.stdout + differs.stderr
+    assert "modify_default" in differs.stdout + differs.stderr
+
+
+# 測試專用的第二版：0001 已經授權之後才失敗。先回報當下的授權狀態，證明失敗點真的在授權之後。
+FAILING_0002 = """
+from alembic import op
+from sqlalchemy import text
+
+revision = "0002"
+down_revision = "0001"
+branch_labels = None
+depends_on = None
+
+
+def upgrade() -> None:
+    granted = op.get_bind().execute(
+        text(
+            "SELECT (SELECT count(*) FROM pg_default_acl) > 0"
+            " AND (SELECT nspacl::text FROM pg_namespace WHERE nspname = 'public')"
+            " LIKE '%radar_app=U%'"
+        )
+    ).scalar_one()
+    raise RuntimeError(f"故意失敗 granted={granted}")
+
+
+def downgrade() -> None:
+    pass
+"""
+
+
+def _grant_state(database: TestDatabase) -> tuple[object, ...]:
+    """授權相關的狀態：有沒有 alembic_version、預設權限、public schema 的權限。"""
+    with psycopg.connect(database.admin_url, autocommit=True) as connection:
+        has_version = connection.execute(
+            "SELECT to_regclass('alembic_version') IS NOT NULL"
+        ).fetchone()
+        default_acl = connection.execute(
+            "SELECT defaclobjtype, defaclacl::text FROM pg_default_acl ORDER BY 1"
+        ).fetchall()
+        schema_acl = connection.execute(
+            "SELECT nspacl::text FROM pg_namespace WHERE nspname = 'public'"
+        ).fetchone()
+    return (has_version, default_acl, schema_acl)
+
+
+def test_failure_after_grants_rolls_everything_back(
+    fresh_database: TestDatabase, tmp_path: Path
+) -> None:
+    # 複製正式的遷移檔到暫存資料夾，再接一個故意失敗的 0002；不動正式的 migrations/。
+    scripts_dir = tmp_path / "migrations"
+    shutil.copytree(MIGRATIONS_DIR, scripts_dir, ignore=shutil.ignore_patterns("__pycache__"))
+    (scripts_dir / "versions" / "0002_fail_after_grants.py").write_text(
+        FAILING_0002, encoding="utf-8"
+    )
+    before = _grant_state(fresh_database)
+
+    with pytest.raises(RuntimeError, match="granted=True"):
+        upgrade_to_head(
+            fresh_database.owner_url, MigrationScripts.load(scripts_dir), connect_timeout=5
+        )
+
+    after = _grant_state(fresh_database)
+    assert after == before
+    assert after[0] == (False,)
+    assert after[1] == []
+    assert "radar_app" not in str(after[2])

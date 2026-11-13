@@ -65,3 +65,46 @@ def test_app_role_can_write_tables_owner_creates_later(fresh_database: TestDatab
         # 預設權限不含改表結構。
         with pytest.raises(psycopg.errors.InsufficientPrivilege):
             app.execute("DROP TABLE note")
+
+
+TABLE_PRIVILEGES = ("SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER")
+SEQUENCE_PRIVILEGES = ("USAGE", "SELECT", "UPDATE")
+
+
+def test_app_role_gets_only_allowed_privileges(fresh_database: TestDatabase) -> None:
+    # 直接查權限（不是靠某個指令失敗來推論）：只有規格允許的那幾種。
+    migrate(fresh_database)
+    with fresh_database.connect(OWNER_ROLE) as owner:
+        owner.execute("CREATE TABLE counter (id bigserial PRIMARY KEY, body text)")
+
+    with connect_admin(fresh_database.name) as admin:
+
+        def granted(check: str, target: str, privileges: tuple[str, ...]) -> set[str]:
+            return {
+                privilege
+                for privilege in privileges
+                if admin.execute(
+                    f"SELECT {check}(%s, %s, %s)", (APP_ROLE, target, privilege)
+                ).fetchone()
+                == (True,)
+            }
+
+        assert granted("has_table_privilege", "counter", TABLE_PRIVILEGES) == {
+            "SELECT",
+            "INSERT",
+            "UPDATE",
+            "DELETE",
+        }
+        assert granted("has_table_privilege", "alembic_version", TABLE_PRIVILEGES) == {"SELECT"}
+        assert granted("has_sequence_privilege", "counter_id_seq", SEQUENCE_PRIVILEGES) == {
+            "USAGE",
+            "SELECT",
+        }
+        assert granted("has_schema_privilege", "public", ("USAGE", "CREATE")) == {"USAGE"}
+        # 擁有者沒有另外給：應用程式角色在 information_schema 裡也只有這四種。
+        rows = admin.execute(
+            "SELECT privilege_type FROM information_schema.role_table_grants"
+            " WHERE grantee = %s AND table_name = 'counter'",
+            (APP_ROLE,),
+        ).fetchall()
+        assert {row[0] for row in rows} == {"SELECT", "INSERT", "UPDATE", "DELETE"}
