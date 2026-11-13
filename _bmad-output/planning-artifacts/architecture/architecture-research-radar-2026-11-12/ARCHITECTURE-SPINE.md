@@ -354,12 +354,12 @@ flowchart TD
 - **Prevents:** 成員資料、受授權限制的內容或白名單外的欄位流到公開網站；訪客看到更新到一半或新舊混在一起的資料
 - **Rule:**
   - 產生器是 `services/demo_export.py`，只用 `PublicViewer` 經 repo 讀資料，不寫自己的 SQL。全部讀取（含自我檢查）在同一個 REPEATABLE READ 的唯讀交易裡完成。
-  - **白名單**：每一種資料檔對應一個「多餘欄位即報錯」的 Pydantic 模型，全部列在 `demo-openapi.json`。論文層級的內容只有兩層：`DemoPaperBiblio`（全部論文，含論文 ID）與 `DemoPaperFull`（只有 `demo_full_paper` 的論文）。關係用 `DemoRelation`，問答用 `QaAnswer`。摘要來源是 Semantic Scholar 的論文，不輸出完整內容與分類標籤：這種論文在 `DemoPaperBiblio` 裡的標籤欄位是空的（PRD 標了 `[ASSUMPTION]`，等授權回覆；目前這類內容被 AD-9 擋住，不會出現）。兩層各有哪些欄位照 PRD FR-42（R3），清單在 ADR-0007；**關鍵字的代號與名稱只在第二層**（Kevin 2026-11-13 決定；PRD FR-42 還沒補這一句）：關係的對照檔 `relation-keywords.json` 只放 `demo_full_paper` 的來源論文的關鍵字，自我檢查會重算一次來比。全部論文那一層沒有關鍵字，所以示範站的爆紅關鍵字要用到的資料檔現在出不去（Deferred）；`DemoPaperBiblio` 含作者、卷期頁碼、開放取用版本的連結、分類標籤與它的 AI 標章資料（就是共用的 `provenance`，AD-21；索引檔為了省空間只存對照表的編號，展開後是同一個形狀）、有沒有摘要、被引用次數。
+  - **白名單**：每一種資料檔對應一個「多餘欄位即報錯」的 Pydantic 模型，全部列在 `demo-openapi.json`。論文層級的內容只有兩層：`DemoPaperBiblio`（全部論文，含論文 ID）與 `DemoPaperFull`（只有 `demo_full_paper` 的論文）。關係用 `DemoRelation`，問答用 `QaAnswer`。摘要來源是 Semantic Scholar 的論文，不輸出完整內容與分類標籤：這種論文在 `DemoPaperBiblio` 裡的標籤欄位是空的（PRD 標了 `[ASSUMPTION]`，等授權回覆；目前這類內容被 AD-9 擋住，不會出現）。**示範站不放完整內容的出版社**（設定清單，先放 IEEE，用 OpenAlex 的出版社欄位判斷；Kevin 2026-11-14 決定）的論文不算示範站可用，不在 `demo_full_paper` 裡，只有 `DemoPaperBiblio`（ADR-0007）。兩層各有哪些欄位照 PRD FR-42（R3），清單在 ADR-0007；**關鍵字的代號與名稱只在第二層**（Kevin 2026-11-13 決定；PRD FR-42 還沒補這一句）：關係的對照檔 `relation-keywords.json` 只放 `demo_full_paper` 的來源論文的關鍵字，自我檢查會重算一次來比。全部論文那一層沒有關鍵字，所以示範站的爆紅關鍵字要用到的資料檔現在出不去（Deferred）；`DemoPaperBiblio` 含作者、卷期頁碼、開放取用版本的連結、分類標籤與它的 AI 標章資料（就是共用的 `provenance`，AD-21；索引檔為了省空間只存對照表的編號，展開後是同一個形狀）、有沒有摘要、被引用次數。
   - **論文清單的篩選只在瀏覽器做，目前只用兩個檔**：期刊、年份、主題、方法、有沒有摘要、有沒有完整內容、本週新增用 `papers-index.json`；標題裡的字用 `titles.json`。條件怎麼合照 AD-19，和成員版跑同一批測試資料。標題的比對規則寫在資料來源層的一個函式：先把全形與半形統一、不分大小寫、字出現在標題的任何位置就算；成員版之後如果也加這個條件，兩邊通過同一批資料檔。之後要加關鍵字條件時會多一份對照檔（Deferred）。
   - **每次匯出寫新目錄**：目錄名是匯出編號（快照編號加當次的序號，例如 `data/12-2/`），寫出後不改。舊目錄由匯出程式依 `demo_export` 的紀錄刪除，保留最近幾次（設定值），`manifest.json` 指向的那一次不刪。只有 `manifest.json` 會被覆寫，而且最後才寫；它記快照、匯出編號、匯出時間與首頁要用的摘要數字。每個資料檔最外層都有 `snapshot` 與匯出編號；前端的快取鍵用匯出編號。
   - **列順序是契約**：`papers-index.json`、`galaxy.json`、`titles.json` 的列順序相同；第 i 列的論文詳情在第 ⌊i÷200⌋ 個分片檔。
   - **關係**：`relations.json` 只輸出至少有一篇來源論文在 `demo_full_paper` 裡的關係，並帶全庫的關係總數；來源論文只列 `demo_full_paper` 裡的。
-  - **寫 manifest 之前的自我檢查**：每個物件通過白名單模型；不在 `demo_full_paper` 的論文沒有完整內容欄位；找不到金絲雀字串與成員 email；每一格計數與首頁的讀數都能用 `papers-index.json` 重算；`relations.json`、`qa.json`、`home.json` 出現的每個論文 ID 都在 `demo_full_paper`；每條關係「計入研究篇數的可列出來源＋另有 N 篇」等於研究篇數。沒過就不換、不送 `demo-export` 心跳。
+  - **寫 manifest 之前的自我檢查**：每個物件通過白名單模型；不在 `demo_full_paper` 的論文沒有完整內容欄位；找不到金絲雀字串與成員 email；每一格計數與首頁的讀數都能用 `papers-index.json` 重算；`relations.json`、`qa.json`、`home.json` 出現的每個論文 ID 都在 `demo_full_paper`；每條關係「計入研究篇數的可列出來源＋另有 N 篇」等於研究篇數；清單裡的出版社的論文沒有完整內容欄位，也不出現在 `relations.json`、`qa.json`、`home.json`（直接用出版社欄位查）。沒過就不換、不送 `demo-export` 心跳。
   - 頁面與資料同一個網域。`RADAR_DEMO_PUBLISH` 預設關；關的時候寫到 `preview/`，結構和正式的完全相同（含自己的 `manifest.json`）。
   - 展示問答由 `radar build-demo-qa` 走 AD-13 的管線（`PublicViewer`、scope `demo`）產生後存檔，匯出時只帶出。
 
@@ -553,14 +553,14 @@ flowchart TD
 | 一張表一個寫入者 | 每張表只有一個 `repo` 模組可以寫；其他模組呼叫它的函式（架構測試，AD-27） |
 | 主鍵 | `uuid`，預設值 `uuidv7()`。例外：`snapshot.number`（給人看的遞增整數）、複合主鍵的表（`embedding`、`qa_usage`）、Procrastinate 自己的表；例外清單寫在 schema 體檢測試裡。`upload_item` 的 ID 由 api 在開始收檔時產生（一樣是 UUIDv7），不靠預設值（AD-24） |
 | 時間 | 資料庫 `timestamptz`（UTC）；API 用 ISO 8601、結尾 `Z`；只有前端轉成台北時間；「今天」、資料截止日、`keyword_as_of` 這類日期界線用設定的時區（`Asia/Taipei`）。例外：證據簡報匯出檔的檔名與檔案裡的產生時間由後端印成台北時間（AD-16） |
-| API | 路徑 `/api/v1/<複數名詞>`，小寫加連字號；JSON 欄位 `snake_case`。列表的回應是 `items`、`next_cursor`，需要總筆數時加 `total`，內容和論文統計有關時加 `snapshot`。一般列表用不透明的 keyset cursor；檢索結果用位移（AD-11）。每頁筆數來自設定 |
+| API | 路徑 `/api/v1/<複數名詞>`，小寫加連字號；JSON 欄位 `snake_case`。列表的回應是 `items`、`next_cursor`，需要總筆數時加 `total`，內容和論文統計有關時加 `snapshot`。一般列表用不透明的 keyset cursor；檢索結果用位移（AD-11）。每頁筆數來自設定。分批載入、畫面寫「已顯示 n／N」的清單（我的文獻庫、我的問答紀錄）每一頁都給 `total`；問答紀錄的「全部刪除」在後端刪這個人的全部紀錄，不是只刪畫面上已經載入的（UX 決定第 78、79 項） |
 | 錯誤 | RFC 9457。錯誤與失敗原因的代碼集中定義在 `radar/domain/errors.py`（小寫英文加底線，全域唯一）；`entrypoints/api/problems.py` 只把它對應成 HTTP 狀態。狀態表的失敗原因、SSE 的 `error` 事件用同一批代碼。後端不回給人看的句子，前端的 i18n 鍵固定是 `errors.<code>`；證據簡報匯出檔裡的固定文字也是從 i18n 取的，不是後端自己寫的（AD-16）。例外：「開啟自己的 PDF」打不開時是轉址，不回錯誤的 JSON（AD-24） |
 | 交易 | 交易只由入口直接呼叫的那個 services 函式開（經 `repo` 提供的交易函式）；它呼叫的其他 services 函式用同一個交易，不 commit；`repo` 的函式不 commit；入口不開交易。例外：`derivation_run`、`llm_call`、`api_call` 用自己的短交易立刻 commit（AD-8） |
 | 外部呼叫 | 不在開著的交易裡呼叫外部服務：先讀出需要的資料並結束交易，呼叫，再開交易寫結果。沒有例外（AD-24 搬 PDF 與刪 PDF 都先完成交易才呼叫物件儲存） |
 | 重試、逾時、速率 | 連線層的重試只在 adapter 做（stamina），次數、退避、逾時放設定，收到 429 時照對方給的等待時間。每個外部來源在自己的 adapter 裡節流，速率放設定。工作層的重試只處理整個工作失敗（AD-14）。其他層不重試 |
 | 寫入 | 「有就更新、沒有才新增」；事件表與 AI 內容只新增 |
 | 背景進度 | 瀏覽器一律用輪詢，間隔放設定；不用 SSE 或 WebSocket 推進度。`GET /api/v1/me/status` 回：處理中的上傳數、做完還沒看過的上傳數、等確認的篇數（含 `replace_confirm`，不含 `declined`；前端顯示時再扣掉還沒送出的「不加入」，AD-24）、今天剩餘題數、問答是否熔斷 |
-| CLI | 對資源操作用 `radar <名詞> <動詞>`（`radar members allow`）；流程用 `radar <動詞>-<名詞>`（`radar export-demo`）；排程用 `radar enqueue <工作>` |
+| CLI | 對資源操作用 `radar <名詞> <動詞>`（`radar members allow`）；流程用 `radar <動詞>-<名詞>`（`radar export-demo`）；排程用 `radar enqueue <工作>`。管理者用證據簡報匯出檔上「核對用的編號」查當時資料，也是一個只有管理者能用的 `radar` 指令，寫進操作手冊；指令名稱由 Epic 10 匯出證據簡報的 Story 定（UX 決定第 81 項） |
 | 背景工作命名 | `動詞_名詞`，和它呼叫的 services 函式同名 |
 | 日誌 | structlog，JSON，輸出到 stdout；固定欄位 `request_id`、`member_id`、`job_id`；不記 email、檔名、問答的問題與答案、PDF 內文、prompt 全文、任何秘密；大小上限由 Compose 設定（AD-17） |
 | 前端命名 | 元件檔 `PascalCase.tsx`，其餘 `kebab-case.ts`；i18n 的鍵是 `頁面.區塊.項目`，錯誤是 `errors.<code>` |
@@ -569,7 +569,7 @@ flowchart TD
 | 測試 | pytest 標記三種：`unit`（不連資料庫，外部服務用 Fake）、`integration`（真的 PostgreSQL 容器；boto3 的 adapter 對 moto 測）、`arch`（架構與 schema 體檢）。外部 API 用錄製的回應；錄製設定只有一份，濾掉認證標頭與網址裡的 key 與 email，`arch` 測試掃 `tests/cassettes/`，出現 email 或任何秘密的值就失敗。`tests/fixtures/` 只放自己產生或開放授權的檔案 |
 | 無障礙測試 | axe 用 WCAG 2.1 的 A 與 AA 規則，兩種建置的每個路由各掃一次；Playwright 跑三種瀏覽器引擎，寬度取手機、900 上下、桌機 |
 | 評估 | 評估不是 pytest：是 `radar eval <題組>`，用真模型，不在 CI 跑。金標準標註存在資料庫（用 CLI 從試算表匯入），不進 repo。調整組與測試組用 `domain/eval_split.py` 依正規化後 DOI 的雜湊切分；prompt 的範例不得取自測試組 |
-| 匯出格式 | 引用匯出（APA、RIS、BibTeX）成員版在後端、示範站在前端各有一份實作，兩邊都要通過 `tests/golden/exports/` 的同一批資料檔 |
+| 匯出格式 | 引用匯出（APA、RIS、BibTeX）只在前端（`web/`）實作一份，成員版與示範站共用，用 `tests/golden/exports/` 的資料檔測（Kevin 2026-11-14 決定；Must 裡沒有需要後端產生引用的地方）。之後 S02 要在後端批次匯出時再加後端那一份，並通過同一批資料檔 |
 
 ## Stack
 
@@ -809,7 +809,7 @@ erDiagram
 | FR-24 突現偵測、查關鍵字、看出處（K6 可拿掉） | `services/keyword_trends.py`、`repo/keyword_stats.py`、`domain/burst.py`、`domain/trend_years.py`、`burst_run` 與 `burst_result`（留底）、`config/keyword_sources.yaml` | AD-31（第二部分）、AD-19、AD-5、AD-25；成員版的規則都定了（ADR-0016）；示範站那一半見 Deferred |
 | FR-26、FR-27 搜尋、找相似論文 | `services/retrieval.py` | AD-11、AD-12、AD-3 |
 | FR-28～FR-31 問答 | `services/qa.py`、`domain/citations.py`、api 的 SSE 路由 | AD-13、AD-8、AD-11 |
-| FR-32、FR-33 取得連結、引用匯出 | `services/exports.py`（一種格式一個函式）；示範站在前端 | AD-3、AD-21、Conventions（匯出格式） |
+| FR-32、FR-33 取得連結、引用匯出 | 引用匯出只在 `web/` 實作一份（一種格式一個函式），成員版與示範站共用；`services/exports.py` 等 S02 要在後端批次匯出時才加 | AD-3、AD-21、Conventions（匯出格式） |
 | FR-34、FR-36 登入、允許名單與設定 | `services/auth.py`、`adapters/google_oidc/`、`radar members …`、`config/` | AD-23、AD-18 |
 | FR-35、FR-50 可見範圍、個人文獻庫 | `repo/visibility.py`、`services/library.py` | AD-3、AD-4、AD-26、AD-27 |
 | FR-37～FR-40 AI 標章、只能複製引用、警語、截至日期 | `web/src/components/` 的 `AiBadge`、`AiText`、`Caveat`、`DataDateBar` | AD-7、AD-19、AD-22 |
