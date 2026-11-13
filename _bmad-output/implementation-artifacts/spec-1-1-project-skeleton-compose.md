@@ -184,6 +184,12 @@ deferred:
   - `[medium]` `[patch]` C5 只測了閒置時的 SIGTERM，沒測進行中的請求會做完（AD-17） — 已修：整合測試在 tmp_path 寫小腳本，替換 `create_app` 掛一個測試用慢路由，其餘照正式 `main()` 跑；慢請求進行中送 SIGTERM，請求拿到 200、退出碼 0、有「正常關機」。正式程式沒有加端點或開關。逾時中止的情況沒做（frontmatter 的 deferred 第 2 項仍適用於「超過 timeout_graceful_shutdown 才中斷」）。
   - `[low]` `[patch]` C6 日誌固定欄位只有 `request_id` — 已修：`request_id`、`member_id`、`job_id` 沒有值時補 null；structlog 與標準 logging 兩種輸出的測試都檢查三個欄位。
 
+### 2026-11-14 — Codex 複查（dc15d89）
+- verdicts: 2 findings — high 0, medium 2, low 0, false 0, maybe-false 0（C1、C3、C4、C6 複查確認已修好）
+- findings:
+  - `[medium]` `[patch]` D1 `connect_args` 的 `options` 會蓋掉 `DATABASE_URL` 原本的 `options` — 已修：`radar/repo/db.py` 的 `_connect_args` 先讀網址的 `options`，再接上 `-c statement_timeout=…`；`tests/unit/test_bootstrap.py::test_existing_url_options_are_kept` 核對驅動收到 `-c role=radar_app -c statement_timeout=7000`。對本機 PostgreSQL 實測網址帶 `search_path`，兩個設定都生效。
+  - `[medium]` `[patch]` D2 statement_timeout 是資料庫端期限，網路斷掉或伺服器不回應時用戶端仍可能一直等 — 已修：連線參數加 `tcp_user_timeout=T×1000`（只在 Linux 有效）與 keepalives（idle T 秒、每秒一次、T 次）；`ping()` docstring 寫明各段期限與整體約 2T～3T 秒；`test_timeouts_reach_driver_connect_params` 核對參數傳到驅動。實測 psycopg 的連線資訊含這些參數。
+
 ## Auto Run Result
 
 Status: done
@@ -212,5 +218,7 @@ Status: done
 - `git ls-files .env` 為空。
 
 **Codex 審查後（第二個 commit）：** pytest 106 passed（unit 43、integration 12、arch 51），ruff、mypy（41 檔）、lint-imports 16 kept 全過。
+
+**Codex 複查後（第三個 commit）：** pytest 107 passed（unit 44、integration 12、arch 51），ruff、mypy、lint-imports 16 kept 全過。
 
 **剩下的風險：** worker 的 graceful timeout 到 1.4 才真的生效；RustFS 用內建預設帳密（只綁 127.0.0.1）；本機佔用 5432／8000／9000／9001；api、worker 各建一份相同映像；整合測試會對 192.0.2.1（文件保留位址）送連線，1.2 加 pytest-socket 時要處理。
