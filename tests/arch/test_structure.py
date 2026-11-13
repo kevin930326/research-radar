@@ -6,6 +6,7 @@ import pytest
 
 from radar.config import env_name
 from radar.domain.settings import Settings
+from tests.conftest import MARKED_DIRS
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -80,3 +81,14 @@ def test_env_example_lists_every_setting_without_values() -> None:
     for field in Settings.model_fields:
         assert env_name(field) in entries
     assert all(value == "" for value in entries.values())
+
+
+def test_every_test_file_sits_under_a_marked_dir() -> None:
+    # CI 依標記分三次跑；不在這三個資料夾的測試沒有標記，會被默默略過（tests/conftest.py 也會擋）。
+    tests_root = ROOT / "tests"
+    misplaced = [
+        str(path.relative_to(ROOT))
+        for path in tests_root.rglob("test_*.py")
+        if path.relative_to(tests_root).parts[0] not in MARKED_DIRS
+    ]
+    assert misplaced == []

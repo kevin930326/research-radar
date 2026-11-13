@@ -1,0 +1,173 @@
+# CI（ADR-0017）：固定檢查 → 兩種架構各自建映像並冒煙 → 合併成多架構標籤推到 GHCR。
+# - 不用任何 repo secret；推 GHCR 用內建的 github.token。
+# - 第三方 action 一律釘 40 碼 commit SHA，註解寫版本。
+# - 只有 push 事件推映像：pull_request 的 github.sha 是 GitHub 暫時產生的合併 commit。
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  IMAGE: ghcr.io/kevin930326/research-radar
+
+jobs:
+  checks:
+    name: checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: 取出程式碼（含完整歷史，給 gitleaks 掃）
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: 安裝 uv
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: "0.13.7"
+          python-version: "3.14"
+
+      - name: 安裝相依套件
+        run: uv sync --locked
+
+      - id: ruff
+        name: ruff（風格）
+        run: uv run --no-sync ruff check .
+
+      - id: ruff-format
+        name: ruff（排版）
+        run: uv run --no-sync ruff format --check .
+
+      - id: mypy
+        name: mypy
+        run: uv run --no-sync mypy
+
+      - id: import-linter
+        name: import-linter
+        run: uv run --no-sync lint-imports
+
+      - id: pytest-unit
+        name: pytest（unit）
+        run: uv run --no-sync pytest -m unit
+
+      - id: pytest-integration
+        name: pytest（integration）
+        run: uv run --no-sync pytest -m integration
+
+      - id: pytest-arch
+        name: pytest（arch）
+        run: uv run --no-sync pytest -m arch
+
+      # gitleaks 與 pip-audit 在前面的檢查失敗時仍要跑：秘密外洩或有漏洞的套件不能因此沒被回報。
+      - id: gitleaks
+        name: gitleaks（整段 git 歷史）
+        if: ${{ !cancelled() }}
+        env:
+          GITLEAKS_VERSION: "8.30.1"
+          GITLEAKS_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+        run: |
+          set -euo pipefail
+          archive="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl --fail --silent --show-error --location --retry 3 \
+            --output "${RUNNER_TEMP}/${archive}" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${archive}"
+          echo "${GITLEAKS_SHA256}  ${RUNNER_TEMP}/${archive}" | sha256sum --check --strict
+          mkdir -p "${RUNNER_TEMP}/gitleaks"
+          tar -xzf "${RUNNER_TEMP}/${archive}" -C "${RUNNER_TEMP}/gitleaks" gitleaks
+          "${RUNNER_TEMP}/gitleaks/gitleaks" git --config .gitleaks.toml --redact --no-banner .
+
+      - id: pip-audit
+        name: pip-audit（uv.lock 的全部套件，含 dev）
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          uv export --locked --all-groups --no-emit-project --format requirements-txt \
+            > "${RUNNER_TEMP}/requirements.txt"
+          uv run --no-sync pip-audit --disable-pip --strict --progress-spinner off \
+            --requirement "${RUNNER_TEMP}/requirements.txt"
+
+  image:
+    name: image (${{ matrix.arch }})
+    needs: checks
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      # 一個架構失敗時，另一個仍跑完，才知道是不是兩邊都壞。
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - name: 取出程式碼
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: 建映像（原生執行機，不用模擬器）
+        run: |
+          docker build \
+            --label "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
+            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+            --tag radar-ci-src .
+
+      - name: 冒煙測試（db＋api，/healthz、/readyz）
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: .github/scripts/smoke.sh radar-ci-src "${ARCH}"
+
+      - name: 登入 GHCR
+        if: github.event_name == 'push'
+        env:
+          REGISTRY_TOKEN: ${{ github.token }}
+        run: echo "${REGISTRY_TOKEN}" | docker login ghcr.io --username "${GITHUB_ACTOR}" --password-stdin
+
+      - name: 推映像（冒煙通過的同一個映像）
+        if: github.event_name == 'push'
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          docker tag radar-ci-src "${IMAGE}:${GITHUB_SHA}-${ARCH}"
+          docker push "${IMAGE}:${GITHUB_SHA}-${ARCH}"
+
+  manifest:
+    name: manifest
+    needs: image
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: 登入 GHCR
+        env:
+          REGISTRY_TOKEN: ${{ github.token }}
+        run: echo "${REGISTRY_TOKEN}" | docker login ghcr.io --username "${GITHUB_ACTOR}" --password-stdin
+
+      - name: 合併成多架構標籤
+        run: |
+          docker buildx imagetools create --tag "${IMAGE}:${GITHUB_SHA}" \
+            "${IMAGE}:${GITHUB_SHA}-amd64" "${IMAGE}:${GITHUB_SHA}-arm64"
+
+      - name: 確認兩個平台都在
+        run: |
+          set -euo pipefail
+          platforms=$(docker buildx imagetools inspect --raw "${IMAGE}:${GITHUB_SHA}" \
+            | jq -r '.manifests[].platform | "\(.os)/\(.architecture)"')
+          echo "${platforms}"
+          for platform in linux/amd64 linux/arm64; do
+            grep -qx "${platform}" <<< "${platforms}" || { echo "缺少 ${platform}" >&2; exit 1; }
+          done

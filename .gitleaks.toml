@@ -1,0 +1,17 @@
+# gitleaks 設定：沿用官方預設規則，只放行一種已知的誤報。
+# CI 對整段 git 歷史執行：gitleaks git --config .gitleaks.toml --redact .
+
+[extend]
+useDefault = true
+
+# BMAD 安裝清單每一列最後是該檔的 sha256（64 碼十六進位），不是秘密；
+# 預設的 generic-api-key 規則會把其中一列（key-screens.md）誤判成金鑰。
+# 只放行「generic-api-key 這一條規則、在這一個檔、找到的值整段是 64 碼十六進位」：
+# 條件是 AND，其他規則在這個檔找到的東西、這個檔裡其他型態的值，都照樣會被抓。
+[[allowlists]]
+description = "BMAD 安裝清單裡的 sha256 檔案雜湊（只對 generic-api-key）"
+targetRules = ["generic-api-key"]
+condition = "AND"
+paths = ['''^_bmad/_config/files-manifest\.csv$''']
+regexTarget = "secret"
+regexes = ['''^[0-9a-f]{64}$''']

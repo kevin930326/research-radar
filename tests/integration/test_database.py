@@ -9,9 +9,9 @@ def test_ping_returns_false_for_refused_address() -> None:
     assert database.ping() is False
 
 
-def test_ping_returns_false_within_timeout_for_unroutable_address() -> None:
-    # 192.0.2.0/24 是保留給文件的位址（TEST-NET-1），不會有人回應。
-    database = Database("postgresql://radar@192.0.2.1:5432/radar", connect_timeout=2)
+def test_ping_returns_false_within_timeout_for_silent_server(silent_port: int) -> None:
+    # 沒把 connect_timeout 傳下去的話，libpq 會一直等下去，測試就不會結束。
+    database = Database(f"postgresql://radar@127.0.0.1:{silent_port}/radar", connect_timeout=2)
 
     started = time.monotonic()
     assert database.ping() is False
