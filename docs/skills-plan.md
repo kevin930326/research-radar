@@ -16,8 +16,8 @@
 | 第一個前端 Story 開始前 | `react-best-practices` | [vercel-labs/agent-skills](https://github.com/vercel-labs/agent-skills) | React 效能（部分規則針對 Next.js，不適用的略過） | [ ] |
 | 第一個前端 Story 開始前 | `playwright-cli` | [Playwright 官方](https://playwright.dev/agent-cli/skills) | 開瀏覽器測試網站（`playwright-cli install --skills`） | [ ] |
 | 主要畫面做完之後 | `impeccable` | [pbakaus/impeccable](https://github.com/pbakaus/impeccable) | 審查與修飾現有畫面：手機版、對比、點擊範圍 | [ ] |
-| 做摘要、問答功能時 | `llm-evaluation` | [wshobson/agents](https://github.com/wshobson/agents) | 建立 eval 題組、比較模型與 prompt | [ ] |
-| 寫 DOI 正規化、去重複等函式時 | `property-based-testing` | [trailofbits/skills](https://github.com/trailofbits/skills) | 測輸入千變萬化的函式 | [ ] |
+| 做摘要、問答功能時 | `llm-evaluation` | [wshobson/agents](https://github.com/wshobson/agents) | 建立 eval 題組、比較模型與 prompt | [x] 2026-11-14，來源 commit `9c61ab2` |
+| 寫 DOI 正規化、去重複等函式時 | `property-based-testing` | [trailofbits/skills](https://github.com/trailofbits/skills) | 測輸入千變萬化的函式 | [x] 2026-11-14，來源 commit `149d7b2`（只裝 skill，沒裝 evals 與腳本） |
 | 第一次部署上線之前 | `insecure-defaults`、`differential-review`、`supply-chain-risk-auditor` | [trailofbits/skills](https://github.com/trailofbits/skills) | 資安檢查、PyPI 套件風險 | [ ] |
 
 ## 選配
