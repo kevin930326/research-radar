@@ -145,6 +145,12 @@ deferred:
   - `[false]` `[reject]` I6 冒煙多驗了記憶體上限、退出碼、正常關機 — 不衝突，補的是 Story 1.1 deferred 的容器層驗收。
   - `[false]` `[reject]` I7 AC 沒要求的附加改動（ruff format、conftest 報錯、本機埠、gitleaks 放行）— 都是讓 AC 成立所需（AC 的 ruff 檢查含排版、三次依標記跑、封鎖網路、gitleaks 掃得過）。
 
+### 2026-11-14 — Codex 審查（PR #39）
+- verdicts: 2 findings — high 0, medium 1, low 1, false 0, maybe-false 0
+- findings:
+  - `[medium]` `[patch]` C1 架構測試守不住「任何檢查失敗 CI 就失敗」：在 `pytest-unit` 加 `continue-on-error: true` 測試仍全過 — 已修：`tests/arch/test_ci_workflow.py` 新增 `_failure_weakeners()`，檢查所有 job 與 step 都沒有 `continue-on-error`（只接受明確的 false）、checks／image 沒有 job 層的 if、必要 step 的 if 只能是空的，例外只有 gitleaks／pip-audit 的 `${{ !cancelled() }}` 與 image 登入、推映像兩步的 push 限定；`test_no_job_or_step_can_hide_a_failure` 對真的 workflow 斷言沒有問題，`test_failure_weakener_check_catches_weakened_workflow` 用 9 份在記憶體裡弄壞的 workflow（step／job 的 continue-on-error、運算式寫法、job 的 if、step 的 if、不允許的 `!cancelled()`、gitleaks 改成 `always()`、冒煙步驟的 if 與 continue-on-error）證明檢查會擋。另外實際在 ci.yml 的 `pytest-unit` 加 `continue-on-error: true`，`test_no_job_or_step_can_hide_a_failure` 失敗，之後還原。既有斷言沒有放寬。
+  - `[low]` `[patch]` C2 `smoke.sh` 收尾的 `compose down` 失敗被 `|| true` 吞掉，主測試成功時仍退出 0 — 已修：down 失敗時印出說明；原本退出碼是 0 就改成 1，原本已失敗就保留原退出碼。本機用一個只讓收尾 `down` 失敗的假 docker 包裝驗證：主測試成功＋收尾失敗 → 1；正常 → 0；主測試失敗（api 起不來）＋收尾失敗 → 1（compose up 的原退出碼）。
+
 ## Design Notes
 
 - **只在 push 事件推 GHCR**：PR 事件的 `github.sha` 是 GitHub 暫時產生的合併 commit，不是任何人推上來的 commit；以它標記會讓「SHA＝程式版本」對不上。PR 分支的每個 commit 本來就會觸發 push 事件，映像由那一次推。代價：同一個 commit 在開著 PR 時會跑兩次（push＋pull_request），私有 repo 多花分鐘數；列給 Kevin 決定要不要之後把 push 限制在 main。

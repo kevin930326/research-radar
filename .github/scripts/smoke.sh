@@ -44,7 +44,13 @@ cleanup() {
     echo "----- api 日誌 -----" >&2
     compose logs --no-color api >&2 || true
   fi
-  compose down --volumes --remove-orphans || true
+  # 收尾失敗不能被吞掉：主測試成功但 down 失敗 → 退出碼 1；主測試已失敗 → 保留原本的退出碼。
+  if ! compose down --volumes --remove-orphans; then
+    echo "冒煙測試收尾失敗：compose down 沒有成功，radar-smoke 的容器或資料卷可能還在" >&2
+    if [[ ${status} -eq 0 ]]; then
+      status=1
+    fi
+  fi
   docker image rm "${COMPOSE_IMAGE}" >/dev/null 2>&1 || true
   exit "${status}"
 }
