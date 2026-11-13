@@ -9,10 +9,14 @@ import sys
 import structlog
 from structlog.typing import EventDict, Processor, WrappedLogger
 
+# Conventions「日誌」的固定欄位：每筆都有，沒有值時是 null。
+FIXED_FIELDS = ("request_id", "member_id", "job_id")
 
-def _ensure_request_id(_logger: WrappedLogger, _method: str, event_dict: EventDict) -> EventDict:
-    """每筆日誌固定有 `request_id` 欄位；不在請求裡的紀錄是 null。"""
-    event_dict.setdefault("request_id", None)
+
+def _ensure_fixed_fields(_logger: WrappedLogger, _method: str, event_dict: EventDict) -> EventDict:
+    """每筆日誌固定有 `request_id`、`member_id`、`job_id`；沒有值的是 null。"""
+    for field in FIXED_FIELDS:
+        event_dict.setdefault(field, None)
     return event_dict
 
 
@@ -23,7 +27,7 @@ def configure_logging(level: int = logging.INFO) -> None:
         structlog.stdlib.add_log_level,
         structlog.stdlib.add_logger_name,
         structlog.processors.TimeStamper(fmt="iso", utc=True),
-        _ensure_request_id,
+        _ensure_fixed_fields,
     ]
 
     structlog.configure(

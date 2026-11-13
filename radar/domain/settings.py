@@ -29,14 +29,22 @@ class Settings(BaseModel):
     @field_validator("database_url")
     @classmethod
     def _check_database_url(cls, value: SecretStr) -> SecretStr:
-        """格式不對就在讀設定時擋下；錯誤訊息不含連線字串本身。"""
-        parts = urlsplit(value.get_secret_value())
-        if parts.scheme not in DATABASE_URL_SCHEMES:
+        """格式不對就在讀設定時擋下。
+
+        錯誤訊息一律是固定句子：解析時的原始例外可能帶出整段網址（含帳密），
+        所以全部攔下、改丟不含值的訊息，並用 `from None` 斷開原本的例外鏈。
+        """
+        try:
+            parts = urlsplit(value.get_secret_value())
+            scheme, hostname = parts.scheme, parts.hostname
+        except Exception:
+            raise ValueError("連線字串無法解析") from None
+        if scheme not in DATABASE_URL_SCHEMES:
             raise ValueError("開頭必須是 postgresql:// 或 postgresql+psycopg://")
-        if not parts.hostname:
+        if not hostname:
             raise ValueError("缺少主機名稱")
         try:
             _ = parts.port
-        except ValueError:
+        except Exception:
             raise ValueError("連接埠必須是 1–65535 的數字") from None
         return value

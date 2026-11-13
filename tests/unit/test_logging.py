@@ -25,7 +25,9 @@ def test_structlog_writes_json_to_stdout_with_unescaped_chinese(
     assert record["level"] == "info"
     assert record["service"] == "api"
     assert "timestamp" in record
-    assert record["request_id"] is None
+    assert {k: record[k] for k in ("request_id", "member_id", "job_id")} == dict.fromkeys(
+        ("request_id", "member_id", "job_id")
+    )
 
 
 def test_bound_request_id_is_included(capsys: pytest.CaptureFixture[str]) -> None:
@@ -45,7 +47,9 @@ def test_stdlib_logging_is_json_too(capsys: pytest.CaptureFixture[str]) -> None:
     assert captured.err == ""
     (record,) = _records(captured.out)
     assert record["event"] == "Started server process [7]"
-    assert record["request_id"] is None
+    assert {k: record[k] for k in ("request_id", "member_id", "job_id")} == dict.fromkeys(
+        ("request_id", "member_id", "job_id")
+    )
 
 
 def test_debug_is_filtered_at_info_level(capsys: pytest.CaptureFixture[str]) -> None:

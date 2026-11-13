@@ -102,3 +102,19 @@ def test_malformed_database_url_rejected_without_echo(url: str) -> None:
 )
 def test_wellformed_database_url_accepted(url: str) -> None:
     assert load_settings({"DATABASE_URL": url}).database_url.get_secret_value() == url
+
+
+# 主機名稱含 NFKC 正規化後會變的字元（℀）時，urlsplit 的例外訊息會帶出整段 netloc（含密碼）。
+UNPARSEABLE_URL = "postgresql://radar:s3cret-PASSWORD@ho℀st:5432/radar"
+
+
+def test_unparseable_database_url_hides_parser_message() -> None:
+    with pytest.raises(ConfigError) as caught:
+        load_settings({"DATABASE_URL": UNPARSEABLE_URL})
+
+    assert caught.value.problems == [
+        "環境變數 DATABASE_URL 格式不對（Value error, 連線字串無法解析）"
+    ]
+    assert "s3cret-PASSWORD" not in str(caught.value)
+    assert caught.value.__cause__ is None
+    assert caught.value.__suppress_context__ is True

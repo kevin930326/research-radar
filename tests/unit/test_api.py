@@ -107,6 +107,7 @@ def test_failed_request_is_logged_with_request_id(capsys: pytest.CaptureFixture[
     )
 
     assert response.status_code == 500
+    assert response.headers[REQUEST_ID_HEADER] == "req-boom"
     records = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
     failed = [r for r in records if r["event"] == "請求失敗"]
     assert len(failed) == 1

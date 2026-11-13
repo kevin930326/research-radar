@@ -174,6 +174,16 @@ deferred:
   - `[low]` `[reject]` I4 日誌那條由單元測試驗、沒有靜態規則禁 print — print 也寫 stdout，不違反「只寫 stdout」；加規則是新增複雜度。
   - `[false]` `[reject]` I5 沒用 git ls-files 驗證 `.env` 沒被追蹤 — 收尾時人工確認 `git ls-files .env` 為空；`.gitignore` 規則有測試。
 
+### 2026-11-14 — Codex 審查（PR #38）
+- verdicts: 6 findings — high 1, medium 4, low 1, false 0, maybe-false 0
+- findings:
+  - `[high]` `[patch]` C1 `urlsplit()` 的例外訊息會帶出整段 netloc（含密碼，例如主機名含 `℀`），經 ConfigError 進啟動日誌 — 已修：settings 驗證器攔下解析過程的所有例外，改丟固定訊息「連線字串無法解析」並 `from None`；單元測試核對訊息與例外鏈，整合測試核對 api／worker 完整啟動輸出不含密碼。
+  - `[medium]` `[patch]` C2 `connect_timeout` 只管建立連線，`SELECT 1` 卡住時 `/readyz` 會一直等 — 已修：連線參數加 `options=-c statement_timeout=<connect_timeout×1000>`；NullPool 讓逾時的連線也會關掉。對本機 PostgreSQL 實測 `show statement_timeout` 為 `3s`、ping 回 True。
+  - `[medium]` `[patch]` C3 未處理例外的 500 回應沒有 `X-Request-ID` — 已修：中介層記完「請求失敗」後自己回 500（內容同 Starlette 預設）並帶標頭；失敗請求的測試加檢查標頭。
+  - `[medium]` `[patch]` C4 連線逾時的整合測試證明不了設定有傳下去 — 已修：新增 `tests/unit/test_bootstrap.py`，用非預設值 7 秒經 `build_database_ping`，攔截 `psycopg.connect` 核對 `connect_timeout == 7` 與 `options`；整合測試保留。
+  - `[medium]` `[patch]` C5 只測了閒置時的 SIGTERM，沒測進行中的請求會做完（AD-17） — 已修：整合測試在 tmp_path 寫小腳本，替換 `create_app` 掛一個測試用慢路由，其餘照正式 `main()` 跑；慢請求進行中送 SIGTERM，請求拿到 200、退出碼 0、有「正常關機」。正式程式沒有加端點或開關。逾時中止的情況沒做（frontmatter 的 deferred 第 2 項仍適用於「超過 timeout_graceful_shutdown 才中斷」）。
+  - `[low]` `[patch]` C6 日誌固定欄位只有 `request_id` — 已修：`request_id`、`member_id`、`job_id` 沒有值時補 null；structlog 與標準 logging 兩種輸出的測試都檢查三個欄位。
+
 ## Auto Run Result
 
 Status: done
@@ -200,5 +210,7 @@ Status: done
 - `uv run radar --help` 列出 `version`；映像內 `radar --help` 也一樣。
 - Docker（修正後重跑）：`docker compose up -d --build` 四個服務 running；`HostConfig.Memory` api 367001600（350 MiB）、worker 419430400（400 MiB）；日誌 json-file 10m×3；`/healthz`、`/readyz` 200，`X-Request-ID` 原樣回傳；`docker compose stop db` 後 `/readyz` 503 `{"status":"not_ready"}`，日誌只記 `OperationalError`；db 重啟後回 200；`docker compose stop api worker` 兩者 ExitCode 0、OOMKilled false、各一筆「正常關機」JSON；api／worker 日誌沒有非 JSON 行；映像 `/app` 只有 `.venv`、uid 10001；最後 `docker compose down -v`。
 - `git ls-files .env` 為空。
+
+**Codex 審查後（第二個 commit）：** pytest 106 passed（unit 43、integration 12、arch 51），ruff、mypy（41 檔）、lint-imports 16 kept 全過。
 
 **剩下的風險：** worker 的 graceful timeout 到 1.4 才真的生效；RustFS 用內建預設帳密（只綁 127.0.0.1）；本機佔用 5432／8000／9000／9001；api、worker 各建一份相同映像；整合測試會對 192.0.2.1（文件保留位址）送連線，1.2 加 pytest-socket 時要處理。

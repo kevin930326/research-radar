@@ -7,7 +7,7 @@ from collections.abc import Awaitable, Callable
 
 import structlog
 from fastapi import FastAPI, Request, Response
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 
 REQUEST_ID_HEADER = "X-Request-ID"
 # 外部帶進來的 request ID 當使用者輸入驗證：只收這個格式，其他一律換新的。
@@ -43,7 +43,11 @@ def create_app(readiness_check: Callable[[], bool]) -> FastAPI:
                     path=request.url.path,
                     duration_ms=round((time.perf_counter() - started) * 1000, 1),
                 )
-                raise
+                # 自己回 500（內容和 Starlette 預設相同），回應才帶得到 request ID；
+                # 例外已經連同 traceback 記進上面那筆日誌。
+                response = PlainTextResponse("Internal Server Error", status_code=500)
+                response.headers[REQUEST_ID_HEADER] = request_id
+                return response
             response.headers[REQUEST_ID_HEADER] = request_id
             # 只記路徑，不記查詢字串（可能含使用者輸入）。
             log.info(

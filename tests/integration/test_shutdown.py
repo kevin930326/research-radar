@@ -6,9 +6,11 @@ import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 import pytest
 
@@ -48,7 +50,7 @@ def _wait_http_ok(url: str, process: subprocess.Popen[str]) -> None:
             with urllib.request.urlopen(url, timeout=1) as response:
                 if response.status == 200:
                     return
-        except urllib.error.URLError, ConnectionError:
+        except urllib.error.URLError, ConnectionError, TimeoutError:
             time.sleep(0.1)
     process.kill()
     pytest.fail("api 沒有在時間內起來")
@@ -132,6 +134,82 @@ def test_api_readyz_respects_connect_timeout() -> None:
         _stop(process)
 
 
+# 掛一個測試用慢路由，其餘照正式的 main()（設定、訊號處理、uvicorn 設定）跑；
+# 正式程式不需要為了測試加端點或開關。
+SLOW_APP_SCRIPT = """
+import asyncio
+import sys
+from pathlib import Path
+
+import radar.entrypoints.api.main as api_main
+
+marker = Path(sys.argv[1])
+real_create_app = api_main.create_app
+
+
+def create_app_with_slow_route(readiness_check):
+    app = real_create_app(readiness_check)
+
+    @app.get("/slow")
+    async def slow():
+        marker.write_text("started")
+        await asyncio.sleep(2)
+        return {"status": "done"}
+
+    return app
+
+
+api_main.create_app = create_app_with_slow_route
+raise SystemExit(api_main.main())
+"""
+
+
+def test_api_sigterm_finishes_in_flight_request(tmp_path: Path) -> None:
+    script = tmp_path / "slow_api.py"
+    script.write_text(SLOW_APP_SCRIPT, encoding="utf-8")
+    marker = tmp_path / "slow-started"
+    port = _free_port()
+    process = subprocess.Popen(
+        [sys.executable, "-I", str(script), str(marker)],
+        env={
+            "PYTHONUNBUFFERED": "1",
+            "DATABASE_URL": UNREACHABLE_DB,
+            "RADAR_API_HOST": "127.0.0.1",
+            "RADAR_API_PORT": str(port),
+        },
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    _wait_http_ok(f"http://127.0.0.1:{port}/healthz", process)
+
+    result: dict[str, object] = {}
+
+    def call_slow() -> None:
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}/slow", timeout=15) as response:
+                result["status"] = response.status
+                result["body"] = json.loads(response.read())
+        except Exception as exc:  # 交給主執行緒的斷言回報
+            result["error"] = repr(exc)
+
+    caller = threading.Thread(target=call_slow)
+    caller.start()
+    deadline = time.monotonic() + STARTUP_TIMEOUT
+    while not marker.exists():
+        if time.monotonic() > deadline:
+            process.kill()
+            pytest.fail("慢請求沒有開始")
+        time.sleep(0.05)
+
+    code, out, err = _stop(process)
+    caller.join(timeout=15)
+
+    assert result == {"status": 200, "body": {"status": "done"}}
+    assert code == 0, err
+    assert any(r["event"] == "正常關機" and r["service"] == "api" for r in _records(out))
+
+
 @pytest.mark.parametrize("signum", [signal.SIGTERM, signal.SIGINT])
 def test_worker_signal_exits_zero_and_logs_shutdown(signum: signal.Signals) -> None:
     process = _spawn("radar.entrypoints.worker", {"DATABASE_URL": UNREACHABLE_DB})
@@ -163,3 +241,15 @@ def test_missing_database_url_fails_without_printing_values(module: str) -> None
     assert process.returncode != 0
     assert "DATABASE_URL" in out
     assert "SENTINEL" not in out + err
+
+
+@pytest.mark.parametrize("module", ["radar.entrypoints.api", "radar.entrypoints.worker"])
+def test_unparseable_database_url_does_not_leak_password(module: str) -> None:
+    # urlsplit 對含 ℀ 的主機名稱丟出的例外訊息會帶出帳密；啟動輸出不能出現它。
+    process = _spawn(module, {"DATABASE_URL": "postgresql://radar:s3cret-PW@ho℀st:5432/radar"})
+    out, err = process.communicate(timeout=30)
+
+    assert process.returncode == 1
+    assert "DATABASE_URL" in out
+    assert "s3cret-PW" not in out + err
+    assert err == ""
