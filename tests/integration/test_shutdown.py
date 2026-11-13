@@ -10,6 +10,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -24,6 +25,16 @@ def _free_port() -> int:
         sock.bind(("127.0.0.1", 0))
         port: int = sock.getsockname()[1]
         return port
+
+
+@pytest.fixture
+def silent_port() -> Iterator[int]:
+    """本機一個只 listen、不回應的埠：連得上，但永遠等不到資料庫的回覆。"""
+    with socket.socket() as server:
+        server.bind(("127.0.0.1", 0))
+        server.listen()
+        port: int = server.getsockname()[1]
+        yield port
 
 
 def _spawn(module: str, env: dict[str, str]) -> subprocess.Popen[str]:
@@ -110,14 +121,14 @@ def test_api_readyz_503_when_database_unreachable() -> None:
     assert any(r["event"] == "資料庫連線失敗" for r in _records(out))
 
 
-def test_api_readyz_respects_connect_timeout() -> None:
-    # 192.0.2.0/24 是保留給文件的位址（TEST-NET-1），不會有人回應；
-    # 沒把連線逾時傳下去的話會等到作業系統的預設逾時。
+def test_api_readyz_respects_connect_timeout(silent_port: int) -> None:
+    # 資料庫位址是本機一個只 listen、不回應的埠；
+    # 沒把連線逾時傳下去的話 libpq 會一直等，/readyz 就不會在時間內回來。
     port = _free_port()
     process = _spawn(
         "radar.entrypoints.api",
         {
-            "DATABASE_URL": "postgresql://radar@192.0.2.1:5432/radar",
+            "DATABASE_URL": f"postgresql://radar@127.0.0.1:{silent_port}/radar",
             "RADAR_DATABASE_CONNECT_TIMEOUT": "2",
             "RADAR_API_HOST": "127.0.0.1",
             "RADAR_API_PORT": str(port),

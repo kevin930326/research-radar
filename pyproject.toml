@@ -30,7 +30,9 @@ dev = [
     "httpx2==2.16.0",
     "import-linter==2.16",
     "mypy==2.4.1",
+    "pip-audit==2.10.1",
     "pytest==9.2.0",
+    "pytest-socket==0.8.1",
     "pyyaml>=6.0.3",
     "ruff==0.17.4",
     "types-pyyaml>=6.0.12.20261113",
@@ -55,7 +57,9 @@ plugins = ["pydantic.mypy"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = ["--strict-markers", "-ra"]
+# --disable-socket：測試預設不能建網路連線（pytest-socket）；整合測試在 tests/conftest.py 只放行本機。
+# --allow-unix-socket：asyncio 的事件迴圈內部用 Unix socket 當自己的通知管道（不出這台機器），要放行。
+addopts = ["--strict-markers", "-ra", "--disable-socket", "--allow-unix-socket"]
 markers = [
     "unit: 不連資料庫，外部服務用 Fake",
     "integration: 真的行程、資料庫或容器",
