@@ -1,0 +1,270 @@
+# STATUS DEFINITIONS:
+# ==================
+# Epic Status:
+#   - backlog: Epic not yet started
+#   - in-progress: Epic actively being worked on
+#   - done: All stories in epic completed
+
+# Story Status:
+#   - backlog: Story only exists in epic file
+#   - ready-for-dev: Story file created, ready for development
+#   - in-progress: Developer actively working on implementation
+#   - review: Implementation complete, ready for review
+#   - done: Story completed
+
+# Retrospective Status:
+#   - optional: Can be completed but not required
+#   - done: Retrospective has been completed
+
+# Action Item Status:
+#   - open: Committed during a retrospective, not yet addressed
+#   - in-progress: Actively being worked on
+#   - done: Completed
+
+# WORKFLOW NOTES:
+# ===============
+# - Epic transitions to 'in-progress' automatically when its first story starts (via build's sprint sync)
+# - Stories can be worked in parallel if team capacity allows
+# - Developer typically creates the next story after the previous one is 'done' to incorporate learnings
+# - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
+# - Retrospective appends its action items to action_items; the status view surfaces open ones
+# ===== 工時重估紀錄（Kevin 2026-11-14 要求留下，12 月底重估時看這裡）=====
+# 這段是註解，重跑 bmad-sprint-planning 更新這個檔案時不會被洗掉（2026-11-14 測過）。
+#
+# 開工前的數字（2026-11-14 開工前檢查）：
+#   - Must（Epic 1～13）每個 Story 的估計加起來：337.5 h。
+#     Epic 14（K8s）另外 18.5 h，不在可砍的範圍，期限 2027-03 底，不算進寒假。
+#   - PRD §8.1 的 Must 中位估計：187 h（樂觀 148 h、悲觀 229 h），比逐 Story 合計少很多。
+#   - 寒假（12/25～2/14）有兩個基準，都留著；重估以「可用總時數」為準（Kevin 2026-11-14 決定）：
+#     - 可用總時數 180～225 h（PRD §8.4）：所有花在專案上的時間都算在裡面。
+#     - 功能預算 120～150 h（PRD §8.4）：總時數扣掉審查、ADR、部署、理解設計的時間。只留著對照。
+#   - 12 月切片是 Epic 1＋2，估計合計 66 h（Epic 1 29 h、Epic 2 37 h）。
+#     PRD §8.4 的 30～40 h 不是只算功能時間：PRD 把 11/19～12/20（每天約 2 h）的約 60 h
+#     分成「剩餘規劃 15～25 h」和「切片 30～40 h」，沒有另外扣審查、理解的時間，
+#     所以 30～40 h 是切片可用的總時數。
+#     規劃到 11/14 已經做到 sprint planning，比 PRD 預期早，所以實際能給切片的時間可能比 30～40 h 多；
+#     12 月的可用總時數 = 約 60 h 減掉 11/19 以後還花在規劃上的時間；
+#     試標與找標註者 B（2.5～4 h，見下面第 5 項）如果在 12/20 以前做，也從這裡扣。
+#     12 月結束時，拿 Epic 1、2 的實際工時加總和這個數字比。
+#   - 寒假剩下的 Must（用估計直接比，還沒乘倍率，也還沒扣掉不屬於 Story 的時間）：
+#     - 都不砍：337.5 − 66 = 271.5 h。比可用總時數 180～225 h 多 46.5～91.5 h；
+#       比功能預算 120～150 h 多 121.5～151.5 h。
+#       這還沒扣 Kevin 手動工作與其他不屬於 Story 的時間。
+#     - K6、K8、K9 全部用上（拿掉 Epic 12 的 19 h，加上 K9 延後的 Epic 7）：約 240～245 h。
+#       比可用總時數 180～225 h 多約 15～65 h；比功能預算 120～150 h 多約 90～125 h。
+#       這還沒扣 Kevin 手動工作與其他不屬於 Story 的時間。
+#       K9 能省多少還沒定：epics.md Epic 7 的備註寫「K9 觸發時延後這個 epic」，整個延後是 12 h（剩約 240 h）；
+#       但 7.4 抽 20 篇看 AI 產出（1.5 h）是驗證，PRD §8.5 寫明不砍；7.5 的每晚備份是 11.2 的依賴。
+#       只算確定能延後的登入部分 7.1～7.3（7.5 h），剩約 245 h。重估時要先定 K9 延後哪些 Story。
+#   - 各 epic 的估計（h）：1: 29、2: 37、3: 53.5、4: 16、5: 20、6: 40.5、7: 12、
+#     8: 22.5、9: 19.5、10: 29.5、11: 14.5、12: 19、13: 24.5、14: 18.5。
+#
+# 什麼時候重估：Epic 1、2 的 Story 全部 done 的時候（PRD §8.5）。
+# 怎麼重估：
+#   1. 倍率 = Epic 1、2 所有 Story 的實際工時加總 ÷ 同一批 Story 的估計加總（66 h）。
+#   2. 剩下每個 Story 的估計 × 倍率，加起來和寒假可用總時數 180～225 h 比。
+#      如果重估時已經過了 12/25：180～225 h 先扣掉 12/25 以後已經花掉的時間
+#      （Epic 1、2 在寒假裡做的部分，加上已經做完的人工工作等不屬於 Story 的時間，由 Kevin 依紀錄估），
+#      下面的保留量也只算還沒發生的部分。
+#      180～225 h 裡還包含不屬於任何 Story 的時間，重估時由 Kevin 估一個保留量先扣掉，再比：
+#      (1) 重估本身 (2) 和設計對話 (3) 回答規劃問題 (4) 可用性測試
+#      (5) Kevin 的人工工作：epics.md Epic 8「Kevin 要做的人工工作」那張表，13 列都不在 Story 的估計裡
+#          （Story 的驗收條件寫的是「Kevin 已經寫好／標完後匯回」，估計只算程式）。
+#          - 原則：人工工作跟著等它的 Story 走。上面「寒假剩下的 Must」把 Epic 3～13 都算在寒假，
+#            所以等它們的人工工作也都算寒假；之後哪個 Story 移出寒假，它的人工工作一起移出。
+#          - 寒假內（12/25～2/14），從 180～225 h 扣，合計約 25.5～43 h：
+#            搜尋的題目 1.5～2、問答的冒煙題 1、分類專用 100 篇 3.5～5、摘要層級 50 篇 4～8.5、
+#            全文層級 20 篇 6～11、構面名稱人工對應 0.5～1、中文重點判定 20 篇 1.5～2.5、
+#            問答評估題 1.5～2、引用支持率的校準 1.5～2、審合併建議 3～6（等 10.3、Epic 11）、
+#            展示問答的題目 1.5～2（等 13.2；Epic 13 的期限雖然是 3 月底，但它的 Story 現在算在寒假）。
+#          - 看哪天做（最晚 12/31），合計 2.5～4 h：試標 5 篇 2～3、找標註者 B 並說明規則 0.5～1。
+#            在 12/20 以前做就算 12 月的時間；在 12/25 以後做就從寒假扣。
+#          - 寒假之後：目前沒有。
+#          - 13 列逐列加總是 28～47 h；表下面寫的合計是 29～47 h，下限差 1 h，這裡用逐列加總。
+#          - PRD §8.1 的「1 月正式標註，Kevin 約 14～26 h」是其中的標註部分，對應表裡的試標、
+#            分類專用 100 篇、摘要層級 50 篇、全文層級 20 篇四列（表的版本是 15.5～27.5 h）。
+#          - 標註者 B 的 2.5～4 h 不是 Kevin 的時間，不扣。
+#          - 表裡的日期是 epics.md 的 [ASSUMPTION]，重估時一起調。
+#   3. 超過就照 PRD §8.5 依序啟動 K6 → K8 → K9；全部用上還是超過，就延後上線，
+#      不砍驗證（評估、引用驗證、授權閘門）；K8s epic 不動。
+#      待辦（Kevin 2026-11-14 決定）：啟動 K9 之前，先改 epics.md 的 Epic 7：寫明只延後 7.1～7.3，
+#      7.4 照做，7.5 的每晚備份保留（11.2 依賴它），改完重跑 sprint planning。
+# 每個 Story 的實際工時記在下面的「實際工時」區塊（Kevin 2026-11-14 決定）。
+# ============================================================================
+
+# ----- 實際工時（每個 Story 一行，格式「Story 代號: 小時數」，例如「1-1-專案骨架與本機-compose: 4.5」）-----
+# 單位是小時，數字是 Kevin 回報的總數：含讀程式、理解設計、看審查意見、審查後修改；
+# 不含等待審查的時間。
+# 第一筆寫進來時把 {} 拿掉。這個區塊要留在 generated 上面，重跑 skill 才不會洗掉註解（2026-11-14 測過）。
+actual_hours: {}
+
+generated: 11-14-2026 03:46
+last_updated: 11-14-2026 03:46
+project: research-radar
+project_key: NOKEY
+tracking_system: file-system
+story_location: _bmad-output/implementation-artifacts
+development_status:
+  epic-1: backlog
+  1-1-專案骨架與本機-compose: backlog
+  1-2-ci-固定檢查與雙架構冒煙測試: backlog
+  1-3-資料庫遷移起點與-schema-體檢: backlog
+  1-4-背景工作與排程入口: backlog
+  1-5-識別碼正規化-論文表與權限的底層: backlog
+  1-6-從-openalex-抓資料-保存原始資料: backlog
+  1-7-解析原始資料與重新解析: backlog
+  1-8-第一次匯入的抓取-暫存與中斷續跑: backlog
+  1-9-第一次匯入的套用-快照-1-與基準比對: backlog
+  1-10-摘要來源與覆蓋率計數: backlog
+  1-11-每週更新的排程與變動偵測: backlog
+  epic-1-retrospective: optional
+
+  epic-2: backlog
+  2-1-送雲端的放行與-llm-連接: backlog
+  2-2-閘門-來歷與費用帳本: backlog
+  2-3-預算熔斷與費用指令: backlog
+  2-4-中文重點: backlog
+  2-5-主題與方法分類: backlog
+  2-6-研究模型擷取: backlog
+  2-7-人工判斷事件與有效值: backlog
+  2-8-向量與全庫向量化: backlog
+  2-9-batch-送出與每週更新的串接: backlog
+  2-10-只對指定的論文跑-ai: backlog
+  2-11-batch-結果匯入與第一次全庫-ai: backlog
+  2-12-管理者的-ai-指令: backlog
+  2-13-標註試算表範本: backlog
+  epic-2-retrospective: optional
+
+  epic-3: backlog
+  3-1-前端骨架與使用須知: backlog
+  3-2-設計代幣-無障礙底線與減少動態: backlog
+  3-3-假登入與-session: backlog
+  3-4-權限測試的框架: backlog
+  3-5-導覽列與帳號選單: backlog
+  3-6-論文頁的-api: backlog
+  3-7-示範站匯出的骨架: backlog
+  3-8-論文頁成員版: backlog
+  3-9-論文頁示範站版: backlog
+  3-10-引用匯出: backlog
+  3-11-修正分類: backlog
+  3-12-回報中文重點錯誤: backlog
+  3-13-找論文清單的-api-篩選: backlog
+  3-14-找論文-篩選-與示範站論文清單: backlog
+  3-15-資料涵蓋範圍: backlog
+  3-16-個人文獻庫的-api: backlog
+  3-17-加入-移出與我的文獻庫-基本版: backlog
+  3-18-備份與還原指令: backlog
+  3-19-部署到-oracle-試用主機-只有-kevin-連得進去: backlog
+  epic-3-retrospective: optional
+
+  epic-4: backlog
+  4-1-混合檢索: backlog
+  4-2-找論文加上搜尋框: backlog
+  4-3-找相似論文: backlog
+  4-4-搜尋的評估題組-最小版本: backlog
+  4-5-系統首頁-兩步版: backlog
+  4-6-部署到試用主機並跑冒煙測試: backlog
+  epic-4-retrospective: optional
+
+  epic-5: backlog
+  5-1-問答的檢索-prompt-與路由: backlog
+  5-2-串流回答與出處驗證: backlog
+  5-3-每日題數與問答紀錄: backlog
+  5-4-問答畫面: backlog
+  5-5-我的問答紀錄與問答的入口: backlog
+  5-6-問答的安全測試與冒煙題: backlog
+  5-7-部署到試用主機並跑冒煙測試: backlog
+  epic-5-retrospective: optional
+
+  epic-6: backlog
+  6-1-上傳的資料表與狀態函式: backlog
+  6-2-收檔: backlog
+  6-3-讀-pdf-的子行程與記憶體量測-含量測環境: backlog
+  6-4-對到論文-加入文獻庫: backlog
+  6-5-使用者確認-手填-不加入-取代: backlog
+  6-6-定時清理: backlog
+  6-7-開啟與刪除自己的-pdf-刪除手填書目: backlog
+  6-8-上傳頁的放-pdf-與處理進度: backlog
+  6-9-上傳頁的-要你確認的: backlog
+  6-10-論文頁的-我的-pdf-與開啟-pdf: backlog
+  6-11-我的文獻庫的上傳部分-使用須知第-2-段-接上-上傳或匯入: backlog
+  6-12-部署到試用主機-在量測環境量-100-個-pdf: backlog
+  epic-6-retrospective: optional
+
+  epic-7: backlog
+  7-1-google-登入與-session: backlog
+  7-2-移出名單: backlog
+  7-3-登入頁: backlog
+  7-4-開放前抽-20-篇看-ai-產出: backlog
+  7-5-每晚備份-關掉假登入-開放同學試用: backlog
+  epic-7-retrospective: optional
+
+  epic-8: backlog
+  8-1-匯入金標準與評估紀錄: backlog
+  8-2-主題分類一致率與標註者間一致性: backlog
+  8-3-研究模型的精確率與召回率: backlog
+  8-4-同一篇跑兩次與可行性檢查點: backlog
+  8-5-中文重點的捏造率: backlog
+  8-6-問答的引用評估與-llm-評審: backlog
+  8-7-評估報告與換模型的門檻: backlog
+  8-8-部署並跑完整評估-判定-fr-20: backlog
+  epic-8-retrospective: optional
+
+  epic-9: backlog
+  9-1-趨勢的計算模組與-23-個答案檔: backlog
+  9-2-計數方塊補主題組合-點數字列出論文: backlog
+  9-3-主題趨勢-成長最快-六張小圖-主圖: backlog
+  9-4-原始篇數與對照-用表格看-展開各期刊: backlog
+  9-5-主題交叉: backlog
+  9-6-示範站預覽的趨勢與接上入口: backlog
+  9-7-部署到試用主機並跑冒煙測試: backlog
+  epic-9-retrospective: optional
+
+  epic-10: backlog
+  10-1-合併事件與重算: backlog
+  10-2-關係的數字與排行表-api: backlog
+  10-3-合併建議與-kevin-的審核: backlog
+  10-4-證據簡報的-api: backlog
+  10-5-證據簡報的匯出檔: backlog
+  10-6-關係排行表畫面: backlog
+  10-7-證據簡報畫面: backlog
+  10-8-示範站預覽的關係排行表與接上入口: backlog
+  10-9-部署到試用主機並跑冒煙測試: backlog
+  epic-10-retrospective: optional
+
+  epic-11: backlog
+  11-1-正式環境的設定: backlog
+  11-2-試用資料搬到正式環境-含切換程序: backlog
+  11-3-用正式環境的備份做還原演練: backlog
+  11-4-帳號與秘密清單-夜間代理人隔離: backlog
+  11-5-nfr-19-的量測: backlog
+  11-6-上線日-搬家-還原演練-開放同學: backlog
+  epic-11-retrospective: optional
+
+  epic-12: backlog
+  12-1-合併建議的第-3-層-ai-判斷: backlog
+  12-2-爆紅偵測的算法與年度規則: backlog
+  12-3-爆紅關鍵字的端點-留底與斷層檢查: backlog
+  12-4-爆紅關鍵字分頁: backlog
+  12-5-示範站的爆紅關鍵字與接上: backlog
+  12-6-部署與斷層檢查: backlog
+  epic-12-retrospective: optional
+
+  epic-13: backlog
+  13-1-示範站匯出補齊與-ieee-檢查: backlog
+  13-2-展示問答的資料: backlog
+  13-3-展示問答與-架構與評估-的畫面: backlog
+  13-4-示範站首頁-靜止版: backlog
+  13-5-60-秒示範: backlog
+  13-6-公開示範站-以及-repo-公開前的檢查: backlog
+  13-7-首頁的星系動畫-最後做: backlog
+  epic-13-retrospective: optional
+
+  epic-14: backlog
+  14-1-kustomize-的基本設定: backlog
+  14-2-排程改成-cronjob: backlog
+  14-3-ci-用-kind-跑冒煙測試: backlog
+  14-4-更新主機盤點與並存做法: backlog
+  14-5-在-k3s-上建-staging: backlog
+  14-6-k8s-部署的-adr-與-readme: backlog
+  epic-14-retrospective: optional
