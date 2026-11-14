@@ -646,3 +646,5 @@
 - **晚到（late result）**：模型還在算的時候輸入被換掉，結果回來時已經不是現在的輸入；這種結果存成 `superseded`，不蓋掉新的。
 - **`GatewayOutcome`（閘門結果）**：`run_llm_job` 回的結果種類，例如 `ACTIVE`（寫成有效）、`SKIPPED`（不用跑）、`BLOCKED`（放行擋下）、`TOO_LARGE`（輸入太大不送）、`TRANSIENT_FAILURE`（暫時性錯誤，下次再跑）。
 - **`GatedProvider`（會等的替身）**：測試用的模型替身，呼叫時先停住，等測試說「放行」才回覆；用來排出並行情境的先後。
+- **凍結的 schema 登記表**：`radar/domain/llm.py` 在 import 時就把 `llm_schemas.py` 每個模型的 JSON schema 產生好、存成字串，之後送出只用這份；像先把菜單印好封存，之後有人在原稿上塗改也不影響已印好的那份。
+- **`$defs`**：JSON schema 裡放「共用型別定義」的區塊（例如巢狀的模型、列舉）；本專案凍結前會把每個定義的 `title`、`description` 拿掉。
