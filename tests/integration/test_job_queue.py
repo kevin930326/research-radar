@@ -4,18 +4,19 @@ sweep 補排（含經 CLI 與正式 worker）、被 SIGKILL 的 worker 留下的
 """
 
 import asyncio
-import concurrent.futures
 import contextlib
 import json
 import signal
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from collections.abc import Callable
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 import psycopg
 import pytest
@@ -31,7 +32,7 @@ from radar.domain.sweep import SweepEntry
 from radar.entrypoints.worker.main import worker_options
 from radar.repo.db import Database
 from radar.services.sweep import SweepResult, sweep
-from tests.database import ROOT, TestDatabase, migrate
+from tests.database import APP_ROLE, ROOT, TestDatabase, migrate
 
 BIN = Path(sys.executable).parent
 FROZEN_SQL = ROOT / "migrations" / "procrastinate" / "schema-3.11.0.sql"
@@ -845,6 +846,69 @@ def test_stale_candidate_out_of_retries_is_not_failed_once_taken_by_healthy_work
     assert _statuses(migrated_fresh) == {stalled: ("doing", 2)}
 
 
+# 鎖等待測試的期限：連線、每個查詢、等鎖都有上限，資料庫沒回應時也不會讓測試卡住。
+_LIMIT_MS = int(WAIT_SECONDS * 1000)
+_SESSION_LIMITS = f"-c statement_timeout={_LIMIT_MS} -c lock_timeout={_LIMIT_MS}"
+_POLL_LIMITS = "-c statement_timeout=5000 -c lock_timeout=5000"
+
+
+def _bounded_connect(url: str, *, autocommit: bool, options: str) -> psycopg.Connection:
+    return psycopg.connect(url, autocommit=autocommit, connect_timeout=5, options=options)
+
+
+def _with_session_limits(url: str) -> str:
+    """連線字串加上 `options`：佇列連線池開出來的每條連線也有查詢與等鎖的期限。"""
+    return f"{url}{'&' if '?' in url else '?'}options={quote(_SESSION_LIMITS)}"
+
+
+def _terminate_backends(database: TestDatabase, role: str) -> None:
+    """清理用：結束這個測試資料庫裡 `role` 的所有連線（盡力而為，失敗不蓋掉原本的錯誤）。"""
+    with (
+        contextlib.suppress(psycopg.Error),
+        _bounded_connect(database.admin_url, autocommit=True, options=_POLL_LIMITS) as admin,
+    ):
+        admin.execute(
+            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity"
+            " WHERE datname = current_database() AND usename = %s",
+            (role,),
+        )
+
+
+class _DaemonCall:
+    """在 daemon 執行緒跑 `func`。它卡住時，測試和 pytest 都不必等它結束（不 join 到底）。"""
+
+    def __init__(self, func: Callable[[], int]) -> None:
+        self._func = func
+        self._value: int | None = None
+        self._error: BaseException | None = None
+        self._thread = threading.Thread(target=self._run, daemon=True, name="sweep-b")
+
+    def _run(self) -> None:
+        try:
+            self._value = self._func()
+        except BaseException as exc:  # 交回主執行緒再丟
+            self._error = exc
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def running(self) -> bool:
+        return self._thread.is_alive()
+
+    def join(self, timeout: float) -> None:
+        if self._thread.is_alive():
+            self._thread.join(timeout)
+
+    def result(self, timeout: float) -> int:
+        self._thread.join(timeout)
+        if self._thread.is_alive():
+            raise TimeoutError(f"連線 B 的 sweep 超過 {timeout} 秒還沒結束")
+        if self._error is not None:
+            raise self._error
+        assert self._value is not None
+        return self._value
+
+
 def test_sweep_waiting_on_row_lock_rechecks_after_the_other_transaction_commits(
     migrated_fresh: TestDatabase, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -852,12 +916,18 @@ def test_sweep_waiting_on_row_lock_rechecks_after_the_other_transaction_commits(
     # 連線 A 鎖住工作列、在交易裡把它重排並交給健康的 worker（還沒提交）；連線 B 的 sweep 從
     # 已提交的資料查到它是候選，卡在 FOR UPDATE 等 A。A 提交後，B 必須用最新的那一版重新核對
     # （attempts 已經變了），回傳 0、不動它。
+    # 期限：每條連線 5 秒內要連上；A、B 的每個查詢與等鎖最多 WAIT_SECONDS 秒（A 另外設交易閒置
+    # 上限，測試行程掛了伺服器也會放掉鎖）；B 在 daemon 執行緒跑，逾時就結束它的連線、不等它。
     stalled = _insert_job(migrated_fresh, status="doing", queueing_lock=None)
-    with psycopg.connect(migrated_fresh.admin_url, autocommit=True) as admin:
+    with _bounded_connect(
+        migrated_fresh.admin_url, autocommit=True, options=_SESSION_LIMITS
+    ) as admin:
         healthy = admin.execute("SELECT * FROM procrastinate_register_worker_v1()").fetchone()
     assert healthy is not None
     stalled_query = procrastinate_sql.queries["select_stalled_jobs_by_heartbeat"]
-    job_app = create_job_app(migrated_fresh.app_url, max_connections=2, connect_timeout=5)
+    job_app = create_job_app(
+        _with_session_limits(migrated_fresh.app_url), max_connections=2, connect_timeout=5
+    )
     candidates: list[object] = []
 
     def sweep_on_connection_b() -> int:
@@ -874,8 +944,12 @@ def test_sweep_waiting_on_row_lock_rechecks_after_the_other_transaction_commits(
             monkeypatch.setattr(connector, "execute_query_all", record_candidates)
             return retry_stalled_jobs(app, seconds_since_heartbeat=60, max_retries=3)
 
-    connection_a = psycopg.connect(migrated_fresh.admin_url)
-    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    connection_a = _bounded_connect(
+        migrated_fresh.admin_url,
+        autocommit=False,
+        options=f"{_SESSION_LIMITS} -c idle_in_transaction_session_timeout={2 * _LIMIT_MS}",
+    )
+    sweep_b = _DaemonCall(sweep_on_connection_b)
     try:
         connection_a.execute(
             "SELECT id FROM procrastinate_jobs WHERE id = %s FOR UPDATE", (stalled,)
@@ -889,12 +963,14 @@ def test_sweep_waiting_on_row_lock_rechecks_after_the_other_transaction_commits(
         assert taken == (stalled,)
         a_pid = connection_a.info.backend_pid
 
-        b_result = executor.submit(sweep_on_connection_b)
+        sweep_b.start()
 
         def b_is_waiting_on_a() -> bool:
-            if b_result.done():
+            if not sweep_b.running():
                 return True  # B 沒有等鎖就結束了：跳出等待，由下面的斷言報錯。
-            with psycopg.connect(migrated_fresh.admin_url, autocommit=True) as watcher:
+            with _bounded_connect(
+                migrated_fresh.admin_url, autocommit=True, options=_POLL_LIMITS
+            ) as watcher:
                 row = watcher.execute(
                     "SELECT count(*) FROM pg_stat_activity"
                     " WHERE %s = ANY(pg_blocking_pids(pid)) AND wait_event_type = 'Lock'",
@@ -903,15 +979,19 @@ def test_sweep_waiting_on_row_lock_rechecks_after_the_other_transaction_commits(
             return row is not None and row[0] > 0
 
         _wait_until(b_is_waiting_on_a, "連線 B 的 sweep 卡在等 A 的列鎖")
-        assert not b_result.done(), "B 沒有等鎖就結束了，沒有製造出交錯"
+        assert sweep_b.running(), "B 沒有等鎖就結束了，沒有製造出交錯"
         assert candidates == [stalled]
 
         connection_a.commit()
-        retried = b_result.result(timeout=WAIT_SECONDS)
+        retried = sweep_b.result(timeout=WAIT_SECONDS)
     finally:
-        # 斷言失敗時也要放掉 A 的鎖，B 才會結束，測試不會卡住。
+        # 不管成功或失敗都放掉 A 的鎖；B 還沒結束就結束它的連線，最多再等 5 秒，之後不管它
+        # （daemon 執行緒不會擋住 pytest 結束）。
         connection_a.close()
-        executor.shutdown(wait=True, cancel_futures=True)
+        sweep_b.join(timeout=5)
+        if sweep_b.running():
+            _terminate_backends(migrated_fresh, APP_ROLE)
+            sweep_b.join(timeout=5)
 
     assert retried == 0
     assert _statuses(migrated_fresh) == {stalled: ("doing", 1)}
