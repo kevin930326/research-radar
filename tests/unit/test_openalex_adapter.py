@@ -3,6 +3,7 @@
 """
 
 import json
+import time
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -299,11 +300,13 @@ def test_fetched_at_is_the_time_of_the_successful_attempt() -> None:
     assert [record.fetched_at for record in page.records] == [second.called_at]
 
 
-def test_backoff_follows_retry_after_with_cap() -> None:
+def test_backoff_follows_retry_after_up_to_the_cap() -> None:
     source = _source(_sequence([], []))
 
     assert source._backoff(RetryableOpenAlexError("HTTP 429", retry_after=7)) == 7
-    assert source._backoff(RetryableOpenAlexError("HTTP 429", retry_after=500)) == 120
+    # 等於上限照等；超過上限不重試（不提早重送，Codex 補複查、Kevin 2026-11-14 決定）。
+    assert source._backoff(RetryableOpenAlexError("HTTP 429", retry_after=120)) == 120
+    assert source._backoff(RetryableOpenAlexError("HTTP 429", retry_after=500)) is False
     assert source._backoff(RetryableOpenAlexError("HTTP 503")) is True
     assert source._backoff(PaperSourceError("HTTP 401")) is False
     assert source._backoff(ValueError("x")) is False
@@ -343,6 +346,116 @@ def test_retries_exhausted_raise_with_every_call(capsys: pytest.CaptureFixture[s
     assert "api.openalex.example" not in str(caught.value)
     assert caught.value.__cause__ is None
     assert caught.value.__suppress_context__
+
+
+# --- Retry-After 超過上限就停、不提早重送（Codex 補複查、Kevin 2026-11-14 決定）-----------
+
+
+@pytest.fixture
+def waits(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[float]]:
+    """關掉 stamina 的測試模式（它會把等待歸零），改成攔下 sleep、只記秒數，不真的等。
+
+    節流用的是注入的 `sleep`（`_source` 預設什麼都不做），這裡記到的只有重試前的等待。
+    """
+    slept: list[float] = []
+    monkeypatch.setattr(time, "sleep", slept.append)
+    with stamina.set_testing(False):
+        yield slept
+
+
+def _no_jitter() -> OpenAlexConfig:
+    return _config(
+        retry={
+            "attempts": 3,
+            "wait_initial_seconds": 1,
+            "wait_max_seconds": 30,
+            "wait_jitter_seconds": 0,
+            "retry_after_max_seconds": 120,
+        }
+    )
+
+
+def test_retry_after_over_the_cap_fails_without_waiting_or_resending(
+    waits: list[float], capsys: pytest.CaptureFixture[str]
+) -> None:
+    configure_logging()
+    seen: list[httpx2.Request] = []
+    responses: list[httpx2.Response | Exception] = [
+        httpx2.Response(429, headers={"Retry-After": "86400", **COST_HEADERS}),
+        _ok(),
+    ]
+
+    with pytest.raises(PaperSourceError) as caught:
+        _source(_sequence(responses, seen), config=_no_jitter()).fetch_journal_page(QUERY, None)
+
+    # 只送一次、不等待；不是額度停下。
+    assert len(seen) == 1
+    assert waits == []
+    assert type(caught.value) is PaperSourceError
+    [call] = caught.value.calls
+    assert (call.http_status, call.cost_usd, call.remaining_usd, call.limit_usd) == (
+        429,
+        Decimal("0.0001"),
+        Decimal("0.9871"),
+        Decimal(1),
+    )
+    message = str(caught.value)
+    assert "HTTP 429" in message
+    assert "86400" in message
+    assert "120" in message
+    out = capsys.readouterr()
+    assert FAKE_KEY not in message + repr(caught.value) + out.out + out.err
+    assert "api.openalex.example" not in message
+    assert caught.value.__cause__ is None
+
+
+def test_retry_after_over_the_cap_keeps_every_earlier_call(waits: list[float]) -> None:
+    # 503（一般退避等 1 秒）之後的 429 要等一天：停下，兩次嘗試都帶著，不再送第三次。
+    seen: list[httpx2.Request] = []
+    responses: list[httpx2.Response | Exception] = [
+        httpx2.Response(503),
+        httpx2.Response(429, headers={"Retry-After": "86400"}),
+        _ok(),
+    ]
+
+    with pytest.raises(PaperSourceError) as caught:
+        _source(_sequence(responses, seen), config=_no_jitter()).fetch_journal_page(QUERY, None)
+
+    assert len(seen) == 2
+    assert waits == [1.0]
+    assert [call.http_status for call in caught.value.calls] == [503, 429]
+
+
+def test_quota_reached_wins_over_a_long_retry_after(waits: list[float]) -> None:
+    # 額度已到時照樣是「額度停下」（不算失敗），不是超過等待上限的失敗。
+    seen: list[httpx2.Request] = []
+    responses: list[httpx2.Response | Exception] = [
+        httpx2.Response(429, headers={"Retry-After": "86400", **_quota_headers("0")}),
+        _ok(),
+    ]
+
+    with pytest.raises(QuotaReachedError) as caught:
+        _source(_sequence(responses, seen), config=_no_jitter()).fetch_journal_page(QUERY, None)
+
+    assert len(seen) == 1
+    assert waits == []
+    assert [call.http_status for call in caught.value.calls] == [429]
+
+
+def test_retry_after_within_the_cap_is_waited_in_full(waits: list[float]) -> None:
+    # 等於上限（120）與上限內（7）都照對方給的秒數等，再重試。
+    seen: list[httpx2.Request] = []
+    responses: list[httpx2.Response | Exception] = [
+        httpx2.Response(429, headers={"Retry-After": "120"}),
+        httpx2.Response(429, headers={"Retry-After": "7"}),
+        _ok(),
+    ]
+
+    page = _source(_sequence(responses, seen), config=_no_jitter()).fetch_journal_page(QUERY, None)
+
+    assert len(seen) == 3
+    assert waits == [120.0, 7.0]
+    assert [call.http_status for call in page.calls] == [429, 429, 200]
 
 
 # --- 重試途中額度到了就停（Codex 審查第 1 點）----------------------------------------------

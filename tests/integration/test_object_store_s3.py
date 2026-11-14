@@ -201,15 +201,35 @@ def test_429_waits_the_seconds_given_by_retry_after(client: Any, waits: list[flo
     assert waits == [60.0]
 
 
-def test_retry_after_is_capped(client: Any, waits: list[float]) -> None:
-    # 對方給極大值（一天）時最多等 retry_after_max 秒，不卡住工作。
-    store = _timed_store(client, retry_after_max=30)
+def test_retry_after_over_the_cap_fails_without_waiting_or_resending(
+    client: Any, waits: list[float]
+) -> None:
+    # 對方要等一天、超過 retry_after_max：不等、不提早重送，原本的錯誤直接往上丟
+    # （Codex 補複查、Kevin 2026-11-14 決定；以前是截短成 30 秒就重送）。
+    store = _timed_store(client, attempts=3, retry_after_max=30)
     seen = _fail_first(client, "GetObject", [(503, "SlowDown", {"Retry-After": "86400"})])
     client.put_object(Bucket=BUCKET, Key=KEY, Body=b"data")
 
-    assert store.get(KEY) == b"data"
+    with pytest.raises(ClientError) as caught:
+        store.get(KEY)
+
+    assert caught.value.response["Error"]["Code"] == "SlowDown"
+    assert len(seen) == 1
+    assert waits == []
+    message = str(caught.value)
+    for secret in ("s3.us-east-1.amazonaws.com", "test-access-key", "test-secret-key"):
+        assert secret not in message
+
+
+def test_retry_after_equal_to_the_cap_is_waited_in_full(client: Any, waits: list[float]) -> None:
+    store = _timed_store(client, attempts=3, retry_after_max=30)
+    seen = _fail_first(client, "PutObject", [(429, "SlowDown", {"Retry-After": "30"})])
+
+    store.put(KEY, b"data", content_type=RAW_CONTENT_TYPE)
+
     assert len(seen) == 2
     assert waits == [30.0]
+    assert store.get(KEY) == b"data"
 
 
 def test_without_retry_after_uses_configured_backoff(client: Any, waits: list[float]) -> None:
@@ -244,7 +264,9 @@ def test_backoff_reads_retry_after_from_the_error_response() -> None:
         )
 
     assert store._backoff(client_error(429, {"retry-after": "60"})) == 60.0
-    assert store._backoff(client_error(503, {"Retry-After": "500"})) == 120
+    # 等於上限照等；超過上限不重試（不提早重送）。
+    assert store._backoff(client_error(503, {"Retry-After": "120"})) == 120
+    assert store._backoff(client_error(503, {"Retry-After": "500"})) is False
     assert store._backoff(client_error(503, {})) is True
     assert store._backoff(ClientError({"Error": {"Code": "AccessDenied"}}, "PutObject")) is False
     assert store._backoff(ValueError("x")) is False
