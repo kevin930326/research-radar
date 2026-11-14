@@ -5,6 +5,7 @@ from urllib.parse import urlsplit
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationInfo, field_validator
 
 from radar.domain.jobs import WORKER_HEARTBEAT_SECONDS
+from radar.domain.policy import CloudPolicy
 from radar.domain.weekly_run import DEFAULT_MAX_FAILURES
 
 DATABASE_URL_SCHEMES = frozenset({"postgresql", "postgresql+psycopg"})
@@ -132,6 +133,36 @@ class Settings(BaseModel):
     object_store_retry_wait_max: float = Field(default=5.0, gt=0, le=300)
     object_store_retry_wait_jitter: float = Field(default=0.5, ge=0, le=60)
     object_store_retry_after_max: int = Field(default=30, ge=0, le=600)
+    # 送雲端的放行（AD-9、ADR-0029）：付費全文與上傳的 PDF 內容可不可以送 Anthropic／Cloudflare。
+    # 預設關；圖書館回覆允許時只改這個設定，不改程式。
+    paywalled_fulltext_llm: bool = False
+    # Anthropic 的 API key。只有要呼叫 LLM 的指令與工作需要；缺了由 bootstrap 在組裝時回報。
+    anthropic_api_key: SecretStr | None = Field(default=None, min_length=1)
+    # 一次呼叫的逾時（秒）與最多嘗試幾次（含第一次；adapter 裡的 stamina 重試，
+    # SDK 自己的重試關掉）。
+    anthropic_timeout: int = Field(default=60, ge=1, le=600)
+    anthropic_attempts: int = Field(default=3, ge=1, le=10)
+    # Anthropic 重試的等待（秒，Conventions「重試、逾時、速率」）：只重試逾時、限流、服務端錯誤與
+    # 連線錯誤；一般是指數退避，從 initial 開始每次加倍、最多 max，再加 0～jitter 秒的抖動；
+    # 對方回 Retry-After 時照它等，要等的超過 retry_after_max 就不再重試（不提早重送）。
+    anthropic_retry_wait_initial: float = Field(default=1.0, gt=0, le=60)
+    anthropic_retry_wait_max: float = Field(default=10.0, gt=0, le=300)
+    anthropic_retry_wait_jitter: float = Field(default=1.0, ge=0, le=60)
+    anthropic_retry_after_max: int = Field(default=60, ge=0, le=600)
+
+    @property
+    def cloud_policy(self) -> CloudPolicy:
+        """送雲端的放行要看的設定（交給 `clear_for_cloud`）。"""
+        return CloudPolicy(paywalled_fulltext_llm=self.paywalled_fulltext_llm)
+
+    @field_validator("anthropic_api_key")
+    @classmethod
+    def _check_anthropic_api_key(cls, value: SecretStr | None) -> SecretStr | None:
+        # 帶空白或換行的 key 會變成不合法的 HTTP 標頭，送出時被當成連線錯誤一直重試；
+        # 在讀設定時擋下。訊息是固定句子，不帶值。
+        if value is not None and any(ch.isspace() for ch in value.get_secret_value()):
+            raise ValueError("不能含空白或換行")
+        return value
 
     @field_validator("object_store_endpoint_url")
     @classmethod

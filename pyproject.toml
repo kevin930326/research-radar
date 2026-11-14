@@ -5,6 +5,7 @@ description = "Research Radar：追蹤資管頂尖期刊新論文的研究助理
 requires-python = ">=3.14,<3.15"
 dependencies = [
     "alembic==1.20.1",
+    "anthropic==2.7.0",
     "boto3==1.44.1",
     "fastapi==0.162.5",
     "httpx2==2.16.0",

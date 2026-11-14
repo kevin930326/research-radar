@@ -18,8 +18,10 @@ from radar.repo.db import Database
 from radar.repo.migrations import MigrationScripts, read_schema_state, upgrade_to_head
 
 if TYPE_CHECKING:
-    # 只給型別註記用：OpenAlex 與物件儲存的 adapter（boto3 約 11 MB）在 build_* 函式裡才 import，
-    # api 行程為了 build_readiness_probes import 這個模組時不會載入它們（mem_limit 很緊）。
+    # 只給型別註記用：OpenAlex、物件儲存（boto3 約 11 MB）與 Anthropic 的 adapter 在 build_*
+    # 函式裡才 import，api 行程為了 build_readiness_probes import 這個模組時不會載入它們
+    # （mem_limit 很緊）。
+    from radar.adapters.anthropic import AnthropicLlmProvider
     from radar.adapters.object_store import S3ObjectStore
     from radar.adapters.openalex import OpenAlexSource
 
@@ -215,4 +217,27 @@ def build_object_store(settings: Settings) -> S3ObjectStore:
         wait_max=settings.object_store_retry_wait_max,
         wait_jitter=settings.object_store_retry_wait_jitter,
         retry_after_max=settings.object_store_retry_after_max,
+    )
+
+
+def build_llm_provider(settings: Settings) -> AnthropicLlmProvider:
+    """Anthropic 的 `LlmProvider`（逾時、重試設定來自 `RADAR_ANTHROPIC_*`）。不連線。
+
+    用完要 `close()`（或用 `with`）。
+
+    Raises:
+        ConfigError: 沒有設定 `RADAR_ANTHROPIC_API_KEY`；訊息只列環境變數名稱。
+    """
+    if settings.anthropic_api_key is None:
+        raise ConfigError([f"缺少環境變數 {env_name('anthropic_api_key')}"])
+    from radar.adapters.anthropic import AnthropicLlmProvider
+
+    return AnthropicLlmProvider(
+        settings.anthropic_api_key.get_secret_value(),
+        timeout=settings.anthropic_timeout,
+        attempts=settings.anthropic_attempts,
+        retry_wait_initial=settings.anthropic_retry_wait_initial,
+        retry_wait_max=settings.anthropic_retry_wait_max,
+        retry_wait_jitter=settings.anthropic_retry_wait_jitter,
+        retry_after_max=settings.anthropic_retry_after_max,
     )
