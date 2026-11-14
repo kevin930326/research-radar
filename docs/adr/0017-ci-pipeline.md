@@ -91,6 +91,10 @@ Story 1.1 之前沒有 CI：檢查只在 Kevin 的 Mac 手動跑，映像只在 
 - **GHCR 的標籤只增不減**：每個分支的每次 push 都會多三個標籤（`<sha>-amd64`、`<sha>-arm64`、`<sha>`），目前沒有保留期或清理規則；私有 package 的儲存空間算在帳號的額度裡。要不要設清理規則、保留多久，留給 Kevin 決定。
 - **gitleaks、pip-audit 升版要手動改**：gitleaks 的版本與 SHA-256 在 workflow；pip-audit 跟著 `uv.lock`。
 
+## Kevin 2026-11-14 的確認
+
+- **CI 對所有分支的 push 都跑**（不縮成只跑 `main` 與 PR）、**GHCR 的舊標籤先不清理**：Kevin 2026-11-14 接受（「取捨」最後兩項留給 Kevin 決定的事）。分鐘數或儲存空間吃緊時再改。
+
 ## 名詞
 
 - **原生執行機**：CPU 架構和要建的映像一樣的 CI 機器（amd64 用 Intel／AMD 的機器、arm64 用 Arm 的機器），不靠模擬。

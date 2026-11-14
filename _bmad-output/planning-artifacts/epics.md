@@ -999,7 +999,7 @@ So that 抓到一半出事時，資料庫裡的論文資料完全不受影響。
 **Acceptance Criteria:**
 
 **Given** `services/weekly_update.py` 是唯一建立快照的地方，第一次匯入就是它的第一次執行（AD-19）
-**When** 執行 `radar enqueue weekly_update`（或直接執行的 `radar weekly-update` `[ASSUMPTION]`）
+**When** 執行 `radar enqueue weekly-update`（或直接執行的 `radar weekly-update` `[ASSUMPTION]`）
 **Then** 寫一筆 `weekly_run`（狀態 `fetching`），依 `config/journals.yaml` 逐本抓取
 **And** 抓取階段只寫 `raw/`、`raw_fetch` 與 `ingest_staging`（解析好的結果），論文資料表的筆數不變（有測試）
 **And** 同一時間只能有一筆 `fetching`（部分唯一索引）；`weekly_run` 在 `sweep` 的登記清單加一列（AR-17）
@@ -1086,7 +1086,7 @@ So that 資料保持最新，我不用每週手動執行。
 
 **Acceptance Criteria:**
 
-**Given** `deploy/crontab` 有一行每週執行 `radar enqueue weekly_update`
+**Given** `deploy/crontab` 有一行每週執行 `radar enqueue weekly-update`
 **When** 執行第二次以後的每週更新
 **Then** 依期刊整本重掃，不用 OpenAlex「只給有更新的」篩選（AD-25）
 **And** 新的論文在套用時寫進新快照的 `first_snapshot_id`；已有的論文不改
