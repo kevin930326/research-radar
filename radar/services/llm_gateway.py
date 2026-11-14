@@ -11,7 +11,8 @@
 5. 取得執行資格的短交易：advisory lock → 再問一次 `should_run`（有 `active`、平常流程的
    `rejected` 或 `running` 就 `SKIPPED`）→ 有 `llm_result_pending` 的 run 就改回 `running` 接續，
    否則新增 `running` 的 `derivation_run`（部分唯一索引兜底），立刻 commit。評估（帶
-   `eval_run_id`）不問 `should_run`、不受 running 索引限制，只接續同一個 `eval_run_id` 的 run。
+   `eval_run_id`）不問 `should_run`、不受 running 索引限制；同一個 `eval_run_id` 已經有 `running`
+   時 `SKIPPED`，也只接續同一個 `eval_run_id` 的 run。
 6. 呼叫模型（不開著交易；接續時跳過 6、7）。暫時性錯誤 → run `failed`、`TRANSIENT_FAILURE`；
    設定錯 → run `failed` 後原樣丟出。
 7. 自己的短交易記 `llm_call`（有 usage 才記；費用由 `domain/pricing.py` 算），連同模型回的文字
@@ -385,10 +386,11 @@ def _acquire(
         # 先查 running 再查表頭：READ COMMITTED 下兩句各自取快照，別人的表頭與 run 改 succeeded
         # 在同一個交易 commit。先查表頭再查 running 的話，對方剛好在兩句之間 commit 時兩句都查不到，
         # 就會再付一次錢；這個順序下一定看得到其中一個。
-        if eval_run_id is None and (
-            find_running_derivation_run_id(viewer, connection, key) is not None
-            or find_blocking_ai_result(viewer, connection, key) is not None
-        ):
+        # 評估也查 running（只看同一個 eval_run_id）：別人剛把 pending 改回 running、離開鎖去
+        # 驗證時，這裡找不到 pending，不擋就會新增 run、再付一次錢。評估不查表頭（`should_run`）。
+        if find_running_derivation_run_id(viewer, connection, key, eval_run_id) is not None:
+            return None
+        if eval_run_id is None and find_blocking_ai_result(viewer, connection, key) is not None:
             return None
         # 已經付過錢、只差寫結果的 run：改回 running，從存下的輸出接續（不再呼叫模型）。
         resumed = update_derivation_run_resumed(connection, key, eval_run_id)

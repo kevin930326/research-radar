@@ -154,8 +154,15 @@ deferred:
 - 2026-11-15（依此更正，協調者轉達 2.1 第五次確認審查的結論）：模板放行改成「loader 讀整個檔 → policy 的 `clear_prompt_file` 核對 domain 寫死的雜湊常數（`radar/domain/prompt_hashes.py`）→ 拿掉設定區、放行本文」，`clear_for_cloud` 拒收 `PROMPT_TEMPLATE`。這一條取代 2.1 spec deferred 第 51 行與 ADR-0029 第 115～117 行的延後做法（不由 policy 讀檔、雜湊清單不從參數收）；ADR-0029 的決定段不改，記錄在 ADR-0030 決定 7、11。另外：`_FROZEN_SCHEMAS` 改唯讀並加架構測試；`test_prompt_template_source.py` 的比對判定只算直接運算元；送出的凍結 schema 字串 sha256 記進 `derivation_run.params.output_schema_sha256`。Intent 與 AC 不變（AC 的「登記檔」現在指 `prompt_hashes.py`）。
 
 - 2026-11-15（Codex 主審查，協調者轉達）：（1）記帳後驗證或寫結果失敗時，重試會再呼叫模型、再付一次錢 → `llm_call` 加存模型輸出（`output_text`／`output_reject_reason`），記帳後出錯的 run 標 `failed`＋`llm_result_pending`，下一次同一組鍵在取得資格的交易裡把它改回 `running`、從存下的輸出接續驗證與寫入，不再呼叫模型；sweep 改看 `updated_at`（接續時重設），已存輸出的逾時 run 也標 `llm_result_pending`。（2）`call_mode=BATCH` 改成明確拒絕（ValueError），Batch 記入 deferred。（3）加架構測試 `test_prompt_registry_history.py`：拿 main 歷史上的登記檔比，已登記的版本不能刪、不能改雜湊。Intent 與 AC 不變（I/O 表「結果寫入失敗」那列的「盡量把 run 改 failed」照樣成立，原因代碼從 `llm_gateway_error` 改成 `llm_result_pending`）。ADR-0030 加選項 6、決定 14、15，取捨段補接續的限制。
+- 2026-11-15（Codex 複查 `037bb4e`，協調者轉達）：（1）評估流程也查 running（只看同一個 `eval_run_id`），接續中的評估不會被同一個評估的新請求再付一次錢；（2）登記歷史比對只取 main 第一父提交那條線（`git rev-list --first-parent`），分支內部的中間版本不算，HEAD 還沒拿到的 main 版本不算刪除。Intent 與 AC 不變；ADR-0030 決定 4、7、14 補充。
 
 ## Review Triage Log
+
+### 2026-11-15 — Codex 複查（`037bb4e`）
+- 原文：`docs/runs/epic-2a/reviews/2.2-codex-recheck-output.md`。
+- findings:
+  - `[high]` `[patch]` 同一個評估並行重試：第一個把 pending 改回 running、離開鎖去驗證，第二個找不到 pending，評估又跳過 running 檢查 → 新增 run、再付錢 — `find_running_derivation_run_id` 加 `eval_run_id` 參數（`IS NOT DISTINCT FROM`），`_acquire` 對平常流程與評估都先查同一個流程的 running。加並行測試 `test_new_request_while_resume_is_validating_is_skipped`（同評估、平常流程兩種）與 `test_other_eval_is_not_blocked_by_resuming_eval`。沒有另加含 `eval_run_id` 的部分唯一索引：advisory lock＋鎖內檢查已經排除，索引只會把漏網的情況變成例外。
+  - `[medium]` `[patch]` 歷史比對沒限定 main 主線，merge commit 合併後會讀到分支內同一版本的兩個雜湊而永久失敗 — 改用 `--first-parent`；刪除只在快照已在 HEAD 歷史裡時才算。加三個 tmp repo 測試（merge commit 合併後下一個分支通過、進 main 後再改失敗；疊在未合併分支上的下一個分支；main 在分岔後新增的版本不算刪除）。
 
 ### 2026-11-15 — Codex 主審查
 - 原文：`docs/runs/epic-2a/reviews/2.2-codex-output.md`；分流：`docs/runs/epic-2a/reviews/2.2-triage.md`。
@@ -303,3 +310,5 @@ with database.transaction() as connection:
 - `call_mode=BATCH` 明確拒絕，Batch 記入 deferred。
 - 新架構測試守 prompt 登記只增不改（和 main 的歷史比）。
 - 這一輪依協調者指示不跑 integration、不起 `radar-ci`：新寫與改過的整合測試只過了 ruff 與 mypy，交 CI 跑。
+
+**Codex 複查之後（2026-11-15）**：修了 1 筆 high、1 筆 medium（見 Review Triage Log「Codex 複查」）：評估接續中也擋同一個評估的新請求；登記歷史比對只看 main 第一父提交那條線。這一輪同樣沒有在本機跑 integration。

@@ -232,9 +232,12 @@ def find_derivation_run(
 
 
 def find_running_derivation_run_id(
-    viewer: SystemViewer, connection: Connection, key: RunKey
+    viewer: SystemViewer, connection: Connection, key: RunKey, eval_run_id: uuid.UUID | None
 ) -> uuid.UUID | None:
-    """這組鍵有沒有平常流程（不是評估）的 `running`；有就回它的 id。
+    """這組鍵有沒有同一個流程的 `running`；有就回它的 id。
+
+    `eval_run_id` 是 None 時只看平常流程（不是評估）的 run；有值時只看同一個評估的 run（別的評估、
+    平常流程都不算）。
 
     Raises:
         TypeError: `viewer` 不是 `SystemViewer`。
@@ -245,10 +248,11 @@ def find_running_derivation_run_id(
             f"SELECT id FROM derivation_run WHERE {visible}"
             " AND paper_id = :paper_id AND task = :task AND prompt_version = :prompt_version"
             " AND model = :model AND input_sha256 = :input_sha256"
-            " AND status = 'running' AND eval_run_id IS NULL"
+            " AND status = 'running'"
+            " AND eval_run_id IS NOT DISTINCT FROM CAST(:eval_run_id AS uuid)"
             " LIMIT 1"
         ),
-        _key_params(key),
+        {**_key_params(key), "eval_run_id": eval_run_id},
     ).scalar_one_or_none()
     return None if value is None else uuid.UUID(str(value))
 
