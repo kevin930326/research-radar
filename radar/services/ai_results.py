@@ -10,7 +10,10 @@
    - 重算目前輸入的 `input_sha256`、目前的 prompt 版本、目前該用的模型，有一個對不上
      → `superseded`（晚到的結果不蓋掉新的）；
    - 都對 → 先把舊的 `active` 標成 `superseded`，再新增 `active`。
-3. `derivation_run` 還是 `running` 時，同一個交易改成 `succeeded`（被 sweep 改成 `failed` 的維持
+3. 內容：不是拒收、工作是 `zh_summary`、輸出是 `ZhSummaryOutput` 時，用
+   `normalize_zh_summary` 從（閘門已經驗證過的）輸出得出四欄內容一起寫；呼叫端不能直接給內容。
+   拒收一律不寫內容（資料庫的 CHECK 也擋）。
+4. `derivation_run` 還是 `running` 時，同一個交易改成 `succeeded`（被 sweep 改成 `failed` 的維持
    `failed`；原因是 `llm_result_pending` 的改成 `llm_run_expired`：已經寫了表頭，不再接續）。
 
 核對與切換在同一個交易、先鎖論文：兩筆結果同時要啟用時一定一筆等另一筆做完，最後有效的是
@@ -19,21 +22,27 @@
 
 import uuid
 
+from pydantic import BaseModel
+
 from radar.domain.ai_outputs import (
     HEADER_TABLES,
     DerivationRun,
     GatewayConfig,
+    LlmTask,
     NewAiResult,
     NoLlmInputError,
     OutputLang,
     PaperLlmSource,
     ResultStatus,
     RunStatus,
+    ZhSummaryContent,
     build_llm_input,
 )
 from radar.domain.errors import ErrorCode
 from radar.domain.fingerprints import input_sha256
+from radar.domain.llm_schemas import ZhSummaryOutput
 from radar.domain.permissions import Action, require
+from radar.domain.validators.zh_summary import normalize_zh_summary
 from radar.domain.viewer import SystemViewer, Viewer
 from radar.repo.ai_outputs import create_ai_result, update_ai_results_superseded
 from radar.repo.db import Database
@@ -62,10 +71,12 @@ def record_llm_result(
     reject_reason: ErrorCode | None,
     taxonomy_version: str | None = None,
     context_values_version: str | None = None,
+    output: BaseModel | str | None = None,
 ) -> ResultStatus:
     """把一次模型呼叫的結果寫成一列表頭，回寫成的狀態（見模組說明的順序）。
 
     `reject_reason` 有值代表被拒收；`abstract_id` 是送出時用的那一筆摘要（只看標題時是 None）。
+    `output` 是閘門驗證過的輸出（Pydantic 模型；沒有 schema 時是文字），內容欄位從它得出。
     `taxonomy_version`／`context_values_version` 是**現在**的分類表與情境值清單版本（重算目前輸入
     的指紋用；2.5／2.6 由呼叫端在寫入時讀設定傳進來）。
 
@@ -111,6 +122,7 @@ def record_llm_result(
                 lang=lang,
                 status=status,
                 reject_reason=reject_reason,
+                zh_summary=_zh_summary_content(task, reject_reason, output),
             ),
         )
         if run.status is RunStatus.RUNNING:
@@ -118,6 +130,17 @@ def record_llm_result(
         elif run.failure_reason == ErrorCode.LLM_RESULT_PENDING:
             update_derivation_run_pending_settled(connection, run.id)
     return status
+
+
+def _zh_summary_content(
+    task: LlmTask, reject_reason: ErrorCode | None, output: BaseModel | str | None
+) -> ZhSummaryContent | None:
+    """要和表頭一起寫的中文重點內容：只有不是拒收、`zh_summary`、輸出是 `ZhSummaryOutput` 時有。"""
+    if reject_reason is not None or task is not LlmTask.ZH_SUMMARY:
+        return None
+    if not isinstance(output, ZhSummaryOutput):
+        return None
+    return normalize_zh_summary(output)
 
 
 def _still_current(

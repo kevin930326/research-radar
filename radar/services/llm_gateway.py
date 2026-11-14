@@ -605,6 +605,7 @@ def _write_result(
             reject_reason=reject_reason,
             taxonomy_version=job.taxonomy_version,
             context_values_version=job.context_values_version,
+            output=output,
         )
     except BaseException as exc:
         _try_fail_run(database, run_id)

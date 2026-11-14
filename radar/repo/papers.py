@@ -51,6 +51,7 @@ from radar.domain.papers import (
     UpsertResult,
     check_storable_text,
 )
+from radar.domain.processing import ProcessingFacts
 from radar.domain.scope import ScopeSettings, is_in_scope
 from radar.domain.viewer import Viewer
 from radar.repo.db import Database
@@ -272,6 +273,34 @@ def find_paper_llm_source(
             content=row["abstract_content"],
         )
     return PaperLlmSource(paper_id=row["id"], title=row["title"], abstract=abstract)
+
+
+def find_paper_processing_facts(
+    viewer: Viewer, connection: Connection, paper_id: uuid.UUID
+) -> ProcessingFacts | None:
+    """`domain/processing.plan_for` 要看的三件事：`origin`、`excluded_reason`、目前的摘要內容
+    （`is_current` 的那一筆，沒有時是 None）。不存在或 `viewer` 看不到都回 None。"""
+    visible = visible_papers(viewer, alias="paper")
+    row = (
+        connection.execute(
+            text(
+                "SELECT paper.origin, paper.excluded_reason, a.content AS abstract_content"
+                " FROM paper LEFT JOIN paper_abstract AS a"
+                " ON a.paper_id = paper.id AND a.is_current"
+                f" WHERE {visible} AND paper.id = :id"
+            ),
+            {"id": paper_id},
+        )
+        .mappings()
+        .one_or_none()
+    )
+    if row is None:
+        return None
+    return ProcessingFacts(
+        origin=PaperOrigin(row["origin"]),
+        excluded_reason=row["excluded_reason"],
+        abstract=row["abstract_content"],
+    )
 
 
 def find_known_external_ids(

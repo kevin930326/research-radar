@@ -1,0 +1,13 @@
+# 中文重點的驗證門檻（PRD FR-14、NFR-4、ADR-0032）：domain 驗證（radar/domain/validators/zh_summary.py）
+# 讀這份。三個鍵都要寫，只收整數；改了不必升 prompt 版本，也不算進輸入指紋。
+
+# 每欄正規化後（NFC、連續空白縮成一個、去頭尾）最多幾個字元；任一欄超過就整筆拒收。
+# PRD FR-14 的預設是 80 字。
+max_chars_per_field: 80
+
+# 摘要至少幾句（以 . ! ? 加空白切）才檢查逐句翻譯：輸出句數不少於摘要句數就拒收。
+# 4 句以內的摘要，逐句翻譯和合格的四欄重點分不出來，所以不檢查（ADR-0032）。最少 2。
+translation_min_abstract_sentences: 5
+
+# 每欄漢字至少佔（漢字數＋英文詞數）的百分之幾，低於就當作不是繁中（1～100）。
+min_cjk_percent: 50

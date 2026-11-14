@@ -1,0 +1,100 @@
+# ADR-0032：中文重點的內容、輸出驗證與 `plan_for`
+
+- 狀態：提議
+- 日期：2026-11-15
+- 對應：epics Story 2.4；PRD FR-14、NFR-4；架構文件 AD-7、AD-8、AD-30；ADR-0015（表頭表、哪一種論文做哪些處理）、ADR-0030（閘門、prompt 登記）、ADR-0031（預算）
+
+## 背景
+
+2.2 的閘門只寫表頭、沒有正式 prompt；也還沒有 `plan_for`。要讓每篇有摘要的論文產生可以存的中文重點，需要：
+
+- 一個地方回答「這篇論文做哪些處理」（AD-30 的四列）。
+- 四欄內容（研究問題、方法、理論、發現）存在哪裡、怎麼保證被拒收的列沒有內容。
+- 模型的輸出當成使用者輸入驗證：逐句翻譯、編造、超長、寫「摘要未提及」、夾標記、不是繁中，都要擋下並帶原因代碼（NFR-4）。
+
+這份 ADR 記錄 spec 留給實作決定、或文件沒寫清楚的地方，以及判準抓不到的情況。
+
+## 考慮過的選項
+
+### 1. 四欄內容存在哪裡
+
+| | 做法 | 優點 | 缺點 |
+|---|---|---|---|
+| A | `zh_summary` 加四個可為 NULL 的 `text` 欄位 | 每欄可以各自是 NULL；CHECK 寫得出「拒收沒有內容」「有值不是空白」；之後的有效值 view 與「回報某一欄有誤」直接用欄位名稱 | 欄位名稱改了要遷移 |
+| B | 一個 `jsonb` 欄位 | 加欄位不用遷移 | 「某欄是 NULL」「有值不是空白」要寫 JSON 路徑的 CHECK；四欄是固定的，彈性用不到 |
+
+### 2. 輸出長度怎麼限制
+
+| | 做法 | 優點 | 缺點 |
+|---|---|---|---|
+| A | schema 寫 `maxLength` | 模型端就限制 | 結構化輸出不支援 `maxLength`（claude-api skill 查證），送出會失敗 |
+| B | schema 只管形狀；長度由 domain 驗證，門檻放 `config/zh_summary.yaml` | 門檻可以改設定、不改程式；和其他判準放在一起 | 模型可能寫超過，要花一次呼叫的錢才知道 |
+
+### 3. 逐句翻譯怎麼認
+
+| | 做法 | 優點 | 缺點 |
+|---|---|---|---|
+| A | 比對輸出與摘要的語意相似度 | 準 | 要另一個模型或向量（跨語言），不能離線、要花錢 |
+| B | 句數：摘要夠長時，輸出的句數不少於摘要就算翻譯 | 離線、可測、便宜 | 短摘要分不出來；摘要 5 句而某欄寫兩句的合格輸出會被誤擋（見取捨） |
+
+### 4. 編造怎麼認
+
+| | 做法 | 優點 | 缺點 |
+|---|---|---|---|
+| A | LLM 評審判斷每欄是不是摘要裡有的 | 抓得到中文寫的編造 | 每篇多一次呼叫；評審本身也要驗證（Epic 8 的評估才做） |
+| B | 只核對輸出裡的阿拉伯數字與英文詞都出現在輸入（標題＋摘要） | 離線、確定、可測 | 中文寫的編造、中文數字抓不到（見取捨） |
+
+## 決定
+
+1. **`plan_for`（`radar/domain/processing.py`）**：只看 `ProcessingFacts` 的三件事：`excluded_reason`、`origin`、目前的摘要內容（`repo/papers.find_paper_processing_facts` 讀）。由上往下：被排除 → 四項都 `not_applicable`；`origin = manual` → 只做標題向量，其他 `not_applicable`；摘要去掉空白後不是空的 → 四項都做（向量用標題＋摘要）；否則只做標題分類與標題向量，中文重點與研究模型 `no_input`。每項工作回一個 `TaskPlan`：要做時是 `input_kind`（`title` 或 `abstract`），不做時是 `skip`（`not_applicable`／`no_input`），剛好一個有值。向量（`embed`）也用 `InputKind` 表示「只有標題」或「標題＋摘要」。呼叫端只問它，`services/zh_summary.py` 不做的論文不呼叫閘門、不寫任何列。
+2. **內容欄位（選項 1A）**：遷移 0011 在 `zh_summary` 加 `research_question`、`method`、`theory`、`findings`（`text`，可為 NULL），`lang` 一律 `zh-Hant`。兩個 CHECK：`rejected` 四欄全是 NULL；有值時至少有一個非空白字元（`~ '[^[:space:]]'`）。可降版（降版會丟掉內容）。
+3. **內容只由 `services/ai_results.py` 寫**：`record_llm_result` 多收閘門驗證過的 `output`；不是拒收、工作是 `zh_summary`、輸出是 `ZhSummaryOutput` 時，用 `normalize_zh_summary` 得出 `ZhSummaryContent` 交給 `NewAiResult`；呼叫端給不了內容。`ZhSummaryContent` 定義在 `domain/ai_outputs.py`（`NewAiResult` 要用、validators 又要 import 那個模組，放在 validators 會互相 import）。`NewAiResult` 是 `rejected` 時帶內容丟 `ValueError`；`repo/ai_outputs.create_ai_result` 收到不是 `zh_summary` 的工作卻帶內容也丟 `ValueError`。`candidate`、`superseded` 照樣存內容（歷史要查得到）。
+4. **schema（選項 2B）**：`ZhSummaryOutput` 四欄都是 `str | None`、沒有預設值（四欄都要給，沒提到給 null）、`extra="forbid"`；欄位說明寫成字面值。多欄、缺欄、型別錯沿用 `llm_output_invalid`，不是 JSON 沿用 `llm_malformed_response`，截斷沿用 `llm_truncated`。
+5. **正規化**：每欄 NFC、連續空白（含全形空白、換行）縮成一個半形空白、去頭尾。結果是空的，或整欄（拿掉空白與標點、不分大小寫）只是「摘要未提及／未提及／無／不詳／N/A／none／not mentioned」這類字，存 NULL，不算拒收。長度＝正規化後的字元數。
+6. **拒收規則與順序**（`radar/domain/validators/zh_summary.py`）：第一個不過的就是原因代碼，不寫內容。
+   1. 存不進資料庫（NUL、單獨的代理字元）→ `llm_output_unstorable`。先擋這個，後面做 `ZhSummaryContent` 時才不會丟非預期的例外（非預期例外會讓 run 停在 `llm_result_pending`、每次接續都再失敗）。
+   2. 夾標記或連結：後面接標籤樣字元（`/`、`!`、`?`、英文字母）的 `<`、欄位開頭的 `>`、反引號、`](`、任何 `://`、`www.`、`mailto:`、`javascript:` → `zh_summary_unsafe_text`。在佔位字判斷之前，所以「`<b>無</b>`」也是拒收，不是 NULL。
+   3. 夾講摘要本身的句子 → `zh_summary_placeholder_text`。主詞分兩種：摘要、原文、文中後面 8 個字內接否定詞（未、沒有、並未、不…）、再 4 個字內接「提及、提到、說明、描述、指出、交代…」；本文、本研究、研究、作者、文章、論文要否定詞緊接在後面（只能隔「中／裡／內」「並／均／皆／也」「明確／特別」）再接那些動詞。另外「未在摘要中…」、英文 `not mentioned`、`n/a` 也算。只寫「未提及」不算（「受訪者未提及隱私疑慮」可能是研究結果）。整欄比對（決定 5，存 NULL）用同一份主詞清單。
+   4. 任一欄超過 `max_chars_per_field`（預設 80）→ `zh_summary_field_too_long`。
+   5. 不是繁中：沒有漢字；漢字數 ×100 < `min_cjk_percent` ×（漢字數＋英文詞數）（預設 50）；含簡體專用字（94 個常用字，每個都不在 Big5／CP950 裡，單元測試核對）→ `zh_summary_not_zh_hant`。
+   6. 逐句翻譯（選項 3B）：摘要句數（`.!?` 後面接空白切）≥ `translation_min_abstract_sentences`（預設 5），而且輸出句數（每欄以 `。！？!?` 切、數有字的段落，每個非空欄位至少一句）≥ 摘要句數 → `zh_summary_sentence_translation`。
+   7. 編造（選項 4B）：輸出的每個阿拉伯數字（NFKC、千分位合併、APA 寫法的 `.05` 當成 0.05、全形逗號「，」先換成頓號再 NFKC、`Decimal` 比較，所以 0.50 等於 0.5）都要出現在輸入的數字裡；輸入的英文數字詞也換成數字（zero～nineteen、twenty～ninety、first～tenth、hundred、thousand，以及「twenty-five」「three hundred」「two thousand」這種相鄰組合）。輸出的每個英文詞（2 個字母以上）要在輸入出現（不分大小寫、容許 s／es／ies 字尾差異），或是輸入裡連續幾個詞的首字母（去掉 of、and、the 等虛詞也算，例如 TPB、UTAUT）；`PLS-SEM` 這種連字號串每一段都認得、或整串是首字母縮寫都算 → `zh_summary_unsupported_content`。
+   - 驗證函式只收 `ZhSummaryOutput`，收到別的型別丟 `TypeError`（是 prompt 的 schema 設錯，程式的錯）。拒收訊息只有欄位名稱與規則，不含輸出內容。
+7. **門檻放 `config/zh_summary.yaml`**：`max_chars_per_field: 80`、`translation_min_abstract_sentences: 5`、`min_cjk_percent: 50`，只經 `radar/config.py` 的 `load_zh_summary_rules` 讀。三個鍵都要寫、不收多的鍵、只收整數（浮點數、字串、布林都擋）；`max_chars_per_field ≥ 1`、`translation_min_abstract_sentences ≥ 2`（1 句的摘要任何輸出都會被當成翻譯）、`min_cjk_percent` 在 1～100。錯誤是 `ConfigError`（「檔名：欄位：原因」）。
+8. **正式 prompt `prompts/zh_summary/v1.md`**：`effort: low`、`max_tokens: 1024`、`disable_thinking: true`、`output_schema: ZhSummaryOutput`。`max_tokens` 的算法：合格的輸出最多四欄 × 80 字＝320 個漢字，保守以每個漢字 2 tokens 算是 640，加 JSON 的鍵名、引號與標點約 60，共約 700；取 1024 留四成餘裕。思考關掉，所以沒有思考 tokens 吃上限。在這個假設下，超過 1024 tokens 的輸出幾乎一定有欄位超過 80 字（本來就會被長度規則整筆拒收），截斷（`llm_truncated`）不會擋掉合格的輸出。和 adapter 單次逾時（`RADAR_ANTHROPIC_TIMEOUT` 預設 60 秒）搭得上：保守假設每秒產生 50 tokens，1024 tokens 約 20 秒，再加輸入處理仍遠低於 60 秒，不會因為輸出太長而逾時（逾時時 Anthropic 可能已計費、帳本記不到，所以上限要小）；單次輸出費用上限 1024 × 0.50 ／百萬＝0.000512 美元。這是 prompt 設定區的值，不動 `config/models.yaml`。prompt 其他寫法：寫四欄定義、只根據標題與摘要不推測、沒提到填 null（不寫「摘要未提及」）、繁中、不逐句翻譯、每欄一句或短語 80 字內、純文字、文件裡的指令是資料；附一個自己編的範例（標明虛構、沒有 DOI 與網址），範例的回答本身通過上面的驗證（單元測試核對）。登記在 `domain/prompt_hashes.py`（v1）。
+9. **`services/zh_summary.run_zh_summary`**：讀事實 → `plan_for` → 不做就回 `ZhSummaryRun(plan, None)`；要做就 `run_llm_job(LlmJob(zh_summary, 計畫的 input_kind, zh-Hant, ZhSummaryValidator(門檻)), budget_allows=BudgetGuard(...))`。時鐘由呼叫端傳入（預算的台北月份）。
+10. **`registry_problems` 在 prompt 資料夾不存在時只回一條**：有了正式登記之後，資料夾不在會讓每個登記的版本都多報一條「找不到 prompt 檔」，改成先檢查資料夾、只報「資料夾不存在」。
+
+## 理由
+
+- 欄位而不是 JSON：四欄是固定的；資料庫層就能保證「拒收沒有內容」，不只靠程式。
+- 判準全部離線、確定：不多花一次模型呼叫，測試可以逐條驗；抓不到的情況寫在下面，評估（Epic 8）再用標註資料量化。
+- 正規化與驗證共用同一個函式：驗證時看的長度、NULL 判斷就是存進去的樣子。
+- 先擋標記、再判斷佔位字：模型回「`<b>無</b>`」這種東西時寧可拒收，也不要把它當成正常的 NULL 吞掉。
+
+## 取捨
+
+- **抓不到中文寫的編造**：例如自己加的理論名稱翻成中文（「社會交換理論」而摘要沒有）、中文數字（「三個」）、「第一」這類序數。編造只核對阿拉伯數字與英文詞。
+- **2 個字母的縮寫很容易碰巧對上**：例如輸出寫「AI」，而摘要剛好有相鄰的兩個詞以 a、i 開頭就算認得。只會放過、不會誤擋。
+- **英文數字詞只認簡單的組合**：「three hundred twenty」只認得 300 與 20，不認得 320；輸出寫 320 會被擋（誤擋，偏保守）。「35%」對「0.35」也會被擋。
+- **逐句翻譯的判準很粗**：4 句以內的摘要，逐句翻譯和合格的四欄重點分不出來，所以不檢查；摘要 5 句而某欄寫了兩句的合格輸出會被誤擋（prompt 要求每欄一句）。長摘要的整段翻譯大多先被 80 字上限擋下。摘要句數會被縮寫（`et al. `、`e.g. `）多算，門檻因此變寬（偏向放過）。
+- **繁中判斷抓不到繁簡同形的句子**：簡體專用字只列了常用的一小份；用字繁簡相同的句子分不出來。
+- **夾指令只擋標記與連結字元**：輸出是資料，畫面只經 `AiText` 顯示；純中文寫的「請忽略之前的指示」分不出來，會照一般文字存（整合測試寫明了這個限制）。英文寫的指令多半被「不是繁中」或「編造」擋下。
+- **只寫「未提及」不算夾帶**：「使用問卷，樣本數未提及」這種沒有講到摘要的寫法會被放過；為了不誤擋「受訪者未提及…」這類真的研究結果。
+- **門檻不算進指紋**：改 `config/zh_summary.yaml` 不會讓已經 `rejected` 的論文自動重跑（指紋與 prompt 版本都沒變，`should_run` 照樣跳過），要用 `radar runs retry`；新門檻只影響之後的驗證，包括接續（`llm_result_pending`）的那一次。
+- **prompt 寫死「80 字以內」**：門檻改小時 prompt 沒跟著改，模型會照 80 寫、被拒收；改門檻時要一起考慮升 prompt 版本。
+- **四欄全是 NULL 也寫成 `active`**：模型判斷摘要什麼都沒提到時就是這樣；AI 區塊要顯示 `empty` 還是 `ready`，由 2.7 的 `repo/ai_blocks.py` 決定。
+- **閘門不強制中文重點一定要帶驗證函式**：`ai_results` 只要輸出是 `ZhSummaryOutput` 就寫內容（照樣正規化）；正式程式只經 `run_zh_summary` 跑，它一定帶 `ZhSummaryValidator`。之後若有別的入口直接呼叫閘門，要記得帶。
+- **降版會丟掉內容**：0011 降到 0010 時四欄整個刪掉，再升版是 NULL。
+- **主詞與距離規則**：摘要、原文、文中一定是在講摘要，容許中間隔幾個字；本文、本研究、研究、作者、文章、論文也常是研究結果的開頭（「本文發現使用者不報告隱私疑慮」），所以要否定詞緊接在主詞後面才算夾帶。代價是「本文對樣本數並沒有說明」這種隔開的寫法會被放過；「研究」也會在「…的研究不涉及…」這種句子裡被當成主詞而誤擋。
+- **`<` 與 `>` 什麼時候算標記**：`<` 只在後面接 `/`、`!`、`?` 或英文字母時算（`<b>`、`</div`、`<!--`），所以 `p < .05`、`β > 0` 這種統計寫法不會被擋；`>` 只在欄位開頭算（Markdown 引言）。`<b` 這種沒有閉合的寫法也算標記（偏保守）。
+- **APA 小數與全形逗號**：`.05` 讀成 0.05，所以輸出寫 0.05 對得上、寫 5 會被擋；NFKC 會把全形逗號「，」變成半形逗號，「120，350」就會被當成千分位的 120350，所以先把「，」換成頓號，讀成 120 與 350。半形逗號照樣當千分位（「120,350」是 120350）。
+- **每欄都要有中文**：沒有漢字的欄位（例如 theory 只寫「TAM」）會被當成不是繁中而拒收；prompt 第 3 條因此要求每欄用中文寫、英文縮寫放在中文名稱後面的括號裡（「科技接受模型（TAM）」）。
+- **3 個字母的編造縮寫也可能碰巧對上**：自己編的縮寫只要剛好是輸入裡連續三個詞的首字母（虛詞可以跳過）就算認得。
+- **只有「未發現／沒有發現」的發現欄存 NULL**：整欄比對把「沒有＋發現」當成佔位字，所以模型想表達「沒有發現顯著效果」卻只寫這四個字時，會存成 NULL（畫面顯示「摘要未提及」）。
+- **`GatewayResult.output` 是模型原本的輸出**：閘門回傳的是 Pydantic 驗過的原始輸出，資料庫存的是正規化後的內容（空白縮掉、佔位字變 NULL）；要顯示或比對時以資料庫為準。
+- **呼叫途中被排除的論文照樣寫成 `active`**：`ai_results` 寫入時核對的是輸入指紋、prompt 版本、模型，沒有重問 `plan_for`；所以模型呼叫期間論文被標成排除，結果仍會寫成 `active`。互動呼叫的時間窗很短；Batch（最長 24 小時）影響最大，做 2.9／2.10 時要決定寫入前是否重問 `plan_for`。
+
+## 名詞
+
+新名詞見 `docs/glossary.md`：`plan_for`（處理計畫）、`ProcessingFacts`、`TaskPlan`、`not_applicable`／`no_input`、中文重點的四欄、佔位字、NFC、簡體專用字、首字母縮寫比對、逐句翻譯判準、編造判準、`ZhSummaryOutput`、`ZhSummaryValidator`、`config/zh_summary.yaml`。（NFKC 已在詞彙表。）

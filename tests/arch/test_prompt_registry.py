@@ -1,6 +1,6 @@
 """prompt 檔與登記（`radar/domain/prompt_hashes.py`）一定對得上（AD-8、ADR-0030「依此更正」）：
 
-- 真的 `prompts/`：`registry_problems` 是空的（2.2 還沒有正式的 prompt，登記是空的）。
+- 真的 `prompts/`：`registry_problems` 是空的（正式登記的 `zh_summary` v1 與檔案對得上）。
 - 登記只有一份：「改了沒升版就失敗」核對的、和 policy 放行模板時核對的是同一張表
   （`domain/prompt_hashes.py`），這裡也證明 policy 真的只認那張表。
 - 在 tmp 示範：改了模板或設定區卻沒升版（沒有新增 `v<N+1>.md`、也沒更新登記）會被抓到，

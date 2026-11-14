@@ -46,3 +46,14 @@ class ErrorCode(StrEnum):
     # 模型已經回應、帳與輸出已存進 `llm_call`，但驗證或寫結果時出錯（或 sweep 判定逾時）：下一次
     # 同一組鍵從存下的輸出接續驗證與寫入，不再呼叫模型（ADR-0030）
     LLM_RESULT_PENDING = "llm_result_pending"
+
+    # 中文重點的 domain 驗證（`radar/domain/validators/zh_summary.py`，Story 2.4、ADR-0032）：
+    # 整筆拒收、不寫內容
+    ZH_SUMMARY_UNSAFE_TEXT = "zh_summary_unsafe_text"  # 欄位含 `<`、`>`、網址、反引號、`](`
+    # 欄位裡夾「摘要未提及…」這類講摘要本身的句子（整欄只是「未提及」這類字的存 NULL，不算拒收）
+    ZH_SUMMARY_PLACEHOLDER_TEXT = "zh_summary_placeholder_text"
+    ZH_SUMMARY_FIELD_TOO_LONG = "zh_summary_field_too_long"  # 正規化後超過 max_chars_per_field
+    ZH_SUMMARY_NOT_ZH_HANT = "zh_summary_not_zh_hant"  # 沒有漢字、漢字比例太低或含簡體專用字
+    ZH_SUMMARY_SENTENCE_TRANSLATION = "zh_summary_sentence_translation"  # 看起來是逐句翻譯
+    # 輸出有輸入（標題＋摘要）沒有的阿拉伯數字或英文詞（編造）
+    ZH_SUMMARY_UNSUPPORTED_CONTENT = "zh_summary_unsupported_content"
