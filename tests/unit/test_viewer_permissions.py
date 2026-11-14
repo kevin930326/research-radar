@@ -119,9 +119,22 @@ def test_member_sees_lab_visible_papers() -> None:
     assert visible_papers(ADMIN, alias="p") == '"p".lab_visible'
 
 
-def test_system_sees_everything_and_public_nothing_yet() -> None:
+def test_system_sees_everything_and_public_sees_counted_papers() -> None:
     assert visible_papers(SYSTEM) == "TRUE"
-    assert visible_papers(PUBLIC) == "FALSE"
+    assert visible_papers(PUBLIC) == (
+        "EXISTS (SELECT 1 FROM counted_paper AS visible_counted"
+        ' WHERE visible_counted.id = "paper".id)'
+    )
+    assert visible_papers(PUBLIC, alias="c") == (
+        'EXISTS (SELECT 1 FROM counted_paper AS visible_counted WHERE visible_counted.id = "c".id)'
+    )
+
+
+@pytest.mark.parametrize("viewer", [PUBLIC, MEMBER, SYSTEM])
+def test_alias_cannot_be_the_subquery_alias(viewer: Viewer) -> None:
+    # 和 EXISTS 子查詢裡的別名相同時，條件會變成「自己等於自己」而永遠成立。
+    with pytest.raises(ValueError, match="visible_counted"):
+        visible_papers(viewer, alias="visible_counted")
 
 
 @pytest.mark.parametrize("alias", ["", "Paper", "p.x", 'p"', "1p", "p; DROP TABLE paper", "a" * 64])

@@ -16,6 +16,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Integer,
+    RowMapping,
     Table,
     Text,
     UniqueConstraint,
@@ -74,8 +75,32 @@ def get_snapshot_of_weekly_run(
         .mappings()
         .one_or_none()
     )
-    if row is None:
-        return None
+    return None if row is None else _snapshot(row)
+
+
+def find_latest_published_snapshot(viewer: SystemViewer, connection: Connection) -> Snapshot | None:
+    """目前已發佈的快照（`published` 裡 `number` 最大的一筆）；一個都還沒發佈就回 None。
+
+    Raises:
+        TypeError: `viewer` 不是 `SystemViewer`。
+    """
+    visible = visible_to_system_only(viewer)  # 不是 SystemViewer 就在碰連線之前丟錯
+    row = (
+        connection.execute(
+            text(
+                f"SELECT {_COLUMNS} FROM snapshot"
+                f" WHERE {visible} AND status = :published"
+                " ORDER BY number DESC LIMIT 1"
+            ),
+            {"published": SnapshotStatus.PUBLISHED.value},
+        )
+        .mappings()
+        .one_or_none()
+    )
+    return None if row is None else _snapshot(row)
+
+
+def _snapshot(row: RowMapping) -> Snapshot:
     return Snapshot(
         id=row["id"],
         number=row["number"],

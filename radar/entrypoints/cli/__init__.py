@@ -15,6 +15,8 @@ from radar.config import (
     load_migration_settings,
     load_settings,
 )
+from radar.domain.coverage import render_coverage_report
+from radar.domain.cube import UnknownJournalError
 from radar.domain.database_requirements import DatabaseRequirementsError
 from radar.domain.import_report import render_import_report
 from radar.domain.jobs import UnknownJobError, find_scheduled_job
@@ -27,6 +29,7 @@ from radar.entrypoints.bootstrap import (
     build_object_store,
 )
 from radar.entrypoints.logging_config import configure_logging
+from radar.services.coverage import get_coverage
 from radar.services.import_report import get_import_report
 from radar.services.jobs import enqueue_scheduled_job
 from radar.services.migrations import migrate_database
@@ -223,6 +226,42 @@ def weekly_run_report(
             _fail("還沒有任何每週更新", [])
         _fail(f"找不到這次每週更新：{weekly_run_id}", [])
     for line in render_import_report(report):
+        typer.echo(line)
+
+
+@app.command("coverage")
+def coverage() -> None:
+    """印出最新已發佈快照的覆蓋率（只讀，不改任何資料）。
+
+    快照編號與截至日期（台北時間）、每本期刊每年的收錄篇數（total）與有摘要的篇數
+    （with_abstract）、依目前的摘要來源分的篇數。只算 counted_paper 裡的論文（追蹤範圍內、
+    沒有被排除、已算進已發佈的快照）。還沒有已發佈的快照、計數裡有設定沒有的期刊、設定錯誤或
+    讀不到資料庫：退出碼 1；資料庫的錯誤只印類別，不印連線字串。
+    """
+    configure_logging()
+    try:
+        settings = load_settings()
+        domain_config = load_domain_config()
+    except ConfigError as exc:
+        log.error("設定錯誤，無法讀取覆蓋率", problems=exc.problems)
+        _fail("設定錯誤，沒有讀取覆蓋率：", exc.problems)
+    try:
+        database = build_database(settings, pool_size=database_pool_size(settings, "cli"))
+        report = get_coverage(SystemViewer(), database, journals=domain_config.journals)
+    except UnknownJournalError as exc:
+        log.error("計數裡有設定沒有的期刊", issn_ls=list(exc.issn_ls))
+        _fail(
+            f"計數裡有設定沒有的期刊（ISSN-L：{'、'.join(exc.issn_ls)}）；"
+            "config/journals.yaml 改過但論文的追蹤範圍還沒重算",
+            ["重算追蹤範圍的 radar rescope 還沒做；在那之前先把那本期刊加回設定"],
+        )
+    except Exception as exc:
+        # 例外訊息可能含主機與帳號，只記類別名稱。
+        log.error("讀取覆蓋率失敗", error_type=type(exc).__name__)
+        _fail(f"讀取覆蓋率失敗（{type(exc).__name__}）；細節見日誌", [])
+    if report is None:
+        _fail("還沒有已發佈的快照", [])
+    for line in render_coverage_report(report):
         typer.echo(line)
 
 
