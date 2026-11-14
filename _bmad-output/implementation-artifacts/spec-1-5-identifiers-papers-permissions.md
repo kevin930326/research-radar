@@ -170,6 +170,15 @@ deferred: []
   - `[medium]` `[patch]` 沒有測試驗證「先鎖再比抓取時間」— 新增 `test_concurrent_older_write_waits_for_lock_then_is_stale`；暫時拿掉 `FOR UPDATE` 時這個測試失敗（較舊的寫入回 `updated`、蓋掉較新的），還原後通過。
   - `[low]` `[patch]` DOI 網址解碼只抓 `UnicodeDecodeError` — 改抓 `UnicodeError`，統一丟 `InvalidIdentifierError`；補邊界案例與 `@example`，性質測試的任意文字改成會混入單獨的代理字元。
 
+### 2026-11-14 — Codex 複查（PR #42）
+- 複查 99226d7：第 1（死結，鎖順序論證成立）、2、3、4、6、7、8 條確認修好、沒有放寬斷言；另提 4 點，全部 patch（都在 `tests/arch/test_repo_rules.py`）。
+- findings:
+  - `[medium]` `[patch]` 第 5 條殘留：只確認讀取函式把 viewer 傳給 visibility，沒確認回傳的條件用進查詢 — 改成要求 visibility 函式的回傳值直接組進查詢（f-string、`text()` 的參數、和字串相接），或指派給一個名稱、之後在被重新指派之前於同一層組進查詢；只在巢狀函式裡呼叫不算。補違規案例：結果丟掉、指派了卻沒用（只當綁定參數）、被覆蓋、在指派之前用、只在巢狀函式內呼叫；另拿真的 `papers.py` 把查詢裡的 `{condition}` 拿掉，確認會被抓到；正式的 `get_paper()`、`find_stuck_ids()` 通過。舊假模組裡把條件直接 `return` 的四個函式也因此多報一條（預期清單加上，沒有刪任何既有項目）。
+  - `[medium]` `[patch]` import 名稱表不分作用範圍，函式內的局部 import 會蓋掉別的函式的解析 — 改成依作用範圍解析（`_scoped_names`）：模組層的 import 全模組看得到，函式（含 lambda、類別）裡的 import 只在那一層和它裡面的巢狀函式看得到。actor、可見條件、SQLAlchemy 寫入三個檢查都改用它。補回歸案例：另一函式內 `from pathlib import Path as write` 不再讓頂層 `write`（repo 寫入）漏報；函式內局部 import 的寫入函式只算在那個函式。
+  - `[low]` `[patch]` 把所有從 SQLAlchemy 匯入的物件都當 SQL 模組 — `.insert`／`.update`／`.delete` 只在前面那段解析成 sqlalchemy 本身或子模組時才算（實際 import 確認是模組）；一般物件（`PopulateDict.update(cache, {...})`、`util.PopulateDict.update(...)`）不報。補非寫入案例與函式內局部 import 的寫入案例。
+  - `[low]` `[patch]` 排除型別註記時漏掉 `ast.TypeAlias` — 型別別名右側與型別參數納入排除；補 `type PaperReader = MemberViewer | SystemViewer` 不被報的案例。
+  - 三個新案例都確認過：換回 99226d7 的檢查函式時，結果不符（漏報或誤報）。
+
 ## Design Notes
 
 - **為什麼「先新增、認領不到再撤回」而不是 advisory lock**：第一次匯入的套用在一個交易裡寫約一萬篇，每個識別碼一把 advisory lock 會超過共用鎖表（實測 21,000 把就 `out of shared memory`）。`INSERT … ON CONFLICT DO NOTHING` 遇到另一個交易還沒 commit 的同一識別碼會等它結束，結束後就知道誰贏；輸的一方退回保存點，自己還沒 commit 的論文與識別碼當下作廢，別人看不到。「先鎖論文、再依優先序佔識別碼，撤回時不留識別碼」讓只寫一篇的交易之間不會死結；一個交易寫很多篇時仍可能死結（ADR-0020 取捨，Codex 審查 PR #42 後修正）。

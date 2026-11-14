@@ -14,6 +14,7 @@
 """
 
 import ast
+import functools
 import importlib
 import inspect
 import pkgutil
@@ -89,22 +90,55 @@ def _resolve_from(module: str, node: ast.ImportFrom, *, is_package: bool) -> str
     return f"{base}.{node.module}" if node.module else base
 
 
-def _imported_names(module: str, tree: ast.Module, *, is_package: bool) -> dict[str, str]:
-    """import 綁定的本地名稱 → 完整路徑（模組，或 `模組.名稱`）。"""
-    names: dict[str, str] = {}
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                if alias.asname:
-                    names[alias.asname] = alias.name
-                else:  # `import a.b.c` 綁定的是 `a`
-                    root = alias.name.split(".")[0]
-                    names[root] = root
-        elif isinstance(node, ast.ImportFrom):
-            source = _resolve_from(module, node, is_package=is_package)
-            for alias in node.names:
-                names[alias.asname or alias.name] = f"{source}.{alias.name}"
-    return names
+_SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)
+
+
+def _own_nodes(scope: ast.AST) -> list[ast.AST]:
+    """`scope` 自己這一層的節點：巢狀的函式、lambda、類別本身算在內，但不往它們裡面走。"""
+    own: list[ast.AST] = []
+    pending = list(ast.iter_child_nodes(scope))
+    while pending:
+        node = pending.pop()
+        own.append(node)
+        if not isinstance(node, _SCOPES):
+            pending.extend(ast.iter_child_nodes(node))
+    return own
+
+
+def _scoped_names(
+    module: str, tree: ast.Module, *, is_package: bool
+) -> dict[int, Mapping[str, str]]:
+    """每個節點看得到的 import 名稱表（本地名稱 → 完整路徑：模組，或 `模組.名稱`）。
+
+    模組層的 import 整個模組都看得到；函式（含 lambda、類別）裡的 import 只在那一層和它裡面的
+    巢狀函式看得到，不會蓋掉別的函式的解析結果。
+    """
+    result: dict[int, Mapping[str, str]] = {}
+
+    def visit(scope: ast.AST, inherited: Mapping[str, str]) -> None:
+        own = _own_nodes(scope)
+        names = dict(inherited)
+        for node in own:
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.asname:
+                        names[alias.asname] = alias.name
+                    else:  # `import a.b.c` 綁定的是 `a`
+                        root = alias.name.split(".")[0]
+                        names[root] = root
+            elif isinstance(node, ast.ImportFrom):
+                source = _resolve_from(module, node, is_package=is_package)
+                for alias in node.names:
+                    names[alias.asname or alias.name] = f"{source}.{alias.name}"
+        result[id(scope)] = names
+        for node in own:
+            result[id(node)] = names
+        for node in own:
+            if isinstance(node, _SCOPES):
+                visit(node, names)
+
+    visit(tree, {})
+    return result
 
 
 def _full_name(expression: ast.AST, names: Mapping[str, str]) -> str | None:
@@ -316,7 +350,7 @@ VIEWER_CLASS_NAMES = frozenset({"MemberViewer", "PublicViewer", "SystemViewer", 
 
 
 def _annotation_nodes(tree: ast.Module) -> set[int]:
-    """型別註記裡的每個節點（`viewer: SystemViewer` 這種寫法不算判斷身分）。"""
+    """型別註記與型別別名右側的每個節點（`viewer: SystemViewer` 這種寫法不算判斷身分）。"""
     annotations: list[ast.AST] = []
     for node in ast.walk(tree):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -332,6 +366,8 @@ def _annotation_nodes(tree: ast.Module) -> set[int]:
                 annotations.append(node.returns)
         elif isinstance(node, ast.AnnAssign):
             annotations.append(node.annotation)
+        elif isinstance(node, ast.TypeAlias):  # `type PaperReader = MemberViewer | SystemViewer`
+            annotations += [node.value, *node.type_params]
     return {id(inner) for annotation in annotations for inner in ast.walk(annotation)}
 
 
@@ -349,15 +385,16 @@ def visibility_problems(module: str, source: str, *, is_package: bool = False) -
     if module == VISIBILITY_MODULE:
         return []
     tree = ast.parse(source)
-    names = _imported_names(module, tree, is_package=is_package)
+    names_of = _scoped_names(module, tree, is_package=is_package)
     annotations = _annotation_nodes(tree)
+    parents = {id(child): node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
 
     judged = [
         (node.lineno, ast.unparse(node))
         for node in ast.walk(tree)
         if isinstance(node, ast.expr)
         and id(node) not in annotations
-        and _judges_viewer(node, names)
+        and _judges_viewer(node, names_of[id(node)])
     ]
     problems = [
         f"{module}:{line}：自己判斷讀者身分（{code}），改用 radar.repo.visibility"
@@ -373,11 +410,93 @@ def visibility_problems(module: str, source: str, *, is_package: bool = False) -
         arguments = [*node.args.posonlyargs, *node.args.args]
         if not arguments or arguments[0].arg != "viewer":
             continue  # 命名規則另外抓
-        if not any(_passes_viewer_to_visibility(call, names) for call in ast.walk(node)):
+        # 只看函式自己這一層：只在巢狀函式裡呼叫不算。
+        own = _own_nodes(node)
+        calls = [call for call in own if _passes_viewer_to_visibility(call, names_of[id(call)])]
+        if not calls:
             problems.append(
                 f"{module}.{node.name}：讀取函式要把 viewer 交給 radar.repo.visibility 的函式"
             )
+        elif not any(_condition_used(call, own, parents, names_of) for call in calls):
+            problems.append(
+                f"{module}.{node.name}：visibility 回的可見條件要用進查詢"
+                "（f-string、text() 或字串相接），不能丟掉或在用之前被覆蓋"
+            )
     return problems
+
+
+_SQL_TEXT = frozenset({"sqlalchemy.text", "sqlalchemy.sql.text", "sqlalchemy.sql.expression.text"})
+
+
+def _position(node: ast.AST) -> tuple[int, int]:
+    return (getattr(node, "lineno", 0), getattr(node, "col_offset", 0))
+
+
+def _in_query(
+    node: ast.AST, parents: Mapping[int, ast.AST], names_of: Mapping[int, Mapping[str, str]]
+) -> bool:
+    """`node` 在同一個語句裡被組進查詢：f-string、`text()` 的參數，或和字串相接。"""
+    current = node
+    while not isinstance(current, ast.stmt):
+        parent = parents.get(id(current))
+        if parent is None:
+            return False
+        if isinstance(parent, ast.JoinedStr):
+            return True
+        if (
+            isinstance(parent, ast.Call)
+            and current is not parent.func
+            and _full_name(parent.func, names_of[id(parent.func)]) in _SQL_TEXT
+        ):
+            return True
+        if (
+            isinstance(parent, ast.BinOp)
+            and isinstance(parent.op, ast.Add)
+            and any(
+                isinstance(side, ast.JoinedStr)
+                or (isinstance(side, ast.Constant) and isinstance(side.value, str))
+                for side in (parent.left, parent.right)
+            )
+        ):
+            return True
+        current = parent
+    return False
+
+
+def _condition_used(
+    call: ast.AST,
+    own: list[ast.AST],
+    parents: Mapping[int, ast.AST],
+    names_of: Mapping[int, Mapping[str, str]],
+) -> bool:
+    """visibility 函式的回傳值用進了查詢：直接組進查詢，或指派給一個名稱、
+    之後（被重新指派之前）在同一層把這個名稱組進查詢。
+    """
+    if _in_query(call, parents, names_of):
+        return True
+    statement = parents.get(id(call))
+    if isinstance(statement, ast.Assign) and len(statement.targets) == 1:
+        target = statement.targets[0]
+    elif isinstance(statement, ast.AnnAssign):
+        target = statement.target
+    else:
+        return False
+    if statement.value is not call or not isinstance(target, ast.Name):
+        return False
+    after = (statement.end_lineno or 0, statement.end_col_offset or 0)
+    same_name = [node for node in own if isinstance(node, ast.Name) and node.id == target.id]
+    rebinds = sorted(
+        _position(node)
+        for node in same_name
+        if isinstance(node.ctx, (ast.Store, ast.Del)) and _position(node) > after
+    )
+    limit = rebinds[0] if rebinds else (float("inf"), 0)
+    return any(
+        isinstance(node.ctx, ast.Load)
+        and after < _position(node) < limit
+        and _in_query(node, parents, names_of)
+        for node in same_name
+    )
 
 
 def _judges_viewer(node: ast.AST, names: Mapping[str, str]) -> bool:
@@ -484,8 +603,93 @@ def test_visibility_check_catches_each_mistake() -> None:
         "radar.repo.fake:28：自己判斷讀者身分（SystemViewer），改用 radar.repo.visibility",
         "radar.repo.fake:32：自己判斷讀者身分（type(viewer)），改用 radar.repo.visibility",
         "radar.repo.fake.get_by_isinstance：讀取函式要把 viewer 交給 radar.repo.visibility 的函式",
+        # 下面這幾個把條件直接 return、沒有組進查詢，也違反「條件要用進查詢」。
+        f"radar.repo.fake.list_by_match：{UNUSED_CONDITION}",
+        f"radar.repo.fake.count_by_attribute：{UNUSED_CONDITION}",
+        f"radar.repo.fake.find_by_module_alias：{UNUSED_CONDITION}",
         "radar.repo.fake.search_with_someone_else：讀取函式要把 viewer 交給"
         " radar.repo.visibility 的函式",
+        f"radar.repo.fake.visible_by_type：{UNUSED_CONDITION}",
+    ]
+
+
+UNUSED_CONDITION = (
+    "visibility 回的可見條件要用進查詢（f-string、text() 或字串相接），不能丟掉或在用之前被覆蓋"
+)
+
+FAKE_UNUSED_CONDITION_REPO = """
+from sqlalchemy import text
+from radar.domain.viewer import MemberViewer, SystemViewer, Viewer
+from radar.repo.visibility import visible_papers
+
+type PaperReader = MemberViewer | SystemViewer
+
+
+def get_discarded(viewer: Viewer, connection: object) -> object:
+    visible_papers(viewer)
+    return connection.execute(text("SELECT * FROM paper"))
+
+
+def list_bound_but_unused(viewer: Viewer, connection: object) -> object:
+    condition = visible_papers(viewer)
+    return connection.execute(text("SELECT * FROM paper"), {"c": condition})
+
+
+def count_overwritten(viewer: Viewer, connection: object) -> object:
+    condition = visible_papers(viewer)
+    condition = "TRUE"
+    return connection.execute(text(f"SELECT count(*) FROM paper WHERE {condition}"))
+
+
+def find_used_before_binding(viewer: Viewer, connection: object, condition: str) -> object:
+    query = text(f"SELECT * FROM paper WHERE {condition}")
+    condition = visible_papers(viewer)
+    return connection.execute(query)
+
+
+def search_nested_only(viewer: Viewer, connection: object) -> object:
+    def helper() -> object:
+        return text(f"SELECT * FROM paper WHERE {visible_papers(viewer)}")
+
+    return connection.execute(text("SELECT * FROM paper"))
+
+
+def get_assigned_ok(viewer: PaperReader, connection: object) -> object:
+    condition: str = visible_papers(viewer, alias="p")
+    return connection.execute(text(f"SELECT * FROM paper p WHERE {condition}"))
+
+
+def list_concat_ok(viewer: Viewer, connection: object) -> object:
+    condition = visible_papers(viewer)
+    return connection.execute(text("SELECT * FROM paper WHERE " + condition))
+
+
+def count_text_argument_ok(viewer: Viewer, connection: object) -> object:
+    return connection.execute(text(visible_papers(viewer)))
+"""
+
+
+def test_visibility_check_requires_condition_used_in_query() -> None:
+    problems = visibility_problems("radar.repo.fake", FAKE_UNUSED_CONDITION_REPO)
+
+    # 型別別名右側的身分類別（`type PaperReader = ...`）不算判斷身分，不會被報。
+    assert problems == [
+        f"radar.repo.fake.get_discarded：{UNUSED_CONDITION}",
+        f"radar.repo.fake.list_bound_but_unused：{UNUSED_CONDITION}",
+        f"radar.repo.fake.count_overwritten：{UNUSED_CONDITION}",
+        f"radar.repo.fake.find_used_before_binding：{UNUSED_CONDITION}",
+        "radar.repo.fake.search_nested_only：讀取函式要把 viewer 交給 radar.repo.visibility 的函式",
+    ]
+
+
+def test_visibility_check_catches_discarded_condition_in_papers() -> None:
+    # 拿真的 papers.py：呼叫 visible_papers 但查詢裡不放條件，一定要被抓到。
+    real = _repo_sources()["radar.repo.papers"]
+    rewritten = real.replace(" WHERE paper.id = :id AND {condition}", " WHERE paper.id = :id")
+    assert rewritten != real
+
+    assert visibility_problems("radar.repo.papers", rewritten) == [
+        f"radar.repo.papers.get_paper：{UNUSED_CONDITION}"
     ]
 
 
@@ -557,36 +761,42 @@ def _is_sqlalchemy(module: str) -> bool:
     return module == "sqlalchemy" or module.startswith("sqlalchemy.")
 
 
+@functools.cache
+def _is_sqlalchemy_module(full: str) -> bool:
+    """`full` 是 sqlalchemy 本身或它的子模組（不是類別、函式等一般物件）。"""
+    if not _is_sqlalchemy(full):
+        return False
+    try:
+        importlib.import_module(full)
+    except ImportError:
+        return False
+    return True
+
+
 def _sqlalchemy_writer_uses(source: str) -> list[str]:
+    """SQLAlchemy 的寫入建構函式（`insert`／`update`／`delete`）：直接 import 進來的，
+    或經 sqlalchemy 模組、子模組（含別名，依作用範圍解析）取用的。一般物件的 `.update`
+    （例如 `PopulateDict.update(cache, {...})`）不算。
+    """
     tree = ast.parse(source)
-    # 綁到 sqlalchemy、它的子模組或其中名稱的本地名稱（`import sqlalchemy.sql` 綁的是 `sqlalchemy`；
-    # `from sqlalchemy.sql import expression as sql` 綁的是 `sql`）。
-    bound = {"sqlalchemy"}
+    names_of = _scoped_names("radar.repo", tree, is_package=True)
     uses: list[str] = []
     for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            bound |= {
-                alias.asname or alias.name.split(".")[0]
-                for alias in node.names
-                if _is_sqlalchemy(alias.name)
-            }
-        elif (
+        if (
             isinstance(node, ast.ImportFrom)
             and node.level == 0
             and _is_sqlalchemy(node.module or "")
         ):
-            for alias in node.names:
-                if alias.name in _SQLALCHEMY_WRITERS:
-                    uses.append(f"from {node.module} import {alias.name}")
-                else:
-                    bound.add(alias.asname or alias.name)
+            uses += [
+                f"from {node.module} import {alias.name}"
+                for alias in node.names
+                if alias.name in _SQLALCHEMY_WRITERS
+            ]
     for node in ast.walk(tree):
         if not (isinstance(node, ast.Attribute) and node.attr in _SQLALCHEMY_WRITERS):
             continue
-        root: ast.AST = node.value
-        while isinstance(root, ast.Attribute):
-            root = root.value
-        if isinstance(root, ast.Name) and root.id in bound:
+        owner = _full_name(node.value, names_of[id(node.value)])
+        if owner is not None and _is_sqlalchemy_module(owner):
             uses.append(ast.unparse(node))
     for node in ast.walk(tree):
         # `paper_table.insert()` 這類 Table 的寫入方法（不帶參數的呼叫）。
@@ -651,6 +861,15 @@ def test_writer_check_catches_each_mistake() -> None:
         "radar.repo.i": "import sqlalchemy.sql\nX = sqlalchemy.sql.expression.insert",
         "radar.repo.j": "import sqlalchemy.sql.dml as dml\nX = dml.delete",
         "radar.repo.k": "from sqlalchemy import sql\nX = sql.expression.update",
+        # 一般物件的 `.update`（不是寫入建構函式）不算；函式裡的局部 import 也看得到。
+        "radar.repo.l": (
+            "from sqlalchemy.util import PopulateDict\n"
+            "from sqlalchemy import util\n"
+            "def f(cache):\n"
+            "    PopulateDict.update(cache, {'a': 1})\n"
+            "    util.PopulateDict.update(cache, {'b': 2})"
+        ),
+        "radar.repo.m": "def f(t):\n    import sqlalchemy as sa\n    return sa.update(t)",
         # docstring 與 ON CONFLICT ... DO UPDATE SET 不算。
         "radar.repo.g": (
             '"""這裡會 INSERT INTO paper。"""\n'
@@ -670,6 +889,7 @@ def test_writer_check_catches_each_mistake() -> None:
         "改用 text() SQL",
         "radar.repo.j：不要用 SQLAlchemy 的寫入（dml.delete），改用 text() SQL",
         "radar.repo.k：不要用 SQLAlchemy 的寫入（sql.expression.update），改用 text() SQL",
+        "radar.repo.m：不要用 SQLAlchemy 的寫入（sa.update），改用 text() SQL",
         "paper：有兩個以上的寫入者（radar.repo.a、radar.repo.b）",
     ]
 
@@ -749,7 +969,7 @@ def actor_problems(module: str, source: str, *, is_package: bool = False) -> lis
     第一個參數卻不是 `actor` 的公開函式。相對 import 先解析成完整模組路徑。
     """
     tree = ast.parse(source)
-    names = _imported_names(module, tree, is_package=is_package)
+    names_of = _scoped_names(module, tree, is_package=is_package)
 
     functions = {
         node.name: node
@@ -758,7 +978,7 @@ def actor_problems(module: str, source: str, *, is_package: bool = False) -> lis
     }
 
     def is_repo_writer(node: ast.AST) -> bool:
-        full = _full_name(node, names)
+        full = _full_name(node, names_of[id(node)])
         if full is None:
             return False
         owner, _, name = full.rpartition(".")
@@ -909,4 +1129,41 @@ def test_relative_imports_resolve_from_package_init() -> None:
     assert actor_problems("radar.services.sub", source, is_package=True) == []
     assert actor_problems("radar.services", source, is_package=True) == [
         "radar.services.f：用到寫入類 repo 函式，第一個參數要叫 actor"
+    ]
+
+
+FAKE_SERVICES_LOCAL_IMPORTS = """
+from radar.repo.papers import upsert_by_external_id as write
+
+
+def ingest(database, paper):
+    write(database, paper)
+
+
+def other():
+    from pathlib import Path as write
+
+    return write(".")
+
+
+def local_repo_import(database):
+    from radar.repo.papers import create_manual
+
+    create_manual(database)
+
+
+def local_name_elsewhere(database):
+    create_manual = print
+    create_manual(database)
+"""
+
+
+def test_actor_check_resolves_imports_per_scope() -> None:
+    # 另一個函式裡的 `from pathlib import Path as write` 不能蓋掉模組層的 `write`（repo 寫入）；
+    # 函式裡局部 import 的寫入函式只算在那個函式。
+    problems = actor_problems("radar.services.fake", FAKE_SERVICES_LOCAL_IMPORTS)
+
+    assert problems == [
+        "radar.services.fake.ingest：用到寫入類 repo 函式，第一個參數要叫 actor",
+        "radar.services.fake.local_repo_import：用到寫入類 repo 函式，第一個參數要叫 actor",
     ]
