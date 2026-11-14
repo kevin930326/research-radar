@@ -4,7 +4,9 @@
 
 1. 從資料列推出要送的文字與來源（`build_llm_input`），每段經 `clear_for_cloud` 放行
    → 沒有輸入 `NO_INPUT`；放行擋下 `BLOCKED`（帶原因代碼）。
-2. 預算檢查（注入的 `budget_allows`；真正的 BudgetGuard 在 2.3）→ 不准 `DEFERRED_BUDGET`。
+2. 預算檢查（`budget_allows`；正式程式一律傳 `services/budget.py` 的 `BudgetGuard(...)`，
+   `tests/arch/test_budget_guard_wiring.py` 守；測試可以傳 lambda）→ 不准 `DEFERRED_BUDGET`：
+   不讀 prompt、不寫任何列、不呼叫模型、不算失敗。
 3. 讀 prompt（`prompts/<工作>/v<N>.md`；policy 核對 domain 寫死的雜湊登記才放行）、算
    `input_sha256`、組 `LlmRequest`。
 4. 離線保守估計輸入 token；超過 `max_input_tokens` 而且工作沒允許 → `TOO_LARGE`。
@@ -18,6 +20,9 @@
    拒收（`rejected`＋原因代碼），不重試。
 9. `services/ai_results.py` 鎖論文列、核對後寫入（另一個短交易）。寫入失敗時帳照記，盡量把 run
    改成 `failed`，例外原樣丟出。
+
+預算檢查是「呼叫前看帳本」，帳在第 7 步才記，所以同時在途的呼叫彼此看不到：超支上限＝同時在途的
+呼叫數 × 單次最大費用（ADR-0031）。Anthropic workspace 的每月上限是第二道。
 """
 
 import uuid

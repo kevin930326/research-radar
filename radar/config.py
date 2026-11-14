@@ -9,6 +9,7 @@ from typing import Any, Literal
 import yaml
 from pydantic import BaseModel, SecretStr, ValidationError
 
+from radar.domain.budget import BudgetConfig
 from radar.domain.domain_config import (
     DomainConfig,
     ExclusionRulesConfig,
@@ -160,6 +161,8 @@ KEYWORD_SOURCES_FILE = "keyword_sources.yaml"
 IMPORT_BASELINE_FILE = "import_baseline.yaml"
 # 模型與價格（AD-8、ADR-0009）：只有要呼叫 LLM 的指令與工作讀（`load_models_config`）。
 MODELS_FILE = "models.yaml"
+# 每月預算（NFR-3、ADR-0031）：閘門的 BudgetGuard 與 `radar costs` 讀（`load_budget_config`）。
+BUDGET_FILE = "budget.yaml"
 
 
 def config_dir(environ: Mapping[str, str] | None = None) -> Path:
@@ -233,6 +236,22 @@ def load_models_config(environ: Mapping[str, str] | None = None) -> ModelsConfig
     if problems or models is None:
         raise ConfigError(problems)
     return models
+
+
+def load_budget_config(environ: Mapping[str, str] | None = None) -> BudgetConfig:
+    """讀 `RADAR_CONFIG_DIR` 下的 `budget.yaml`（workspace 上限、熔斷線、各功能預算）並驗證。
+
+    讀法與錯誤格式和 `load_domain_config` 相同（「檔名：欄位路徑：原因」）。
+
+    Raises:
+        ConfigError: 缺檔、不是合法 YAML、鍵寫兩次或內容不對（例如金額寫成數字、負數、缺工作、
+            熔斷線不低於 workspace 上限）。
+    """
+    problems: list[str] = []
+    budget = _load_yaml_model(config_dir(environ), BUDGET_FILE, BudgetConfig, problems)
+    if problems or budget is None:
+        raise ConfigError(problems)
+    return budget
 
 
 def _load_yaml_model[T: BaseModel](

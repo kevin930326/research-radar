@@ -13,7 +13,8 @@ ADR-0030）。
 
 import json
 import uuid
-from datetime import timedelta
+from datetime import datetime, timedelta
+from decimal import Decimal
 
 from sqlalchemy import (
     Boolean,
@@ -233,6 +234,35 @@ def find_running_derivation_run_id(
         _key_params(key),
     ).scalar_one_or_none()
     return None if value is None else uuid.UUID(str(value))
+
+
+def list_llm_costs_by_task(
+    viewer: SystemViewer, connection: Connection, start: datetime, end: datetime
+) -> dict[LlmTask, Decimal]:
+    """`llm_call.created_at` 在 [`start`, `end`) 之間的費用，依 `derivation_run.task` 加總
+    （含評估與 Batch）；沒有帳的工作不在結果裡。預算檢查與 `radar costs` 用。
+
+    Raises:
+        TypeError: `viewer` 不是 `SystemViewer`。
+        ValueError: `start`、`end` 沒有時區，或 `start` 不早於 `end`。
+    """
+    visible = visible_to_system_only(viewer)
+    for moment in (start, end):
+        if moment.tzinfo is None or moment.utcoffset() is None:
+            raise ValueError("start、end 要帶時區（不能是 naive datetime）")
+    if start >= end:
+        raise ValueError("start 要早於 end")
+    rows = connection.execute(
+        text(
+            "SELECT derivation_run.task, sum(llm_call.cost_usd) AS cost_usd"
+            " FROM llm_call JOIN derivation_run ON derivation_run.id = llm_call.run_id"
+            f" WHERE {visible}"
+            " AND llm_call.created_at >= :start AND llm_call.created_at < :end"
+            " GROUP BY derivation_run.task"
+        ),
+        {"start": start, "end": end},
+    ).all()
+    return {LlmTask(row[0]): Decimal(row[1]) for row in rows}
 
 
 # --- 寫入 ---------------------------------------------------------------------------------
