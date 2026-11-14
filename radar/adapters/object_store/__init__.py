@@ -10,8 +10,9 @@
   所以重試日誌不帶主機（D12(c)）。次數用完時：`ClientError` 照舊丟原本的例外（訊息本來就不含
   主機）；連線類的錯誤丟 `ObjectStoreUnavailableError`（訊息只有原本的錯誤類別）。
 - `ClientError` 以外的 botocore 錯誤（`BotoCoreError`，例如 `SSLError`、`ProxyConnectionError`），
-  不論可不可重試，最後一律換成不含網址的 `ObjectStoreUnavailableError`（`from None`）：這些錯誤的
-  訊息常帶端點網址（R2 的帳號 ID），工作失敗的 traceback 會印出來。
+  不論可不可重試，最後一律換成不含網址的 `ObjectStoreUnavailableError`，在 `except` 外面丟，
+  `__cause__`、`__context__` 都是 None：這些錯誤的訊息常帶端點網址（R2 的帳號 ID），工作失敗的
+  traceback 會印出來。
 - 等待與次數的預設值和 `Settings` 的 `object_store_*` 一致；正式程式由 `bootstrap.py` 從設定傳入。
 - 讀不到的鍵丟 `ObjectNotFoundError`。
 """
@@ -206,18 +207,25 @@ class S3ObjectStore:
             ClientError: 不重試的錯誤回應，或可重試的錯誤回應次數用完（原本的例外）。
             ObjectStoreUnavailableError: 連線類的錯誤次數用完，或其他不重試的 botocore 錯誤
                 （`BotoCoreError`）；都不帶原本的例外（訊息可能含端點網址）。
+
+        換成的例外都在 `except` 區塊外面丟：在裡面丟時 `from None` 只設 `__suppress_context__`，
+        `__context__` 仍串著原本含網址的例外，Procrastinate 與日誌可能沿著它印出來。
         """
 
         def once() -> T:
+            error: Exception
             try:
                 return operation()
             except Exception as exc:
                 if is_retryable(exc):
-                    raise _RetryableStoreError(exc) from None
-                if isinstance(exc, BotoCoreError):
-                    raise ObjectStoreUnavailableError(type(exc).__name__, retried=False) from None
-                raise
+                    error = _RetryableStoreError(exc)
+                elif isinstance(exc, BotoCoreError):
+                    error = ObjectStoreUnavailableError(type(exc).__name__, retried=False)
+                else:
+                    raise
+            raise error from None
 
+        original: Exception | None = None
         try:
             for attempt in stamina.retry_context(
                 on=self._backoff,
@@ -230,10 +238,12 @@ class S3ObjectStore:
                 with attempt:
                     return once()
         except _RetryableStoreError as exc:
-            if isinstance(exc.original, ClientError):
-                raise exc.original from None
-            raise ObjectStoreUnavailableError(type(exc.original).__name__) from None
-        raise AssertionError("stamina 用完次數時會丟出最後一個例外，不會走到這裡")
+            original = exc.original
+        if original is None:
+            raise AssertionError("stamina 用完次數時會丟出最後一個例外，不會走到這裡")
+        if isinstance(original, ClientError):
+            raise original from None
+        raise ObjectStoreUnavailableError(type(original).__name__) from None
 
 
 def _retry_after_header(error: Exception) -> str | None:
