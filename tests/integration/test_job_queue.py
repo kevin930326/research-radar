@@ -847,7 +847,10 @@ def test_stale_candidate_out_of_retries_is_not_failed_once_taken_by_healthy_work
 
 
 # 鎖等待測試的期限：連線、每個查詢、等鎖都有上限，資料庫沒回應時也不會讓測試卡住。
+# statement_timeout／lock_timeout 是資料庫那端的期限，資料庫整個沒回應時管不到客戶端；所以主執行緒
+# 碰資料庫的每一步都交給 daemon 執行緒跑、主執行緒最多等 `_STEP_SECONDS`（見 `_within`）。
 _LIMIT_MS = int(WAIT_SECONDS * 1000)
+_STEP_SECONDS = 15.0
 _SESSION_LIMITS = f"-c statement_timeout={_LIMIT_MS} -c lock_timeout={_LIMIT_MS}"
 _POLL_LIMITS = "-c statement_timeout=5000 -c lock_timeout=5000"
 
@@ -862,30 +865,35 @@ def _with_session_limits(url: str) -> str:
 
 
 def _terminate_backends(database: TestDatabase, role: str) -> None:
-    """清理用：結束這個測試資料庫裡 `role` 的所有連線（盡力而為，失敗不蓋掉原本的錯誤）。"""
-    with (
-        contextlib.suppress(psycopg.Error),
-        _bounded_connect(database.admin_url, autocommit=True, options=_POLL_LIMITS) as admin,
-    ):
-        admin.execute(
-            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity"
-            " WHERE datname = current_database() AND usename = %s",
-            (role,),
-        )
+    """清理用：結束這個測試資料庫裡 `role` 的所有連線（盡力而為，失敗或逾時都不蓋掉原本的錯誤）。"""
+
+    def terminate() -> None:
+        with _bounded_connect(database.admin_url, autocommit=True, options=_POLL_LIMITS) as admin:
+            admin.execute(
+                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity"
+                " WHERE datname = current_database() AND usename = %s",
+                (role,),
+            )
+
+    with contextlib.suppress(psycopg.Error, TimeoutError):
+        _within(_STEP_SECONDS, terminate, "清理連線")
 
 
-class _DaemonCall:
+class _DaemonCall[T]:
     """在 daemon 執行緒跑 `func`。它卡住時，測試和 pytest 都不必等它結束（不 join 到底）。"""
 
-    def __init__(self, func: Callable[[], int]) -> None:
+    def __init__(self, func: Callable[[], T], name: str) -> None:
         self._func = func
-        self._value: int | None = None
+        self._name = name
+        self._done = False
+        self._value: T | None = None
         self._error: BaseException | None = None
-        self._thread = threading.Thread(target=self._run, daemon=True, name="sweep-b")
+        self._thread = threading.Thread(target=self._run, daemon=True, name=name)
 
     def _run(self) -> None:
         try:
             self._value = self._func()
+            self._done = True
         except BaseException as exc:  # 交回主執行緒再丟
             self._error = exc
 
@@ -899,14 +907,21 @@ class _DaemonCall:
         if self._thread.is_alive():
             self._thread.join(timeout)
 
-    def result(self, timeout: float) -> int:
+    def result(self, timeout: float) -> T:
         self._thread.join(timeout)
         if self._thread.is_alive():
-            raise TimeoutError(f"連線 B 的 sweep 超過 {timeout} 秒還沒結束")
+            raise TimeoutError(f"{self._name} 超過 {timeout} 秒還沒結束")
         if self._error is not None:
             raise self._error
-        assert self._value is not None
-        return self._value
+        assert self._done
+        return self._value  # type: ignore[return-value]  # _done 為真時就是 func 的回傳值
+
+
+def _within[T](seconds: float, func: Callable[[], T], what: str) -> T:
+    """在 daemon 執行緒跑 `func`，主執行緒最多等 `seconds` 秒；資料庫沒回應就丟 TimeoutError。"""
+    call = _DaemonCall(func, name=what)
+    call.start()
+    return call.result(timeout=seconds)
 
 
 def test_sweep_waiting_on_row_lock_rechecks_after_the_other_transaction_commits(
@@ -918,11 +933,21 @@ def test_sweep_waiting_on_row_lock_rechecks_after_the_other_transaction_commits(
     # （attempts 已經變了），回傳 0、不動它。
     # 期限：每條連線 5 秒內要連上；A、B 的每個查詢與等鎖最多 WAIT_SECONDS 秒（A 另外設交易閒置
     # 上限，測試行程掛了伺服器也會放掉鎖）；B 在 daemon 執行緒跑，逾時就結束它的連線、不等它。
-    stalled = _insert_job(migrated_fresh, status="doing", queueing_lock=None)
-    with _bounded_connect(
-        migrated_fresh.admin_url, autocommit=True, options=_SESSION_LIMITS
-    ) as admin:
-        healthy = admin.execute("SELECT * FROM procrastinate_register_worker_v1()").fetchone()
+    # 主執行緒碰資料庫的每一步（含 watcher、清理、A 的查詢）都用 `_within` 限時，資料庫整個沒回應
+    # 時測試也會在有限時間內失敗結束。
+    stalled = _within(
+        _STEP_SECONDS,
+        lambda: _insert_job(migrated_fresh, status="doing", queueing_lock=None),
+        "建立測試工作",
+    )
+
+    def register_healthy_worker() -> tuple[Any, ...] | None:
+        with _bounded_connect(
+            migrated_fresh.admin_url, autocommit=True, options=_SESSION_LIMITS
+        ) as admin:
+            return admin.execute("SELECT * FROM procrastinate_register_worker_v1()").fetchone()
+
+    healthy = _within(_STEP_SECONDS, register_healthy_worker, "註冊健康的 worker")
     assert healthy is not None
     stalled_query = procrastinate_sql.queries["select_stalled_jobs_by_heartbeat"]
     job_app = create_job_app(
@@ -944,30 +969,37 @@ def test_sweep_waiting_on_row_lock_rechecks_after_the_other_transaction_commits(
             monkeypatch.setattr(connector, "execute_query_all", record_candidates)
             return retry_stalled_jobs(app, seconds_since_heartbeat=60, max_retries=3)
 
-    connection_a = _bounded_connect(
-        migrated_fresh.admin_url,
-        autocommit=False,
-        options=f"{_SESSION_LIMITS} -c idle_in_transaction_session_timeout={2 * _LIMIT_MS}",
+    connection_a = _within(
+        _STEP_SECONDS,
+        lambda: _bounded_connect(
+            migrated_fresh.admin_url,
+            autocommit=False,
+            options=f"{_SESSION_LIMITS} -c idle_in_transaction_session_timeout={2 * _LIMIT_MS}",
+        ),
+        "連線 A 連上資料庫",
     )
-    sweep_b = _DaemonCall(sweep_on_connection_b)
+    sweep_b = _DaemonCall(sweep_on_connection_b, name="連線 B 的 sweep")
     try:
-        connection_a.execute(
-            "SELECT id FROM procrastinate_jobs WHERE id = %s FOR UPDATE", (stalled,)
-        )
-        connection_a.execute(
-            "SELECT procrastinate_retry_job_v2(%s, now(), NULL, NULL, NULL)", (stalled,)
-        )
-        taken = connection_a.execute(
-            "SELECT id FROM procrastinate_fetch_job_v2(ARRAY['maintenance'], %s)", (healthy[0],)
-        ).fetchone()
-        assert taken == (stalled,)
-        a_pid = connection_a.info.backend_pid
+
+        def lock_and_hand_over_on_a() -> int:
+            connection_a.execute(
+                "SELECT id FROM procrastinate_jobs WHERE id = %s FOR UPDATE", (stalled,)
+            )
+            connection_a.execute(
+                "SELECT procrastinate_retry_job_v2(%s, now(), NULL, NULL, NULL)", (stalled,)
+            )
+            taken = connection_a.execute(
+                "SELECT id FROM procrastinate_fetch_job_v2(ARRAY['maintenance'], %s)",
+                (healthy[0],),
+            ).fetchone()
+            assert taken == (stalled,)
+            return connection_a.info.backend_pid
+
+        a_pid = _within(WAIT_SECONDS + 5, lock_and_hand_over_on_a, "連線 A 鎖住並交出工作")
 
         sweep_b.start()
 
-        def b_is_waiting_on_a() -> bool:
-            if not sweep_b.running():
-                return True  # B 沒有等鎖就結束了：跳出等待，由下面的斷言報錯。
+        def count_waiting_on_a() -> int:
             with _bounded_connect(
                 migrated_fresh.admin_url, autocommit=True, options=_POLL_LIMITS
             ) as watcher:
@@ -976,26 +1008,37 @@ def test_sweep_waiting_on_row_lock_rechecks_after_the_other_transaction_commits(
                     " WHERE %s = ANY(pg_blocking_pids(pid)) AND wait_event_type = 'Lock'",
                     (a_pid,),
                 ).fetchone()
-            return row is not None and row[0] > 0
+            return 0 if row is None else row[0]
+
+        def b_is_waiting_on_a() -> bool:
+            if not sweep_b.running():
+                return True  # B 沒有等鎖就結束了：跳出等待，由下面的斷言報錯。
+            return _within(_STEP_SECONDS, count_waiting_on_a, "查 B 是否在等 A 的鎖") > 0
 
         _wait_until(b_is_waiting_on_a, "連線 B 的 sweep 卡在等 A 的列鎖")
         assert sweep_b.running(), "B 沒有等鎖就結束了，沒有製造出交錯"
         assert candidates == [stalled]
 
-        connection_a.commit()
+        _within(WAIT_SECONDS + 5, connection_a.commit, "連線 A 提交")
         retried = sweep_b.result(timeout=WAIT_SECONDS)
     finally:
-        # 不管成功或失敗都放掉 A 的鎖；B 還沒結束就結束它的連線，最多再等 5 秒，之後不管它
-        # （daemon 執行緒不會擋住 pytest 結束）。
-        connection_a.close()
+        # 不管成功或失敗都放掉 A 的鎖（關連線也限時，卡住就不管它）；B 還沒結束就結束它的連線，
+        # 最多再等 5 秒，之後不管它（daemon 執行緒不會擋住 pytest 結束）。
+        with contextlib.suppress(TimeoutError):
+            _within(5, connection_a.close, "關閉連線 A")
         sweep_b.join(timeout=5)
         if sweep_b.running():
             _terminate_backends(migrated_fresh, APP_ROLE)
             sweep_b.join(timeout=5)
 
     assert retried == 0
-    assert _statuses(migrated_fresh) == {stalled: ("doing", 1)}
-    assert _job_worker(migrated_fresh, stalled) == healthy[0]
+    assert _within(_STEP_SECONDS, lambda: _statuses(migrated_fresh), "讀工作狀態") == {
+        stalled: ("doing", 1)
+    }
+    assert (
+        _within(_STEP_SECONDS, lambda: _job_worker(migrated_fresh, stalled), "讀工作的 worker")
+        == healthy[0]
+    )
 
 
 def test_guarded_retry_works_through_the_workers_async_connector(
