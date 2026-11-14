@@ -1344,6 +1344,53 @@ def test_setup_failure_touches_the_run_and_raises_the_original_error(
     assert "secret-value-in-message" not in str(logs)
 
 
+class _WrappedSetupError(Exception):
+    """模擬包裝過的建 adapter 錯誤：`error_type` 帶原本的錯誤類別（或被塞了別的內容）。"""
+
+    def __init__(self, error_type: object) -> None:
+        self.error_type = error_type
+        super().__init__("wrapped")
+
+
+@pytest.mark.parametrize(
+    ("error", "cause"),
+    [
+        (_WrappedSetupError("ValueError"), "ValueError"),
+        (_WrappedSetupError("Invalid endpoint: http://leak.example:9000"), None),
+        (_WrappedSetupError(42), None),
+        (_WrappedSetupError("abc123account"), None),
+        (_WrappedSetupError("secret_value"), None),
+        (_WrappedSetupError("A" * 64), "A" * 64),
+        (_WrappedSetupError("A" * 65), None),
+        (_SetupBrokenError("secret-value-in-message"), None),
+    ],
+    ids=[
+        "class-name",
+        "url-in-error-type",
+        "not-a-string",
+        "lowercase-setting-value",
+        "underscore-word",
+        "longest-allowed",
+        "too-long",
+        "no-error-type",
+    ],
+)
+def test_setup_failure_log_carries_only_a_class_name_as_cause(
+    weekly_db: TestDatabase, database: TrackingDatabase, error: Exception, cause: str | None
+) -> None:
+    # `cause` 只收像類別名稱的字串；`error_type` 剛好是訊息或網址時不收（K7）。
+    run_id = _start(database)
+
+    with capture_logs() as logs, pytest.raises(type(error)):
+        _open_and_run(database, _Opener(error=error), run_id)
+
+    [logged] = [log for log in logs if log["log_level"] == "error"]
+    assert logged["event"] == "每週更新準備抓取失敗"
+    assert (logged["error"], logged["cause"]) == (type(error).__name__, cause)
+    assert "leak.example" not in str(logs)
+    assert "secret-value-in-message" not in str(logs)
+
+
 def test_finished_or_skipped_run_does_not_open_the_setup(
     weekly_db: TestDatabase, database: TrackingDatabase
 ) -> None:

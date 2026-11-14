@@ -1,6 +1,6 @@
 # ADR-0028：每週更新的失敗上限與變動偵測
 
-- 狀態：提議
+- 狀態：已接受（Kevin 2026-11-14）
 - 日期：2026-11-14（同日依 Codex 主審查 C1～C3 修訂決定 4、6，新增決定 9；編號不變）
 - 對應：epics Story 1.11；FR-9、FR-10、NFR-5、NFR-18；架構文件 AD-14、AD-19、AD-25；ADR-0004（背景工作與排程）、ADR-0014（原始資料先存、每週整本重掃）、ADR-0025（抓取與續跑）、ADR-0026（套用、快照）
 
@@ -66,6 +66,7 @@ epics Story 1.11 的驗收：重試到上限標 `failed`、不送心跳，已發
 6. **變動偵測在寫入函式裡**：`repo.papers._update_existing` 鎖論文時一起讀舊的 `source_hash`，要寫的不同（含舊的是 NULL）就把 `source_changed_at` 設成 `clock_timestamp()`（那一句執行的時間，在拿到論文的列鎖之後；Codex 主審查 C3 修訂，原本是 `now()`），否則保留原值；`UpsertResult.source_changed` 回報（CREATED、STALE 一律 False；不參與相等比較）。每週套用把它計進 `WeeklyApplyResult.changed` 與完成的 info 日誌。`reparse` 經同一個函式，所以 reparse 讓指紋變了也會記。被引用次數、關鍵字照舊每次覆寫，不進指紋、不動 `source_changed_at`。
 7. **套用時哪一列壞掉**：逐列寫入時某一列丟例外，先記一筆警告「每週更新套用時這一列寫不進去」（`weekly_run_id`、`external_key`、錯誤類別；不帶內容）再往上丟。
 8. **crontab 不改**：`0 19 * * 0 … radar enqueue weekly-update`（主機時區是 UTC 時＝台北時間每週一 03:00）；主機時區與專案路徑 `/opt/research-radar` 由 Story 3.19 部署時確認。架構測試檢查這一行一週剛好一次（分、時固定，日、月 `*`，星期一個值）。
+   - **Kevin 2026-11-14 接受（K2）**：時間先照現在的 `0 19 * * 0`（假設主機時區 UTC），主機時區與路徑在 Story 3.19 部署時確認再改。
 9. **抓取每頁以這一筆可以寫為條件**（Codex 主審查 C1）：寫原始資料（`raw_fetch`）的交易與寫暫存列＋進度的交易，第一句都是 `repo.weekly_runs.update_weekly_run_touched_while_fetching`（`UPDATE … SET updated_at = now() WHERE id = … AND status = 'fetching' AND failure_count < max_failures RETURNING id`）。改到了，這一列鎖到交易結束（另一個工作要改成 `failed` 得等這個交易結束）；沒改到（已經 `failed`、已發佈，或已到上限等著收尾），整個交易不寫，停下這次抓取：記警告「每週更新已經不能再寫（不是抓取中或已到失敗上限），停下這次抓取」（`weekly_run_id`、期刊代號），回 `skipped`（`journals`、`pages`、`counts` 是停下之前暫存好的），不算一次失敗、不送心跳、不丟錯（工作正常結束，工作層不會重試）。`raw_fetch` 原本在 `services/ingest.fetch_journal` 自己的交易裡寫，所以它多一個參數 `write_raw`：有給就由呼叫端寫這一頁的 `raw_fetch`（每週更新用它加上面的條件），沒給照舊在自己的交易寫。
 
 ## 理由
@@ -82,6 +83,7 @@ epics Story 1.11 的驗收：重試到上限標 `failed`、不送心跳，已發
 - **很長的第一次匯入也受上限約束**：中途零星失敗累積到 8 次就標 `failed`。這時 Kevin 再 `radar enqueue weekly-update` 會開新的一筆從頭抓；原始資料都在 `raw/`，但 OpenAlex 額度會再花一次（約 0.01 美元）。
 - **刪掉的暫存列不能「接著套用」**：要查哪一篇壞掉看錯誤日誌的 `external_key`，原始資料在 `raw/`。
 - **套用失敗的那一列記警告、不記錯誤**：spec 原本寫「記錯誤日誌」，但 1.9 既有的測試要求套用失敗時只有一筆錯誤日誌（「每週更新套用失敗，已整個退回」）；為了不改既有測試，這一筆改成警告。同一次失敗仍有那一筆錯誤日誌，到上限時另有「重試到上限」的錯誤日誌。要改成錯誤層級時，要一起改 `tests/integration/test_weekly_apply.py` 的 `test_failure_midway_rolls_back_everything`。
+  - **Kevin 2026-11-14 接受（K10）**：維持警告，不改既有測試。
 - **`source_changed_at` 只記最後一次**：一週內變兩次只看得到最後一次；Epic 2 用「比上次處理的時間晚」判斷就夠。要歷史時再加變動紀錄表（3-C）。
 - **`failure_count` 上限調低時**：已經到或超過新上限的那一筆，下一次被排入（工作重試、sweep、cron）讀到就收尾成 `failed`（`>=` 判斷），不必再失敗一次，不會卡住。
 - **失敗後再排入的那一刻**：`failed` 的那一筆不再被 sweep 補排；如果 Kevin 想讓同一筆接著抓，要手動把狀態改回 `fetching`（不建議，直接開新的一筆）。
@@ -89,6 +91,7 @@ epics Story 1.11 的驗收：重試到上限標 `failed`、不送心跳，已發
 - **OpenAlex 故障超過約 2 小時，這一週就標 `failed`**：預設 8 次約 2 小時；之後要等下一次 cron，或手動 `radar enqueue weekly-update` 開新的一筆從頭抓。
 - **「8 次 ≈ 2 小時」綁著工作重試的設定**：這是照 `RADAR_JOB_MAX_RETRIES=3`、`RADAR_JOB_RETRY_WAIT=30` 算的；改其中一個要一起看另一個，沒有程式檢查兩者的關係。
 - **一本期刊永久壞掉時，整個每週更新每週都 `failed`**：其他期刊也出不了新快照。「略過那一本、照樣發佈其餘的」不在這次範圍，要 Kevin 決定。
+  - **Kevin 2026-11-14 決定（K11）**：維持現狀。心跳沒送，心跳服務會通知 Kevin，手動處理；「略過那一本」等第一次匯入之後的實際情況再決定要不要另開 Story。
 - **`source_changed_at` 是寫入那一句執行的時間（`clock_timestamp()`），在拿到論文列鎖之後**（Codex 主審查 C3 修訂）：等著每週套用放鎖的寫入，記下的時間一定晚於那次快照的 `as_of`（`as_of` 也是 `clock_timestamp()`，在同一個套用交易的最後一步），所以「變動時間 ≤ 快照的 `as_of`，而且晚於上次處理時所根據的快照的 `as_of`」這種篩法不會因為寫入的交易開得早而漏掉它。**仍有的限制**：它仍早於那個寫入交易的 commit。一個沒有碰到同一篇論文、所以不必等套用的長交易，寫入那一句在快照 `as_of` 之前、commit 卻在之後，依快照時間篩選時兩邊都可能漏掉它（篩前一段時還看不到，篩後一段時時間又太早）。之後的重新處理最好用「指紋和上次處理時的不同」或寫入時一起設的待處理標記判定，`source_changed_at` 只當參考；同一個套用交易裡寫的論文，變動時間會早於這次快照的 `as_of`。
 - **舊指紋是 NULL 也算變動，reparse 也會記**：目前經寫入函式的論文都有指紋，NULL 只會出現在 1.7 之前的資料。指紋算法改版（`v` 加一）後跑 reparse，全部論文會一起算變動；這是刻意的（算進指紋的輸入真的變了），但會讓之後的重新處理整批重跑。
 - **已到上限、收尾一直沒做成時**（決定 4）：那一筆停在 `fetching`，佔著唯一的 `fetching`；工作重試、sweep 每 2 小時、下一次 cron 都會再試收尾。cron 收尾成功才建新的一筆；cron 那次收尾也失敗時，那一週要等 cron 工作的重試，或 Kevin 修好資料庫後手動 `radar enqueue weekly-update`。

@@ -1,6 +1,6 @@
 # ADR-0025：每週更新的抓取與續跑
 
-- 狀態：提議
+- 狀態：已接受（Kevin 2026-11-14）
 - 日期：2026-11-14
 - 對應：epics Story 1.8；FR-8、FR-9、NFR-5；架構文件 AD-14、AD-19、AD-25；ADR-0004（背景工作與排程）、ADR-0014（原始資料先存、每週整本重掃）、ADR-0021（OpenAlex 抓取與原始資料）、ADR-0022（解析與暫存）
 
@@ -45,6 +45,7 @@
 4. **`batch_id`＝`weekly_run.id`。** 暫存列 `kind='weekly_update'`；同一批裡同一篇重抓時，只在新的抓取時間 ≥ 舊的時覆寫（`upsert_staged_papers`）。`ingest_staging.kind` 的 CHECK 改成 `('reparse', 'weekly_update')`。
 5. **收錄過濾在暫存前。** 純函式 `collection_skip_reason` 依序檢查：類型不是 `article`／`review`、沒有 DOI、不是這本期刊、沒有出版年、出版年早於起始年。不在範圍內的只算進 `out_of_scope`，不進暫存表；出版年比今年晚照收。`Editorial Board` 這類 `paratext` 因此被類型擋下，不另加排除規則。
 6. **失敗與續跑。** `fetch_journal` 在 source 失敗或 cursor 繞圈時丟 `JournalFetchError`，帶 `resume_cursor`（要重抓的那一頁送出的 cursor）；物件儲存、資料庫與暫存時的錯誤不包裝，原樣往上丟。`run_weekly_update` 遇到任何例外都記錯誤日誌（只帶期刊代號與原因或錯誤類別，不帶 cursor 值）、更新 `updated_at` 後往上丟，交給工作層重試或 sweep 補排；因為那一頁的交易沒寫，下次從保存的 `next_cursor`（和 `resume_cursor` 是同一頁）接著抓。額度停下不算失敗：更新 `updated_at`、記警告、結束這次工作。worker 的 `run_weekly_update` 工作經 `open_and_run_weekly_update`：先讀狀態，確認是 `fetching` 且還沒抓完，才讀領域設定、建 OpenAlex 與物件儲存的 adapter；建不起來（缺金鑰、設定壞掉）時同樣記錯誤日誌、更新 `updated_at` 後往上丟，已經抓完的那一筆被補排時不讀設定、不建 adapter。失敗後更新 `updated_at` 這一步本身也失敗時（例如資料庫正連不上），只記一筆警告（只帶錯誤類別），往上丟的仍是原本的例外。
+   - **補充（2026-11-14，K7，Kevin 同意）**：建 adapter 失敗時 worker 丟的是 `AdapterSetupError`（不串原例外，免得印出端點網址），所以「每週更新準備抓取失敗」那筆錯誤日誌的 `error` 只看得到包裝類別。現在多帶一個 `cause` 欄位＝原本的錯誤類別名稱（取例外的 `error_type` 屬性，只收像類別名稱的字串，其他一律 None）；仍不帶網址與例外訊息，錯誤日誌仍是一筆。
 7. **sweep 時限 2 小時。** `SWEEP_REGISTRY` 加 `weekly_run`／`status='fetching'`／`updated_at`／`run_weekly_update`／2 小時。
 
 ## 理由
@@ -61,6 +62,7 @@
 - **`fetched_by_year` 不含解析失敗或沒有出版年的篇**：所以各年加總可能小於 `fetched`；這兩種分別算在 `unparseable` 與 `out_of_scope`（沒有出版年）。1.9 的「每本期刊每年的過濾前篇數」用 `fetched_by_year`。
 - **重試同一頁時的額度判斷改了（D12(b)）**：ADR-0021 取捨寫的「重試途中的額度判斷只看那次回應的回報」，1.8 起改成「最新一次回報的用量＋那之後每次嘗試的本地費用」（同一個 UTC 日）。ADR-0021 的決定（用量＝兩者取較大）不變，只是 adapter 在重試途中也照這個方向累加。
 - **降版會刪暫存資料**：遷移 0006 的 downgrade 先刪 `kind='weekly_update'` 的暫存列，才能把 CHECK 改回只有 `reparse`。只在開發時降版會用到；正式資料庫不降版。
+  - **Kevin 2026-11-14 接受（K3）**：維持現狀。暫存列只是中間產物，重抓就有；降版只在開發時用，不另寫保留暫存列的遷移邏輯。
 - **1.11 之前沒有 `failed`**：重試用完的那一筆（以及額度停下的那一筆）每 2 小時被 sweep 補排一次，成本是幾個請求與一筆警告日誌。一本期刊一直失敗（例如存下的 cursor 被拒、或 OpenAlex 的 cursor 固定繞圈）時，排在它後面的期刊這一輪都抓不到；繞圈時每次續跑會重送繞圈的那兩頁、計數重複加（暫存列不會重複）。這些都由 1.11 的「重試到上限就 `failed`」收尾。另外 1.9 之前，抓完的那一筆仍是 `fetching`，sweep 也會每 2 小時補排一次，`run_weekly_update` 看到 `fetch_finished_at` 已有值就直接結束、不送請求。
 - **每頁一個交易**：14 本、每本幾十頁，總共幾百個短交易，可以接受。
 - **之後要改成整本一個交易或改用別的進度表**：要動遷移、`radar/repo/weekly_runs.py`、`radar/services/weekly_update.py` 與 `tests/integration/test_weekly_update.py`。

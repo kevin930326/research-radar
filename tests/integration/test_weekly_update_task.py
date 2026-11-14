@@ -338,3 +338,26 @@ def test_adapter_setup_error_does_not_carry_the_endpoint(
     assert _progress_rows(weekly_db) == 0
     [logged] = [log for log in logs if log["log_level"] == "error"]
     assert (logged["weekly_run_id"], logged["error"]) == (str(run_id), "AdapterSetupError")
+
+
+def test_adapter_setup_error_log_carries_the_cause_class_but_not_the_endpoint(
+    weekly_db: TestDatabase, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 日誌除了包裝類別 `AdapterSetupError`，也帶原本的錯誤類別（`cause`），才看得出是哪一種
+    # 錯誤；但仍然只有類別名稱，不帶網址或例外訊息（K7）。
+    settings = {
+        "openalex_api_key": "test-openalex-key",
+        **OBJECT_STORE,
+        "object_store_endpoint_url": f"http://{BAD_HOST}:9000",
+    }
+    task = _task(weekly_db, monkeypatch, ROOT / "config", **settings)
+    run_id, _before = _fetching_run(weekly_db)
+
+    with capture_logs() as logs, pytest.raises(worker_tasks.AdapterSetupError):
+        task(weekly_run_id=str(run_id))
+
+    [logged] = [log for log in logs if log["log_level"] == "error"]
+    assert logged["event"] == "每週更新準備抓取失敗"
+    assert (logged["error"], logged["cause"]) == ("AdapterSetupError", "ValueError")
+    assert BAD_HOST not in str(logs)
+    assert "abc123account" not in str(logs)
