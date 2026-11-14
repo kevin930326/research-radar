@@ -5,11 +5,13 @@ description = "Research Radar：追蹤資管頂尖期刊新論文的研究助理
 requires-python = ">=3.14,<3.15"
 dependencies = [
     "alembic==1.20.1",
+    "boto3==1.44.1",
     "fastapi==0.162.5",
     "httpx2==2.16.0",
     "procrastinate==3.11.0",
     "psycopg[binary,pool]==3.3.9",
     "pydantic==2.14.3",
+    "pyyaml==6.0.3",
     "sqlalchemy==2.1.8",
     "stamina==26.1.0",
     "structlog==26.1.0",
@@ -33,13 +35,15 @@ module-root = ""
 dev = [
     "hypothesis==6.170.15",
     "import-linter==2.16",
+    "moto[s3]==5.2.5",
     "mypy==2.4.1",
     "pip-audit==2.10.1",
     "pytest==9.2.0",
+    "pytest-recording==0.14.1",
     "pytest-socket==0.8.1",
-    "pyyaml>=6.0.3",
     "ruff==0.17.4",
     "types-pyyaml>=6.0.12.20261113",
+    "vcrpy==9.4.2",
 ]
 
 [tool.ruff]
@@ -62,6 +66,11 @@ python_version = "3.14"
 strict = true
 files = ["radar", "tests", "migrations"]
 plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+# 這幾個套件沒有附型別資訊。
+module = ["boto3", "boto3.*", "botocore", "botocore.*", "moto", "moto.*", "vcr", "vcr.*"]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -109,6 +118,8 @@ forbidden_modules = [
     "uvicorn",
     "typer",
     "structlog",
+    "yaml",
+    "stamina",
 ]
 
 [[tool.importlinter.contracts]]
@@ -307,5 +318,30 @@ allow_indirect_imports = true
 ignore_imports = [
     "radar.entrypoints.cli -> typer",
     "radar.entrypoints.cli.** -> typer",
+]
+unmatched_ignore_imports_alerting = "none"
+
+[[tool.importlinter.contracts]]
+id = "pkg-yaml"
+name = "yaml 只在 radar.config（領域設定只經 radar/config.py 讀，AD-18）"
+type = "forbidden"
+source_modules = ["radar"]
+forbidden_modules = ["yaml"]
+allow_indirect_imports = true
+ignore_imports = [
+    "radar.config -> yaml",
+]
+unmatched_ignore_imports_alerting = "none"
+
+[[tool.importlinter.contracts]]
+id = "pkg-stamina"
+name = "stamina 只在 radar.adapters（重試只寫在 adapter，Conventions「重試、逾時、速率」）"
+type = "forbidden"
+source_modules = ["radar"]
+forbidden_modules = ["stamina"]
+allow_indirect_imports = true
+ignore_imports = [
+    "radar.adapters -> stamina",
+    "radar.adapters.** -> stamina",
 ]
 unmatched_ignore_imports_alerting = "none"

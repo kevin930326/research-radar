@@ -48,6 +48,8 @@ def test_package_location_contracts() -> None:
         ),
         "pkg-fastapi": ({"fastapi", "starlette", "uvicorn"}, {"radar.entrypoints.api"}),
         "pkg-typer": ({"typer"}, {"radar.entrypoints.cli"}),
+        "pkg-yaml": ({"yaml"}, {"radar.config"}),
+        "pkg-stamina": ({"stamina"}, {"radar.adapters"}),
     }
     for contract_id, (packages, owners) in expected.items():
         contract = contracts[contract_id]

@@ -8,6 +8,8 @@ from radar.domain.jobs import WORKER_HEARTBEAT_SECONDS
 
 DATABASE_URL_SCHEMES = frozenset({"postgresql", "postgresql+psycopg"})
 HEARTBEAT_URL_SCHEMES = frozenset({"https", "http"})
+# 物件儲存的端點：正式是 R2（https），本機 RustFS 是 http://127.0.0.1:9000。
+OBJECT_STORE_URL_SCHEMES = frozenset({"https", "http"})
 # 心跳網址的設定欄位：`heartbeat_url_` 加上排程名稱（連字號換成底線），一個排程一個（AD-15）。
 HEARTBEAT_URL_FIELD_PREFIX = "heartbeat_url_"
 
@@ -102,6 +104,44 @@ class Settings(BaseModel):
     heartbeat_retry_wait_initial: float = Field(default=1.0, gt=0, le=60)
     heartbeat_retry_wait_max: float = Field(default=10.0, gt=0, le=300)
     heartbeat_retry_after_max: int = Field(default=30, ge=0, le=600)
+    # OpenAlex 的 API key（FR-10）。只有抓取的指令與工作需要；其餘的呼叫、速率、額度設定在
+    # config/openalex.yaml（AD-18）。
+    openalex_api_key: SecretStr | None = Field(default=None, min_length=1)
+    # 物件儲存（R2／本機 RustFS，S3 相容）：端點網址、區域（R2 是 auto）、bucket、金鑰。
+    # 只有寫原始資料的指令與工作需要；缺了由 bootstrap 在組裝時回報。
+    object_store_endpoint_url: str | None = None
+    object_store_region: str | None = Field(default=None, min_length=1)
+    object_store_bucket: str | None = Field(default=None, min_length=1)
+    object_store_access_key_id: SecretStr | None = Field(default=None, min_length=1)
+    object_store_secret_access_key: SecretStr | None = Field(default=None, min_length=1)
+    # 物件儲存的連線與讀取逾時（秒）與最多嘗試幾次（含第一次；adapter 裡的 stamina 重試，
+    # botocore 自己的重試關掉）。
+    object_store_timeout: int = Field(default=10, ge=1, le=300)
+    object_store_attempts: int = Field(default=3, ge=1, le=10)
+    # 物件儲存重試的等待（秒，Conventions「重試、逾時、速率」）：一般是指數退避，從 initial 開始
+    # 每次加倍、最多 max，再加 0～jitter 秒的抖動；對方回 429／5xx 並帶 Retry-After 時照它等，
+    # 要等的超過 retry_after_max 就不再重試、這次存取算失敗（不提早重送；對方給極大值時也不卡住
+    # 工作，ADR-0021）。
+    object_store_retry_wait_initial: float = Field(default=0.5, gt=0, le=60)
+    object_store_retry_wait_max: float = Field(default=5.0, gt=0, le=300)
+    object_store_retry_wait_jitter: float = Field(default=0.5, ge=0, le=60)
+    object_store_retry_after_max: int = Field(default=30, ge=0, le=600)
+
+    @field_validator("object_store_endpoint_url")
+    @classmethod
+    def _check_object_store_endpoint_url(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        try:
+            parts = urlsplit(value)
+            scheme, hostname = parts.scheme, parts.hostname
+        except Exception:
+            raise ValueError("網址無法解析") from None
+        if scheme not in OBJECT_STORE_URL_SCHEMES:
+            raise ValueError("開頭必須是 https:// 或 http://")
+        if not hostname:
+            raise ValueError("缺少主機名稱")
+        return value
 
     @field_validator("database_url")
     @classmethod

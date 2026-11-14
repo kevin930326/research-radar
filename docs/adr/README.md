@@ -27,6 +27,7 @@
 | [0018](0018-database-migrations-and-roles.md) | 資料庫遷移用 Alembic、所有遷移在一個交易裡；第一個遷移只檢查功能並給應用程式角色預設權限；本機與 CI 也建 `radar_owner`、`radar_app` 兩個角色；`/readyz` 沒遷移或落後回 503、比程式新照常就緒；連線數預算 | 提議 | AD-15、AD-17、AD-18、AD-29 |
 | [0019](0019-worker-and-queue-integration.md) | worker 接上 Procrastinate：佇列的 SQL 凍結成檔由 Alembic 執行；連線池自己開；監督迴圈處理訊號與重開；做完的工作紀錄全留；排程只在 `deploy/crontab` | 提議 | AD-14、AD-15、AD-17、AD-18 |
 | [0020](0020-identifiers-and-paper-writes.md) | 識別碼的正規化規則（ISSN 不驗檢查碼）；論文寫入先新增再認領識別碼、每個來源一欄抓取時間、識別碼衝突不合併；viewer、權限表與資料層的架構測試 | 提議 | AD-3、AD-4、AD-5、AD-6、AD-25、AD-27 |
+| [0021](0021-openalex-fetch-and-raw-storage.md) | OpenAlex 只篩期刊與年份、原始資料從回應原文切出每一篇的位元組；用量取本地加總與 OpenAlex 回報的較大者；去重看 `raw_fetch`、先存物件再寫列；領域設定 `config/*.yaml` 啟動時驗證 | 提議 | AD-2、AD-18、AD-25、AD-29 |
 
 「提議」表示還沒經過 Kevin 確認；PR 合併後改成「已接受」。
 

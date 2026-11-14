@@ -1,0 +1,53 @@
+# 追蹤的期刊（AD-18 領域設定；api、worker、CLI 啟動時由 radar/config.py 驗證，錯了就不啟動）。
+#
+# - start_year：從哪一年起抓（含當年度）；查 OpenAlex 時篩 publication_year > start_year - 1。
+# - key：期刊代號，小寫英文開頭、只用小寫英文、數字、底線，不可重複。
+# - name：期刊全名。
+# - issn_l：OpenAlex 的 ISSN-L（查詢用 primary_location.source.issn），不可重複。
+#
+# 來源：spikes/oq-02/output/results.json（2026-11-11）各筆的 source.issn_l 與 expected；
+# 2016–2025 合計 9,643 篇，是 OQ-02 的基準。新增期刊只要在這裡加一筆。
+start_year: 2016
+journals:
+  - key: misq
+    name: MIS Quarterly
+    issn_l: 0276-7783
+  - key: isr
+    name: Information Systems Research
+    issn_l: 1047-7047
+  - key: jmis
+    name: Journal of Management Information Systems
+    issn_l: 0742-1222
+  - key: jais
+    name: Journal of the Association for Information Systems
+    issn_l: 1536-9323
+  - key: ejis
+    name: European Journal of Information Systems
+    issn_l: 0960-085X
+  - key: isj
+    name: Information Systems Journal
+    issn_l: 1350-1917
+  - key: jit
+    name: Journal of Information Technology
+    issn_l: 0268-3962
+  - key: jsis
+    name: Journal of Strategic Information Systems
+    issn_l: 0963-8687
+  - key: dss
+    name: Decision Support Systems
+    issn_l: 0167-9236
+  - key: im
+    name: Information & Management
+    issn_l: 0378-7206
+  - key: io
+    name: Information and Organization
+    issn_l: 1471-7727
+  - key: pmj
+    name: Project Management Journal
+    issn_l: 1938-9507
+  - key: tem
+    name: IEEE Transactions on Engineering Management
+    issn_l: 0018-9391
+  - key: database
+    name: The DATA BASE for Advances in Information Systems
+    issn_l: 0095-0033

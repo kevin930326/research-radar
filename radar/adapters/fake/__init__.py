@@ -2,5 +2,14 @@
 
 from radar.adapters.fake.heartbeat import FakeHeartbeat
 from radar.adapters.fake.jobs import FakeJobQueue
+from radar.adapters.fake.object_store import FakeObjectStore, FakePut
+from radar.adapters.fake.paper_source import FakePaperSource, FakeRequest
 
-__all__ = ["FakeHeartbeat", "FakeJobQueue"]
+__all__ = [
+    "FakeHeartbeat",
+    "FakeJobQueue",
+    "FakeObjectStore",
+    "FakePaperSource",
+    "FakePut",
+    "FakeRequest",
+]

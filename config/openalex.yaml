@@ -1,0 +1,31 @@
+# OpenAlex 的呼叫設定（AD-18 領域設定、AD-29；api、worker、CLI 啟動時由 radar/config.py 驗證）。
+# API key 不放這裡：用環境變數 RADAR_OPENALEX_API_KEY。
+#
+# 數字的來源（ADR-0014、ADR-0021，2026-11-12 查 OpenAlex 官方文件）：免費額度每天 1 美元、
+# 清單查詢每次 0.0001 美元；每頁最多 200 筆，這裡用 100（FR-10）。
+base_url: https://api.openalex.org
+# 每頁幾筆。
+per_page: 100
+# 每秒最多送幾個請求（節流；含重試）。OpenAlex 的上限是每秒 10 個（spikes/oq-02/check_coverage.py
+# 的註解記載的官方限制），設定檔驗證不收超過 10 的值。
+requests_per_second: 5
+# 單一請求的逾時秒數。
+timeout_seconds: 30
+# 409、429、5xx、連線錯誤與逾時的重試（adapter 裡的 stamina 指數退避）。
+retry:
+  # 最多嘗試幾次（含第一次）。
+  attempts: 5
+  # 退避從幾秒開始、每次加倍、最多幾秒，再加 0～jitter 秒的隨機抖動。
+  wait_initial_seconds: 1
+  wait_max_seconds: 30
+  wait_jitter_seconds: 1
+  # 對方回 Retry-After 時照它給的秒數等；要等的超過這個秒數就不再重試，這一頁算失敗
+  # （不提早重送，ADR-0021）。
+  retry_after_max_seconds: 120
+# 每日額度（OpenAlex 在 UTC 午夜重置）。今天的用量到 daily_budget_usd × stop_at_ratio 就停下、
+# 寫警告、不算失敗，留到下一次續跑。
+quota:
+  daily_budget_usd: 1.0
+  stop_at_ratio: 0.8
+  # 回應沒有 x-ratelimit-cost-usd 標頭時，一次請求算多少錢。
+  default_request_cost_usd: 0.0001

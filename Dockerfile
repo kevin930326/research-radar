@@ -26,6 +26,8 @@ ENV PATH=/app/.venv/bin:$PATH \
 WORKDIR /app
 # radar migrate 與 api 的 /readyz 以工作目錄下的 migrations/ 找遷移檔。
 COPY migrations ./migrations
+# 領域設定（期刊清單、OpenAlex 設定）：api、worker、CLI 啟動時驗證，預設讀工作目錄下的 config/。
+COPY config ./config
 USER radar
 EXPOSE 8000
 CMD ["python", "-m", "radar.entrypoints.api"]

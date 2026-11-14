@@ -7,7 +7,7 @@ from types import FrameType
 import structlog
 import uvicorn
 
-from radar.config import ConfigError, database_pool_size, load_settings
+from radar.config import ConfigError, database_pool_size, load_domain_config, load_settings
 from radar.entrypoints.api.app import create_app
 from radar.entrypoints.bootstrap import MigrationsNotFoundError, build_readiness_probes
 from radar.entrypoints.logging_config import configure_logging
@@ -19,6 +19,8 @@ log = structlog.get_logger(__name__)
 def main() -> int:
     configure_logging()
     try:
+        # 領域設定（config/*.yaml）錯了也不啟動（AD-18）。
+        load_domain_config()
         settings = load_settings()
     except ConfigError as exc:
         log.error("設定錯誤，無法啟動", service="api", problems=exc.problems)

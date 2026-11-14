@@ -3,10 +3,13 @@
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Literal
+from pathlib import Path
+from typing import Any, Literal
 
+import yaml
 from pydantic import BaseModel, SecretStr, ValidationError
 
+from radar.domain.domain_config import DomainConfig, JournalsConfig, OpenAlexConfig
 from radar.domain.jobs import scheduled_jobs
 from radar.domain.settings import MigrationSettings, Settings, heartbeat_url_field
 
@@ -134,3 +137,116 @@ def heartbeat_urls(settings: Settings) -> dict[str, str]:
         if isinstance(value, SecretStr):
             urls[job.check] = value.get_secret_value()
     return urls
+
+
+# --- 領域設定（AD-18）：config/*.yaml ----------------------------------------------------------
+
+# 設定資料夾：環境變數 RADAR_CONFIG_DIR，沒設時是工作目錄下的 config/（映像的 WORKDIR 是 /app）。
+CONFIG_DIR_FIELD = "config_dir"
+DEFAULT_CONFIG_DIR = "config"
+JOURNALS_FILE = "journals.yaml"
+OPENALEX_FILE = "openalex.yaml"
+
+
+def config_dir(environ: Mapping[str, str] | None = None) -> Path:
+    """領域設定的資料夾（相對路徑以工作目錄為起點）。"""
+    env = os.environ if environ is None else environ
+    return Path(env.get(env_name(CONFIG_DIR_FIELD), "") or DEFAULT_CONFIG_DIR)
+
+
+def load_domain_config(environ: Mapping[str, str] | None = None) -> DomainConfig:
+    """讀 `RADAR_CONFIG_DIR` 下的 `journals.yaml` 與 `openalex.yaml` 並驗證。
+
+    兩個檔的問題一起回報，每條寫成「檔名：欄位路徑：原因」（例如
+    `journals.yaml：journals.2.issn_l：…`）；缺檔、不是合法 YAML、同一個 mapping 的鍵寫兩次
+    也各有一條。
+
+    Raises:
+        ConfigError: 任何一個檔有問題。
+    """
+    directory = config_dir(environ)
+    problems: list[str] = []
+    journals = _load_yaml_model(directory, JOURNALS_FILE, JournalsConfig, problems)
+    openalex = _load_yaml_model(directory, OPENALEX_FILE, OpenAlexConfig, problems)
+    if problems or journals is None or openalex is None:
+        raise ConfigError(problems)
+    return DomainConfig(journals=journals, openalex=openalex)
+
+
+def _load_yaml_model[T: BaseModel](
+    directory: Path, filename: str, model: type[T], problems: list[str]
+) -> T | None:
+    """讀一個 YAML 檔、驗證成 `model`；有問題就加進 `problems`、回 None。"""
+    path = directory / filename
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        problems.append(f"{filename}：找不到檔案（{path}）")
+        return None
+    except (OSError, UnicodeDecodeError) as exc:
+        problems.append(f"{filename}：讀不出來（{type(exc).__name__}）")
+        return None
+    try:
+        return _parse_yaml_model(text, filename, model, problems)
+    except RecursionError:
+        # 例如 `journals: &a [*a]`：alias 指回自己，走節點樹或驗證時會無限遞迴。
+        problems.append(f"{filename}：YAML 有循環參照（alias 指回自己）或巢狀太深")
+        return None
+
+
+def _parse_yaml_model[T: BaseModel](
+    text: str, filename: str, model: type[T], problems: list[str]
+) -> T | None:
+    """解析 YAML 文字、檢查重複的鍵、驗證成 `model`；有問題就加進 `problems`、回 None。"""
+    try:
+        document = yaml.compose(text, Loader=yaml.SafeLoader)
+    except yaml.YAMLError as exc:
+        problems.append(f"{filename}：不是合法的 YAML（{_yaml_position(exc)}）")
+        return None
+    duplicates = _duplicate_keys(document, ())
+    if duplicates:
+        problems.extend(f"{filename}：{path_}：同一層的鍵寫了兩次" for path_ in duplicates)
+        return None
+
+    try:
+        data: Any = yaml.safe_load(text)
+    except yaml.YAMLError as exc:
+        problems.append(f"{filename}：不是合法的 YAML（{_yaml_position(exc)}）")
+        return None
+    if not isinstance(data, dict):
+        problems.append(f"{filename}：最上層要是「鍵: 值」的對照（mapping）")
+        return None
+
+    try:
+        return model.model_validate(data)
+    except ValidationError as exc:
+        for error in exc.errors(include_input=False, include_url=False, include_context=False):
+            location = ".".join(str(part) for part in error["loc"]) or "（最上層）"
+            message = error["msg"].removeprefix("Value error, ")
+            problems.append(f"{filename}：{location}：{message}")
+        return None
+
+
+def _duplicate_keys(node: yaml.Node | None, path: tuple[str, ...]) -> list[str]:
+    """YAML 節點樹裡，同一個 mapping 寫了兩次的鍵（以「欄位路徑（第幾行）」表示）。"""
+    found: list[str] = []
+    if isinstance(node, yaml.MappingNode):
+        seen: set[object] = set()
+        for key_node, value_node in node.value:
+            key = key_node.value if isinstance(key_node, yaml.ScalarNode) else repr(key_node)
+            child = (*path, str(key))
+            if key in seen:
+                found.append(f"{'.'.join(child)}（第 {key_node.start_mark.line + 1} 行）")
+            seen.add(key)
+            found.extend(_duplicate_keys(value_node, child))
+    elif isinstance(node, yaml.SequenceNode):
+        for index, item in enumerate(node.value):
+            found.extend(_duplicate_keys(item, (*path, str(index))))
+    return found
+
+
+def _yaml_position(error: yaml.YAMLError) -> str:
+    mark = getattr(error, "problem_mark", None)
+    if mark is None:
+        return "格式錯誤"
+    return f"第 {mark.line + 1} 行第 {mark.column + 1} 欄"
