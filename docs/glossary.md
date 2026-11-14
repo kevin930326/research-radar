@@ -574,3 +574,8 @@
 - **`pg_locks`**：PostgreSQL 內建的「目前誰拿著哪些鎖」清單；reparse 每個交易第一句查它，確認自己這條連線還拿著寫入鎖。
 - **`pg_terminate_backend`**：管理者從資料庫端強制切斷某一條連線的函式；測試用它模擬資料庫重啟、連線被切斷。
 - **`AdvisoryLockLostError`（寫入鎖遺失）**：reparse 發現持鎖的連線斷了、或鎖已經不在那條連線上時丟的錯誤；丟出時那個交易沒有 commit，整次作業中止。
+- **`pg_backend_pid()`**：PostgreSQL 函式，回傳目前這條連線在資料庫端的編號（PID）；用它在 `pg_locks`、`pg_stat_activity` 裡認出「我自己這條連線」。
+- **`SessionLock`**：`Database.session_lock` 拿到寫入鎖時交出的東西，包著「鎖＋持有它的那一條連線」；reparse 每個交易都經過它的 `transaction()` 開在同一條連線上，第一句先確認鎖還在。
+- **`search_path`**：沒寫 schema 名稱時，PostgreSQL 依序去哪些 schema 找表和函式，像找檔案時依序翻的資料夾清單。
+- **`pg_stat_activity`**：PostgreSQL 內建的「目前每條連線在做什麼」清單，一條連線一列，`state` 欄寫它的狀態。
+- **`idle` 與 `idle in transaction`（`pg_stat_activity` 的連線狀態）**：`idle` 是連線閒著、沒有開著的交易；`idle in transaction` 是交易開了還沒結束、只是暫時沒在跑 SQL，這時它拿著的列鎖不會放；測試用它確認讀物件儲存時沒有開著的交易。

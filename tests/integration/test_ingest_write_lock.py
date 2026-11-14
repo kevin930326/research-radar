@@ -11,6 +11,8 @@ ADR-0026 取捨）。
    （連線斷掉的，和連線還活著、解鎖丟出一般錯誤的兩種）。
 5. 持鎖的連線中途斷了（Codex 複查 R1）：原本的 reparse 不能換一條連線繼續寫；別的作業拿到鎖之後，
    它的下一個交易丟 `AdvisoryLockLostError`、什麼都不 commit。
+6. 跑好幾批時，每次讀物件儲存，持鎖的連線（從資料庫端的 `pg_stat_activity` 看）都沒有開著的
+   交易；`batch_size` 不合法時一條連線都沒開、一句 SQL 都沒送。
 
 並行用兩條真的連線（不同的 `Database`）與執行緒；用 `threading.Event` 讓一邊停在持有鎖的
 那一段，不靠 sleep 的時序，每次等待都有逾時。論文內容取自錄好的 OpenAlex 回應
@@ -27,7 +29,7 @@ from decimal import Decimal
 from typing import Any
 
 import pytest
-from sqlalchemy import Connection, text
+from sqlalchemy import Connection, event, text
 from structlog.testing import capture_logs
 
 from radar.adapters.fake import FakeHeartbeat, FakeObjectStore, FakePaperSource
@@ -69,7 +71,7 @@ from radar.services.weekly_update import (
     weekly_update,
 )
 from tests.database import APP_ROLE, OWNER_ROLE, TestDatabase, connect_admin, migrate
-from tests.openalex_cassette import ISSN_L, cassette_work, work_bytes
+from tests.openalex_cassette import ISSN_L, cassette_work, cassette_works, work_bytes
 
 WAIT = 30.0  # 每次等待另一條執行緒的上限（秒）
 NOW = datetime(2026, 11, 16, 3, 0, tzinfo=UTC)
@@ -791,3 +793,123 @@ def test_session_lock_is_not_acquired_twice(lock_db: TestDatabase) -> None:
         assert Database.try_shared_transaction_lock(two, INGEST_WRITE_LOCK_KEY)
         assert _lock_holders(lock_db) == 2
     assert _lock_holders(lock_db) == 0
+
+
+# --- 6. 讀物件儲存時沒有開著的交易；參數不對時不碰資料庫 ----------------------------------------
+# reparse 改走 `SessionLock.transaction()` 之後，`tests/integration/test_reparse.py` 用來計數的
+# `TrackingDatabase`（只包 `Database.transaction()`）數不到它的交易，那裡的
+# `open_during_gets == [0, 0, 0]` 與 `opened == 0` 永遠成立；這兩個測試從資料庫端補回同樣的保證。
+
+
+def _staged_now(db: TestDatabase) -> int:
+    """目前已經 commit 的暫存列數（用管理者連線查，不多開 `radar_app` 的連線）。"""
+    with connect_admin(db.name) as admin:
+        row = admin.execute("SELECT count(*) FROM ingest_staging").fetchone()
+    assert row is not None
+    staged: int = row[0]
+    return staged
+
+
+class InspectingStore(FakeObjectStore):
+    """每次 `get` 時從資料庫端記下：持鎖連線的 PID 與狀態、`radar_app` 每條連線的狀態、
+    已經 commit 的暫存列數。"""
+
+    def __init__(self, db: TestDatabase) -> None:
+        super().__init__()
+        self.db = db
+        self.seen: list[tuple[int, str | None, list[str | None], int]] = []
+
+    def get(self, key: str) -> bytes:
+        pid = _lock_holder_pid(self.db)
+        backends = _backends(self.db)
+        staged = _staged_now(self.db)
+        self.seen.append((pid, backends.get(pid), sorted(backends.values(), key=str), staged))
+        return super().get(key)
+
+
+def _seed_known_works(database: Database, store: FakeObjectStore, count: int) -> None:
+    """I&O 錄好的前 `count` 篇（依 ID 排序）：原始資料已存、論文已匯入。"""
+    works = sorted(cassette_works(), key=lambda work: str(work["id"]))[:count]
+    records = []
+    with database.transaction() as connection:
+        for work in works:
+            key = str(work["id"]).rsplit("/", 1)[-1]
+            content = work_bytes(work)
+            record = RawRecord(RawSource.OPENALEX, key, content, T1)
+            records.append(record)
+            store.objects[raw_object_key("openalex", record.sha256)] = compress_raw(content)
+            store.content_types[raw_object_key("openalex", record.sha256)] = RAW_CONTENT_TYPE
+            upsert_by_external_id(
+                connection,
+                parse_openalex_work(content, fetched_at=T1),
+                origin=PaperOrigin.TRACKED,
+                excluded_reason=None,
+                scope=SCOPE,
+            )
+        create_raw_fetches(connection, records)
+
+
+def test_lock_connection_is_idle_at_every_object_store_get(
+    lock_db: TestDatabase, database: Database
+) -> None:
+    store = InspectingStore(lock_db)
+    _seed_known_works(database, store, 5)
+
+    result = reparse_papers(
+        SYSTEM, database, store, scope=SCOPE, exclusion_rules=RULES, batch_size=2
+    )
+
+    assert result == ReparseResult(raw_keys=5, staged=5, updated=5)
+    # 5 篇分 3 批（2、2、1）；每批的暫存列在下一批 GET 之前已經 commit。
+    assert [staged for *_, staged in store.seen] == [0, 0, 2, 2, 4]
+    # 每次 GET 都是同一條持鎖連線，而且它沒有開著的交易（不是 idle in transaction）。
+    pids = {pid for pid, *_ in store.seen}
+    assert len(pids) == 1
+    assert [state for _, state, *_ in store.seen] == ["idle"] * 5
+    # radar_app 的任何一條連線在 GET 時都沒有開著的交易、也沒有在跑 SQL。
+    for _, _, states, _ in store.seen:
+        assert set(states) == {"idle"}
+    assert _lock_holders(lock_db) == 0
+
+
+class StatementCountingDatabase(Database):
+    """記下這個連線池開過幾條實體連線、送出過的每一句 SQL。"""
+
+    def __init__(self, url: str) -> None:
+        super().__init__(url, connect_timeout=5, pool_size=2)
+        self.connects = 0
+        self.statements: list[str] = []
+        event.listen(self._engine, "connect", self._on_connect)
+        event.listen(self._engine, "before_cursor_execute", self._on_execute)
+
+    def _on_connect(self, *_args: Any) -> None:
+        self.connects += 1
+
+    def _on_execute(self, _conn: Any, _cursor: Any, statement: str, *_args: Any) -> None:
+        self.statements.append(statement)
+
+
+@pytest.mark.parametrize("batch_size", [0, -1, True])
+def test_invalid_batch_size_sends_no_sql(
+    lock_db: TestDatabase, database: Database, batch_size: int
+) -> None:
+    store = PausingStore()
+    store.release.set()
+    _reparse_input(database, store)
+    before = _paper_tables(lock_db)
+    backends_before = _backends(lock_db)
+    counting = StatementCountingDatabase(lock_db.app_url)
+
+    with pytest.raises(ValueError, match="batch_size"):
+        reparse_papers(
+            SYSTEM, counting, store, scope=SCOPE, exclusion_rules=RULES, batch_size=batch_size
+        )
+
+    # 一條連線都沒開、一句 SQL 都沒送：沒拿鎖、沒開交易、沒清暫存。
+    assert counting.connects == 0
+    assert counting.statements == []
+    assert _backends(lock_db) == backends_before
+    assert _lock_holders(lock_db) == 0
+    assert store.gets == []
+    assert _paper_tables(lock_db) == before
+    assert _count(lock_db, "ingest_staging") == 0
