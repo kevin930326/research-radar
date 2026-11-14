@@ -20,6 +20,20 @@ deferred:
     location: >-
       radar/services/budget.py（get_budget_status）；之後的 radar/repo/ai_blocks.py
     severity: medium
+  - summary: >-
+      交給 Story 2.4：prompt 的 max_tokens 要能在 RADAR_ANTHROPIC_TIMEOUT（預設 60 秒）內生完，不然長輸出會每次逾時、可能每次付費卻沒記帳。
+    evidence: |-
+      呼叫不串流；逾時沒有用量，閘門不記帳（ADR-0031 決定 6 適用條件 1）；adapter 每次最多試 3 次，工作層之後還會再排。PromptSettings 的 max_tokens 上限是 64,000。2.4 放第一個正式 prompt（zh_summary）時依實際輸出長度設 max_tokens，並確認逾時內生得完（或改用串流）。
+    location: >-
+      prompts/zh_summary/；radar/domain/settings.py（anthropic_timeout）
+    severity: medium
+  - summary: >-
+      交給 Story 2.9：台北每月 1 日 00:00～08:00，Anthropic（若以 UTC 算月份）還在上個月；1 日是週一時每週更新（台北週一 03:00）正好落在這段，被 400 拒絕的論文會永久 rejected。
+    evidence: |-
+      ADR-0031 取捨「月份以台北時間算…」；deploy/crontab 的每週更新；adapter 把 400 歸成 LlmInvalidRequestError（拒收）。可行做法：(a) 迴圈前查預算時，台北 1 日 08:00 前整批延後；(b) BudgetGuard 另加 UTC 月份的加總，接近 workspace_limit_usd 時也不准；(c) adapter 把「額度用完」的 400 歸成暫時錯誤。
+    location: >-
+      之後的每週更新 AI 呼叫端（2.9）；radar/adapters/anthropic/__init__.py
+    severity: medium
 ---
 
 <intent-contract>
@@ -111,6 +125,8 @@ deferred:
 ## Spec Change Log
 
 - 2026-11-15（協調者通知，非審查迴圈）：合併 2.2 的 Codex 主審查修正 `037bb4e`（記帳後出錯改接續 `llm_result_pending`、拒絕 Batch）。依協調者建議，預算不准時仍接續已付費、只差寫結果的 run；沒有可接續的照舊 `DEFERRED_BUDGET`，`_acquire(resume_only=True)` 不新增 run。Intent 不變（接續不呼叫模型、不花錢，不違反「預算不准時不呼叫模型」）。KEEP：預算不准、沒有 pending 時不讀 prompt、不寫列。
+- 2026-11-15（Codex 主審查，PR #56，中 3 筆，只改文件與加一個設定守衛測試）：ADR-0031 決定 6 補適用條件（帳都記得進去、沒有工作打開 `allow_over_input_limit`、不設快取），記帳失敗後要不要暫停改列「待 Kevin 決定」；`allow_over_input_limit` 目前六個工作都是 `false`，加 `tests/unit/test_budget_config.py` 的守衛，打開時要先重算；取捨更正月初 8 小時的說法（可能被 Anthropic 拒絕，400 會變成拒收、429 是暫時錯誤）。Intent 不變。
+- 2026-11-15（確認審查 13f1eec，中 2、低 2）：適用條件 1 補上另外三種付了錢卻沒記帳的情況（逾時或斷線、行程被殺、非預期例外），待 Kevin 決定改寫並加選項 D「悲觀記帳」、建議改成 D；429 的重試改寫成 adapter 的 stamina；月初窗口寫明每週更新的排程會碰到、處理交給 2.9；max_tokens 與逾時交給 2.4（兩條加進 deferred）。`test_budget_denied_without_pending_run_never_creates_a_run` 改成真的準備別的論文的 pending run（斷言不變），新增三個預算不准時接續的整合測試。Intent 不變。
 
 ## Review Triage Log
 
