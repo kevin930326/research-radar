@@ -126,5 +126,8 @@ def build_worker(
             heartbeat_urls,
             timeout=settings.heartbeat_timeout,
             attempts=settings.heartbeat_attempts,
+            wait_initial=settings.heartbeat_retry_wait_initial,
+            wait_max=settings.heartbeat_retry_wait_max,
+            retry_after_max=settings.heartbeat_retry_after_max,
         ),
     )

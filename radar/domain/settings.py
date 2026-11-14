@@ -96,6 +96,12 @@ class Settings(BaseModel):
     # 送一次心跳的 HTTP 逾時（秒）與最多嘗試幾次（含第一次；失敗只記錯誤，不讓工作失敗）。
     heartbeat_timeout: int = Field(default=5, ge=1, le=60)
     heartbeat_attempts: int = Field(default=3, ge=1, le=10)
+    # 心跳重試的等待（秒，Conventions「重試、逾時、速率」）：一般是指數退避，從 initial 開始
+    # 每次加倍、最多 max；對方回 429／5xx 並帶 Retry-After 時照它等，但最多等 retry_after_max，
+    # 避免對方給極大值時卡住 worker。
+    heartbeat_retry_wait_initial: float = Field(default=1.0, gt=0, le=60)
+    heartbeat_retry_wait_max: float = Field(default=10.0, gt=0, le=300)
+    heartbeat_retry_after_max: int = Field(default=30, ge=0, le=600)
 
     @field_validator("database_url")
     @classmethod

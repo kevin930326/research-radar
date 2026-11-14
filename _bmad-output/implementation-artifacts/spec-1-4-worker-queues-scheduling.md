@@ -177,6 +177,14 @@ deferred:
   - `[medium]` `[patch]` 卡住的工作撞排隊鎖改成 failed 的分支沒有測試執行過 — 已修：新增整合測試，卡住的 doing 與同排隊鎖的 todo 並存，`retry_stalled_jobs` 回 0、卡住那筆變 failed（Procrastinate 的 `finish_job` 會把 attempts 加 1，測試已註明）、todo 不受影響。
   - `[medium]` `[patch]` 「收到 SIGTERM 時等手上的工作做完」只用假的 run_once 驗證過 — 已修：新增整合測試，真的 worker 子行程執行約 2 秒的同步工作時送 SIGTERM，斷言退出碼 0、「正常關機」、工作 `succeeded`。
 
+### 2026-11-14 — Codex 審查（PR #41）
+- verdicts: 4 findings — high 1, medium 2, low 1；4 條都修
+- findings:
+  - `[high]` `[patch]` `retry_stalled_jobs` 重排前沒重新確認工作仍屬於失聯的 worker：兩輪 sweep 拿到同一份候選清單時，第一輪重排、健康 worker 接手後，第二輪仍會改回 `todo`（Procrastinate 3.11 的 `retry_job_v2` 接受 `doing`／`failed`，不會丟 P0001），造成重複執行、突破重試上限、提早放掉 `pdf` 鎖 — 已修：查出來的只當候選；每一筆的重試與「標成失敗」（用完次數、撞排隊鎖兩條路）都改成一個 SQL 敘述：CTE 用 `SELECT ... FOR UPDATE OF job` 鎖住工作列，重新核對「仍是 doing、attempts 和候選相同、worker_id 仍是候選的 worker 或已變 NULL、沒有 `seconds_since_heartbeat` 秒內報到過的 worker」，通過才呼叫 `procrastinate_retry_job_v2`／`procrastinate_finish_job_v1`，沒通過回空的、記警告跳過。新增整合測試：攔下候選查詢、兩輪都回同一份舊清單，第一輪後用 Procrastinate 自己的 `register_worker`／`fetch_job` 讓健康 worker 接手，斷言第二輪回 0、工作仍是 doing、attempts 1、worker_id 是健康 worker；另一個測試走「用完次數」那條路；另測經 worker 的非同步連線池走這段 SQL。三個競爭／撞鎖測試在修正前的程式上都會失敗（已實際跑過確認）。單元測試的假 connector 改成對應新 SQL（原本模擬的 `job_manager.retry_job_by_id` 已不再使用），既有三個測試的斷言值不變，另加兩個。
+  - `[medium]` `[patch]` 正常失敗重試撞上排隊鎖時工作一直卡在 `doing`（Procrastinate 只結束 task，worker 仍有心跳，sweep 不回收） — 已修：`create_job_app` 把 JobManager 換成 `RadarJobManager`，覆寫 `retry_job`：`UniqueViolation` 且是排隊鎖時，用 `finish_job` 標成 failed 並記警告（帶 `failed_job_id`、`queueing_lock`）；其他唯一鍵衝突照樣往上丟。新增整合測試：並行數 1、A 執行中排入同排隊鎖的 B、A 失敗，斷言 A 是 failed（attempts 1）、B 執行一次後 succeeded、有一筆警告；修正前這個測試會逾時（A 卡在 doing）。另加單元測試（撞排隊鎖會標 failed、其他唯一鍵衝突照丟、`create_job_app` 用的是 `RadarJobManager`）。ADR-0019 決定第 5 點與取捨同步更新。
+  - `[medium]` `[patch]` 心跳收到 429 時丟掉 `Retry-After`，重試間隔用 stamina 預設值 — 已修：`parse_retry_after()` 解析秒數或 HTTP 日期（看不懂回 None）；`HttpHeartbeat` 改用 stamina 的退避判斷函式，有 `Retry-After` 就照它等、上限 `RADAR_HEARTBEAT_RETRY_AFTER_MAX`（預設 30 秒），沒有就指數退避 `RADAR_HEARTBEAT_RETRY_WAIT_INITIAL`（預設 1）～`RADAR_HEARTBEAT_RETRY_WAIT_MAX`（預設 10），次數仍是 `RADAR_HEARTBEAT_ATTEMPTS`；設定只在 `radar/config.py` 讀，`bootstrap.py` 傳入；`.env.example` 補上。單元測試關掉 stamina 測試模式、攔下 `time.sleep` 記秒數：`Retry-After: 7` 等 7 秒、一天被壓到 30 秒、沒標頭依序 2／3／3 秒、看不懂的標頭走一般退避；另測解析函式、設定範圍與接線、建構子預設值和設定一致。
+  - `[low]` `[patch]` 補排只直接呼叫 `sweep()`，CLI＋正式 worker 的案例只測空登記清單 — 已修：新增整合測試，子行程跑正式的 `worker main()`，只把 `radar.entrypoints.worker.tasks.SWEEP_REGISTRY` 換成測試狀態表 `probe_item` 並登記它要排入的工作（沿用既有 `SLOW_WORKER_SCRIPT` 的組裝方式，正式程式沒有加測試開關）；經 `radar enqueue sweep`（CLI）→ 正式登記的 sweep → worker 執行，斷言補排的工作名稱 `identify_probe`、佇列 `pdf`、鎖、參數 `probe_item_id` 等於卡住那一列的 ID、排隊鎖，以及補排的工作也被 worker 執行、收到同一個 ID，`sweep 完成` 的日誌是 1／1／0。
+
 ## Design Notes
 
 - **為什麼凍結 SQL 而不是在遷移裡讀套件的 schema.sql**：套件升版時 schema.sql 會變，舊遷移在新資料庫上會建出新版結構，接著升版用的遷移又會撞到已存在的物件。凍結成檔，升版時 arch 測試失敗，提醒加一個套用 Procrastinate `sql/migrations/` 新檔的遷移並更新凍結的版本。

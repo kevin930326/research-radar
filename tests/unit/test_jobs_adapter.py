@@ -1,5 +1,6 @@
 """佇列 adapter：排入的選項、工作的簽名檢查與參數轉換（用 Procrastinate 的 InMemoryConnector）。"""
 
+import asyncio
 import json
 import uuid
 from collections.abc import Callable
@@ -10,11 +11,15 @@ from typing import Any, cast
 import procrastinate
 import pytest
 from procrastinate import exceptions as procrastinate_exceptions
+from procrastinate import sql as procrastinate_sql
 from procrastinate.jobs import Job
 from procrastinate.testing import InMemoryConnector
 
 from radar.adapters.jobs import (
+    FAIL_IF_STILL_STALLED,
+    RETRY_IF_STILL_STALLED,
     InvalidJobSignatureError,
+    RadarJobManager,
     check_job_signature,
     create_job_app,
     defer_job,
@@ -225,64 +230,158 @@ def _connector_error(cause: Exception) -> procrastinate_exceptions.ConnectorExce
 
 
 class _FakeConnector:
-    def __init__(self, rows: list[dict[str, object]]) -> None:
+    """查卡住的工作回 `rows`；「核對後重試／標成失敗」依 `errors`、`gone` 丟錯或回空的。"""
+
+    def __init__(
+        self, rows: list[dict[str, object]], errors: dict[int, Exception], gone: set[int]
+    ) -> None:
         self.rows = rows
+        self.errors = errors
+        self.gone = gone
+        self.retried: list[int] = []
         self.finished: list[object] = []
 
     def get_sync_connector(self) -> _FakeConnector:
         return self
 
-    def execute_query_all(self, **_kwargs: object) -> list[dict[str, object]]:
-        return self.rows
-
-    def execute_query(self, **kwargs: object) -> None:
-        self.finished.append(kwargs["job_id"])
-
-
-class _FakeManager:
-    def __init__(self, errors: dict[int, Exception]) -> None:
-        self.errors = errors
-        self.retried: list[int] = []
-
-    def retry_job_by_id(self, *, job_id: int, retry_at: object) -> None:
-        if job_id in self.errors:
-            raise self.errors[job_id]
-        self.retried.append(job_id)
+    def execute_query_all(self, *, query: str, **kwargs: Any) -> list[dict[str, object]]:
+        if query == procrastinate_sql.queries["select_stalled_jobs_by_heartbeat"]:
+            return self.rows
+        job_id = kwargs["job_id"]
+        if job_id in self.gone:
+            return []  # 鎖住重新核對時已經不是卡住的狀態
+        if query == RETRY_IF_STILL_STALLED:
+            if job_id in self.errors:
+                raise self.errors[job_id]
+            self.retried.append(job_id)
+        else:
+            assert query == FAIL_IF_STILL_STALLED
+            self.finished.append(job_id)
+        return [{"id": job_id}]
 
 
 def _stalled_app(
-    rows: list[dict[str, object]], errors: dict[int, Exception]
-) -> tuple[Any, _FakeConnector, _FakeManager]:
-    connector, manager = _FakeConnector(rows), _FakeManager(errors)
-    return SimpleNamespace(connector=connector, job_manager=manager), connector, manager
+    rows: list[dict[str, object]], errors: dict[int, Exception], gone: frozenset[int] = frozenset()
+) -> tuple[Any, _FakeConnector]:
+    connector = _FakeConnector(rows, errors, set(gone))
+    return SimpleNamespace(connector=connector), connector
 
 
 def _row(job_id: int, attempts: int = 0) -> dict[str, object]:
-    return {"id": job_id, "task_name": "sweep", "attempts": attempts}
+    return {"id": job_id, "task_name": "sweep", "attempts": attempts, "worker_id": 7}
 
 
 def test_stalled_jobs_out_of_retries_are_failed_not_retried() -> None:
-    app, connector, manager = _stalled_app([_row(1, attempts=2), _row(2, attempts=1)], {})
+    app, connector = _stalled_app([_row(1, attempts=2), _row(2, attempts=1)], {})
 
     assert retry_stalled_jobs(app, seconds_since_heartbeat=60, max_retries=2) == 1
     assert connector.finished == [1]
-    assert manager.retried == [2]
+    assert connector.retried == [2]
 
 
 def test_stalled_job_whose_state_changed_is_skipped() -> None:
     errors: dict[int, Exception] = {1: _connector_error(_PlpgsqlRaiseError())}
-    app, connector, manager = _stalled_app([_row(1), _row(2)], errors)
+    app, connector = _stalled_app([_row(1), _row(2)], errors)
 
     assert retry_stalled_jobs(app, seconds_since_heartbeat=60, max_retries=3) == 1
-    assert manager.retried == [2]
+    assert connector.retried == [2]
     assert connector.finished == []
 
 
 def test_other_database_errors_still_propagate() -> None:
     # 連線斷了不能當成「這筆跳過」：sweep 要失敗、不送心跳，才看得到資料庫出事。
     errors: dict[int, Exception] = {1: _connector_error(_ConnectionLostError())}
-    app, _connector, manager = _stalled_app([_row(1), _row(2)], errors)
+    app, connector = _stalled_app([_row(1), _row(2)], errors)
 
     with pytest.raises(procrastinate_exceptions.ConnectorException):
         retry_stalled_jobs(app, seconds_since_heartbeat=60, max_retries=3)
-    assert manager.retried == []
+    assert connector.retried == []
+
+
+def test_candidate_no_longer_stalled_is_neither_retried_nor_counted() -> None:
+    # 候選清單是舊的：第 1 筆鎖住重新核對時已經被健康的 worker 接手（核對不通過、回空的）。
+    app, connector = _stalled_app([_row(1), _row(2, attempts=5)], {}, gone=frozenset({1, 2}))
+
+    assert retry_stalled_jobs(app, seconds_since_heartbeat=60, max_retries=3) == 0
+    assert connector.retried == []
+    assert connector.finished == []
+
+
+def test_guard_passes_the_candidates_worker_attempts_and_heartbeat_window() -> None:
+    seen: list[dict[str, Any]] = []
+    app, connector = _stalled_app([_row(1, attempts=2)], {})
+    real = connector.execute_query_all
+
+    def record(*, query: str, **kwargs: Any) -> list[dict[str, object]]:
+        if query == RETRY_IF_STILL_STALLED:
+            seen.append(kwargs)
+        return real(query=query, **kwargs)
+
+    connector.execute_query_all = record  # type: ignore[method-assign]
+    retry_stalled_jobs(app, seconds_since_heartbeat=90, max_retries=3)
+
+    assert seen == [{"job_id": 1, "attempts": 2, "worker_id": 7, "seconds_since_heartbeat": 90}]
+
+
+def test_guarded_queries_lock_the_job_row_and_use_the_frozen_functions() -> None:
+    # 核對與改動在同一個敘述裡，先鎖住工作列；呼叫的 Procrastinate 函式要和套件自己用的一致
+    # （升版時這裡會失敗，提醒回來核對）。
+    for query in (RETRY_IF_STILL_STALLED, FAIL_IF_STILL_STALLED):
+        assert "FOR UPDATE OF job" in query
+        assert "job.status = 'doing'" in query
+        assert "job.attempts = %(attempts)s" in query
+    assert "procrastinate_retry_job_v2(" in procrastinate_sql.queries["retry_job"]
+    assert "procrastinate_retry_job_v2(" in RETRY_IF_STILL_STALLED
+    assert "procrastinate_finish_job_v1(" in procrastinate_sql.queries["finish_job"]
+    assert "procrastinate_finish_job_v1(" in FAIL_IF_STILL_STALLED
+
+
+# --- 工作失敗要重試、卻撞到排隊鎖 -----------------------------------------------------------
+
+
+class _QueueingLockConnector(InMemoryConnector):
+    """重試時丟 `UniqueViolation`（`queueing_lock` 有值＝撞到排隊鎖）。"""
+
+    def __init__(self, queueing_lock: str | None) -> None:
+        super().__init__()
+        self.queueing_lock = queueing_lock
+        self.finished: list[tuple[object, object]] = []
+
+    async def execute_query_async(self, query: str, **arguments: Any) -> None:
+        if query == procrastinate_sql.queries["retry_job"]:
+            raise procrastinate_exceptions.UniqueViolation(
+                constraint_name="some_constraint", queueing_lock=self.queueing_lock
+            )
+        if query == procrastinate_sql.queries["finish_job"]:
+            self.finished.append((arguments["job_id"], arguments["status"]))
+            return
+        raise AssertionError(query)
+
+
+def _failed_job() -> Job:
+    return Job(id=42, queue="maintenance", task_name="sweep", lock=None, queueing_lock="sweep")
+
+
+def test_retry_hitting_queueing_lock_marks_job_failed() -> None:
+    connector = _QueueingLockConnector(queueing_lock="sweep")
+    manager = RadarJobManager(connector=connector)
+
+    asyncio.run(manager.retry_job(job=_failed_job(), retry_at=datetime.now(UTC)))
+
+    assert connector.finished == [(42, "failed")]
+
+
+def test_retry_other_unique_violation_still_raises() -> None:
+    connector = _QueueingLockConnector(queueing_lock=None)
+    manager = RadarJobManager(connector=connector)
+
+    with pytest.raises(procrastinate_exceptions.UniqueViolation):
+        asyncio.run(manager.retry_job(job=_failed_job(), retry_at=datetime.now(UTC)))
+    assert connector.finished == []
+
+
+def test_job_app_uses_radar_job_manager() -> None:
+    job_app = create_job_app("postgresql://u@h/db", max_connections=2, connect_timeout=3)
+
+    assert isinstance(job_app.app.job_manager, RadarJobManager)
+    assert job_app.app.job_manager.connector is job_app.app.connector

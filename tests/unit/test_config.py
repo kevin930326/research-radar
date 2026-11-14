@@ -245,6 +245,45 @@ def test_worker_defaults() -> None:
     assert settings.heartbeat_attempts == 3
 
 
+def test_heartbeat_retry_wait_settings() -> None:
+    defaults = load_settings({"DATABASE_URL": DB_URL})
+    custom = load_settings(
+        {
+            "DATABASE_URL": DB_URL,
+            "RADAR_HEARTBEAT_RETRY_WAIT_INITIAL": "0.5",
+            "RADAR_HEARTBEAT_RETRY_WAIT_MAX": "20",
+            "RADAR_HEARTBEAT_RETRY_AFTER_MAX": "120",
+        }
+    )
+
+    assert (
+        defaults.heartbeat_retry_wait_initial,
+        defaults.heartbeat_retry_wait_max,
+        defaults.heartbeat_retry_after_max,
+    ) == (1.0, 10.0, 30)
+    assert (
+        custom.heartbeat_retry_wait_initial,
+        custom.heartbeat_retry_wait_max,
+        custom.heartbeat_retry_after_max,
+    ) == (0.5, 20.0, 120)
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("RADAR_HEARTBEAT_RETRY_WAIT_INITIAL", "0"),
+        ("RADAR_HEARTBEAT_RETRY_WAIT_MAX", "301"),
+        ("RADAR_HEARTBEAT_RETRY_AFTER_MAX", "-1"),
+        ("RADAR_HEARTBEAT_RETRY_AFTER_MAX", "601"),
+    ],
+)
+def test_heartbeat_retry_wait_out_of_range_is_config_error(name: str, value: str) -> None:
+    with pytest.raises(ConfigError) as caught:
+        load_settings({"DATABASE_URL": DB_URL, name: value})
+
+    assert name in str(caught.value)
+
+
 def test_worker_connection_split_default_is_2_1_3() -> None:
     split = worker_connection_split(load_settings({"DATABASE_URL": DB_URL}))
 

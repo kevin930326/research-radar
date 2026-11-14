@@ -1,5 +1,6 @@
 """背景工作佇列對真的 PostgreSQL：遷移與降版、`radar enqueue`＋worker 子行程、pdf 的鎖、
-sweep 補排、被 SIGKILL 的 worker 留下的工作、worker 比遷移先起來（Story 1.4、ADR-0019）。
+sweep 補排（含經 CLI 與正式 worker）、被 SIGKILL 的 worker 留下的工作、舊候選清單的競爭、
+重試撞到排隊鎖、worker 比遷移先起來（Story 1.4、ADR-0019）。
 """
 
 import asyncio
@@ -17,6 +18,9 @@ from typing import Any
 
 import psycopg
 import pytest
+import structlog
+from procrastinate import sql as procrastinate_sql
+from procrastinate import utils as procrastinate_utils
 
 from radar.adapters.fake import FakeHeartbeat
 from radar.adapters.jobs import create_job_app, defer_job, register_job, retry_stalled_jobs
@@ -378,6 +382,98 @@ def test_sweep_requeues_only_stuck_rows_once(migrated_fresh: TestDatabase) -> No
     assert heartbeat.sent == ["sweep", "sweep"]
 
 
+# 正式的 worker（main()），sweep 的登記清單換成測試狀態表 probe_item，並登記它要排入的工作
+# （執行時把參數寫進 marker）；sweep 本身照正式的 register_tasks 登記與執行。
+PROBE_REGISTRY_WORKER_SCRIPT = """
+import sys
+import uuid
+from datetime import timedelta
+from pathlib import Path
+
+import radar.entrypoints.worker.main as worker_main
+import radar.entrypoints.worker.tasks as worker_tasks
+from radar.adapters.jobs import register_job
+from radar.domain.jobs import JobSpec, Queue
+from radar.domain.sweep import SweepEntry
+
+marker = Path(sys.argv[1])
+identify_probe = JobSpec("identify_probe", Queue.PDF)
+worker_tasks.SWEEP_REGISTRY = (
+    SweepEntry(
+        table="probe_item",
+        status_column="status",
+        start_status="received",
+        time_column="updated_at",
+        job=identify_probe,
+        stuck_after=timedelta(hours=1),
+    ),
+)
+real_register_tasks = worker_main.register_tasks
+
+
+def register_with_probe_job(app, parts, settings):
+    real_register_tasks(app, parts, settings)
+
+    def run_identify_probe(probe_item_id: uuid.UUID) -> None:
+        marker.write_text(str(probe_item_id))
+
+    register_job(app, identify_probe, run_identify_probe, max_retries=0, retry_wait=1)
+
+
+worker_main.register_tasks = register_with_probe_job
+raise SystemExit(worker_main.main())
+"""
+
+
+def test_cli_enqueued_sweep_on_worker_requeues_registered_stuck_row(
+    migrated_fresh: TestDatabase, tmp_path: Path
+) -> None:
+    with migrated_fresh.connect("radar_owner") as owner:
+        owner.execute(PROBE_TABLE_SQL)
+        stuck = owner.execute(
+            "INSERT INTO probe_item (status, updated_at)"
+            " VALUES ('received', now() - interval '2 hours') RETURNING id"
+        ).fetchone()
+        owner.execute(
+            "INSERT INTO probe_item (status, updated_at) VALUES"
+            " ('received', now() - interval '10 minutes'),"
+            " ('matched', now() - interval '2 hours')"
+        )
+    assert stuck is not None
+    script = tmp_path / "probe_registry_worker.py"
+    script.write_text(PROBE_REGISTRY_WORKER_SCRIPT, encoding="utf-8")
+    marker = tmp_path / "identify-probe-ran"
+    env = {"DATABASE_URL": migrated_fresh.app_url}
+    worker = _spawn([sys.executable, "-I", str(script), str(marker)], env)
+    try:
+        result = _radar("enqueue", "sweep", env=env)
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "已排入 sweep" in result.stdout
+
+        _wait_until(
+            lambda: (
+                [(job["task_name"], job["status"]) for job in _jobs(migrated_fresh)]
+                == [("sweep", "succeeded"), ("identify_probe", "succeeded")]
+            ),
+            "sweep 補排的工作也執行成功",
+        )
+    finally:
+        code, records, err = _stop(worker)
+
+    assert code == 0, err
+    sweep_job, requeued = _jobs(migrated_fresh)
+    assert (sweep_job["queue_name"], sweep_job["args"]) == ("maintenance", {})
+    assert requeued["task_name"] == "identify_probe"
+    assert requeued["queue_name"] == "pdf"
+    assert requeued["lock"] == PDF_LOCK
+    assert requeued["args"] == {"probe_item_id": str(stuck[0])}
+    assert requeued["queueing_lock"] == f"identify_probe:{stuck[0]}"
+    assert marker.read_text() == str(stuck[0])
+    [done] = [r for r in records if r["event"] == "sweep 完成"]
+    assert (done["stuck_rows"], done["requeued"], done["retried_jobs"]) == (1, 1, 0)
+    assert done["job_id"] == sweep_job["id"]
+
+
 # 正式的 worker（main()）再多登記一個很慢的測試工作；其餘照正式程式跑。
 SLOW_WORKER_SCRIPT = """
 import sys
@@ -566,6 +662,173 @@ def test_stalled_job_finished_meanwhile_is_skipped(
 
     assert retried == 1
     assert _statuses(migrated_fresh) == {finished: ("succeeded", 0), other: ("todo", 1)}
+
+
+def test_second_sweep_with_stale_candidates_leaves_job_taken_by_healthy_worker(
+    migrated_fresh: TestDatabase, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 重現兩輪 sweep 拿到同一份（舊的）候選清單：第一輪重排、健康的 worker 接手之後，
+    # 第二輪不可以再把它改回排隊（否則重複執行、突破重試上限、pdf 的鎖被提早放掉）。
+    stalled = _insert_job(migrated_fresh, status="doing", queueing_lock=None)
+    stalled_query = procrastinate_sql.queries["select_stalled_jobs_by_heartbeat"]
+    job_app = create_job_app(migrated_fresh.app_url, max_connections=2, connect_timeout=5)
+
+    with job_app.opened() as app:
+        connector = app.connector.get_sync_connector()
+        real_query_all = connector.execute_query_all
+        candidates: list[dict[str, Any]] = []
+
+        def same_candidates_every_time(**kwargs: Any) -> list[dict[str, Any]]:
+            if kwargs["query"] != stalled_query:
+                return real_query_all(**kwargs)
+            if not candidates:
+                candidates.extend(real_query_all(**kwargs))
+            return [dict(row) for row in candidates]
+
+        monkeypatch.setattr(connector, "execute_query_all", same_candidates_every_time)
+        first = retry_stalled_jobs(app, seconds_since_heartbeat=60, max_retries=3)
+
+        # 健康的 worker 照 Procrastinate 自己的流程登記、取走這個工作。
+        with psycopg.connect(migrated_fresh.admin_url, autocommit=True) as admin:
+            registered = admin.execute("SELECT * FROM procrastinate_register_worker_v1()")
+            healthy = registered.fetchone()
+            assert healthy is not None
+            fetched = admin.execute(
+                "SELECT id FROM procrastinate_fetch_job_v2(ARRAY['maintenance'], %s)",
+                (healthy[0],),
+            ).fetchone()
+
+        second = retry_stalled_jobs(app, seconds_since_heartbeat=60, max_retries=3)
+
+    assert [row["id"] for row in candidates] == [stalled]
+    assert fetched == (stalled,)
+    assert (first, second) == (1, 0)
+    [job] = _jobs(migrated_fresh)
+    assert (job["status"], job["attempts"]) == ("doing", 1)
+    with psycopg.connect(migrated_fresh.admin_url, autocommit=True) as admin:
+        owner = admin.execute(
+            "SELECT worker_id FROM procrastinate_jobs WHERE id = %s", (stalled,)
+        ).fetchone()
+    assert owner == (healthy[0],)
+
+
+def test_stale_candidate_out_of_retries_is_not_failed_once_taken_by_healthy_worker(
+    migrated_fresh: TestDatabase, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 「用完次數就標成失敗」那條路也要先核對：候選清單裡的 attempts 是舊的。
+    stalled = _insert_job(migrated_fresh, status="doing", queueing_lock=None, attempts=1)
+    stalled_query = procrastinate_sql.queries["select_stalled_jobs_by_heartbeat"]
+    job_app = create_job_app(migrated_fresh.app_url, max_connections=2, connect_timeout=5)
+
+    with job_app.opened() as app:
+        connector = app.connector.get_sync_connector()
+        real_query_all = connector.execute_query_all
+        candidates: list[dict[str, Any]] = []
+
+        def same_candidates_every_time(**kwargs: Any) -> list[dict[str, Any]]:
+            if kwargs["query"] != stalled_query:
+                return real_query_all(**kwargs)
+            if not candidates:
+                candidates.extend(real_query_all(**kwargs))
+            return [dict(row) for row in candidates]
+
+        monkeypatch.setattr(connector, "execute_query_all", same_candidates_every_time)
+        # 上限 2：第一輪 attempts 1 → 重排成 2。
+        first = retry_stalled_jobs(app, seconds_since_heartbeat=60, max_retries=2)
+        with psycopg.connect(migrated_fresh.admin_url, autocommit=True) as admin:
+            healthy = admin.execute("SELECT * FROM procrastinate_register_worker_v1()").fetchone()
+            assert healthy is not None
+            admin.execute(
+                "SELECT id FROM procrastinate_fetch_job_v2(ARRAY['maintenance'], %s)",
+                (healthy[0],),
+            )
+        # 第二輪：上限降到 1，舊清單的 attempts（1）已到上限，但工作已經在健康的 worker 手上。
+        second = retry_stalled_jobs(app, seconds_since_heartbeat=60, max_retries=1)
+
+    assert (first, second) == (1, 0)
+    assert _statuses(migrated_fresh) == {stalled: ("doing", 2)}
+
+
+def test_guarded_retry_works_through_the_workers_async_connector(
+    migrated_fresh: TestDatabase,
+) -> None:
+    # worker 裡的 sweep 是同步工作、在執行緒跑，連線池是非同步的那個（和 CLI 不同的路）。
+    retried = _insert_job(migrated_fresh, status="doing", queueing_lock=None)
+    used_up = _insert_job(migrated_fresh, status="doing", queueing_lock=None, attempts=3)
+    job_app = create_job_app(migrated_fresh.app_url, max_connections=2, connect_timeout=5)
+
+    async def retry_like_the_worker() -> int:
+        async with job_app.opened_async() as app:
+            return await procrastinate_utils.sync_to_async(
+                retry_stalled_jobs, app, seconds_since_heartbeat=60, max_retries=3
+            )
+
+    assert asyncio.run(retry_like_the_worker()) == 1
+    assert _statuses(migrated_fresh) == {retried: ("todo", 1), used_up: ("failed", 4)}
+
+
+FLAKY = JobSpec("flaky_probe", Queue.MAINTENANCE)
+
+
+def test_failed_job_whose_retry_hits_queueing_lock_ends_as_failed(
+    migrated_fresh: TestDatabase,
+) -> None:
+    # 並行數 1：A 執行中又排入同一件事 B（同一個排隊鎖），A 失敗要重試時撞鎖。
+    # A 要確實結束（failed），不能卡在 doing；B 照常執行。
+    job_app = create_job_app(migrated_fresh.app_url, max_connections=2, connect_timeout=5)
+    probe_id = uuid.uuid4()
+    runs: list[str] = []
+
+    def flaky(probe_id: uuid.UUID) -> None:
+        runs.append("run")
+        if len(runs) == 1:
+            other = create_job_app(migrated_fresh.app_url, max_connections=1, connect_timeout=5)
+            with other.opened() as other_app:
+                assert defer_job(other_app, FLAKY, {"probe_id": probe_id}) is True
+            raise RuntimeError("第一次執行失敗")
+
+    register_job(job_app.app, FLAKY, flaky, max_retries=3, retry_wait=1)
+    with job_app.opened() as app:
+        assert defer_job(app, FLAKY, {"probe_id": probe_id}) is True
+
+    settings = Settings.model_validate(
+        {"database_url": migrated_fresh.app_url, "worker_concurrency": 1}
+    )
+
+    def settled() -> bool:
+        return [job["status"] for job in _jobs(migrated_fresh)] == ["failed", "succeeded"]
+
+    async def run_worker_until_settled() -> None:
+        async with job_app.opened_async() as app:
+            worker = asyncio.create_task(app.run_worker_async(**worker_options(settings)))
+            deadline = time.monotonic() + WAIT_SECONDS
+            while not settled():
+                assert time.monotonic() < deadline, _jobs(migrated_fresh)
+                assert not worker.done(), worker
+                await asyncio.sleep(0.2)
+            worker.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await worker
+
+    with structlog.testing.capture_logs() as logs:
+        asyncio.run(run_worker_until_settled())
+
+    first, second = _jobs(migrated_fresh)
+    # 從「執行中」結束時 Procrastinate 會把 attempts 加一（這次執行也算一次）。
+    assert (first["status"], first["attempts"], first["queueing_lock"]) == (
+        "failed",
+        1,
+        f"flaky_probe:{probe_id}",
+    )
+    # B 只執行一次就成功（成功結束時 attempts 一樣加一）。
+    assert (second["status"], second["attempts"]) == ("succeeded", 1)
+    assert runs == ["run", "run"]
+    warnings = [
+        log for log in logs if log["event"].startswith("工作失敗要重試，但同一件事已經在排隊")
+    ]
+    assert [(log["failed_job_id"], log["log_level"]) for log in warnings] == [
+        (first["id"], "warning")
+    ]
 
 
 # --- worker 比遷移先起來 ------------------------------------------------------------------

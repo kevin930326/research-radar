@@ -9,6 +9,7 @@ import procrastinate
 import pytest
 
 import radar.entrypoints.worker.main as worker_main
+from radar.adapters.heartbeat import HttpHeartbeat
 from radar.adapters.jobs import retry_stalled_jobs
 from radar.domain.jobs import SWEEP
 from radar.domain.settings import Settings
@@ -95,3 +96,37 @@ def test_sweep_task_retry_strategy_follows_settings() -> None:
     strategy = parts.job_app.app.tasks[SWEEP.name].retry_strategy
     assert isinstance(strategy, procrastinate.RetryStrategy)
     assert (strategy.max_attempts, strategy.wait, strategy.linear_wait) == (5, 7, 7)
+
+
+def test_heartbeat_retry_waits_follow_settings() -> None:
+    settings = Settings.model_validate(
+        {
+            "database_url": APP_URL,
+            "heartbeat_attempts": 4,
+            "heartbeat_retry_wait_initial": 0.5,
+            "heartbeat_retry_wait_max": 20,
+            "heartbeat_retry_after_max": 120,
+        }
+    )
+    parts = build_worker(settings, queue_pool_size=2, app_pool_size=3, heartbeat_urls={})
+
+    heartbeat = parts.send_heartbeat
+    assert isinstance(heartbeat, HttpHeartbeat)
+    assert (
+        heartbeat._attempts,
+        heartbeat._wait_initial,
+        heartbeat._wait_max,
+        heartbeat._retry_after_max,
+    ) == (4, 0.5, 20.0, 120)
+
+
+def test_heartbeat_constructor_defaults_match_settings_defaults() -> None:
+    # 預設值寫在兩處（設定與 adapter 的建構子），要一致。
+    defaults = Settings.model_validate({"database_url": APP_URL})
+    heartbeat = HttpHeartbeat({}, timeout=5, attempts=3)
+
+    assert (heartbeat._wait_initial, heartbeat._wait_max, heartbeat._retry_after_max) == (
+        defaults.heartbeat_retry_wait_initial,
+        defaults.heartbeat_retry_wait_max,
+        defaults.heartbeat_retry_after_max,
+    )
