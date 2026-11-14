@@ -41,6 +41,7 @@ from radar.domain.scope import ScopeSettings
 from radar.domain.snapshot import SnapshotStatus
 from radar.domain.viewer import MemberViewer, SystemViewer
 from radar.repo.db import Database
+from radar.repo.ingest_staging import delete_staged_papers, list_staged_papers
 from radar.repo.papers import (
     update_paper_keywords,
     update_papers_first_snapshot,
@@ -395,6 +396,32 @@ def test_first_apply_writes_papers_and_publishes_snapshot_1(
     assert not [log for log in logs if log["event"] == "這次每週更新沒有任何暫存論文"]
 
 
+def test_apply_reads_staging_in_batches_of_batch_size(
+    weekly_db: TestDatabase, database: TrackingDatabase, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 低記憶體主機靠分批讀暫存列：205 列、每批 50 → 非空的批次是 50、50、50、50、5，
+    # 每次都用 batch_size 當上限、游標往前推，最後一次讀到空的才停（Codex 補審 C3）。
+    run_id = _fetched_run(database)
+    assert _staged_count(weekly_db, run_id) == 205
+    batches: list[tuple[int, uuid.UUID | None, int]] = []
+
+    def recording(*args: Any, **kwargs: Any) -> Any:
+        staged = list_staged_papers(*args, **kwargs)
+        batches.append((kwargs["limit"], kwargs["after_id"], len(staged)))
+        return staged
+
+    monkeypatch.setattr(weekly_update_module, "list_staged_papers", recording)
+    result = _apply(database, run_id, batch_size=50)
+
+    assert [size for _limit, _after, size in batches] == [50, 50, 50, 50, 5, 0]
+    assert {limit for limit, _after, _size in batches} == {50}
+    cursors = [after for _limit, after, _size in batches]
+    assert cursors[0] is None
+    assert None not in cursors[1:]
+    assert len(set(cursors)) == len(cursors)
+    assert (result.staged, result.created) == (205, 205)
+
+
 # --- 中途失敗 ---------------------------------------------------------------------------------
 
 
@@ -488,6 +515,72 @@ def test_second_round_failure_keeps_snapshot_1_and_old_titles(
     assert _paper_tables(weekly_db) == before
     assert _run_row(weekly_db, second)[0] == "fetching"
     assert _run_row(weekly_db, first)[0] == "published"
+
+
+def test_failure_after_deleting_staging_rolls_everything_back(
+    weekly_db: TestDatabase, database: TrackingDatabase, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 故障點在套用尾段：已經指定 first_snapshot_id、發佈快照、真的刪掉暫存列之後才丟錯，
+    # 仍然整個退回（Codex 補審 C2）。
+    run_id = _fetched_run(database)
+    staged = _staged_count(weekly_db, run_id)
+    before = _paper_tables(weekly_db)
+    touched_before = _backdate(weekly_db, run_id)
+    heartbeat = FakeHeartbeat()
+    deleted: list[int] = []
+
+    def delete_then_fail(connection: Connection, batch_id: uuid.UUID) -> int:
+        deleted.append(delete_staged_papers(connection, batch_id))
+        # 這時同一個交易裡：快照已發佈、論文已指到它、暫存列已刪光。
+        [(status, number)] = connection.exec_driver_sql("SELECT status, number FROM snapshot").all()
+        assert (status, number) == ("published", 1)
+        assigned = connection.exec_driver_sql(
+            "SELECT count(*) FROM paper WHERE first_snapshot_id IS NOT NULL"
+        ).scalar_one()
+        assert assigned == staged
+        raise _ApplyBrokenError("secret-detail-in-message")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(weekly_update_module, "delete_staged_papers", delete_then_fail)
+        with capture_logs() as logs, pytest.raises(_ApplyBrokenError):
+            _apply(database, run_id, heartbeat)
+
+    # 真的刪掉了（不是在刪之前就丟錯）。
+    assert deleted == [staged]
+    # 論文四張表、快照、weekly_run 狀態、暫存列都是套用前的樣子；沒有心跳。
+    assert _paper_tables(weekly_db) == before
+    assert _snapshots(weekly_db) == []
+    status, finished_at, updated_at = _run_row(weekly_db, run_id)
+    assert (status, finished_at is not None) == ("fetching", True)
+    assert updated_at > touched_before
+    assert _staged_count(weekly_db, run_id) == staged
+    assert heartbeat.sent == []
+    [error] = [log for log in logs if log["log_level"] == "error"]
+    assert (error["event"], error["error"]) == ("每週更新套用失敗，已整個退回", "_ApplyBrokenError")
+    assert "secret-detail-in-message" not in str(logs)
+
+    # 解除故障再跑一次：快照編號仍是 1，結果和一次就成功的相同。
+    result = _apply(database, run_id, heartbeat)
+
+    [(snapshot_id, number, snapshot_run, snapshot_status)] = _snapshots(weekly_db)
+    assert (number, snapshot_run, snapshot_status) == (1, run_id, "published")
+    [(as_of,)] = _rows(weekly_db, "SELECT as_of FROM snapshot")
+    assert result == WeeklyApplyResult(
+        weekly_run_id=run_id,
+        snapshot_id=snapshot_id,
+        snapshot_number=1,
+        as_of=as_of,
+        staged=staged,
+        created=staged,
+        first_snapshot_assigned=staged,
+    )
+    assert _count(weekly_db, "paper") == staged
+    assert _rows(
+        weekly_db, "SELECT count(*) FROM paper WHERE first_snapshot_id = %s", snapshot_id
+    ) == [(staged,)]
+    assert _run_row(weekly_db, run_id)[0] == "published"
+    assert _staged_count(weekly_db, run_id) == 0
+    assert heartbeat.sent == ["weekly-update"]
 
 
 # --- 再套用、內容相同的下一輪、補指定快照 ---------------------------------------------------------

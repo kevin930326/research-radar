@@ -36,7 +36,7 @@ from radar.domain.raw_records import RawRecord, RawSource
 from radar.domain.scope import ScopeSettings
 from radar.domain.staging import StagingItem, StagingKind
 from radar.domain.viewer import SystemViewer
-from radar.repo.db import Database
+from radar.repo.db import INGEST_WRITE_LOCK_KEY, Database
 from radar.repo.ingest_staging import create_staged_papers
 from radar.repo.papers import upsert_by_external_id
 from radar.repo.weekly_runs import create_weekly_run
@@ -279,3 +279,34 @@ def test_reparse_refuses_while_weekly_update_is_fetching(
     ]
     assert _rows(fresh_database, "SELECT count(*) FROM paper") == [(0,)]
     assert _rows(fresh_database, "SELECT status FROM weekly_run") == [("fetching",)]
+
+
+def test_reparse_refuses_while_another_holds_the_write_lock(
+    fresh_database: TestDatabase, s3: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 另一個 reparse（這裡直接拿同一把鎖代表）正在跑：退出碼 1、清楚的訊息、什麼都不寫。
+    migrate(fresh_database)
+    database = Database(fresh_database.app_url, connect_timeout=5, pool_size=2)
+    work = cassette_pages()[0][0]
+    leftover = StagingItem(
+        external_key=work["id"].rsplit("/", 1)[-1],
+        paper=parse_openalex_work(work_bytes(work), fetched_at=FETCHED_AT),
+        excluded_reason=None,
+    )
+    with database.transaction() as connection:
+        create_staged_papers(
+            connection, batch_id=uuid.uuid7(), kind=StagingKind.REPARSE, items=[leftover]
+        )
+    _set_env(monkeypatch, fresh_database.app_url)
+
+    with database.session_lock(INGEST_WRITE_LOCK_KEY) as acquired:
+        assert acquired
+        result = runner.invoke(cli.app, ["reparse"])
+
+    assert result.exit_code == 1, result.output
+    assert "另一個 reparse 或每週更新正在寫入論文，等它結束後再跑 reparse" in result.stderr
+    assert "重新解析完成" not in result.stdout
+    assert _rows(fresh_database, "SELECT kind, count(*) FROM ingest_staging GROUP BY kind") == [
+        ("reparse", 1)
+    ]
+    assert _rows(fresh_database, "SELECT count(*) FROM paper") == [(0,)]
