@@ -190,20 +190,26 @@ def test_invalid_object_store_endpoint_prints_only_error_class(
     monkeypatch.setenv("RADAR_OBJECT_STORE_ENDPOINT_URL", "http://bad host!.invalid:9000")
     monkeypatch.setenv("RADAR_OBJECT_STORE_ACCESS_KEY_ID", "FAKE-ACCESS-not-real")
     monkeypatch.setenv("RADAR_OBJECT_STORE_SECRET_ACCESS_KEY", FAKE_PASSWORD)
-    called: list[None] = []
-    monkeypatch.setattr(cli, "reparse_papers", lambda *_a, **_k: called.append(None))
+    monkeypatch.setattr(cli, "reparse_papers", _botocore_should_have_failed)
 
     result = runner.invoke(cli.app, ["reparse"], catch_exceptions=False)
 
     assert result.exit_code == 1
     assert "ValueError" in result.stderr
+    # 日誌（JSON）寫在 stdout：只有錯誤類別，沒有主機與假帳密。
+    assert '"error_type": "ValueError"' in result.stdout
     captured = capsys.readouterr()
     for text in (result.stdout, result.stderr, captured.out, captured.err):
         assert "bad host!" not in text
+        assert "bad%20host" not in text
         assert FAKE_PASSWORD not in text
         assert "FAKE-ACCESS-not-real" not in text
         assert "s3cret-APP" not in text
-    assert called == []
+    assert "重新解析完成" not in result.stdout
+
+
+def _botocore_should_have_failed(*_args: Any, **_kwargs: Any) -> ReparseResult:
+    pytest.fail("botocore 沒有擋下不合法的端點")
 
 
 @pytest.mark.usefixtures("env")

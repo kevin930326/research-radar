@@ -248,3 +248,13 @@ deferred: []
 - `tests/unit/test_cli_reparse.py::test_endpoint_with_credentials_is_config_error`：端點帶帳密時在設定驗證就擋下，stderr 列出環境變數名稱、輸出不含帳密。
 - `tests/unit/test_config.py::test_object_store_endpoint_url_rejects_credentials`（三種寫法：帳號＋密碼、只有帳號、只有密碼）：`ConfigError` 只指出環境變數，不含值。
 - 拿掉修正確認會失敗：把 CLI 換回舊寫法，前兩個測試失敗（`ValueError: Invalid endpoint: ...` 直接丟出）；把設定驗證換回舊寫法，後兩組共 4 個測試失敗。
+
+## 對抗式審查修正
+
+三條意見都是低，集中在 `RADAR_OBJECT_STORE_ENDPOINT_URL` 的設定驗證（`radar/domain/settings.py` 的 `_check_object_store_endpoint_url`）與一個測試：
+
+1. **沒檢查連接埠**：`http://host:99999`、`http://host:abc` 原本都能通過，`check_database_url` 卻會擋。改成照 `check_database_url` 的寫法讀 `parts.port`、接住例外，錯誤訊息固定是「連接埠必須是 1–65535 的數字」，不含值。測試：`tests/unit/test_config.py::test_object_store_endpoint_url_rejects_bad_port`（`:99999`、`:abc`、`:-1` 三種）。
+2. **沒擋查詢參數與片段**：S3 端點用不到 `?…` 與 `#…`，而且可能夾帶簽章。改成有任一段就擋下，訊息固定是「網址不能含查詢參數（?）或片段（#）」，不含值。測試：`tests/unit/test_config.py::test_object_store_endpoint_url_rejects_query_and_fragment`（四種寫法，斷言錯誤訊息不含假簽章與主機）；另外新增 `test_object_store_endpoint_url_accepts_valid`，確認 `http://[::1]:9000`、`https://abc123.r2.cloudflarestorage.com`、`http://localhost:9000`、`http://rustfs:9000`、`http://127.0.0.1:9000`、`http://host:9000/bucket` 不會被誤擋（原本沒有「要通過」的測試，新寫）。
+3. **`test_invalid_object_store_endpoint_prints_only_error_class` 不夠嚴**（本 Story 自己新增的測試，這次是加強）：補上日誌斷言（stdout 的 JSON 日誌有 `"error_type": "ValueError"`，且 stdout、stderr、capsys 都不含主機與假帳密）；`reparse_papers` 的替身改成直接 `pytest.fail("botocore 沒有擋下不合法的端點")`，將來 botocore 改成接受這種端點時，失敗訊息直接說明原因。
+
+**拿掉修正確認會失敗**：拿掉連接埠檢查，第 1 組 3 個測試失敗；拿掉查詢參數／片段檢查，第 2 組 4 個測試失敗；第 3 條的測試在 CLI 換回 fd813b3 之前的寫法時失敗（`ValueError: Invalid endpoint: ...` 直接丟出）、日誌不記 `error_type` 時失敗、日誌把例外訊息寫進去時失敗；`build_object_store` 改成不檢查端點時，測試以「botocore 沒有擋下不合法的端點」失敗。
