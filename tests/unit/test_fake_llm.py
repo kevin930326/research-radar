@@ -6,7 +6,6 @@ import math
 from typing import Any
 
 import pytest
-from pydantic import BaseModel
 
 from radar.adapters.fake import (
     FakeEmbeddingProvider,
@@ -27,15 +26,14 @@ from radar.domain.llm import (
     LlmTruncatedError,
     NotCloudSafeError,
 )
+from radar.domain.llm_schemas import FakeAnyObject as AnyObject
 from radar.domain.policy import CloudPolicy, CloudSafeText, ContentSource, clear_for_cloud
 from radar.ports import EmbeddingProvider, LlmProvider
 
 POLICY = CloudPolicy()
 
-
-# output_schema 改成只收 Pydantic 模型類別（Opus 確認審查第 1 點）；原本是 {"type": "object"}。
-class AnyObject(BaseModel):
-    pass
+# output_schema 只收 radar/domain/llm_schemas.py 最上層的模型類別（Opus 確認審查第 1、3 輪）；
+# 原本是 {"type": "object"}。
 
 
 def _safe(text: str, source: ContentSource = ContentSource.TITLE) -> CloudSafeText:

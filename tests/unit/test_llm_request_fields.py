@@ -16,7 +16,7 @@ from typing import Any
 
 import httpx2
 import pytest
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel
 
 from radar.adapters.anthropic import AnthropicLlmProvider
 from radar.adapters.fake import FakeLlmProvider, fake_completion
@@ -27,18 +27,13 @@ from radar.domain.llm import (
     check_llm_request,
     snapshot_llm_request,
 )
+from radar.domain.llm_schemas import FakeResearchQuestion as Answer
 from radar.domain.policy import CloudPolicy, CloudSafeText, ContentSource, clear_for_cloud
 from tests.anthropic_cassette import cassette_response
 
 POLICY = CloudPolicy()
 PAYWALLED = "（假）付費全文不該送出 PAYWALLED-MARKER-5T"
 MARKER = "PAYWALLED-MARKER-5T"
-
-
-class Answer(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    research_question: str
 
 
 def _safe(text: str, source: ContentSource = ContentSource.TITLE) -> CloudSafeText:

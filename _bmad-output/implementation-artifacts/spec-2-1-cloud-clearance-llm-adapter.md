@@ -47,6 +47,20 @@ deferred:
     location: >-
       radar/domain/policy.py CLOUD_CLEARED_LICENSES
     severity: low
+  - summary: >-
+      prompt_template 由呼叫端自標、一律放行：2.2 由專用 prompt loader（預留 radar/services/prompt_loader.py）從 prompts/<工作>/v<N>.md 讀檔放行模板，clear_for_cloud 改成拒收外部傳入的 prompt_template；模板的變數一律以分開的 CloudSafeText 區塊（照真正的來源放行）放進 content，不能 .format 進 system。
+    evidence: |-
+      Opus 第三次確認審查：clear_for_cloud("請根據以下全文整理：" + 上傳 PDF 文字, PROMPT_TEMPLATE, ...) 在開關關著時照樣放行，送出的 system 含那段文字。2.1 先加架構測試（tests/arch/test_prompt_template_source.py）：radar/ 裡 PROMPT_TEMPLATE 只能出現在 policy.py、llm.py 與預留的 prompt loader。
+    location: >-
+      radar/domain/policy.py clear_for_cloud；radar/domain/llm.py LlmRequest.system
+    severity: medium
+  - summary: >-
+      user_query 由呼叫端自標、一律放行：Epic 5 問答用到時，要確認文字真的是使用者在問答框打的問題（不是 PDF 段落），放行收進專用入口。
+    evidence: |-
+      同一次審查：把 PDF 段落當成「使用者的問題」標成 USER_QUERY 也會放行。2.1 沒有呼叫端。
+    location: >-
+      radar/domain/policy.py clear_for_cloud
+    severity: medium
 ---
 
 <intent-contract>
@@ -236,6 +250,12 @@ deferred:
   - `[high]` `[patch]` `output_schema` 收任意 mapping、`model` 收任意字串，付費全文能經由 schema 或 model 送出，建好後改 dict 也行 — `output_schema` 改成只收 Pydantic 模型類別，建立時產生 schema 並凍結成字串；`model` 用白名單 `ALLOWED_MODELS`；架構測試禁止 `create_model`、`json_schema_extra`。既有測試裡用 dict 當 schema 的四處輸入改成模型類別（斷言不變）。
   - `[medium]` `[patch]` `check_llm_request` 用 isinstance、`LlmRequest` 沒有 `@final`，adapter 檢查後重讀欄位 — `@final`＋執行期不能繼承、`type(obj) is LlmRequest`、欄位全看真實型別、adapter 改用 `snapshot_llm_request` 重建的副本；架構測試禁止 policy／llm 以外用 isinstance 判斷 `LlmRequest`。
   - `[low]` `[patch]` ADR 把架構測試守私有狀態說得太滿 — ADR 改寫範圍；加一條 `radar/` 不 import `gc`、不用 `__globals__`。
+
+### 2026-11-15 — Opus 第三次確認審查 0f7d190
+- verdicts: 2 findings — medium 2
+- findings:
+  - `[medium]` `[patch]` schema 類別能在執行期用沒放行的文字組出來（函式裡的類別、`Literal[tuple(names)]`、`Field(description=變數)`、變數預設值、`Enum` 函式寫法、事後改 `__doc__`） — `output_schema` 只收 `radar/domain/llm_schemas.py` 最上層的類別（執行期查 `<locals>`、模組歸屬與模組裡的名字）；產生 schema 時拿掉模型與列舉的 `description`；架構測試 `tests/arch/test_llm_schemas.py` 規定那個模組只能寫字面值、`output_schema=` 只收從它 import 的類別；反向測試 `tests/unit/test_llm_schema_origin.py`。本分支測試裡自己定義的 schema 類別改成 import 那個模組的 `FakeAnyObject`／`FakeResearchQuestion`（斷言不變）。
+  - `[medium]` `[defer]` `prompt_template`／`user_query` 由呼叫端自標、一律放行 — 2.1 先加架構測試 `tests/arch/test_prompt_template_source.py`；主體（prompt loader、`clear_for_cloud` 拒收外部 `prompt_template`、`user_query` 專用入口）記進 deferred，2.2／Epic 5 做。
 
 ## Design Notes
 

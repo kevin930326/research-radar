@@ -16,6 +16,7 @@
 
 import json
 import math
+import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, Final, Literal, cast, final, get_args
@@ -49,6 +50,9 @@ EFFORTS: Final[frozenset[str]] = frozenset(get_args(Effort.__value__))
 # 可以送出的模型 ID（白名單）。`model` 也會原樣送到雲端，所以不收任意字串（ADR-0029）。
 # 目前還沒有模型設定檔，先放 domain 常數；2.2 的 `config/models.yaml` 之後接手。
 ALLOWED_MODELS: Final[frozenset[str]] = frozenset({"claude-haiku-5-5"})
+
+# `output_schema` 只收這個模組最上層定義的類別（ADR-0029；寫法由架構測試守著）。
+SCHEMA_MODULE: Final = "radar.domain.llm_schemas"
 
 # 正常結束與長度截斷的 `stop_reason`（其餘都當格式不對）。
 END_TURN: Final = "end_turn"
@@ -209,7 +213,8 @@ class LlmRequest:
     - `content`：使用者訊息的區塊，一個 `CloudSafeText` 一個文字區塊，至少一個。
     - `model`：必須在 `ALLOWED_MODELS` 裡。
     - `effort`、`disable_thinking`：Haiku 5.5 的思考設定。
-    - `output_schema`：要固定 JSON 格式時，傳 repo 裡寫死的 Pydantic 模型**類別**（不收 dict）；
+    - `output_schema`：要固定 JSON 格式時，傳 `radar/domain/llm_schemas.py` 最上層定義的
+      Pydantic 模型**類別**（不收 dict、函式裡定義的類別、別的模組的類別）；
       建立時由類別產生 JSON schema 並凍結成字串，送出時才轉回 dict，建好之後改不到。
       有給時回應必須是 JSON 物件。schema 和 `model` 一樣會送到雲端，所以也在放行範圍內
       （ADR-0029）：只收寫在程式裡的類別，不收外部文字組出來的 schema。
@@ -246,8 +251,9 @@ class LlmRequest:
 
 
 class _SchemaWithoutTitles(GenerateJsonSchema):
-    """產生 JSON schema 時不放 Pydantic 自動加的 `title`（由欄位名稱與類別名稱推出，送出只是多
-    花 token）。"""
+    """產生 JSON schema 時，模型與列舉不放 `title`（由名稱推出，只是多花 token）與 `description`
+    （來自 docstring；`__doc__` 建好後還能被改，所以一律不送）。欄位的 `Field(description=...)`
+    照送（架構測試要求寫成字面值）。"""
 
     def field_title_should_be_set(
         self, schema: core_schema.CoreSchema | core_schema.ModelField | Any
@@ -257,6 +263,13 @@ class _SchemaWithoutTitles(GenerateJsonSchema):
     def model_schema(self, schema: core_schema.ModelSchema) -> JsonSchemaValue:
         result = super().model_schema(schema)
         result.pop("title", None)
+        result.pop("description", None)
+        return result
+
+    def enum_schema(self, schema: core_schema.EnumSchema) -> JsonSchemaValue:
+        result = super().enum_schema(schema)
+        result.pop("title", None)
+        result.pop("description", None)
         return result
 
 
@@ -269,12 +282,27 @@ def _schema_json(output_schema: type[BaseModel] | None) -> str | None:
     return json.dumps(schema, ensure_ascii=False, sort_keys=True, allow_nan=False)
 
 
-def _is_model_class(value: object) -> bool:
-    """真的是 `BaseModel` 的子類別（看真實型別是不是 metaclass，偽裝 `__class__` 的物件不算）。"""
+def _is_schema_class(value: object) -> bool:
+    """是 `SCHEMA_MODULE` 最上層定義的 `BaseModel` 子類別。
+
+    - 看真實型別是不是 metaclass（偽裝 `__class__` 的物件不算）。
+    - 函式裡臨時定義的類別（`__qualname__` 含 `<locals>`）、巢狀類別、別的模組的類別都不收：
+      這些都可以在執行期用沒放行的文字組出來（`Literal[tuple(names)]`、`Field(description=變數)`）。
+    - 模組裡那個名字真的指向這個類別（`__module__`、`__qualname__` 可以亂改，但改了對不上）。
+    """
     if not issubclass(type(value), type):
         return False
     # 上一行已確認真實型別是 metaclass（value 是真的類別）；cast 只是讓 mypy 收窄。
-    return issubclass(cast(type, value), BaseModel) and value is not BaseModel
+    cls = cast(type, value)
+    if not issubclass(cls, BaseModel) or cls is BaseModel:
+        return False
+    module, qualname = cls.__module__, cls.__qualname__
+    if type(module) is not str or type(qualname) is not str:
+        return False
+    if module != SCHEMA_MODULE or not qualname.isidentifier():
+        return False
+    owner = sys.modules.get(module)
+    return owner is not None and vars(owner).get(qualname) is cls
 
 
 def _validate_request(request: LlmRequest) -> None:
@@ -314,8 +342,11 @@ def _validate_request(request: LlmRequest) -> None:
         raise ValueError("LlmRequest.effort 只能是 low、medium、high 或 None")
     if type(request.disable_thinking) is not bool:
         raise TypeError("LlmRequest.disable_thinking 必須是 bool")
-    if request.output_schema is not None and not _is_model_class(request.output_schema):
-        raise TypeError("LlmRequest.output_schema 必須是 Pydantic 模型類別或 None（不收 dict）")
+    if request.output_schema is not None and not _is_schema_class(request.output_schema):
+        raise TypeError(
+            "LlmRequest.output_schema 必須是 radar/domain/llm_schemas.py 最上層定義的"
+            " Pydantic 模型類別或 None（不收 dict、函式裡定義的類別、別的模組的類別）"
+        )
 
 
 def _not_cloud_safe(where: str, value: object, *, container: bool = False) -> str:

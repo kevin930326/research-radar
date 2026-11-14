@@ -6,7 +6,6 @@ import dataclasses
 from typing import Any
 
 import pytest
-from pydantic import BaseModel
 
 from radar.adapters.fake import fake_completion
 from radar.domain.errors import ErrorCode
@@ -35,6 +34,7 @@ from radar.domain.llm import (
     interpret_completion,
     system_prompt,
 )
+from radar.domain.llm_schemas import FakeAnyObject as AnyObject
 from radar.domain.policy import (
     CloudPolicy,
     CloudSafeText,
@@ -62,11 +62,8 @@ def _request(**changes: Any) -> LlmRequest:
     return LlmRequest(**values)
 
 
-# output_schema 改成只收 Pydantic 模型類別（Opus 確認審查第 1 點）；原本是 {"type": "object"}。
-class AnyObject(BaseModel):
-    pass
-
-
+# output_schema 只收 radar/domain/llm_schemas.py 最上層的模型類別（Opus 確認審查第 1、3 輪）；
+# 原本是 {"type": "object"}。
 JSON_REQUEST = _request(output_schema=AnyObject)
 
 

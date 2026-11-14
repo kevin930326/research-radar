@@ -629,3 +629,6 @@
 - **模型白名單（`ALLOWED_MODELS`）**：可以送出的模型 ID 清單（目前只有 `claude-haiku-5-5`）；`model` 也會原樣送到雲端，所以不收清單以外的字串。
 - **`snapshot_llm_request`（請求副本）**：adapter 送出前，把檢查過的請求用讀到的值重新建一份，之後只讀這份，像影印一份簽過名的文件再寄出，原件之後被塗改也影響不到寄出去的那份。
 - **TOCTOU（檢查與使用之間的時間差）**：先檢查、後使用時，中間被換掉的漏洞；本專案用「檢查後重建副本、只用副本」避開。
+- **`llm_schemas.py`（schema 模組）**：`radar/domain/llm_schemas.py`，給 LLM 的結構化輸出格式只能寫在這裡、而且只能寫字面值，像菜單只能印好，不能讓客人現場改字；`LlmRequest.output_schema` 只收這個模組最上層的類別。
+- **prompt loader**：2.2 要做的元件，只從 `prompts/<工作>/v<N>.md` 讀檔、把模板放行成 `prompt_template`；之後一般程式不能自己把文字標成模板。
+- **`<locals>`（函式裡定義的類別）**：Python 給函式內部定義的類別的名字標記；這種類別可以用執行期的資料臨時組出來，所以 schema 一律不收。

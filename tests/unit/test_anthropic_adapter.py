@@ -12,7 +12,6 @@ import anthropic
 import httpx2
 import pytest
 import stamina
-from pydantic import BaseModel, ConfigDict
 
 from radar.adapters.anthropic import (
     ANTHROPIC_BASE_URL,
@@ -37,6 +36,7 @@ from radar.domain.llm import (
     LlmUsage,
     NotCloudSafeError,
 )
+from radar.domain.llm_schemas import FakeResearchQuestion as ResearchQuestion
 from radar.domain.policy import CloudPolicy, CloudSafeText, ContentSource, clear_for_cloud
 from radar.ports import LlmProvider
 from tests.anthropic_cassette import NAMES, cassette_body, cassette_request, cassette_response
@@ -53,14 +53,8 @@ SCHEMA: dict[str, object] = {
 }
 
 
-# output_schema 改成只收 Pydantic 模型類別（Opus 確認審查第 1 點）：這個類別產生的 JSON schema
-# 就是上面的 SCHEMA（不寫 docstring：docstring 會變成 schema 的 description）。
-class ResearchQuestion(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    research_question: str
-
-
+# output_schema 只收 radar/domain/llm_schemas.py 最上層的模型類別（Opus 確認審查第 1、3 輪）：
+# ResearchQuestion（FakeResearchQuestion）產生的 JSON schema 就是上面的 SCHEMA。
 type Reply = httpx2.Response | Exception | Callable[[], httpx2.Response]
 
 
