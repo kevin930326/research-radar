@@ -155,6 +155,41 @@ def test_api_paths_are_404_json_for_every_method(
     _assert_security_headers(response.headers)
 
 
+# 不只常見方法：TRACE、CONNECT、自訂方法也不能因為方法清單變成 405（Codex 審查 PR #61）。
+@pytest.mark.parametrize("method", ["HEAD", "OPTIONS", "TRACE", "CONNECT", "PROPFIND", "PURGE"])
+@pytest.mark.parametrize("path", ["/api/v1/x", "/api"])
+def test_api_paths_are_404_for_methods_outside_any_list(
+    client: TestClient, method: str, path: str
+) -> None:
+    response = client.request(method, path)
+
+    assert response.status_code == 404
+    if method != "HEAD":
+        assert response.json() == {"detail": "Not Found"}
+    _assert_security_headers(response.headers)
+
+
+@pytest.mark.parametrize("method", ["TRACE", "CONNECT", "PROPFIND"])
+def test_shell_paths_reject_unlisted_methods_with_405(client: TestClient, method: str) -> None:
+    response = client.request(method, "/notice")
+
+    assert response.status_code == 405
+    assert response.headers["allow"] == "GET, HEAD"
+
+
+def test_direct_index_request_is_not_cached(client: TestClient) -> None:
+    for method in ("GET", "HEAD"):
+        response = client.request(method, "/index.html")
+
+        assert response.status_code == 200
+        assert response.headers["cache-control"] == "no-cache"
+    assert client.get("/index.html").text == SHELL
+
+
+def test_static_assets_do_not_get_the_shell_cache_header(client: TestClient) -> None:
+    assert "cache-control" not in client.get("/assets/index-abc123.js").headers
+
+
 @pytest.mark.parametrize("method", ["POST", "PUT", "DELETE"])
 def test_shell_paths_only_accept_get_and_head(client: TestClient, method: str) -> None:
     response = client.request(method, "/notice")
@@ -205,6 +240,38 @@ def test_symlink_out_of_the_build_is_not_followed(web_dist: Path, client: TestCl
     response = client.get("/assets/link.txt")
 
     assert response.text == SHELL
+
+
+def test_index_symlinked_out_of_the_build_is_not_mounted(tmp_path: Path) -> None:
+    dist = tmp_path / "web" / "dist"
+    dist.mkdir(parents=True)
+    outside = tmp_path / "web" / "secret.txt"
+    outside.write_text("outside", encoding="utf-8")
+    (dist / "index.html").symlink_to(outside)
+
+    with structlog.testing.capture_logs() as logs:
+        client = TestClient(create_app(readiness_check=lambda: True, web_dist=dist))
+
+    assert client.get("/healthz").json() == {"status": "ok"}
+    assert client.get("/readyz").json() == {"status": "ready"}
+    for path in ("/", "/notice", "/index.html"):
+        response = client.get(path)
+        assert response.status_code == 404, path
+        assert "outside" not in response.text
+    assert any(entry["log_level"] == "warning" for entry in logs)
+
+
+def test_index_symlinked_inside_the_build_is_still_served(tmp_path: Path) -> None:
+    dist = tmp_path / "web" / "dist"
+    dist.mkdir(parents=True)
+    (dist / "real.html").write_text(SHELL, encoding="utf-8")
+    (dist / "index.html").symlink_to(dist / "real.html")
+
+    client = TestClient(create_app(readiness_check=lambda: True, web_dist=dist))
+
+    response = client.get("/notice")
+    assert response.text == SHELL
+    assert response.headers["cache-control"] == "no-cache"
 
 
 def test_without_web_dist_only_api_is_served() -> None:

@@ -68,6 +68,35 @@ describe("project lint rules", () => {
     expect(await ruleIds("e2e/hardcoded.spec.ts")).toContain("no-restricted-syntax");
   });
 
+  // Codex 審查 PR #61：動態 import() 與別名呼叫 fetch 也要擋。
+  it("blocks a dynamic import of datasource/api from a page", async () => {
+    expect(await ruleIds("pages/DynamicImportApiPage.tsx")).toContain("no-restricted-syntax");
+  });
+
+  it("blocks a dynamic import of datasource/static written as a template literal", async () => {
+    expect(await ruleIds("components/DynamicImportStatic.tsx")).toContain("no-restricted-syntax");
+  });
+
+  it("blocks a dynamic import of #datasource-impl from a page", async () => {
+    expect(await ruleIds("pages/DynamicImportImplPage.tsx")).toContain("no-restricted-syntax");
+  });
+
+  it("blocks fetch called through an alias of globalThis", async () => {
+    expect(await ruleIds("components/AliasedFetch.tsx")).toContain("no-restricted-properties");
+  });
+
+  it("blocks fetch destructured from self in a hook", async () => {
+    expect(await ruleIds("hooks/destructured-fetch.ts")).toContain("no-restricted-properties");
+  });
+
+  it("allows a dynamic import of the datasource entry", async () => {
+    expect(await ruleIds("pages/AllowedDynamic.tsx")).toEqual([]);
+  });
+
+  it("lets the datasource layer itself call globalThis.fetch", async () => {
+    expect(await ruleIds("datasource/api/allowed-property-fetch.ts")).toEqual([]);
+  });
+
   it("lets the datasource layer itself fetch", async () => {
     expect(await ruleIds("datasource/api/allowed-fetch.ts")).toEqual([]);
   });

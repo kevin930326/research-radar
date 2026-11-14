@@ -168,6 +168,16 @@ deferred:
   - `[low]` `[patch]` （Intent）沒有直接證明 `assetsInlineLimit: 0` 生效 — 已修：e2e 斷言兩種建置的 CSS 都沒有 `url(data:`。
   - `[false]` `[reject]` （Intent）`smoke.sh` 在 CI 啟動 compose — 「不啟動 docker compose」限的是本機實作過程；CI 的冒煙本來就用 compose（ADR-0017）。
 
+### 2026-11-15 — Codex 主審查（PR #61，審 4c920f1）
+- verdicts: 6 findings — high 0, medium 4, low 2；patch 5、defer 1
+- findings:
+  - `[medium]` `[patch]` 頁面殼 `index.html` 本身是符號連結時，可送出建置資料夾外的檔案（`index.is_file()` 會跟著連結走，回頁面殼時沒經過 `_file_inside()`） — 已修：`mount_web()` 改用 `_file_inside(root, "index.html")` 找頁面殼，不在建置資料夾裡就不掛前端、記一筆警告，api 照常啟動；補 unit 測試（指到外面不掛、指到建置資料夾裡照常送）。
+  - `[medium]` `[patch]` ESLint 的資料來源限制擋不住動態 `import("../datasource/api")`、`import("#datasource-impl")` 與別名呼叫 `const b = globalThis; b.fetch()` — 已修：`no-restricted-syntax` 對 `ImportExpression` 的字串與 template literal 套和靜態 import 同一組路徑；`no-restricted-properties` 改成任何物件的 `.fetch` 都擋（含解構）；`src/datasource/` 例外不變。補 5 個違反檔與 2 個允許檔，`src/lint.test.ts` 逐一斷言。
+  - `[medium]` `[patch]` 站內連結檢查只看畫面上沒有「找不到這一頁」，真的 HTTP 404（例如 404 JSON）會被放過 — 已修：新增 `e2e/landing.ts`，文件導航的回應必須 2xx（轉址的中間段與 304 除外），落點要等網址落定在頁面清單裡、有 h1、沒有「找不到這一頁」；補兩個反例，證明導到回 404 JSON 的網址與頁面清單外的網址都會被判失敗。
+  - `[medium]` `[defer]` 「重新整理」沒驗證點擊有效、載入中沒驗證 300ms 延遲 — 同意是缺口，延後到 3.14：使用須知不載入任何資料，目前沒有能真的觸發等待與失敗的路由；只為測試加假路由會把測試專用程式放進正式建置。3.14（第一個有資料載入的畫面）用真的資料請求驗證。與上一輪 Verification 第 4 條同一件事。
+  - `[low]` `[patch]` 直接要 `/index.html` 不帶 `Cache-Control: no-cache` — 上一輪判 reject，Codex 再提出後改修（改動很小）：送出的檔案就是頁面殼時一律帶 `no-cache`；補 unit 測試（GET、HEAD 都帶，`/assets/*` 不帶）。
+  - `[low]` `[patch]` `/api/` 底下的 TRACE、CONNECT 回 405 不是 404 — 已修：「其餘路徑」改成不設方法清單的 Starlette `Route`（端點是 ASGI 類別，Starlette 才不預設只收 GET），`/api/` 任何方法（含自訂方法）都 404 JSON；補 unit 測試（HEAD、OPTIONS、TRACE、CONNECT、PROPFIND、PURGE）。
+
 ## Design Notes
 
 - **單一來源的安全標頭**：放在 Python 套件裡，api 用 `importlib.resources` 讀；`vite.config.ts` 用相對路徑讀同一個檔給 `vite preview`。映像的 Node 段只需多複製這一個 JSON。Playwright 再斷言 preview 的標頭等於檔案內容，兩邊不可能走樣。
