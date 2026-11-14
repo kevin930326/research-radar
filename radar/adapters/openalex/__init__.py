@@ -4,8 +4,9 @@
   不用 search 端點，也不加 type／DOI 篩選（那是解析後的過濾）。
 - 回傳逐篇的原始紀錄：回應原文裡那一篇的原樣位元組切片，不解析、不重新序列化。
 - 節流：每秒最多 `requests_per_second` 個請求（含重試）。
-- 409、429、5xx、連線錯誤與逾時由 stamina 指數退避重試；帶 `Retry-After` 時照它等，
-  最多 `retry_after_max_seconds`。其他 4xx 不重試。
+- 409、429、5xx、連線錯誤與逾時由 stamina 指數退避重試；帶 `Retry-After` 時照對方給的秒數等
+  （ADR-0004）。要等的超過 `retry_after_max_seconds` 就不再重試、丟 `PaperSourceError`（不提早
+  重送）。其他 4xx 不重試。
 - 每次可重試的失敗後先看對方回報的額度：「上限 − 剩餘」到 `quota.stop_at_usd` 或剩 0 就不再
   重試，丟 `QuotaReachedError`（帶著每次嘗試），由 services 照「額度停下」處理、不算失敗。
 - 每次 HTTP 嘗試都記一筆 `ApiCall`；失敗時 `PaperSourceError` 帶著它們。確定沒送出的
@@ -142,6 +143,12 @@ class OpenAlexSource:
                 with attempt:
                     response = self._get_once(params, calls)
         except RetryableOpenAlexError as exc:
+            if self._retry_after_too_long(exc):
+                raise PaperSourceError(
+                    f"嘗試 {len(calls)} 次後停止（{exc.reason}；對方要求等 {exc.retry_after:g} 秒，"
+                    f"超過上限 {retry.retry_after_max_seconds:g} 秒）",
+                    calls=calls,
+                ) from None
             raise PaperSourceError(
                 f"嘗試 {len(calls)} 次仍失敗（{exc.reason}）", calls=calls
             ) from None
@@ -157,12 +164,25 @@ class OpenAlexSource:
             raise PaperSourceError(exc.reason, calls=calls) from None
 
     def _backoff(self, error: Exception) -> bool | float:
-        """stamina 的退避判斷：不重試回 False；照一般退避回 True；照 `Retry-After` 回秒數。"""
+        """stamina 的退避判斷：不重試回 False；照一般退避回 True；照 `Retry-After` 回秒數。
+
+        `Retry-After` 要等的超過 `retry_after_max_seconds` 時回 False：不等也不提早重送（那會
+        違反對方的要求），由 `fetch_journal_page` 轉成 `PaperSourceError`，這一頁算失敗。
+        """
         if not isinstance(error, RetryableOpenAlexError):
             return False
         if error.retry_after is None:
             return True
-        return min(error.retry_after, self._config.retry.retry_after_max_seconds)
+        if self._retry_after_too_long(error):
+            return False
+        return error.retry_after
+
+    def _retry_after_too_long(self, error: RetryableOpenAlexError) -> bool:
+        """對方用 `Retry-After` 要求等的秒數超過 `retry_after_max_seconds`（等於上限還是照等）。"""
+        return (
+            error.retry_after is not None
+            and error.retry_after > self._config.retry.retry_after_max_seconds
+        )
 
     def _throttle(self) -> None:
         """離上一個請求不到 1 / requests_per_second 秒就先等。"""

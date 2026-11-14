@@ -3,8 +3,9 @@
 - boto3 client 由 `create_s3_client` 建：端點、區域、金鑰、逾時都明確傳入（不讀 AWS 的環境變數
   與設定檔裡的金鑰），botocore 自己的重試關掉（`total_max_attempts=1`）。
 - 連線錯誤、逾時、5xx、429／SlowDown 由這裡的 stamina 重試，最多 `attempts` 次（含第一次）。
-  錯誤回應帶 `Retry-After` 時照它等，但最多 `retry_after_max` 秒；沒帶就指數退避：從
-  `wait_initial` 秒開始、每次加倍、最多 `wait_max` 秒，再加 0～`wait_jitter` 秒的抖動。
+  錯誤回應帶 `Retry-After` 時照對方給的秒數等（ADR-0004）；要等的超過 `retry_after_max` 秒就
+  不再重試，原本的錯誤直接往上丟（不提早重送）。沒帶就指數退避：從 `wait_initial` 秒開始、
+  每次加倍、最多 `wait_max` 秒，再加 0～`wait_jitter` 秒的抖動。
 - 等待與次數的預設值和 `Settings` 的 `object_store_*` 一致；正式程式由 `bootstrap.py` 從設定傳入。
 - 讀不到的鍵丟 `ObjectNotFoundError`。
 """
@@ -141,14 +142,17 @@ class S3ObjectStore:
     def _backoff(self, error: Exception) -> bool | float:
         """stamina 的退避判斷：不重試回 False；照一般退避回 True；照 `Retry-After` 回秒數。
 
-        `Retry-After` 的秒數最多 `retry_after_max`（對方給極大值時不卡住工作）。
+        `Retry-After` 要等的超過 `retry_after_max` 秒時回 False：不等也不提早重送（那會違反
+        對方的要求），原本的錯誤直接往上丟，這次存取算失敗（ADR-0021）。
         """
         if not is_retryable(error):
             return False
         retry_after = parse_retry_after(_retry_after_header(error))
         if retry_after is None:
             return True
-        return min(retry_after, self._retry_after_max)
+        if retry_after > self._retry_after_max:
+            return False
+        return retry_after
 
     def _with_retry[T](self, operation: Callable[[], T]) -> T:
         for attempt in stamina.retry_context(

@@ -19,7 +19,8 @@ retry:
   wait_initial_seconds: 1
   wait_max_seconds: 30
   wait_jitter_seconds: 1
-  # 對方回 Retry-After 時照它等，但最多等幾秒。
+  # 對方回 Retry-After 時照它給的秒數等；要等的超過這個秒數就不再重試，這一頁算失敗
+  # （不提早重送，ADR-0021）。
   retry_after_max_seconds: 120
 # 每日額度（OpenAlex 在 UTC 午夜重置）。今天的用量到 daily_budget_usd × stop_at_ratio 就停下、
 # 寫警告、不算失敗，留到下一次續跑。
