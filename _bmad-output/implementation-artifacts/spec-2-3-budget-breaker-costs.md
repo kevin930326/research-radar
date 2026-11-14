@@ -2,10 +2,10 @@
 title: 'Story 2.3：預算熔斷與費用指令'
 type: 'feature'
 created: '2026-11-15'
-status: 'in-review'
+status: 'done'
 baseline_revision: '65e1c25c1fdebdb8a58e959c914445b53bb9b60a'
 review_loop_iteration: 0
-followup_review_recommended: false
+followup_review_recommended: true
 context:
   - '{project-root}/AGENTS.md'
   - '{project-root}/_bmad-output/implementation-artifacts/epic-2-context.md'
@@ -115,7 +115,7 @@ deferred:
 ## Review Triage Log
 
 ### 2026-11-15 — Review pass
-- verdicts: 28 findings — high 0, medium 3, low 15, false 10, maybe-false 0
+- verdicts: 28 findings — high 0, medium 4, low 15, false 9, maybe-false 0
 - findings:
   - `[low]` `[patch]` （verification-gap）`radar costs` 與 `BudgetGuard` 的預設時鐘沒有測試，改成 naive 會全部壞而測試照綠 — 加單元測試核對兩個 `_utc_now` 帶時區，加一個不傳 `clock=` 的 `BudgetGuard` 整合案例。
   - `[low]` `[patch]` （verification-gap）並行測試用真的現在，跨台北月界時會失敗 — 月界前兩分鐘內 `pytest.skip`。
@@ -136,7 +136,7 @@ deferred:
   - `[low]` `[reject]` （edge）掃描器跳過整個閘門檔 — 閘門檔只定義 `run_llm_job`，自己呼叫自己不會發生；要改成只跳過定義是額外分支。
   - `[low]` `[reject]` （edge）`getattr(llm_gateway, "run_llm_job")` 繞過 — 同 blind 第 7 條。
   - `[low]` `[patch]` （edge）讀帳本失敗時丟例外、不是 `DEFERRED_BUDGET` — 刻意的（失敗就不呼叫模型，也不假裝成預算用完）；docstring 與 ADR 寫明，同 blind 第 8 條。
-  - `[false]` `[defer]` （intent）AI 區塊的 `deferred_budget` 狀態沒有存、沒有驗 — `repo/ai_blocks.py` 是 Story 2.7 的驗收條件，判定時讀預算狀態（ADR-0015 判定順序第 5 步）；2.3 提供 `get_budget_status(...).allows(task)` 給它用。記入 deferred，PR 說明列為沒照 AC 字面做的地方。
+  - `[medium]` `[defer]` （intent）AI 區塊的 `deferred_budget` 狀態沒有存、沒有驗 — `repo/ai_blocks.py` 是 Story 2.7 的驗收條件，判定時讀預算狀態（ADR-0015 判定順序第 5 步）；2.3 提供 `get_budget_status(...).allows(task)` 給它用。記入 deferred，PR 說明列為沒照 AC 字面做的地方。
   - `[false]` `[reject]` （intent）正式 worker 沒有經過 `BudgetGuard` — 目前沒有任何正式呼叫閘門的程式；接線規則由架構測試守，ADR 寫明交接。
   - `[false]` `[reject]` （intent）功能預算全是 null，正式環境不會只擋單一功能 — 文件沒有數字，照交代留空、列為 Kevin 決定；機制有測試。
   - `[false]` `[reject]` （intent）只檢索只驗到狀態物件 — 問答在 Epic 5，AC 寫明「問答在 Epic 5 讀它」。
@@ -154,3 +154,30 @@ deferred:
 - `uv run lint-imports` -- expected: 全部契約通過
 - `uv run pytest -m unit` -- expected: 全過
 - `docker compose --env-file /dev/null --project-name radar-ci --file compose.yaml up --detach --wait db && uv run pytest -m arch && uv run pytest -m integration` -- expected: 全過；最後 `docker compose --env-file /dev/null --project-name radar-ci down`
+
+## Auto Run Result
+
+**做了什麼**：閘門的預算檢查從注入的空殼變成真的看帳本。
+
+- `config/budget.yaml`：熔斷線 50、workspace 上限 70、六個功能預算先留 `null`（數字待 Kevin 定）。
+- `domain/budget.py`：台北月份、設定驗證、到達即擋、只檢索（由帳本算、不存開關）、`radar costs` 的輸出。
+- `services/budget.py`：`get_budget_status`、`BudgetGuard`。
+- `radar costs` 指令；接線架構測試；ADR-0031（提議）。
+- 合併 2.2 的 `037bb4e`、`3dd9a90`（協調者通知）之後：預算不准時，已付費、只差寫結果的 `llm_result_pending` run 照樣接續；沒有可接續的照舊 `DEFERRED_BUDGET`、不新增 run。
+
+**改了哪些檔**（2.3 自己的）：
+
+- 新增：`config/budget.yaml`、`radar/domain/budget.py`、`radar/services/budget.py`、`docs/adr/0031-budget-breaker-and-costs.md`、六個測試檔（`tests/unit/test_budget_domain.py`、`test_budget_config.py`、`test_budget_clocks.py`、`tests/integration/test_budget_guard.py`、`test_costs_cli.py`、`tests/arch/test_budget_guard_wiring.py`）。
+- 修改：`radar/config.py`（`load_budget_config`）、`radar/repo/llm_ledger.py`（`list_llm_costs_by_task`、`find_resumable_derivation_run_id`）、`radar/services/llm_gateway.py`（預算不准時只接續）、`radar/entrypoints/cli/__init__.py`（`radar costs`）、`tests/llm_support.py`（只加兩個函式）、`docs/adr/README.md`、`docs/glossary.md`、`sprint-status.yaml`。
+
+**審查**：四層共 28 筆（medium 4、low 15、false 9）。
+
+- patch 13 筆（medium 3、low 10）：超支上限照設定上限重算、ADR 補決定 11～14、Raises、預設時鐘測試、並行測試避開月界、名詞表、共用工具。
+- defer 1 筆：AI 區塊的 `deferred_budget` 交給 2.7。
+- reject 14 筆（false 9、low 5），理由逐筆在 Review Triage Log。
+
+**建議再審一次：是**（這一輪修了兩組 medium）。具體風險：合併 2.2 時加的「預算不准時接續 pending」路徑（`_has_resumable_run`＋`_acquire(resume_only=True)`）是在四層審查之後才加的，只有兩個整合測試，沒有經過審查層；它和 2.2 的接續、評估接續的並行行為（3dd9a90）交互，Codex 主審查應該看這一段。
+
+**驗證**：ruff check、ruff format --check、mypy（240 檔）、lint-imports（19 條）通過；`pytest -m unit` 1672 passed、`-m arch` 270 passed、`-m integration` 465 passed（radar-ci；各 1 xfailed 是既有的網路封鎖測試）。
+
+**剩下的風險**：功能預算全是 `null`；沒有正式呼叫端（接線靠架構測試）；並行超支上限約 0.042 美元 × 在途數；Batch 整批的預估交給 2.9；帳本加總沒有索引。

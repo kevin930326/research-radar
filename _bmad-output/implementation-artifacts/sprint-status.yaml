@@ -111,7 +111,7 @@ actual_hours:
   - {round: epic-1, stories: "1.1～1.11", estimate_h: 29, elapsed_h: 20, kevin_h_low: 3, kevin_h_high: 4, rough: true}
 
 generated: 11-14-2026 03:46
-last_updated: 11-15-2026 02:30
+last_updated: 11-15-2026 02:57
 project: research-radar
 project_key: NOKEY
 tracking_system: file-system
@@ -134,7 +134,7 @@ development_status:
   epic-2: in-progress
   2-1-送雲端的放行與-llm-連接: review
   2-2-閘門-來歷與費用帳本: review
-  2-3-預算熔斷與費用指令: backlog
+  2-3-預算熔斷與費用指令: review
   2-4-中文重點: backlog
   2-5-主題與方法分類: backlog
   2-6-研究模型擷取: backlog
