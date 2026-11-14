@@ -53,12 +53,19 @@ def register_tasks(app: procrastinate.App, parts: WorkerParts, settings: Setting
 
     def weekly_update_job() -> None:
         # 心跳在 run_weekly_update 發佈快照、commit 之後才送（ADR-0026），這裡不送。
-        weekly_update(SystemViewer(), parts.database, parts.enqueue)
+        # 找到的 fetching 已到失敗上限（上次收尾沒做成）時先收尾再建新的一筆（ADR-0028）。
+        weekly_update(
+            SystemViewer(),
+            parts.database,
+            parts.enqueue,
+            max_failures=settings.weekly_update_max_failures,
+        )
 
     def run_weekly_update_job(weekly_run_id: uuid.UUID) -> None:
         # service 先讀狀態，確認要抓才呼叫 open_setup：已經抓完、不是 fetching 時不讀設定、不建
         # adapter；建不起來（缺金鑰、設定壞掉）時 service 也會更新 updated_at（ADR-0025）。
         # 抓完了才呼叫 load_scope 讀追蹤範圍，接著套用、發佈快照，commit 後送心跳（ADR-0026）。
+        # 每失敗一次記一次，累計到上限就標 failed、不再補排（ADR-0028）。
         advance_weekly_update(
             SystemViewer(),
             parts.database,
@@ -66,6 +73,7 @@ def register_tasks(app: procrastinate.App, parts: WorkerParts, settings: Setting
             load_scope,
             parts.send_heartbeat,
             weekly_run_id,
+            max_failures=settings.weekly_update_max_failures,
         )
 
     def load_scope() -> ScopeSettings:

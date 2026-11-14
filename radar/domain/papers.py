@@ -6,6 +6,7 @@ Story 1.5 定了識別碼、標題、期刊、出版年；Story 1.7 加了作者
 `domain/fingerprints.py`）。新欄位都有預設值。
 """
 
+import dataclasses
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
@@ -262,6 +263,8 @@ class StoredPaper:
     referenced_works: tuple[str, ...]
     cited_by_count: int | None
     source_hash: str | None
+    # 由 Story 1.11 加：寫入時 `source_hash` 變了的最後時間；None＝寫入以來指紋沒變過（ADR-0028）。
+    source_changed_at: datetime | None = None
 
 
 class UpsertOutcome(StrEnum):
@@ -274,8 +277,13 @@ class UpsertOutcome(StrEnum):
 
 @dataclass(frozen=True)
 class UpsertResult:
-    """寫入的結果。`conflicts`：已經屬於另一篇論文、所以沒有掛到這篇的識別碼（不搬、不合併）。"""
+    """寫入的結果。`conflicts`：已經屬於另一篇論文、所以沒有掛到這篇的識別碼（不搬、不合併）。
+
+    `source_changed`：更新既有論文時 `source_hash` 變了（含原本是 NULL；ADR-0028）；CREATED、
+    STALE 一律 False。不參與相等比較：兩個結果相等仍只看（論文, 結果, 衝突）。
+    """
 
     paper_id: uuid.UUID
     outcome: UpsertOutcome
     conflicts: tuple[ExternalId, ...] = ()
+    source_changed: bool = dataclasses.field(default=False, compare=False)

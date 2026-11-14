@@ -109,6 +109,7 @@ def fetch_journal(
     quota: OpenAlexQuota,
     cursor: str | None = None,
     on_page: Callable[[FetchedPage], None] | None = None,
+    write_raw: Callable[[Sequence[RawRecord]], None] | None = None,
     clock: Callable[[], datetime] = _utc_now,
 ) -> JournalFetchResult:
     """從 `cursor`（None＝第一頁）起，把這本期刊一頁一頁抓完。每一頁：
@@ -121,7 +122,9 @@ def fetch_journal(
        （失敗時寫完再原樣往上丟）。source 在重試途中發現額度已到（`QuotaReachedError`）時，
        寫完 `calls` 後和第 1 步一樣寫警告、回傳 `stopped_for_quota=True` 與這一頁的 cursor。
     4. 短交易查出哪些內容（sha256）已經存過；其餘的（同頁重複只算一次）壓縮後 put 進物件儲存。
-    5. 一個交易寫這一頁的 `raw_fetch` 列（同一個來源、外部鍵、抓取時間已經有了就略過）。
+    5. 一個交易寫這一頁的 `raw_fetch` 列（同一個來源、外部鍵、抓取時間已經有了就略過）。有
+       `write_raw` 時改由它寫（每週更新用它在同一個交易先確認那筆 `weekly_run` 還能寫；Story 1.11
+       Codex C1）；它丟的例外原樣往上丟，這一頁不交給 `on_page`。
     6. 下一頁的 cursor 是這一輪已經送過的（例如 A → B → A 繞圈）就丟 `JournalFetchError`，
        不然費用為零又沒有額度回報時會一直繞下去。
     7. 有 `on_page` 就交給它這一頁（`FetchedPage`；空的最後一頁也交）；它丟的例外原樣往上丟。
@@ -133,8 +136,8 @@ def fetch_journal(
         PermissionDeniedError: `actor` 不是系統工作（不碰資料庫與 source）。
         JournalFetchError: source 抓取失敗（`api_call` 已經寫好），或 cursor 繞回這一輪送過的；
             `resume_cursor` 是續跑時要送的 cursor。
-        Exception: 物件儲存（`ObjectStoreUnavailableError`、`ClientError`）、資料庫與 `on_page`
-            的錯誤不包成 `JournalFetchError`，原樣往上丟。
+        Exception: 物件儲存（`ObjectStoreUnavailableError`、`ClientError`）、資料庫、`write_raw`
+            與 `on_page` 的錯誤不包成 `JournalFetchError`，原樣往上丟。
     """
     require(actor, Action.INGEST_PAPERS, None)
     viewer = SystemViewer()
@@ -168,8 +171,11 @@ def fetch_journal(
 
         new_objects, existing_objects = _store_raw(database, viewer, source, store, page.records)
         if page.records:
-            with database.transaction() as connection:
-                create_raw_fetches(connection, page.records)
+            if write_raw is None:
+                with database.transaction() as connection:
+                    create_raw_fetches(connection, page.records)
+            else:
+                write_raw(page.records)
 
         if page.next_cursor is not None and page.next_cursor in sent_cursors:
             # 訊息不帶 cursor 的值：固定句子就夠，也不會意外帶出任何秘密。這一頁不交給

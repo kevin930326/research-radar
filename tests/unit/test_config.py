@@ -13,6 +13,7 @@ from radar.config import (
 )
 from radar.domain.jobs import scheduled_jobs
 from radar.domain.settings import MigrationSettings, Settings, heartbeat_url_field
+from radar.domain.weekly_run import DEFAULT_MAX_FAILURES
 
 DB_URL = "postgresql://radar:s3cret-PASSWORD@db:5432/radar"
 
@@ -243,6 +244,23 @@ def test_worker_defaults() -> None:
     assert settings.heartbeat_url_sweep is None
     assert settings.heartbeat_timeout == 5
     assert settings.heartbeat_attempts == 3
+
+
+def test_weekly_update_max_failures_defaults_to_8_and_can_be_overridden() -> None:
+    # Story 1.11、ADR-0028：一筆每週更新累計失敗幾次就標成 failed；預設值和 domain 的常數同一個。
+    defaults = load_settings({"DATABASE_URL": DB_URL})
+    custom = load_settings({"DATABASE_URL": DB_URL, "RADAR_WEEKLY_UPDATE_MAX_FAILURES": "3"})
+
+    assert defaults.weekly_update_max_failures == 8 == DEFAULT_MAX_FAILURES
+    assert custom.weekly_update_max_failures == 3
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "101", "abc", "2.5"])
+def test_weekly_update_max_failures_out_of_range_is_config_error(value: str) -> None:
+    with pytest.raises(ConfigError) as caught:
+        load_settings({"DATABASE_URL": DB_URL, "RADAR_WEEKLY_UPDATE_MAX_FAILURES": value})
+
+    assert "RADAR_WEEKLY_UPDATE_MAX_FAILURES" in str(caught.value)
 
 
 def test_heartbeat_retry_wait_settings() -> None:

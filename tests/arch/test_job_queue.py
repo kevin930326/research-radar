@@ -170,6 +170,27 @@ def test_crontab_matches_scheduled_jobs_one_to_one() -> None:
     assert sorted(schedules) == sorted(job.check for job in scheduled_jobs())
 
 
+def test_weekly_update_runs_once_a_week() -> None:
+    # Story 1.11：分、時是固定的一個數字，日、月是 `*`，星期是一個值（0–7）→ 一週剛好一次。
+    # 時間本身（UTC 週日 19:00＝台北週一 03:00）由 Story 3.19 確認主機時區時再看，這裡不寫死。
+    lines = [
+        line
+        for line in CRONTAB.read_text(encoding="utf-8").splitlines()
+        if line.endswith(" radar enqueue weekly-update")
+    ]
+    assert len(lines) == 1
+    match = CRON_LINE.fullmatch(lines[0].strip())
+    assert match
+    minute, hour, day, month, weekday = match["when"].split()
+    assert minute.isdigit()
+    assert 0 <= int(minute) <= 59
+    assert hour.isdigit()
+    assert 0 <= int(hour) <= 23
+    assert (day, month) == ("*", "*")
+    assert weekday.isdigit()
+    assert 0 <= int(weekday) <= 7
+
+
 def test_sweep_runs_every_15_minutes() -> None:
     lines = [
         line for line in CRONTAB.read_text(encoding="utf-8").splitlines() if line.endswith(" sweep")

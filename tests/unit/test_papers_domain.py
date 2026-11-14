@@ -116,6 +116,16 @@ def test_upsert_result_has_no_conflicts_by_default() -> None:
     assert result.conflicts == ()
 
 
+def test_upsert_result_source_changed_defaults_false_and_is_not_compared() -> None:
+    # Story 1.11：結果相等仍只看（論文, 結果, 衝突），`source_changed` 只是附帶的資訊。
+    paper_id = uuid.uuid4()
+    changed = UpsertResult(paper_id, UpsertOutcome.UPDATED, source_changed=True)
+
+    assert UpsertResult(paper_id, UpsertOutcome.UPDATED).source_changed is False
+    assert changed.source_changed is True
+    assert changed == UpsertResult(paper_id, UpsertOutcome.UPDATED)
+
+
 # --- upsert_by_external_id：不碰資料庫就擋下 ------------------------------------------------
 
 

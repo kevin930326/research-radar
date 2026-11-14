@@ -42,7 +42,7 @@ from radar.domain.domain_config import (
 )
 from radar.domain.papers import PaperOrigin
 from radar.domain.parsers.openalex import parse_openalex_work
-from radar.domain.raw_records import RawRecord, RawSource, compress_raw
+from radar.domain.raw_records import JournalQuery, RawRecord, RawSource, SourcePage, compress_raw
 from radar.domain.scope import ScopeSettings
 from radar.domain.storage_keys import RAW_CONTENT_TYPE, raw_object_key
 from radar.domain.sweep import SWEEP_REGISTRY
@@ -54,6 +54,7 @@ from radar.repo.sweep import find_stuck_ids
 from radar.repo.weekly_runs import create_weekly_run
 from radar.services import reparse as reparse_module
 from radar.services import weekly_update as weekly_update_module
+from radar.services.ingest import JournalFetchError
 from radar.services.reparse import (
     ReparseBusyError,
     ReparseResult,
@@ -486,6 +487,135 @@ def test_apply_is_not_done_while_the_lock_is_held_then_resumes(
     assert (result.snapshot_number, result.staged, result.created) == (1, staged, staged)
     assert _run_row(lock_db, run_id)[0] == "published"
     assert heartbeat.sent == ["weekly-update"]
+
+
+class PausingSource(FakePaperSource):
+    """第 2 頁的請求進來時通知 `entered`，等 `release` 才回（停在抓取中途，沒有開著的交易）。"""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    def fetch_journal_page(self, query: JournalQuery, cursor: str | None) -> SourcePage:
+        if cursor is not None and not self.entered.is_set():
+            self.entered.set()
+            assert self.release.wait(WAIT), "等太久：主執行緒沒有放行"
+        return super().fetch_journal_page(query, cursor)
+
+
+def _weekly_rows(db: TestDatabase, weekly_run_id: uuid.UUID) -> dict[str, Any]:
+    """這一筆每週更新寫進資料庫的東西：狀態與次數、原始資料、暫存列、進度。"""
+    return {
+        "run": _rows(
+            db, "SELECT status, failure_count FROM weekly_run WHERE id = %s", weekly_run_id
+        ),
+        "raw_fetch": _count(db, "raw_fetch"),
+        "staging": _rows(
+            db, "SELECT count(*) FROM ingest_staging WHERE batch_id = %s", weekly_run_id
+        ),
+        "progress": _rows(
+            db,
+            "SELECT journal_key, next_cursor, finished_at, pages, fetched, staged"
+            " FROM weekly_run_journal WHERE weekly_run_id = %s",
+            weekly_run_id,
+        ),
+    }
+
+
+def test_old_fetch_writes_nothing_after_another_job_marks_the_run_failed(
+    lock_db: TestDatabase, database: Database
+) -> None:
+    # Codex C1：sweep 把仍在跑的工作 B 誤判成卡住而補排了 A（佇列鎖擋不住），兩個都過了讀狀態。
+    # B 停在第 2 頁的請求；A 抓第 2 頁失敗、到上限 1 → failed＋刪暫存並 commit。這時已經沒有
+    # fetching，reparse 拿得到鎖也不被擋；放行 B：B 的每一頁都以 fetching 為條件，什麼都不寫、
+    # 正常結束（不算失敗），reparse 照常完成。
+    reparse_store = PausingStore()
+    _reparse_input(database, reparse_store)
+    run_id = weekly_update(SYSTEM, database, FakeJobQueue().enqueue).weekly_run_id
+    source_b = PausingSource({MISQ_ISSN: _misq_book()}, clock=lambda: NOW)
+
+    def job_b() -> WeeklyFetchResult:
+        return run_weekly_update(
+            SYSTEM,
+            _other_database(lock_db),
+            source_b,
+            FakeObjectStore(),
+            run_id,
+            journals=JOURNALS,
+            exclusion_rules=RULES,
+            quota=QUOTA,
+            clock=lambda: NOW,
+            max_failures=1,
+        )
+
+    b = Background(job_b)
+    reparse = Background(lambda: _reparse(_other_database(lock_db), reparse_store))
+    b.start()
+    try:
+        assert source_b.entered.wait(WAIT)
+        # B 的第 1 頁（2 篇）已經寫好：原始資料、暫存列、進度。
+        assert _count(lock_db, "raw_fetch") == 1 + 2
+        assert _weekly_rows(lock_db, run_id)["staging"] == [(2,)]
+
+        # A：同一筆的另一個工作，從保存的第 2 頁接著抓，失敗、到上限 → failed＋刪暫存。
+        source_a = _source()
+        source_a.fail_once(MISQ_ISSN, 2)
+        with capture_logs() as logs, pytest.raises(JournalFetchError):
+            run_weekly_update(
+                SYSTEM,
+                database,
+                source_a,
+                FakeObjectStore(),
+                run_id,
+                journals=JOURNALS,
+                exclusion_rules=RULES,
+                quota=QUOTA,
+                clock=lambda: NOW,
+                max_failures=1,
+            )
+        assert [log["event"] for log in logs if log["log_level"] == "error"][-1] == (
+            "每週更新重試到上限，標成失敗"
+        )
+        after_a = _weekly_rows(lock_db, run_id)
+        assert after_a["run"] == [("failed", 1)]
+        assert after_a["staging"] == [(0,)]
+
+        # reparse 拿到鎖、查無 fetching 而開始（停在 GET，整段持有獨佔鎖）。
+        reparse.start()
+        assert reparse_store.entered.wait(WAIT)
+        assert _lock_holders(lock_db) == 1
+
+        # 放行 B：它拿到第 2 頁，但寫原始資料的交易確認不是 fetching → 整頁不寫、停下。
+        with capture_logs() as logs:
+            source_b.release.set()
+            b.join()
+        assert b.error is None
+        assert b.result.skipped
+        assert (b.result.journals, b.result.pages, b.result.counts.fetched) == (("misq",), 1, 2)
+        assert [request.cursor is None for request in source_b.requests] == [True, False]
+        # B 什麼都沒寫：狀態、次數、原始資料、暫存列、進度都和 A 收尾後一樣；不算失敗。
+        assert _weekly_rows(lock_db, run_id) == after_a
+        assert [log["event"] for log in logs if log["log_level"] in ("warning", "error")] == [
+            "每週更新已經不能再寫（不是抓取中或已到失敗上限），停下這次抓取"
+        ]
+        # reparse 仍持有鎖、還在跑（B 沒有拿共用鎖，也沒碰它）。
+        assert _lock_holders(lock_db) == 1
+    finally:
+        source_b.release.set()
+        reparse_store.release.set()
+    b.join()
+    reparse.join()
+
+    # reparse 照常完成：讀到的原始資料只有 reparse 那一篇與 B 第 1 頁的 2 篇（論文不存在、略過），
+    # 更新了那一篇；暫存列清光，鎖放掉了。
+    assert reparse.error is None
+    assert (reparse.result.raw_keys, reparse.result.not_in_database) == (3, 2)
+    assert reparse.result.updated == 1
+    assert _count(lock_db, "paper") == 1
+    assert _count(lock_db, "ingest_staging") == 0
+    assert _weekly_rows(lock_db, run_id) == after_a
+    assert _lock_holders(lock_db) == 0
 
 
 # --- 2. 反向順序：每週更新的套用拿著共用鎖時，reparse 拒絕 ----------------------------------------

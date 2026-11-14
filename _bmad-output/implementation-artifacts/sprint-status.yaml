@@ -116,7 +116,7 @@ development_status:
   1-8-第一次匯入的抓取-暫存與中斷續跑: review
   1-9-第一次匯入的套用-快照-1-與基準比對: review
   1-10-摘要來源與覆蓋率計數: review
-  1-11-每週更新的排程與變動偵測: backlog
+  1-11-每週更新的排程與變動偵測: review
   epic-1-retrospective: optional
 
   epic-2: backlog

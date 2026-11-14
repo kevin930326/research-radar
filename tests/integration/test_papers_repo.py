@@ -487,6 +487,176 @@ def test_excluded_reason_is_stored(papers_db: TestDatabase, database: Database) 
     assert _paper_row(papers_db, result.paper_id)["excluded_reason"] == "editorial"
 
 
+# --- 變動偵測：source_hash 變了才記 source_changed_at（Story 1.11、ADR-0028） --------------------
+
+
+def _changed_at(db: TestDatabase, paper_id: uuid.UUID) -> tuple[Any, ...]:
+    [row] = _rows(db, "SELECT source_hash, source_changed_at FROM paper WHERE id = %s", paper_id)
+    return row
+
+
+def test_new_paper_has_no_source_change(papers_db: TestDatabase, database: Database) -> None:
+    created = _upsert(database, _paper())
+
+    assert created.outcome is UpsertOutcome.CREATED
+    assert created.source_changed is False
+    source_hash, changed_at = _changed_at(papers_db, created.paper_id)
+    assert source_hash == _paper().source_hash
+    assert changed_at is None
+
+
+def test_same_fingerprint_is_not_a_change_even_if_citations_change(
+    papers_db: TestDatabase, database: Database
+) -> None:
+    created = _upsert(database, _paper(cited_by_count=1))
+
+    # 被引用次數、引用清單、文章類型不在指紋裡：照樣覆寫，但不算變動。
+    result = _upsert(
+        database,
+        _paper(fetched_at=T2, cited_by_count=9, referenced_works=("W77",), work_type="review"),
+    )
+
+    assert result.outcome is UpsertOutcome.UPDATED
+    assert result.source_changed is False
+    assert _changed_at(papers_db, created.paper_id) == (_paper().source_hash, None)
+    assert _rows(papers_db, "SELECT cited_by_count FROM paper") == [(9,)]
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"abstract": "A new abstract.", "abstract_source": "openalex"},
+        {"is_retracted": True},
+        {"volume": "42"},
+    ],
+    ids=["abstract", "retracted", "volume"],
+)
+def test_changed_fingerprint_sets_source_changed_at(
+    papers_db: TestDatabase, database: Database, change: dict[str, object]
+) -> None:
+    created = _upsert(database, _paper())
+    changed = _paper(fetched_at=T2, **change)
+    assert changed.source_hash != _paper().source_hash
+
+    with database.transaction() as connection:
+        before_write = connection.exec_driver_sql("SELECT now()").scalar_one()
+    result = _upsert(database, changed)
+
+    assert result.outcome is UpsertOutcome.UPDATED
+    assert result.source_changed is True
+    source_hash, changed_at = _changed_at(papers_db, created.paper_id)
+    assert source_hash == changed.source_hash
+    assert changed_at is not None
+    assert changed_at >= before_write
+    with database.transaction() as connection:
+        stored = get_paper(SystemViewer(), connection, created.paper_id)
+    assert stored is not None
+    assert stored.source_changed_at == changed_at
+
+    # 之後同指紋再寫一次：保留原本的變動時間，不算變動。
+    again = _upsert(database, _paper(fetched_at=T2 + timedelta(days=1), **change))
+    assert again.source_changed is False
+    assert _changed_at(papers_db, created.paper_id) == (changed.source_hash, changed_at)
+
+
+def test_missing_old_fingerprint_counts_as_a_change(
+    papers_db: TestDatabase, database: Database
+) -> None:
+    # 舊的 source_hash 是 NULL（例如 1.7 之前寫的）：要寫的不同，算變動。
+    created = _upsert(database, _paper())
+    _owner(papers_db, "UPDATE paper SET source_hash = NULL WHERE id = %s", created.paper_id)
+
+    result = _upsert(database, _paper(fetched_at=T2))
+
+    assert result.source_changed is True
+    source_hash, changed_at = _changed_at(papers_db, created.paper_id)
+    assert source_hash == _paper().source_hash
+    assert changed_at is not None
+
+
+def test_source_changed_at_is_the_statement_time_not_the_transaction_start(
+    papers_db: TestDatabase, database: Database
+) -> None:
+    # Codex C3：同一個交易裡先停一下再寫，記下的變動時間要是那一句執行的時間（clock_timestamp），
+    # 不是交易開始的時間（now()）。
+    created = _upsert(database, _paper())
+
+    with database.transaction() as connection:
+        started = connection.exec_driver_sql("SELECT now()").scalar_one()
+        connection.exec_driver_sql("SELECT pg_sleep(0.3)")
+        result = upsert_by_external_id(
+            connection,
+            _paper(fetched_at=T2, volume="7"),
+            origin=PaperOrigin.TRACKED,
+            excluded_reason=None,
+            scope=SCOPE,
+        )
+        same_transaction_now = connection.exec_driver_sql("SELECT now()").scalar_one()
+
+    assert result.source_changed is True
+    _hash, changed_at = _changed_at(papers_db, created.paper_id)
+    assert same_transaction_now == started
+    assert changed_at - started >= timedelta(seconds=0.3)
+
+
+def test_source_changed_at_is_taken_after_waiting_for_the_paper_lock(
+    papers_db: TestDatabase, database: Database
+) -> None:
+    # Codex C3：較新的單篇寫入先開交易，等每週套用持有的論文列鎖；套用在最後發佈快照
+    # （as_of＝clock_timestamp()）後 commit。它拿到鎖之後才寫的 source_changed_at 要晚於那個
+    # as_of，用「前後兩次快照的 as_of」篩選時才不會漏掉。
+    created = _upsert(database, _paper())
+    results: dict[str, Any] = {}
+    errors: list[BaseException] = []
+
+    def writer() -> None:
+        try:
+            with database.transaction() as connection:
+                results["started"] = connection.exec_driver_sql("SELECT now()").scalar_one()
+                results["upsert"] = upsert_by_external_id(
+                    connection,
+                    _paper(fetched_at=T2, volume="8"),
+                    origin=PaperOrigin.IMPORT,
+                    excluded_reason=None,
+                    scope=SCOPE,
+                )
+        except BaseException as exc:
+            errors.append(exc)
+
+    with papers_db.connect(APP_ROLE, autocommit=False) as apply_connection:
+        # 每週套用的交易：鎖著這篇論文。
+        apply_connection.execute(
+            "SELECT id FROM paper WHERE id = %s FOR UPDATE", (created.paper_id,)
+        )
+        thread = threading.Thread(target=writer)
+        thread.start()
+        try:
+            _wait_until_a_backend_waits_on_a_lock(papers_db)
+            # 寫入已經開了交易、正在等鎖；套用這時才發佈快照、commit。
+            row = apply_connection.execute("SELECT clock_timestamp()").fetchone()
+            assert row is not None
+            as_of = row[0]
+            apply_connection.commit()
+        finally:
+            thread.join(30)
+    assert not thread.is_alive()
+
+    assert errors == []
+    assert results["upsert"].source_changed is True
+    _hash, changed_at = _changed_at(papers_db, created.paper_id)
+    assert results["started"] < as_of < changed_at
+
+
+def test_stale_write_is_not_a_change(papers_db: TestDatabase, database: Database) -> None:
+    created = _upsert(database, _paper(fetched_at=T2))
+
+    result = _upsert(database, _paper(fetched_at=T1, volume="99"))
+
+    assert result.outcome is UpsertOutcome.STALE
+    assert result.source_changed is False
+    assert _changed_at(papers_db, created.paper_id) == (_paper().source_hash, None)
+
+
 # --- 讀者身分 -----------------------------------------------------------------------------
 
 

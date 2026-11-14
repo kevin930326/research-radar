@@ -47,6 +47,10 @@ from radar.repo.weekly_runs import (
     find_fetching_weekly_run,
     get_weekly_run,
     list_weekly_run_journals,
+    update_weekly_run_failed,
+    update_weekly_run_failure,
+    update_weekly_run_published,
+    update_weekly_run_touched_while_fetching,
     upsert_weekly_run_journal_page,
 )
 from radar.services import weekly_update as weekly_update_module
@@ -1095,6 +1099,172 @@ def test_staging_kind_check_accepts_weekly_update_only_besides_reparse(
         connection.execute(sql, ("weekly_update", "a" * 64))
         with pytest.raises(psycopg.errors.CheckViolation):
             connection.execute(sql, ("first_import", "a" * 64))
+
+
+# --- repo：失敗次數（Story 1.11、ADR-0028） --------------------------------------------------
+
+
+def _failure(database: Database, run_id: uuid.UUID) -> int | None:
+    with database.transaction() as connection:
+        return update_weekly_run_failure(connection, run_id)
+
+
+def _mark_failed(database: Database, run_id: uuid.UUID, max_failures: int) -> int | None:
+    with database.transaction() as connection:
+        return update_weekly_run_failed(connection, run_id, max_failures=max_failures)
+
+
+def _failure_row(db: TestDatabase, run_id: uuid.UUID) -> tuple[Any, ...]:
+    [row] = _rows(
+        db, "SELECT status, failure_count, updated_at FROM weekly_run WHERE id = %s", run_id
+    )
+    return row
+
+
+def test_update_weekly_run_failure_only_counts_up(
+    weekly_db: TestDatabase, database: TrackingDatabase
+) -> None:
+    # Codex C2：加次數與改成 failed 分成兩個交易；加次數這一句只加、不改狀態。
+    run_id = _start(database)
+    touched = _backdate(weekly_db, run_id)
+    assert _failure_row(weekly_db, run_id)[:2] == ("fetching", 0)
+
+    assert [_failure(database, run_id) for _ in range(3)] == [1, 2, 3]
+
+    # 仍是 fetching（即使次數早就超過任何上限）；updated_at 不由它改。
+    assert _failure_row(weekly_db, run_id) == ("fetching", 3, touched)
+    with database.transaction() as connection:
+        run = get_weekly_run(SYSTEM, connection, run_id)
+    assert run is not None
+    assert run.failure_count == 3
+
+
+def test_update_weekly_run_failed_marks_only_at_the_limit(
+    weekly_db: TestDatabase, database: TrackingDatabase
+) -> None:
+    run_id = _start(database)
+    touched = _backdate(weekly_db, run_id)
+    _failure(database, run_id)
+    _failure(database, run_id)
+
+    # 還沒到上限（2 < 3）：不改、回 None，updated_at 也不動。
+    assert _mark_failed(database, run_id, 3) is None
+    assert _failure_row(weekly_db, run_id) == ("fetching", 2, touched)
+
+    # 到上限：改成 failed、更新 updated_at，回累計次數。
+    assert _failure(database, run_id) == 3
+    assert _mark_failed(database, run_id, 3) == 3
+    status, count, updated_at = _failure_row(weekly_db, run_id)
+    assert (status, count) == ("failed", 3)
+    assert updated_at > touched
+
+    # 已經不是 fetching：兩句都不改、回 None。部分唯一索引也放開，可以建新的一筆。
+    assert _failure(database, run_id) is None
+    assert _mark_failed(database, run_id, 3) is None
+    assert _failure_row(weekly_db, run_id)[:2] == ("failed", 3)
+    assert _start(database) != run_id
+
+
+def test_update_weekly_run_failed_with_a_lower_limit_marks_at_once(
+    weekly_db: TestDatabase, database: TrackingDatabase
+) -> None:
+    # 次數已經超過（例如上限調低）：≥ 上限就改成 failed。
+    run_id = _start(database)
+    _owner(weekly_db, "UPDATE weekly_run SET failure_count = 5 WHERE id = %s", run_id)
+
+    assert _mark_failed(database, run_id, 2) == 5
+    assert _failure_row(weekly_db, run_id)[:2] == ("failed", 5)
+
+
+def test_failure_functions_leave_published_and_missing_runs_alone(
+    weekly_db: TestDatabase, database: TrackingDatabase
+) -> None:
+    run_id = _start(database)
+    _owner(weekly_db, "UPDATE weekly_run SET status = 'published' WHERE id = %s", run_id)
+
+    for weekly_run_id in (run_id, uuid.uuid7()):
+        assert _failure(database, weekly_run_id) is None
+        assert _mark_failed(database, weekly_run_id, 1) is None
+    assert _failure_row(weekly_db, run_id)[:2] == ("published", 0)
+
+
+def test_touched_while_fetching_needs_fetching_and_room_below_the_limit(
+    weekly_db: TestDatabase, database: TrackingDatabase
+) -> None:
+    # Codex C1：抓取每頁的交易第一句。仍是 fetching、還沒到上限才改到（並更新 updated_at）。
+    run_id = _start(database)
+    touched = _backdate(weekly_db, run_id)
+
+    def touch(weekly_run_id: uuid.UUID, max_failures: int) -> bool:
+        with database.transaction() as connection:
+            return update_weekly_run_touched_while_fetching(
+                connection, weekly_run_id, max_failures=max_failures
+            )
+
+    assert touch(run_id, 2)
+    status, count, updated_at = _failure_row(weekly_db, run_id)
+    assert (status, count) == ("fetching", 0)
+    assert updated_at > touched
+
+    # 次數 1 < 上限 2：仍改到。
+    _failure(database, run_id)
+    assert touch(run_id, 2)
+    # 次數到上限 2（還是 fetching，等著收尾）：不改，updated_at 不動。
+    _failure(database, run_id)
+    touched = _backdate(weekly_db, run_id)
+    assert not touch(run_id, 2)
+    assert _failure_row(weekly_db, run_id) == ("fetching", 2, touched)
+
+    # 不是 fetching、不存在：不改。
+    for status_value in ("failed", "published"):
+        _owner(weekly_db, "UPDATE weekly_run SET status = %s WHERE id = %s", status_value, run_id)
+        assert not touch(run_id, 100)
+    assert not touch(uuid.uuid7(), 100)
+
+
+def test_published_respects_the_failure_limit_when_given(
+    weekly_db: TestDatabase, database: TrackingDatabase
+) -> None:
+    # Codex C2：已到上限、等著收尾的那一筆不能被套用；沒給上限時照 1.9 的行為。
+    run_id = _start(database)
+    _owner(
+        weekly_db,
+        "UPDATE weekly_run SET fetch_finished_at = now(), failure_count = 2 WHERE id = %s",
+        run_id,
+    )
+
+    def publish(**kwargs: Any) -> bool:
+        with database.transaction() as connection:
+            return update_weekly_run_published(connection, run_id, **kwargs)
+
+    assert not publish(max_failures=2)
+    assert _failure_row(weekly_db, run_id)[:2] == ("fetching", 2)
+    assert publish(max_failures=3)
+    assert _failure_row(weekly_db, run_id)[:2] == ("published", 2)
+
+
+def test_failure_limit_functions_reject_a_bad_limit_without_touching_the_database() -> None:
+    class Untouchable:
+        def __getattr__(self, name: str) -> Any:
+            pytest.fail(f"不該碰連線（{name}）")
+
+    for bad in (0, -1, True, 1.5):
+        with pytest.raises(ValueError, match="max_failures"):
+            update_weekly_run_failed(Untouchable(), uuid.uuid7(), max_failures=bad)  # type: ignore[arg-type]
+        with pytest.raises(ValueError, match="max_failures"):
+            update_weekly_run_touched_while_fetching(Untouchable(), uuid.uuid7(), max_failures=bad)  # type: ignore[arg-type]
+        with pytest.raises(ValueError, match="max_failures"):
+            update_weekly_run_published(Untouchable(), uuid.uuid7(), max_failures=bad)  # type: ignore[arg-type]
+
+
+def test_weekly_run_failure_count_check(weekly_db: TestDatabase) -> None:
+    with (
+        weekly_db.connect(APP_ROLE) as connection,
+        pytest.raises(
+            psycopg.errors.CheckViolation, match="ck_weekly_run_failure_count_not_negative"
+        ),
+    ):
+        connection.execute("INSERT INTO weekly_run (status, failure_count) VALUES ('failed', -1)")
 
 
 # --- open_and_run_weekly_update：確認要抓才開 adapter（對抗式審查第 1 條） ---------------------

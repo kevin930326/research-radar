@@ -3,7 +3,9 @@
 - `weekly_run`：一次每週更新一列；同時只能有一筆 `fetching`（部分唯一索引）。
 - `weekly_run_journal`：這一次每週更新裡每本期刊抓到哪一頁、過濾前後各幾篇（續跑用）。
 
-Story 1.8 只用到 `fetching`；套用、發佈快照（`published`）在 1.9，`failed` 在 1.11。
+Story 1.8 只用到 `fetching`；套用、發佈快照（`published`）在 1.9，`failed` 在 1.11：一筆
+`weekly_run` 從建立起累計失敗到上限（`DEFAULT_MAX_FAILURES`，設定 `weekly_update_max_failures`）
+就標成 `failed`（ADR-0028）。
 """
 
 import uuid
@@ -12,6 +14,17 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
 from types import MappingProxyType
+
+# 一筆 `weekly_run` 從建立起最多失敗幾次就標成 `failed`（ADR-0028）。工作層重試預設 3 次（一次
+# 排入最多 4 次嘗試），sweep 2 小時後補排再 4 次：大約 2 小時多一點標 `failed`。
+DEFAULT_MAX_FAILURES = 8
+
+
+def check_max_failures(value: object) -> int:
+    """失敗上限要是正整數（`bool` 不算）；不是就丟 `ValueError`。回傳原值。"""
+    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+        raise ValueError(f"max_failures 要是正整數（現在是 {value!r}）")
+    return value
 
 
 class WeeklyRunStatus(StrEnum):
@@ -26,16 +39,20 @@ class WeeklyRunStatus(StrEnum):
 
 @dataclass(frozen=True)
 class WeeklyRun:
-    """一次每週更新。`fetch_finished_at` 是 None 代表還沒全部抓完。"""
+    """一次每週更新。`fetch_finished_at` 是 None 代表還沒全部抓完；`failure_count` 是從建立起
+    累計失敗了幾次（ADR-0028）。
+    """
 
     id: uuid.UUID
     status: WeeklyRunStatus
     fetch_finished_at: datetime | None
     created_at: datetime
     updated_at: datetime
+    failure_count: int = 0
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "status", WeeklyRunStatus(self.status))
+        _check_count(self.failure_count, "failure_count")
 
 
 def _check_count(value: object, name: str) -> None:

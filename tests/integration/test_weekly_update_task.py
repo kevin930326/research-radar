@@ -137,6 +137,48 @@ def test_adapter_setup_failure_touches_the_run_and_raises(
     assert "test-secret-key" not in str(logs)
 
 
+def _failure_count(db: TestDatabase, run_id: uuid.UUID) -> int:
+    with db.connect(APP_ROLE) as connection:
+        row = connection.execute(
+            "SELECT failure_count FROM weekly_run WHERE id = %s", (run_id,)
+        ).fetchone()
+    assert row is not None
+    count: int = row[0]
+    return count
+
+
+def test_setup_failures_up_to_the_configured_limit_mark_the_run_failed(
+    weekly_db: TestDatabase, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Story 1.11：照正式的 register_tasks 登記、設定上限 2；缺 OpenAlex 金鑰讓準備抓取每次都失敗。
+    task = _task(
+        weekly_db, monkeypatch, ROOT / "config", weekly_update_max_failures=2, **OBJECT_STORE
+    )
+    run_id, _before = _fetching_run(weekly_db)
+
+    with capture_logs() as logs, pytest.raises(ConfigError):
+        task(weekly_run_id=str(run_id))
+
+    assert (_status(weekly_db, run_id), _failure_count(weekly_db, run_id)) == ("fetching", 1)
+    [warning] = [log for log in logs if log["event"] == "每週更新失敗，已記一次"]
+    assert (warning["failures"], warning["max_failures"]) == (1, 2)
+
+    with capture_logs() as logs, pytest.raises(ConfigError):
+        task(weekly_run_id=str(run_id))
+
+    assert (_status(weekly_db, run_id), _failure_count(weekly_db, run_id)) == ("failed", 2)
+    [error] = [log for log in logs if log["event"] == "每週更新重試到上限，標成失敗"]
+    assert (error["log_level"], error["failures"], error["max_failures"]) == ("error", 2, 2)
+    assert _snapshots(weekly_db) == []
+
+    # 之後的工作重試或 sweep 補排：不是 fetching，略過、正常結束（不丟錯、不再加次數）。
+    with capture_logs() as logs:
+        task(weekly_run_id=str(run_id))
+
+    assert [log["event"] for log in logs] == ["每週更新不是抓取中，略過"]
+    assert _failure_count(weekly_db, run_id) == 2
+
+
 def _no_adapters(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     """把建 adapter 的兩個函式換成「被呼叫就記下來」的版本；回傳記錄。"""
     built: list[str] = []
