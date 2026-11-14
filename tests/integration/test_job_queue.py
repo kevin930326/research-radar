@@ -4,6 +4,7 @@ sweep 補排（含經 CLI 與正式 worker）、被 SIGKILL 的 worker 留下的
 """
 
 import asyncio
+import concurrent.futures
 import contextlib
 import json
 import signal
@@ -842,6 +843,79 @@ def test_stale_candidate_out_of_retries_is_not_failed_once_taken_by_healthy_work
 
     assert (first, second) == (1, 0)
     assert _statuses(migrated_fresh) == {stalled: ("doing", 2)}
+
+
+def test_sweep_waiting_on_row_lock_rechecks_after_the_other_transaction_commits(
+    migrated_fresh: TestDatabase, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 上面兩個測試是「第一輪做完、才跑第二輪」，沒有真的撞在一起。這裡用兩條連線製造列鎖等待：
+    # 連線 A 鎖住工作列、在交易裡把它重排並交給健康的 worker（還沒提交）；連線 B 的 sweep 從
+    # 已提交的資料查到它是候選，卡在 FOR UPDATE 等 A。A 提交後，B 必須用最新的那一版重新核對
+    # （attempts 已經變了），回傳 0、不動它。
+    stalled = _insert_job(migrated_fresh, status="doing", queueing_lock=None)
+    with psycopg.connect(migrated_fresh.admin_url, autocommit=True) as admin:
+        healthy = admin.execute("SELECT * FROM procrastinate_register_worker_v1()").fetchone()
+    assert healthy is not None
+    stalled_query = procrastinate_sql.queries["select_stalled_jobs_by_heartbeat"]
+    job_app = create_job_app(migrated_fresh.app_url, max_connections=2, connect_timeout=5)
+    candidates: list[object] = []
+
+    def sweep_on_connection_b() -> int:
+        with job_app.opened() as app:
+            connector = app.connector.get_sync_connector()
+            real_query_all = connector.execute_query_all
+
+            def record_candidates(**kwargs: Any) -> list[dict[str, Any]]:
+                rows = real_query_all(**kwargs)
+                if kwargs["query"] == stalled_query:
+                    candidates.extend(row["id"] for row in rows)
+                return rows
+
+            monkeypatch.setattr(connector, "execute_query_all", record_candidates)
+            return retry_stalled_jobs(app, seconds_since_heartbeat=60, max_retries=3)
+
+    connection_a = psycopg.connect(migrated_fresh.admin_url)
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    try:
+        connection_a.execute(
+            "SELECT id FROM procrastinate_jobs WHERE id = %s FOR UPDATE", (stalled,)
+        )
+        connection_a.execute(
+            "SELECT procrastinate_retry_job_v2(%s, now(), NULL, NULL, NULL)", (stalled,)
+        )
+        taken = connection_a.execute(
+            "SELECT id FROM procrastinate_fetch_job_v2(ARRAY['maintenance'], %s)", (healthy[0],)
+        ).fetchone()
+        assert taken == (stalled,)
+        a_pid = connection_a.info.backend_pid
+
+        b_result = executor.submit(sweep_on_connection_b)
+
+        def b_is_waiting_on_a() -> bool:
+            if b_result.done():
+                return True  # B 沒有等鎖就結束了：跳出等待，由下面的斷言報錯。
+            with psycopg.connect(migrated_fresh.admin_url, autocommit=True) as watcher:
+                row = watcher.execute(
+                    "SELECT count(*) FROM pg_stat_activity"
+                    " WHERE %s = ANY(pg_blocking_pids(pid)) AND wait_event_type = 'Lock'",
+                    (a_pid,),
+                ).fetchone()
+            return row is not None and row[0] > 0
+
+        _wait_until(b_is_waiting_on_a, "連線 B 的 sweep 卡在等 A 的列鎖")
+        assert not b_result.done(), "B 沒有等鎖就結束了，沒有製造出交錯"
+        assert candidates == [stalled]
+
+        connection_a.commit()
+        retried = b_result.result(timeout=WAIT_SECONDS)
+    finally:
+        # 斷言失敗時也要放掉 A 的鎖，B 才會結束，測試不會卡住。
+        connection_a.close()
+        executor.shutdown(wait=True, cancel_futures=True)
+
+    assert retried == 0
+    assert _statuses(migrated_fresh) == {stalled: ("doing", 1)}
+    assert _job_worker(migrated_fresh, stalled) == healthy[0]
 
 
 def test_guarded_retry_works_through_the_workers_async_connector(
