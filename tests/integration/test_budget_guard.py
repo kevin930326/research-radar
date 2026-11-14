@@ -389,3 +389,59 @@ def test_concurrent_calls_both_pass_the_check_and_overshoot_is_bounded(
     assert total == Decimal("49.9998") + 2 * per_call
     assert Decimal(50) < total <= Decimal(50) + 2 * per_call
     assert not guard(LlmTask.ZH_SUMMARY)
+
+
+# --- 接續：已經付過錢、只差寫結果的 run 不受預算擋（ADR-0031） ----------------------------------
+
+
+def test_pending_run_is_resumed_even_when_budget_is_exhausted(
+    db: TestDatabase, database: Database, config: GatewayConfig, paper_id: uuid.UUID
+) -> None:
+    def broken(_output: object, _input: object) -> None:
+        raise RuntimeError("測試：驗證函式壞了")
+
+    # 只準備一個回覆：預算不准時若真的呼叫模型，替身會丟錯、`requests` 也會變兩筆。
+    provider = _provider()
+    open_guard = _guard(database)
+    with pytest.raises(RuntimeError, match="驗證函式壞了"):
+        run_llm_job(
+            SYSTEM,
+            database,
+            provider,
+            config,
+            LlmJob(paper_id, LlmTask.ZH_SUMMARY, InputKind.ABSTRACT, OutputLang.ZH_HANT, broken),
+            budget_allows=open_guard,
+        )
+    assert execute(db, "SELECT status, failure_reason FROM derivation_run") == [
+        ("failed", "llm_result_pending")
+    ]
+    insert_ledger(db, paper_id, LlmTask.ZH_SUMMARY, "50", NOW)
+    guard = _guard(database)
+    assert not guard(LlmTask.ZH_SUMMARY)
+    calls_before = table_counts(db)["llm_call"]
+
+    result = _run(database, provider, config, _job(paper_id), guard)
+
+    assert (result.outcome, result.resumed, result.cost_usd) == (GatewayOutcome.ACTIVE, True, None)
+    assert len(provider.requests) == 1
+    assert table_counts(db)["llm_call"] == calls_before  # 接續不再記帳
+    # 寫成之後預算照樣不准：沒有可接續的 run，回 DEFERRED_BUDGET，不呼叫模型。
+    again = _run(database, provider, config, _job(paper_id), guard)
+    assert again == GatewayResult(GatewayOutcome.DEFERRED_BUDGET)
+    assert len(provider.requests) == 1
+
+
+def test_budget_denied_without_pending_run_never_creates_a_run(
+    db: TestDatabase, database: Database, config: GatewayConfig, paper_id: uuid.UUID
+) -> None:
+    # 別的論文有 pending 的 run 不算：鍵不同。
+    insert_ledger(db, paper_id, LlmTask.ZH_SUMMARY, "50", NOW)
+    other_paper = create_paper(database, doi="10.1/def", openalex_id="W2")
+    before = table_counts(db)
+    provider = _provider()
+
+    result = _run(database, provider, config, _job(other_paper), _guard(database))
+
+    assert result == GatewayResult(GatewayOutcome.DEFERRED_BUDGET)
+    assert provider.requests == []
+    assert table_counts(db) == before

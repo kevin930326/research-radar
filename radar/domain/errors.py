@@ -43,3 +43,6 @@ class ErrorCode(StrEnum):
     LLM_OUTPUT_UNSTORABLE = "llm_output_unstorable"  # 輸出的字串存不進資料庫（NUL、單獨的代理字元）
     LLM_RUN_EXPIRED = "llm_run_expired"  # 互動呼叫超過時限還是 running，由 sweep 改成 failed
     LLM_GATEWAY_ERROR = "llm_gateway_error"  # 閘門自己出錯（例如寫結果失敗），run 改 failed
+    # 模型已經回應、帳與輸出已存進 `llm_call`，但驗證或寫結果時出錯（或 sweep 判定逾時）：下一次
+    # 同一組鍵從存下的輸出接續驗證與寫入，不再呼叫模型（ADR-0030）
+    LLM_RESULT_PENDING = "llm_result_pending"

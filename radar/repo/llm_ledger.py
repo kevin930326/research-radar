@@ -3,9 +3,10 @@ ADR-0030）。
 
 - `derivation_run`：一次模型呼叫一筆，狀態 `running` → `succeeded`（含被拒收）／`failed`（暫時性
   失敗、設定錯、sweep 判定逾時）。（對象, 工作, prompt 版本, 模型, input_sha256）有只算
-  `running` 而且不是評估的部分唯一索引：同一份輸入同時只有一個在跑。
-- `llm_call`：一次呼叫的 tokens 與費用（`numeric(12,6)`，美元）；`run_id` 唯一。應用程式角色對它
-  沒有 UPDATE、DELETE（遷移 0010 收回）：帳只能新增。
+  `running` 而且不是評估的部分唯一索引：同一份輸入同時只有一個在跑。已經存下輸出卻沒寫成結果的
+  run 標 `failed`（`llm_result_pending`），下一次同一組鍵把它改回 `running` 接續（ADR-0030）。
+- `llm_call`：一次呼叫的 tokens、費用（`numeric(12,6)`，美元）與存下的輸出；`run_id` 唯一。應用
+  程式角色對它沒有 UPDATE、DELETE（遷移 0010 收回）：帳只能新增。
 - 兩張表都由 services 用自己的短交易寫、立刻 commit（Conventions 的例外：主交易回滾時帳照記）。
 - 寫入一律用 `text()` SQL；函式收呼叫端開好的交易連線，不 commit。
 - 讀取函式第一個參數是 `viewer`，只給系統工作（`visible_to_system_only`）。
@@ -44,6 +45,7 @@ from radar.domain.ai_outputs import (
     NewLlmCall,
     RunKey,
     RunStatus,
+    SavedLlmOutput,
 )
 from radar.domain.errors import ErrorCode
 from radar.domain.viewer import SystemViewer
@@ -87,10 +89,10 @@ derivation_run_table = Table(
         unique=True,
         postgresql_where=text("status = 'running' AND eval_run_id IS NULL"),
     ),
-    # sweep 找逾時的互動 running。
+    # sweep 找逾時的互動 running（看 `updated_at`：接續時會重設）。
     Index(
-        "ix_derivation_run_running_created_at",
-        "created_at",
+        "ix_derivation_run_running_updated_at",
+        "updated_at",
         postgresql_where=text("status = 'running'"),
     ),
     CheckConstraint(
@@ -143,6 +145,9 @@ llm_call_table = Table(
     Column("request_id", Text),
     Column("stop_reason", Text),
     Column("raw_response", JSONB),
+    # 存下的模型輸出（最多一個有值）：寫結果失敗後從這裡接續，不再呼叫模型（ADR-0030）。
+    Column("output_text", Text),
+    Column("output_reject_reason", Text),
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
     UniqueConstraint("run_id"),
     CheckConstraint(
@@ -152,6 +157,19 @@ llm_call_table = Table(
     ),
     CheckConstraint("cost_usd >= 0", name="cost_usd_not_negative"),
     CheckConstraint("price_tier IN ('standard', 'long_context')", name="price_tier"),
+    CheckConstraint(
+        "output_text IS NULL OR output_reject_reason IS NULL", name="output_at_most_one"
+    ),
+    CheckConstraint(
+        "output_reject_reason IS NULL OR output_reject_reason ~ '^[a-z][a-z0-9_]*$'",
+        name="output_reject_reason_format",
+    ),
+)
+
+# 這筆 run 有存下輸出的 `llm_call`（可以接續）；用在 `UPDATE derivation_run` 裡。
+_HAS_SAVED_OUTPUT = (
+    "EXISTS (SELECT 1 FROM llm_call AS c WHERE c.run_id = derivation_run.id"
+    " AND (c.output_text IS NOT NULL OR c.output_reject_reason IS NOT NULL))"
 )
 
 _RUN_COLUMNS = (
@@ -265,6 +283,66 @@ def list_llm_costs_by_task(
     return {LlmTask(row[0]): Decimal(row[1]) for row in rows}
 
 
+def find_resumable_derivation_run_id(
+    viewer: SystemViewer, connection: Connection, key: RunKey, eval_run_id: uuid.UUID | None
+) -> uuid.UUID | None:
+    """這組鍵（評估時還要同一個 `eval_run_id`）最早一筆可接續的 run：`llm_result_pending` 而且
+    `llm_call` 存下了輸出（和 `update_derivation_run_resumed` 同一個條件，只讀不改）；沒有回 None。
+    預算不准時閘門用它判斷還能不能接續（ADR-0031）。
+
+    Raises:
+        TypeError: `viewer` 不是 `SystemViewer`。
+    """
+    visible = visible_to_system_only(viewer)
+    value = connection.execute(
+        text(
+            f"SELECT r.id FROM derivation_run AS r WHERE {visible}"
+            " AND r.paper_id = :paper_id AND r.task = :task"
+            " AND r.prompt_version = :prompt_version AND r.model = :model"
+            " AND r.input_sha256 = :input_sha256"
+            " AND r.status = 'failed' AND r.failure_reason = :pending"
+            " AND r.eval_run_id IS NOT DISTINCT FROM CAST(:eval_run_id AS uuid)"
+            " AND EXISTS (SELECT 1 FROM llm_call AS c WHERE c.run_id = r.id"
+            " AND (c.output_text IS NOT NULL OR c.output_reject_reason IS NOT NULL))"
+            " ORDER BY r.created_at, r.id LIMIT 1"
+        ),
+        {
+            **_key_params(key),
+            "pending": ErrorCode.LLM_RESULT_PENDING.value,
+            "eval_run_id": eval_run_id,
+        },
+    ).scalar_one_or_none()
+    return None if value is None else uuid.UUID(str(value))
+
+
+def find_llm_call_output(
+    viewer: SystemViewer, connection: Connection, run_id: uuid.UUID
+) -> SavedLlmOutput | None:
+    """這筆 run 的 `llm_call` 存下的模型輸出；沒有帳或沒有存輸出時回 None。
+
+    Raises:
+        TypeError: `viewer` 不是 `SystemViewer`。
+    """
+    visible = visible_to_system_only(viewer)
+    row = (
+        connection.execute(
+            text(
+                f"SELECT output_text, output_reject_reason FROM llm_call WHERE {visible}"
+                " AND run_id = :run_id"
+            ),
+            {"run_id": run_id},
+        )
+        .mappings()
+        .one_or_none()
+    )
+    if row is None or (row["output_text"] is None and row["output_reject_reason"] is None):
+        return None
+    reason = row["output_reject_reason"]
+    return SavedLlmOutput(
+        text=row["output_text"], reject_reason=None if reason is None else ErrorCode(reason)
+    )
+
+
 # --- 寫入 ---------------------------------------------------------------------------------
 
 
@@ -330,18 +408,98 @@ def update_derivation_run_failed(
     return result.rowcount == 1
 
 
-def update_expired_derivation_runs(connection: Connection, older_than: timedelta) -> int:
-    """把建立超過 `older_than` 還是 `running` 的互動呼叫改成 `failed`（`llm_run_expired`），
-    回改了幾筆。Batch 的不看時限（跟著批次的結果走，ADR-0009）。
+def update_derivation_run_failed_or_pending(
+    connection: Connection, run_id: uuid.UUID, reason: ErrorCode
+) -> bool:
+    """`running` → `failed`：已經有存下輸出的 `llm_call` 時記 `llm_result_pending`（下一次接續、
+    不再呼叫模型），否則記 `reason`。已經不是 `running` 就不改、回 False。
     """
     result = connection.execute(
         text(
-            "UPDATE derivation_run SET status = 'failed', failure_reason = :reason,"
+            "UPDATE derivation_run SET status = 'failed',"
+            f" failure_reason = CASE WHEN {_HAS_SAVED_OUTPUT} THEN :pending ELSE :reason END,"
+            " finished_at = clock_timestamp(), updated_at = clock_timestamp()"
+            " WHERE id = :id AND status = 'running'"
+        ),
+        {
+            "id": run_id,
+            "reason": ErrorCode(reason).value,
+            "pending": ErrorCode.LLM_RESULT_PENDING.value,
+        },
+    )
+    return result.rowcount == 1
+
+
+def update_derivation_run_resumed(
+    connection: Connection, key: RunKey, eval_run_id: uuid.UUID | None
+) -> uuid.UUID | None:
+    """把這組鍵（評估時還要同一個 `eval_run_id`）最早一筆 `llm_result_pending` 而且有存下輸出的
+    run 改回 `running`（重設 `updated_at`，sweep 從現在起算），回它的 id；沒有就回 None。
+
+    呼叫端要先持有這組鍵的 advisory lock，並確認沒有平常流程的 `running`（部分唯一索引）。
+    在呼叫端開好的交易裡做，不 commit。
+    """
+    value = connection.execute(
+        text(
+            "UPDATE derivation_run SET status = 'running', failure_reason = NULL,"
+            " finished_at = NULL, updated_at = clock_timestamp()"
+            " WHERE status = 'failed' AND id = ("
+            " SELECT r.id FROM derivation_run AS r"
+            " WHERE r.paper_id = :paper_id AND r.task = :task"
+            " AND r.prompt_version = :prompt_version AND r.model = :model"
+            " AND r.input_sha256 = :input_sha256"
+            " AND r.status = 'failed' AND r.failure_reason = :pending"
+            " AND r.eval_run_id IS NOT DISTINCT FROM CAST(:eval_run_id AS uuid)"
+            " AND EXISTS (SELECT 1 FROM llm_call AS c WHERE c.run_id = r.id"
+            " AND (c.output_text IS NOT NULL OR c.output_reject_reason IS NOT NULL))"
+            " ORDER BY r.created_at, r.id LIMIT 1)"
+            " RETURNING id"
+        ),
+        {
+            **_key_params(key),
+            "pending": ErrorCode.LLM_RESULT_PENDING.value,
+            "eval_run_id": eval_run_id,
+        },
+    ).scalar_one_or_none()
+    return None if value is None else uuid.UUID(str(value))
+
+
+def update_derivation_run_pending_settled(connection: Connection, run_id: uuid.UUID) -> bool:
+    """`llm_result_pending` 的 run 已經寫了表頭（例如 sweep 判定逾時後原本的呼叫才寫成
+    `superseded`）：原因改成 `llm_run_expired`，不再接續。不是 pending 就不改、回 False。
+    """
+    result = connection.execute(
+        text(
+            "UPDATE derivation_run SET failure_reason = :expired, updated_at = clock_timestamp()"
+            " WHERE id = :id AND status = 'failed' AND failure_reason = :pending"
+        ),
+        {
+            "id": run_id,
+            "expired": ErrorCode.LLM_RUN_EXPIRED.value,
+            "pending": ErrorCode.LLM_RESULT_PENDING.value,
+        },
+    )
+    return result.rowcount == 1
+
+
+def update_expired_derivation_runs(connection: Connection, older_than: timedelta) -> int:
+    """把超過 `older_than` 沒有進展（`updated_at`；接續時會重設）還是 `running` 的互動呼叫改成
+    `failed`，回改了幾筆：已經有存下輸出的 `llm_call` 記 `llm_result_pending`（下一次接續），
+    否則記 `llm_run_expired`。Batch 的不看時限（跟著批次的結果走，ADR-0009）。
+    """
+    result = connection.execute(
+        text(
+            "UPDATE derivation_run SET status = 'failed',"
+            f" failure_reason = CASE WHEN {_HAS_SAVED_OUTPUT} THEN :pending ELSE :reason END,"
             " finished_at = clock_timestamp(), updated_at = clock_timestamp()"
             " WHERE status = 'running' AND call_mode = 'interactive'"
-            " AND created_at < clock_timestamp() - :older_than"
+            " AND updated_at < clock_timestamp() - :older_than"
         ),
-        {"reason": ErrorCode.LLM_RUN_EXPIRED.value, "older_than": older_than},
+        {
+            "reason": ErrorCode.LLM_RUN_EXPIRED.value,
+            "pending": ErrorCode.LLM_RESULT_PENDING.value,
+            "older_than": older_than,
+        },
     )
     return int(result.rowcount)
 
@@ -349,8 +507,10 @@ def update_expired_derivation_runs(connection: Connection, older_than: timedelta
 def create_llm_call(connection: Connection, call: NewLlmCall) -> uuid.UUID:
     """新增一筆 `llm_call`，回它的 id。在呼叫端開好的交易裡做，不 commit。
 
-    `raw_response` 要存得進 jsonb（呼叫端先用 `is_storable_json` 檢查，存不下就傳 None）。
+    `raw_response` 要存得進 jsonb（呼叫端先用 `is_storable_json` 檢查，存不下就傳 None）；
+    `output` 的文字已由 `SavedLlmOutput` 確認存得進 text。
     """
+    output = call.output
     raw = (
         None if call.raw_response is None else json.dumps(dict(call.raw_response), allow_nan=False)
     )
@@ -359,10 +519,11 @@ def create_llm_call(connection: Connection, call: NewLlmCall) -> uuid.UUID:
             "INSERT INTO llm_call"
             " (run_id, input_tokens, output_tokens, cache_creation_input_tokens,"
             " cache_read_input_tokens, cost_usd, price_tier, is_batch, response_id, request_id,"
-            " stop_reason, raw_response)"
+            " stop_reason, raw_response, output_text, output_reject_reason)"
             " VALUES (:run_id, :input_tokens, :output_tokens, :cache_creation_input_tokens,"
             " :cache_read_input_tokens, :cost_usd, :price_tier, :is_batch, :response_id,"
-            " :request_id, :stop_reason, CAST(:raw_response AS jsonb))"
+            " :request_id, :stop_reason, CAST(:raw_response AS jsonb), :output_text,"
+            " :output_reject_reason)"
             " RETURNING id"
         ),
         {
@@ -378,6 +539,12 @@ def create_llm_call(connection: Connection, call: NewLlmCall) -> uuid.UUID:
             "request_id": call.request_id,
             "stop_reason": call.stop_reason,
             "raw_response": raw,
+            "output_text": None if output is None else output.text,
+            "output_reject_reason": (
+                None
+                if output is None or output.reject_reason is None
+                else ErrorCode(output.reject_reason).value
+            ),
         },
     ).scalar_one()
     return uuid.UUID(str(value))

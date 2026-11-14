@@ -154,8 +154,8 @@ class Settings(BaseModel):
     # 所以最壞是 deadline + 最長的一次等待（retry_wait_max + jitter 與 retry_after_max 取大的）
     # + timeout 秒。
     anthropic_deadline: int = Field(default=180, ge=1, le=3600)
-    # 互動呼叫的 `derivation_run` 建立超過幾秒還是 running，sweep 就改成 failed
-    # （`llm_run_expired`）。
+    # 互動呼叫的 `derivation_run` 建立（或接續）超過幾秒還是 running，sweep 就改成 failed
+    # （`llm_run_expired`；已經存下輸出的記 `llm_result_pending`，下一次接續）。
     # 要比上面說的最壞時間長，否則還在跑的呼叫會被誤判。
     llm_run_stale_after: int = Field(default=900, ge=60, le=86_400)
 

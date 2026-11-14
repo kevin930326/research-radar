@@ -223,8 +223,8 @@ def test_result_after_concurrent_sweep_is_superseded_and_run_stays_failed(
     worker = Worker(database, provider, config, _job(paper_id))
     assert provider.entered.wait(WAIT)
 
-    # 等模型的期間 sweep 判定逾時（把建立時間往前推，模擬已經過了時限）。
-    execute(db, "UPDATE derivation_run SET created_at = now() - interval '1 hour'")
+    # 等模型的期間 sweep 判定逾時（把最後進展的時間往前推，模擬已經過了時限）。
+    execute(db, "UPDATE derivation_run SET updated_at = now() - interval '1 hour'")
     assert expire_stale_runs(SYSTEM, database, timedelta(minutes=15)) == 1
     provider.release.set()
     result = worker.join()

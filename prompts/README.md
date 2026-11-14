@@ -61,4 +61,6 @@ PROMPT_FILE_HASHES: dict[str, dict[int, tuple[str, str | None]]] = {
   都留著（歷史結果的來歷要查得到）。
 - 改了內容卻沒升版：`tests/arch/test_prompt_registry.py` 會失敗，執行期的 prompt loader 也會拒絕
   雜湊對不上的檔案。
+- 連登記的雜湊一起改、版本不變：檔和登記雖然對得上，`tests/arch/test_prompt_registry_history.py`
+  拿 main 歷史上的登記比，已經進 main 的版本被改或被刪都會失敗（要完整的 git 歷史）。
 - prompt 升版等於「做法變了」：同一篇論文會照平常的流程重跑一次，新的結果取代舊的（ADR-0015）。
