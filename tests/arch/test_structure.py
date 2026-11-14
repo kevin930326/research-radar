@@ -104,3 +104,17 @@ def test_env_example_lists_migration_settings_without_values() -> None:
     for field in MigrationSettings.model_fields:
         assert env_name(field) in entries
     assert entries["RADAR_MIGRATION_DATABASE_URL"] == ""
+
+
+def test_dockerfile_always_rebuilds_the_project_package() -> None:
+    """安裝 radar 本身的那一行要帶 --reinstall-package radar。
+
+    uv 預設只看 pyproject.toml 有沒有變來決定要不要重新打包本機專案；build 的快取掛載裡
+    留著舊的包時，程式改了、pyproject.toml 沒改，映像裡會是舊程式（2026-11-14 發生過）。
+    """
+    lines = (ROOT / "Dockerfile").read_text(encoding="utf-8").splitlines()
+    install_project = [
+        line for line in lines if "uv sync" in line and "--no-install-project" not in line
+    ]
+    assert len(install_project) == 1, install_project
+    assert "--reinstall-package radar" in install_project[0]

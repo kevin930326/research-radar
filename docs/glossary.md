@@ -542,3 +542,4 @@
 - **MiB 與 MB**：MiB 是 1024×1024 位元組，MB（十進位）是 1,000,000 位元組，所以 750 MiB 約等於 786 MB；Docker 的 `mem_limit: 400m` 的 m 是 MiB。本專案 AGENTS.md 的「750 MB」以 MiB 計（Kevin 2026-11-14 決定）。
 - **Structural Seed（原始碼結構）**：架構文件裡畫出整個 repo 資料夾怎麼分的那一段，新的 Story 照它放檔案；本機的 compose 檔放根目錄是它的例外，理由在 ADR-0023。
 - **排程名稱 vs. 工作名稱**：排程名稱是 crontab 與心跳用的名字，用連字號（`weekly-update`，`radar enqueue weekly-update`）；工作名稱是程式裡的工作與檔名，用底線（`weekly_update`）。
+- **快取掛載（cache mount）**：建映像時借用的一塊暫存空間，下載過、打包過的東西留在裡面，下次建映像可以直接拿來用；它不會進到映像裡，但裡面留著舊東西時，可能被誤拿來用。
