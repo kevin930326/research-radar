@@ -590,3 +590,7 @@
 - **`search_path`**：沒寫 schema 名稱時，PostgreSQL 依序去哪些 schema 找表和函式，像找檔案時依序翻的資料夾清單。
 - **`pg_stat_activity`**：PostgreSQL 內建的「目前每條連線在做什麼」清單，一條連線一列，`state` 欄寫它的狀態。
 - **`idle` 與 `idle in transaction`（`pg_stat_activity` 的連線狀態）**：`idle` 是連線閒著、沒有開著的交易；`idle in transaction` 是交易開了還沒結束、只是暫時沒在跑 SQL，這時它拿著的列鎖不會放；測試用它確認讀物件儲存時沒有開著的交易。
+- **失敗上限（每週更新）**：一筆每週更新從建立起最多失敗幾次（設定 `RADAR_WEEKLY_UPDATE_MAX_FAILURES`，預設 8）；到了就標成 `failed`、不再補排，下一次排程開新的一筆從頭抓（ADR-0028）。
+- **`failure_count`**：`weekly_run` 上累計失敗了幾次的欄位；工作重試、sweep 補排、下一週接著同一筆都一起算，有進度也不歸零。
+- **`source_changed_at`**：論文上「指紋（`source_hash`）最後一次變了是什麼時候」的欄位；NULL＝寫入以來沒變過，之後的重新處理用它找出有變動的論文。
+- **變動（`changed`）**：每週套用時，既有論文的指紋變了的篇數（摘要、撤稿標記、書目欄位改了）；只改被引用次數或關鍵字不算。

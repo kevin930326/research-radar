@@ -38,7 +38,7 @@ from radar.domain.permissions import PermissionDeniedError
 from radar.domain.raw_records import ApiCall, JournalQuery, RawRecord, RawSource, SourcePage
 from radar.domain.staging import StagingItem, StagingKind
 from radar.domain.viewer import MemberViewer, SystemViewer
-from radar.domain.weekly_run import JournalProgress, PageCounts
+from radar.domain.weekly_run import JournalProgress, PageCounts, WeeklyRunFailure
 from radar.repo.api_calls import create_api_calls
 from radar.repo.db import Database
 from radar.repo.ingest_staging import upsert_staged_papers
@@ -47,6 +47,7 @@ from radar.repo.weekly_runs import (
     find_fetching_weekly_run,
     get_weekly_run,
     list_weekly_run_journals,
+    update_weekly_run_failure,
     upsert_weekly_run_journal_page,
 )
 from radar.services import weekly_update as weekly_update_module
@@ -1095,6 +1096,91 @@ def test_staging_kind_check_accepts_weekly_update_only_besides_reparse(
         connection.execute(sql, ("weekly_update", "a" * 64))
         with pytest.raises(psycopg.errors.CheckViolation):
             connection.execute(sql, ("first_import", "a" * 64))
+
+
+# --- repo：失敗次數（Story 1.11、ADR-0028） --------------------------------------------------
+
+
+def _failure(database: Database, run_id: uuid.UUID, max_failures: int) -> WeeklyRunFailure | None:
+    with database.transaction() as connection:
+        return update_weekly_run_failure(connection, run_id, max_failures=max_failures)
+
+
+def _failure_row(db: TestDatabase, run_id: uuid.UUID) -> tuple[Any, ...]:
+    [row] = _rows(
+        db, "SELECT status, failure_count, updated_at FROM weekly_run WHERE id = %s", run_id
+    )
+    return row
+
+
+def test_update_weekly_run_failure_counts_up_then_marks_failed(
+    weekly_db: TestDatabase, database: TrackingDatabase
+) -> None:
+    run_id = _start(database)
+    touched = _backdate(weekly_db, run_id)
+    assert _failure_row(weekly_db, run_id)[:2] == ("fetching", 0)
+
+    first = _failure(database, run_id, 3)
+    second = _failure(database, run_id, 3)
+
+    assert (first, second) == (WeeklyRunFailure(1, False), WeeklyRunFailure(2, False))
+    # 仍是 fetching；updated_at 不由它改（那是 update_weekly_run_touched 的事）。
+    assert _failure_row(weekly_db, run_id) == ("fetching", 2, touched)
+    with database.transaction() as connection:
+        run = get_weekly_run(SYSTEM, connection, run_id)
+    assert run is not None
+    assert run.failure_count == 2
+
+    # 第 3 次到上限：同一句改成 failed。
+    assert _failure(database, run_id, 3) == WeeklyRunFailure(3, True)
+    assert _failure_row(weekly_db, run_id) == ("failed", 3, touched)
+
+    # 已經不是 fetching：不再加、回 None。部分唯一索引也放開，可以建新的一筆。
+    assert _failure(database, run_id, 3) is None
+    assert _failure_row(weekly_db, run_id)[:2] == ("failed", 3)
+    assert _start(database) != run_id
+
+
+def test_update_weekly_run_failure_with_a_lower_limit_marks_failed_at_once(
+    weekly_db: TestDatabase, database: TrackingDatabase
+) -> None:
+    # 次數已經超過（例如上限調低）：加一之後 ≥ 上限就標 failed。
+    run_id = _start(database)
+    _owner(weekly_db, "UPDATE weekly_run SET failure_count = 5 WHERE id = %s", run_id)
+
+    assert _failure(database, run_id, 2) == WeeklyRunFailure(6, True)
+    assert _failure_row(weekly_db, run_id)[:2] == ("failed", 6)
+
+
+def test_update_weekly_run_failure_leaves_published_and_missing_runs_alone(
+    weekly_db: TestDatabase, database: TrackingDatabase
+) -> None:
+    run_id = _start(database)
+    _owner(weekly_db, "UPDATE weekly_run SET status = 'published' WHERE id = %s", run_id)
+
+    assert _failure(database, run_id, 1) is None
+    assert _failure(database, uuid.uuid7(), 1) is None
+    assert _failure_row(weekly_db, run_id)[:2] == ("published", 0)
+
+
+def test_update_weekly_run_failure_rejects_a_bad_limit_without_touching_the_database() -> None:
+    class Untouchable:
+        def __getattr__(self, name: str) -> Any:
+            pytest.fail(f"不該碰連線（{name}）")
+
+    for bad in (0, -1, True, 1.5):
+        with pytest.raises(ValueError, match="max_failures"):
+            update_weekly_run_failure(Untouchable(), uuid.uuid7(), max_failures=bad)  # type: ignore[arg-type]
+
+
+def test_weekly_run_failure_count_check(weekly_db: TestDatabase) -> None:
+    with (
+        weekly_db.connect(APP_ROLE) as connection,
+        pytest.raises(
+            psycopg.errors.CheckViolation, match="ck_weekly_run_failure_count_not_negative"
+        ),
+    ):
+        connection.execute("INSERT INTO weekly_run (status, failure_count) VALUES ('failed', -1)")
 
 
 # --- open_and_run_weekly_update：確認要抓才開 adapter（對抗式審查第 1 條） ---------------------

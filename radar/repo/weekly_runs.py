@@ -1,7 +1,8 @@
 """`weekly_run` 與 `weekly_run_journal` 表：表的定義與唯一的寫入者（AD-14、ADR-0004、ADR-0025、
 ADR-0026）。
 
-- `weekly_run`：一次每週更新一列；同時只能有一筆 `fetching`（部分唯一索引）。
+- `weekly_run`：一次每週更新一列；同時只能有一筆 `fetching`（部分唯一索引）。`failure_count` 是
+  從建立起累計失敗幾次，到上限就改成 `failed`（遷移 0009、ADR-0028）。
 - `weekly_run_journal`：每本期刊抓到哪一頁、過濾前後各幾篇；每暫存完一頁更新一次，和那一頁的
   暫存列在同一個交易（進度不會比暫存多或少）。
 
@@ -32,11 +33,18 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import JSONB
 
 from radar.domain.viewer import SystemViewer
-from radar.domain.weekly_run import JournalProgress, PageCounts, WeeklyRun, WeeklyRunStatus
+from radar.domain.weekly_run import (
+    JournalProgress,
+    PageCounts,
+    WeeklyRun,
+    WeeklyRunFailure,
+    WeeklyRunStatus,
+    check_max_failures,
+)
 from radar.repo.models import Base
 from radar.repo.visibility import visible_to_system_only
 
-# --- 表的定義（`alembic check` 拿來和資料庫比對；遷移 0006 建表） ---------------------------
+# --- 表的定義（`alembic check` 拿來和資料庫比對；遷移 0006 建表、0009 加 `failure_count`） ------
 
 _COUNTS = ("pages", "fetched", "staged", "excluded", "out_of_scope", "unparseable")
 
@@ -48,6 +56,8 @@ weekly_run_table = Table(
     Column("fetch_finished_at", DateTime(timezone=True)),
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
     Column("updated_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
+    # 由遷移 0009 加（Story 1.11）：從建立起累計失敗幾次（ADR-0028）。
+    Column("failure_count", Integer, nullable=False, server_default=text("0")),
     # 同時只能有一筆 `fetching`（ADR-0004 決定第 2 點）。
     Index(
         "uq_weekly_run_fetching",
@@ -58,6 +68,7 @@ weekly_run_table = Table(
     CheckConstraint(
         "status IN ('fetching', 'published', 'ai_done', 'exported', 'failed')", name="status"
     ),
+    CheckConstraint("failure_count >= 0", name="failure_count_not_negative"),
 )
 
 # 外鍵的索引由唯一約束（開頭是 weekly_run_id）提供。
@@ -83,7 +94,7 @@ weekly_run_journal_table = Table(
     CheckConstraint("jsonb_typeof(fetched_by_year) = 'object'", name="fetched_by_year_object"),
 )
 
-_RUN_COLUMNS = "id, status, fetch_finished_at, created_at, updated_at"
+_RUN_COLUMNS = "id, status, fetch_finished_at, created_at, updated_at, failure_count"
 
 
 def _weekly_run(row: RowMapping) -> WeeklyRun:
@@ -93,6 +104,7 @@ def _weekly_run(row: RowMapping) -> WeeklyRun:
         fetch_finished_at=row["fetch_finished_at"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
+        failure_count=row["failure_count"],
     )
 
 
@@ -337,3 +349,36 @@ def update_weekly_run_published(connection: Connection, weekly_run_id: uuid.UUID
         },
     )
     return len(rows.all()) == 1
+
+
+def update_weekly_run_failure(
+    connection: Connection, weekly_run_id: uuid.UUID, *, max_failures: int
+) -> WeeklyRunFailure | None:
+    """記這筆每週更新又失敗一次：只在 `fetching` 時把 `failure_count` 加一；加完到 `max_failures`
+    就在同一句改成 `failed`。回（累計失敗次數, 是否這次標成 `failed`）；不存在或不是 `fetching`
+    （已經 `failed`、已發佈）時什麼都不改、回 None。
+
+    不改 `updated_at`（那是 `update_weekly_run_touched` 的事）。在呼叫端開好的交易裡做，不 commit。
+
+    Raises:
+        ValueError: `max_failures` 不是正整數（不碰資料庫）。
+    """
+    check_max_failures(max_failures)
+    row = connection.execute(
+        text(
+            "UPDATE weekly_run SET failure_count = failure_count + 1,"
+            " status = CASE WHEN failure_count + 1 >= :max_failures THEN :failed ELSE status END"
+            " WHERE id = :id AND status = :fetching"
+            " RETURNING failure_count, status"
+        ),
+        {
+            "id": weekly_run_id,
+            "max_failures": max_failures,
+            "failed": WeeklyRunStatus.FAILED.value,
+            "fetching": WeeklyRunStatus.FETCHING.value,
+        },
+    ).one_or_none()
+    if row is None:
+        return None
+    failures, status = row
+    return WeeklyRunFailure(failures=failures, failed=status == WeeklyRunStatus.FAILED.value)

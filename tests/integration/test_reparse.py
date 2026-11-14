@@ -292,6 +292,31 @@ def test_running_twice_keeps_counts(
     assert after["keyword"] == before["keyword"]
 
 
+def test_reparse_records_source_changes(
+    reparse_db: TestDatabase, database: TrackingDatabase, store: GuardedStore
+) -> None:
+    # ADR-0028 決定第 6 點：reparse 經同一個寫入函式，指紋變了也寫 source_changed_at。
+    same, changed = _works(2)
+    for work in (same, changed):
+        _seed_raw(database, store, _key(work), work_bytes(work), T1)
+    # 一篇和原始資料解析出來的一樣（指紋不變）；一篇是舊解析（沒有摘要，指紋不同）。
+    _seed_paper(database, parse_openalex_work(work_bytes(same), fetched_at=T1))
+    _seed_paper(database, _old_parse(changed, T1))
+
+    result = _reparse(database, store)
+
+    assert result.updated == 2
+    changed_at = dict(
+        _rows(
+            reparse_db,
+            "SELECT e.value_norm, p.source_changed_at FROM paper p"
+            " JOIN external_id e ON e.paper_id = p.id AND e.scheme = 'openalex'",
+        )
+    )
+    assert changed_at[_key(same)] is None
+    assert changed_at[_key(changed)] is not None
+
+
 # --- 壞資料 ---------------------------------------------------------------------------------
 
 

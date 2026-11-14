@@ -68,7 +68,9 @@ SWEEP_REGISTRY: tuple[SweepEntry, ...] = (
     # 工作通常不會被當成卡住（一頁平常幾秒）。最壞時（物件存取每次都照 `Retry-After` 等到上限、
     # 重試用完）一頁可能超過 2 小時，sweep 會多排一筆；但佇列鎖讓它等前一筆做完、接著看到已保存
     # 的進度，不會兩個同時抓（ADR-0025 理由 4）。
-    # 1.11 做 `failed` 之前，重試用完的那一筆每 2 小時被補排一次（額度停下的也是）。
+    # 失敗會累計（跨工作重試、sweep 補排、下一週 cron 接著同一筆）；到上限
+    # （`weekly_update_max_failures`）那一筆改成 `failed`、移出 `fetching`，sweep 不再補排
+    # （Story 1.11、ADR-0028）。額度停下不算失敗，仍是 `fetching`，每 2 小時補排一次接著抓。
     SweepEntry(
         "weekly_run", "status", "fetching", "updated_at", RUN_WEEKLY_UPDATE, timedelta(hours=2)
     ),

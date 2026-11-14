@@ -13,6 +13,12 @@ AD-14、AD-19、AD-25、ADR-0004、ADR-0014、ADR-0025）。
 - `weekly_run.updated_at` 每頁、額度停下、失敗（含建 adapter 失敗）、已經抓完又被排入、因為
   reparse 正在跑而先不做時都更新，sweep 照 2 小時的時限補排（ADR-0025）。
 
+失敗上限（Story 1.11、ADR-0028）：準備抓取、抓取、準備套用、套用每失敗一次，就在同一個短交易
+更新 `updated_at` 並把 `weekly_run.failure_count` 加一；從建立起累計到 `max_failures`（設定
+`weekly_update_max_failures`）就改成 `failed`、同一個交易刪掉這一批暫存列，記錯誤日誌、不送心跳。
+之後的工作重試、sweep 都看到不是 `fetching` 而略過，下一次 cron 開新的一筆。額度停下、reparse
+正在跑而先不做、略過、已經抓完又被排入都不算失敗。
+
 和 `radar reparse` 互斥（ADR-0026 取捨）：開始抓取或套用前讀狀態的那個交易、以及套用的交易，
 第一件事是試拿 `INGEST_WRITE_LOCK_KEY` 的共用交易級 advisory lock；拿不到代表 reparse 正在跑，
 這次不抓也不套用（不碰 source、物件儲存、論文），更新 `updated_at`、記警告、正常結束（不算失敗），
@@ -27,8 +33,8 @@ AD-14、AD-19、AD-25、ADR-0004、ADR-0014、ADR-0025）。
 - `advance_weekly_update`（worker 的 `run_weekly_update` 工作用）：先照
   `open_and_run_weekly_update` 抓，抓完了才讀追蹤範圍、接著套用。
 
-快照與 `first_snapshot_id` 只由這個模組寫（架構測試守著）。`failed` 屬 1.11。抓取段不寫 `paper`
-等論文表；任何時候都不在開著的交易裡呼叫 source、物件儲存或心跳。
+快照與 `first_snapshot_id` 只由這個模組寫（架構測試守著）。抓取段不寫 `paper` 等論文表；任何時候
+都不在開著的交易裡呼叫 source、物件儲存或心跳。
 """
 
 import time
@@ -59,7 +65,13 @@ from radar.domain.permissions import Action, require
 from radar.domain.scope import ScopeSettings
 from radar.domain.staging import StagingItem, StagingKind
 from radar.domain.viewer import SystemViewer, Viewer
-from radar.domain.weekly_run import JournalProgress, PageCounts, WeeklyRunStatus
+from radar.domain.weekly_run import (
+    DEFAULT_MAX_FAILURES,
+    JournalProgress,
+    PageCounts,
+    WeeklyRunStatus,
+    check_max_failures,
+)
 from radar.ports import ObjectStore, PaperSource
 from radar.repo.db import INGEST_WRITE_LOCK_KEY, Database
 from radar.repo.ingest_staging import (
@@ -78,6 +90,7 @@ from radar.repo.weekly_runs import (
     find_fetching_weekly_run,
     get_weekly_run,
     list_weekly_run_journals,
+    update_weekly_run_failure,
     update_weekly_run_fetch_finished,
     update_weekly_run_published,
     update_weekly_run_touched,
@@ -161,6 +174,8 @@ class WeeklyApplyResult:
     - `snapshot_id`、`snapshot_number`、`as_of`：這次發佈的快照。
     - `staged`：讀到的暫存列數；`created`、`updated`：新增、更新的論文篇數；`stale`：資料比論文上的
       舊、什麼都沒寫的篇數；`conflicts`：識別碼已經屬於另一篇論文、沒有掛上去的個數。
+    - `changed`：`updated` 裡 `source_hash` 變了的篇數（摘要、撤稿標記、書目欄位改了；只改被引用
+      次數或關鍵字不算；ADR-0028）。
     - `first_snapshot_assigned`：這次指到新快照的論文篇數（含之前沒有著落的）。
     """
 
@@ -176,6 +191,7 @@ class WeeklyApplyResult:
     stale: int = 0
     conflicts: int = 0
     first_snapshot_assigned: int = 0
+    changed: int = 0
 
 
 @dataclass(frozen=True)
@@ -237,6 +253,7 @@ def run_weekly_update(
     quota: OpenAlexQuota,
     parse: Parse = parse_openalex_work,
     clock: Callable[[], datetime] = _utc_now,
+    max_failures: int = DEFAULT_MAX_FAILURES,
 ) -> WeeklyFetchResult:
     """推進這一次每週更新的抓取段。
 
@@ -251,16 +268,19 @@ def run_weekly_update(
     3. 額度停下：短交易更新 `weekly_run.updated_at`、記警告、回 `stopped_for_quota=True`
        （不算失敗、不往下抓）。
     4. 全部期刊都抓完：短交易寫 `fetch_finished_at`。
-    5. 抓取途中任何例外：記錯誤日誌（只帶期刊代號與原因或錯誤類別）、短交易更新
-       `updated_at`（這一步也失敗時只記一筆警告），再原樣往上丟原本的例外。
+    5. 抓取途中任何例外：記錯誤日誌（只帶期刊代號與原因或錯誤類別）、`_record_failure` 一個短
+       交易更新 `updated_at` 並記一次失敗（到 `max_failures` 就改成 `failed`、刪暫存列；這一步
+       也失敗時只記一筆警告），再原樣往上丟原本的例外。
 
     Raises:
         PermissionDeniedError: `actor` 不是系統工作（不碰資料庫與 source）。
+        ValueError: `max_failures` 不是正整數（不碰資料庫與 source）。
         JournalFetchError: 一本期刊抓到一半失敗。進度已保存：工作層重試或 sweep 補排時，從保存的
             `next_cursor`（和 `resume_cursor` 是同一頁）接著抓。
         Exception: 物件儲存、資料庫或解析暫存時的其他錯誤，同樣原樣往上丟，續跑方式一樣。
     """
     require(actor, Action.INGEST_PAPERS, None)
+    check_max_failures(max_failures)
     done, progress = _read_run(database, weekly_run_id)
     if done is not None:
         return done
@@ -276,6 +296,7 @@ def run_weekly_update(
         quota=quota,
         parse=parse,
         clock=clock,
+        max_failures=max_failures,
     )
 
 
@@ -287,6 +308,7 @@ def open_and_run_weekly_update(
     *,
     parse: Parse = parse_openalex_work,
     clock: Callable[[], datetime] = _utc_now,
+    max_failures: int = DEFAULT_MAX_FAILURES,
 ) -> WeeklyFetchResult:
     """先讀狀態，確認要抓才 `open_setup()` 開 adapter 與設定，再照 `run_weekly_update` 抓。
 
@@ -294,14 +316,16 @@ def open_and_run_weekly_update(
     或只更新 `updated_at`），而且不呼叫 `open_setup`：sweep 補排已經抓完的那一筆時不讀設定、
     不建 adapter。
     `open_setup` 丟錯（缺 OpenAlex 金鑰、物件儲存設定不齊、領域設定壞掉）時：記錯誤日誌（只帶
-    錯誤類別）、短交易更新 `updated_at`，再原樣往上丟；sweep 照 2 小時的時限補排，不會每 15 分鐘
-    就補排一次。
+    錯誤類別）、`_record_failure` 更新 `updated_at` 並記一次失敗，再原樣往上丟；sweep 照 2 小時的
+    時限補排，不會每 15 分鐘就補排一次。
 
     Raises:
         PermissionDeniedError: `actor` 不是系統工作（不碰資料庫、不呼叫 `open_setup`）。
+        ValueError: `max_failures` 不是正整數（不碰資料庫、不呼叫 `open_setup`）。
         Exception: `open_setup` 的錯誤，以及 `run_weekly_update` 會丟的錯誤，原樣往上丟。
     """
     require(actor, Action.INGEST_PAPERS, None)
+    check_max_failures(max_failures)
     done, progress = _read_run(database, weekly_run_id)
     if done is not None:
         return done
@@ -315,7 +339,7 @@ def open_and_run_weekly_update(
                 weekly_run_id=str(weekly_run_id),
                 error=type(exc).__name__,
             )
-            _touch_after_failure(database, weekly_run_id)
+            _record_failure(database, weekly_run_id, max_failures)
             raise
         return _fetch_journals(
             actor,
@@ -329,6 +353,7 @@ def open_and_run_weekly_update(
             quota=setup.quota,
             parse=parse,
             clock=clock,
+            max_failures=max_failures,
         )
 
 
@@ -342,22 +367,32 @@ def advance_weekly_update(
     *,
     parse: Parse = parse_openalex_work,
     clock: Callable[[], datetime] = _utc_now,
+    max_failures: int = DEFAULT_MAX_FAILURES,
 ) -> WeeklyAdvanceResult:
     """推進這一次每週更新：先照 `open_and_run_weekly_update` 抓；全部抓完了才 `load_scope()`
     讀追蹤範圍，再 `apply_weekly_update` 套用。
 
     抓取段略過（不存在、不是 `fetching`）、因為 reparse 正在跑而先不做、或因額度停下時直接回，
     `apply` 是 None，不讀範圍。
-    `load_scope` 丟錯時：記錯誤日誌「每週更新準備套用失敗」（只帶錯誤類別）、短交易更新
-    `updated_at`，再原樣往上丟（sweep 照 2 小時的時限補排）。
+    `load_scope` 丟錯時：記錯誤日誌「每週更新準備套用失敗」（只帶錯誤類別）、`_record_failure`
+    更新 `updated_at` 並記一次失敗，再原樣往上丟（sweep 照 2 小時的時限補排）。`max_failures`
+    一路傳給抓取段與套用段。
 
     Raises:
         PermissionDeniedError: `actor` 不是系統工作（不碰資料庫、不呼叫任何傳入的函式）。
+        ValueError: `max_failures` 不是正整數（不碰資料庫、不呼叫任何傳入的函式）。
         Exception: 抓取段、`load_scope` 與套用段的錯誤，原樣往上丟。
     """
     require(actor, Action.INGEST_PAPERS, None)
+    check_max_failures(max_failures)
     fetch = open_and_run_weekly_update(
-        actor, database, open_setup, weekly_run_id, parse=parse, clock=clock
+        actor,
+        database,
+        open_setup,
+        weekly_run_id,
+        parse=parse,
+        clock=clock,
+        max_failures=max_failures,
     )
     if not fetch.fetch_finished:
         return WeeklyAdvanceResult(fetch=fetch, apply=None)
@@ -370,10 +405,15 @@ def advance_weekly_update(
             weekly_run_id=str(weekly_run_id),
             error=type(exc).__name__,
         )
-        _touch_after_failure(database, weekly_run_id)
+        _record_failure(database, weekly_run_id, max_failures)
         raise
     applied = apply_weekly_update(
-        actor, database, weekly_run_id, scope=scope, send_heartbeat=send_heartbeat
+        actor,
+        database,
+        weekly_run_id,
+        scope=scope,
+        send_heartbeat=send_heartbeat,
+        max_failures=max_failures,
     )
     return WeeklyAdvanceResult(fetch=fetch, apply=applied)
 
@@ -386,6 +426,7 @@ def apply_weekly_update(
     scope: ScopeSettings,
     send_heartbeat: SendHeartbeat,
     batch_size: int = 500,
+    max_failures: int = DEFAULT_MAX_FAILURES,
 ) -> WeeklyApplyResult:
     """套用這一次每週更新：一個交易把暫存列寫進論文並發佈快照，commit 之後才送心跳。
 
@@ -400,23 +441,27 @@ def apply_weekly_update(
     2. `create_snapshot`（`building`，編號＝目前最大值＋1）。
     3. 依暫存列的 `id` 每批 `batch_size` 筆讀這一批（`batch_id`＝`weekly_run_id`）；逐筆
        `upsert_by_external_id`（`tracked`、暫存列的 `excluded_reason`），不是 STALE 時整批覆寫
-       OpenAlex 的關鍵字。
+       OpenAlex 的關鍵字。某一列丟例外時先記一筆警告「每週更新套用時這一列寫不進去」（只帶
+       `weekly_run_id`、`external_key` 與錯誤類別，不帶內容）再往上丟。`source_hash` 變了的
+       既有論文計進 `changed`。
     4. `update_papers_first_snapshot`：追蹤範圍內、還沒有著落的論文一律指到這個快照。
     5. `update_snapshot_published`（`as_of`＝發佈的時間）。
     6. `delete_staged_papers`：刪掉這一批暫存列。
 
     commit 之後送 `weekly-update` 心跳一次、記 info（篇數、快照編號、秒數）。任何例外：記錯誤日誌
-    （只帶 `weekly_run_id` 與錯誤類別）、短交易更新 `updated_at`，再原樣往上丟；交易整個退回，
-    快照、論文、`weekly_run` 狀態與暫存列都是套用前的樣子，重跑一次就好。
+    （只帶 `weekly_run_id` 與錯誤類別）、`_record_failure` 更新 `updated_at` 並記一次失敗，再原樣
+    往上丟；交易整個退回，快照、論文、`weekly_run` 狀態與暫存列都是套用前的樣子，重跑一次就好。
+    累計到 `max_failures` 時那一筆改成 `failed`、暫存列刪掉，之後不再套用（ADR-0028）。
 
     Raises:
         PermissionDeniedError: `actor` 不是系統工作（不碰資料庫、不送心跳）。
-        ValueError: `batch_size` 不是正整數（不碰資料庫）。
+        ValueError: `batch_size` 或 `max_failures` 不是正整數（不碰資料庫）。
         Exception: 套用時的任何錯誤（交易已整個退回）。
     """
     require(actor, Action.INGEST_PAPERS, None)
     if not isinstance(batch_size, int) or isinstance(batch_size, bool) or batch_size < 1:
         raise ValueError("batch_size 要是正整數")
+    check_max_failures(max_failures)
     viewer = SystemViewer()
     started = time.monotonic()
     tally = _ApplyTally()
@@ -436,21 +481,31 @@ def apply_weekly_update(
                 ):
                     tally.staged += len(staged)
                     for row in staged:
-                        written = upsert_by_external_id(
-                            connection,
-                            row.paper,
-                            origin=PaperOrigin.TRACKED,
-                            excluded_reason=row.excluded_reason,
-                            scope=scope,
-                        )
-                        tally.count(written)
-                        if written.outcome is not UpsertOutcome.STALE:
-                            update_paper_keywords(
+                        try:
+                            written = upsert_by_external_id(
                                 connection,
-                                written.paper_id,
-                                KeywordSource.OPENALEX,
-                                row.paper.keywords,
+                                row.paper,
+                                origin=PaperOrigin.TRACKED,
+                                excluded_reason=row.excluded_reason,
+                                scope=scope,
                             )
+                            if written.outcome is not UpsertOutcome.STALE:
+                                update_paper_keywords(
+                                    connection,
+                                    written.paper_id,
+                                    KeywordSource.OPENALEX,
+                                    row.paper.keywords,
+                                )
+                        except Exception as exc:
+                            # 看得出是哪一列（1.9 deferred）；只帶外部鍵與錯誤類別，不帶內容。
+                            log.warning(
+                                "每週更新套用時這一列寫不進去",
+                                weekly_run_id=str(weekly_run_id),
+                                external_key=row.external_key,
+                                error=type(exc).__name__,
+                            )
+                            raise
+                        tally.count(written)
                     after_id = staged[-1].id
                 tally.first_snapshot_assigned = update_papers_first_snapshot(
                     connection, snapshot_id
@@ -464,7 +519,7 @@ def apply_weekly_update(
             weekly_run_id=str(weekly_run_id),
             error=type(exc).__name__,
         )
-        _touch_after_failure(database, weekly_run_id)
+        _record_failure(database, weekly_run_id, max_failures)
         raise
 
     if tally.blocked_by_reparse:
@@ -487,6 +542,7 @@ def apply_weekly_update(
         stale=tally.stale,
         conflicts=tally.conflicts,
         first_snapshot_assigned=tally.first_snapshot_assigned,
+        changed=tally.changed,
     )
     if tally.staged == 0:
         # 每週整本重掃，正常不會 0 篇；0 篇多半是查詢或解析壞了。照樣發佈（行為不變），
@@ -502,6 +558,7 @@ def apply_weekly_update(
         stale=tally.stale,
         conflicts=tally.conflicts,
         first_snapshot_assigned=tally.first_snapshot_assigned,
+        changed=tally.changed,
         seconds=round(time.monotonic() - started, 1),
     )
     return result
@@ -522,6 +579,7 @@ class _ApplyTally:
     stale: int = 0
     conflicts: int = 0
     first_snapshot_assigned: int = 0
+    changed: int = 0
 
     def count(self, result: UpsertResult) -> None:
         """記下一筆寫入的結果。"""
@@ -532,6 +590,8 @@ class _ApplyTally:
             self.created += 1
         else:
             self.updated += 1
+            if result.source_changed:
+                self.changed += 1
         self.conflicts += len(result.conflicts)
 
 
@@ -591,6 +651,7 @@ def _fetch_journals(
     quota: OpenAlexQuota,
     parse: Parse,
     clock: Callable[[], datetime],
+    max_failures: int,
 ) -> WeeklyFetchResult:
     """`run_weekly_update` 的第 2～5 步：依設定的順序逐本抓還沒抓完的期刊。"""
     tally = _Tally()
@@ -639,8 +700,9 @@ def _fetch_journals(
                     journal=journal.key,
                     error=type(exc).__name__,
                 )
-            # 失敗也更新 updated_at：sweep 照 2 小時的時限補排，不會每 15 分鐘就補排一次。
-            _touch_after_failure(database, weekly_run_id)
+            # 失敗也更新 updated_at：sweep 照 2 小時的時限補排，不會每 15 分鐘就補排一次；
+            # 同一個交易記一次失敗，到上限就標 failed（ADR-0028）。
+            _record_failure(database, weekly_run_id, max_failures)
             raise
         if result.stopped_for_quota:
             _touch(database, weekly_run_id)
@@ -690,17 +752,48 @@ def _touch(database: Database, weekly_run_id: uuid.UUID) -> None:
         update_weekly_run_touched(connection, weekly_run_id)
 
 
-def _touch_after_failure(database: Database, weekly_run_id: uuid.UUID) -> None:
-    """失敗之後更新 `updated_at`；這一步也失敗（例如資料庫正連不上）時只記一筆警告（只帶錯誤
-    類別），不丟錯：呼叫端接著丟的是原本的例外，不會被這裡的錯誤蓋掉。
+def _record_failure(database: Database, weekly_run_id: uuid.UUID, max_failures: int) -> None:
+    """失敗之後一個短交易：更新 `updated_at`、把 `failure_count` 加一（只在 `fetching` 時）；
+    加完到 `max_failures` 就改成 `failed`，同一個交易刪掉這一批暫存列（ADR-0028）。
+
+    之後記日誌：沒到上限記警告「每週更新失敗，已記一次」；到上限記錯誤「每週更新重試到上限，
+    標成失敗」（不送心跳）。已經不是 `fetching` 時只更新 `updated_at`、不記。
+
+    這個交易本身失敗（例如資料庫正連不上）時只記一筆警告（只帶錯誤類別），不丟錯：呼叫端接著丟
+    的是原本的例外，不會被這裡的錯誤蓋掉。
     """
+    deleted = 0
     try:
-        _touch(database, weekly_run_id)
+        with database.transaction() as connection:
+            update_weekly_run_touched(connection, weekly_run_id)
+            failure = update_weekly_run_failure(
+                connection, weekly_run_id, max_failures=max_failures
+            )
+            if failure is not None and failure.failed:
+                deleted = delete_staged_papers(connection, weekly_run_id)
     except Exception as exc:
         log.warning(
             "每週更新失敗後更新 updated_at 也失敗",
             weekly_run_id=str(weekly_run_id),
             error=type(exc).__name__,
+        )
+        return
+    if failure is None:
+        return
+    if failure.failed:
+        log.error(
+            "每週更新重試到上限，標成失敗",
+            weekly_run_id=str(weekly_run_id),
+            failures=failure.failures,
+            max_failures=max_failures,
+            staged_deleted=deleted,
+        )
+    else:
+        log.warning(
+            "每週更新失敗，已記一次",
+            weekly_run_id=str(weekly_run_id),
+            failures=failure.failures,
+            max_failures=max_failures,
         )
 
 
