@@ -1613,6 +1613,7 @@ def test_fetch_stops_writing_once_the_run_is_failed_or_at_the_limit(
     def interrupt() -> None:
         _owner(weekly_db, change, run_id)
 
+    source: FakePaperSource
     if when == "before_raw":
         source = _InterruptingSource(
             {MISQ_ISSN: _misq_book(), ISSN_L: _cassette_book()},
