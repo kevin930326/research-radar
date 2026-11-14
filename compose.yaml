@@ -1,6 +1,10 @@
 # 本機開發用：`docker compose up -d --build` 起四個服務。
 # 正式／試用主機的 compose（只有 api、worker、cloudflared）在 Story 3.19 放 deploy/。
-# 規則：不用 env_file、不做變數替換；秘密不放這裡（本機資料庫用 trust 驗證、只綁 127.0.0.1）。
+# 規則：只用 api、worker 各一個 `.env.radar`（required: false、format: raw：值原樣讀入、
+# 不做 $ 替換）的 env_file，compose 檔本身也不做變數替換；
+# 秘密不放這裡（本機資料庫用 trust 驗證、只綁 127.0.0.1）。`.env.radar` 只放 RADAR_* 秘密
+# （見 .env.radar.example，ADR-0024），不進 git；乾淨的 clone、CI 沒有這個檔時照樣起得來。
+# environment 寫的值（DATABASE_URL 等）優先於 env_file。整個 .env 不載入容器。
 # api、worker 只拿應用程式角色（radar_app）的連線字串；擁有者（radar_owner）的只在執行
 # `radar migrate` 時用 `docker compose run -e RADAR_MIGRATION_DATABASE_URL=... api radar migrate` 傳入。
 name: research-radar
@@ -48,6 +52,10 @@ services:
   api:
     build: .
     command: ["python", "-m", "radar.entrypoints.api"]
+    env_file:
+      - path: .env.radar
+        required: false
+        format: raw
     environment:
       DATABASE_URL: postgresql://radar_app@db:5432/radar
       RADAR_API_SHUTDOWN_GRACEFUL_TIMEOUT: "10"
@@ -66,6 +74,10 @@ services:
   worker:
     build: .
     command: ["python", "-m", "radar.entrypoints.worker"]
+    env_file:
+      - path: .env.radar
+        required: false
+        format: raw
     environment:
       DATABASE_URL: postgresql://radar_app@db:5432/radar
       RADAR_WORKER_SHUTDOWN_GRACEFUL_TIMEOUT: "30"

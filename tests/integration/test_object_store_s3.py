@@ -6,16 +6,28 @@ stamina 重試，而 botocore 自己不重試（每次嘗試只送一個請求�
 """
 
 import time
+import traceback
 from collections.abc import Iterator
 from typing import Any
 
 import pytest
 import stamina
 from botocore.awsrequest import AWSResponse
-from botocore.exceptions import ClientError, EndpointConnectionError
+from botocore.exceptions import (
+    ClientError,
+    EndpointConnectionError,
+    ProxyConnectionError,
+    SSLError,
+)
 from moto import mock_aws
+from structlog.testing import capture_logs
 
-from radar.adapters.object_store import S3ObjectStore, create_s3_client, is_retryable
+from radar.adapters.object_store import (
+    ObjectStoreUnavailableError,
+    S3ObjectStore,
+    create_s3_client,
+    is_retryable,
+)
 from radar.domain.raw_records import compress_raw, decompress_raw
 from radar.domain.storage_keys import RAW_CONTENT_TYPE, ObjectNotFoundError, raw_object_key
 from radar.ports import ObjectStore
@@ -150,6 +162,71 @@ def test_other_client_errors_are_not_retried(client: Any) -> None:
     assert len(seen) == 1
 
 
+# --- 重試日誌與用完次數的訊息不帶主機（D12(c)）------------------------------------------------
+
+HOST = "s3.us-east-1.amazonaws.com"
+
+
+def test_retry_logs_do_not_carry_the_host(client: Any) -> None:
+    # stamina 重試時把例外的 repr 寫進日誌；botocore 的連線錯誤訊息帶整個端點網址。
+    store = S3ObjectStore(client, BUCKET, attempts=3)
+    failure = EndpointConnectionError(endpoint_url=f"https://{HOST}")
+    assert HOST in str(failure)
+    seen = _fail_first(client, "PutObject", [failure, failure])
+
+    with capture_logs() as logs:
+        store.put(KEY, b"data", content_type=RAW_CONTENT_TYPE)
+
+    assert len(seen) == 3
+    retries = [log for log in logs if log["event"] == "stamina.retry_scheduled"]
+    assert len(retries) == 2
+    assert all("EndpointConnectionError" in log["caused_by"] for log in retries)
+    assert HOST not in str(logs)
+    assert store.get(KEY) == b"data"
+
+
+def test_retry_logs_of_error_responses_keep_code_and_status(client: Any) -> None:
+    store = S3ObjectStore(client, BUCKET, attempts=2)
+    _fail_first(client, "PutObject", [(503, "SlowDown")])
+
+    with capture_logs() as logs:
+        store.put(KEY, b"data", content_type=RAW_CONTENT_TYPE)
+
+    [retry] = [log for log in logs if log["event"] == "stamina.retry_scheduled"]
+    assert "SlowDown" in retry["caused_by"]
+    assert "503" in retry["caused_by"]
+    assert HOST not in str(logs)
+
+
+def test_connection_errors_out_of_attempts_raise_without_the_host(client: Any) -> None:
+    store = S3ObjectStore(client, BUCKET, attempts=2)
+    failure = EndpointConnectionError(endpoint_url=f"https://{HOST}")
+    seen = _fail_first(client, "PutObject", [failure] * 5)
+
+    with capture_logs() as logs, pytest.raises(ObjectStoreUnavailableError) as caught:
+        store.put(KEY, b"data", content_type=RAW_CONTENT_TYPE)
+
+    assert len(seen) == 2
+    assert caught.value.error_type == "EndpointConnectionError"
+    assert "EndpointConnectionError" in str(caught.value)
+    assert HOST not in str(caught.value)
+    # 例外鏈也斷開：印出 traceback 時不會帶出原本含網址的例外。
+    assert caught.value.__cause__ is None
+    assert caught.value.__suppress_context__
+    assert HOST not in str(logs)
+
+
+def test_get_connection_errors_out_of_attempts_also_raise_without_the_host(client: Any) -> None:
+    store = S3ObjectStore(client, BUCKET, attempts=2)
+    store.put(KEY, b"data", content_type=RAW_CONTENT_TYPE)
+    _fail_first(client, "GetObject", [EndpointConnectionError(endpoint_url=f"https://{HOST}")] * 5)
+
+    with pytest.raises(ObjectStoreUnavailableError) as caught:
+        store.get(KEY)
+
+    assert HOST not in str(caught.value)
+
+
 def test_is_retryable_classification() -> None:
     def client_error(code: str, status: int) -> ClientError:
         return ClientError(
@@ -277,3 +354,77 @@ def test_satisfies_the_object_store_port(client: Any) -> None:
 
     store.put(KEY, b"x", content_type=RAW_CONTENT_TYPE)
     assert store.get(KEY) == b"x"
+
+
+# --- 其他 botocore 錯誤（對抗式審查第 2 條）--------------------------------------------------
+
+
+def _access(store: S3ObjectStore, operation: str) -> None:
+    if operation == "GetObject":
+        store.get(KEY)
+    else:
+        store.put(KEY, b"data", content_type=RAW_CONTENT_TYPE)
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        SSLError(endpoint_url=f"https://{HOST}", error="certificate verify failed"),
+        ProxyConnectionError(proxy_url=f"http://proxy.{HOST}:3128", error="refused"),
+    ],
+    ids=["SSLError", "ProxyConnectionError"],
+)
+@pytest.mark.parametrize("operation", ["PutObject", "GetObject"])
+def test_other_botocore_errors_raise_without_the_host_and_are_not_retried(
+    client: Any, failure: Exception, operation: str
+) -> None:
+    # 不在可重試清單裡的 botocore 錯誤：不重試，換成不含網址的例外，例外鏈也斷開。
+    store = S3ObjectStore(client, BUCKET, attempts=3)
+    store.put(KEY, b"data", content_type=RAW_CONTENT_TYPE)
+    seen = _fail_first(client, operation, [failure] * 5)
+
+    with capture_logs() as logs, pytest.raises(ObjectStoreUnavailableError) as caught:
+        _access(store, operation)
+
+    assert len(seen) == 1
+    assert HOST in str(failure)
+    assert caught.value.error_type == type(failure).__name__
+    assert type(failure).__name__ in str(caught.value)
+    assert "不重試" in str(caught.value)
+    assert HOST not in str(caught.value)
+    assert caught.value.__cause__ is None
+    assert caught.value.__suppress_context__
+    assert HOST not in str(logs)
+
+
+# --- 例外鏈完全斷開（Codex 補審 C1）---------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected_requests"),
+    [
+        (EndpointConnectionError(endpoint_url=f"https://{HOST}"), 2),
+        (SSLError(endpoint_url=f"https://{HOST}", error="certificate verify failed"), 1),
+    ],
+    ids=["retryable-out-of-attempts", "not-retryable"],
+)
+@pytest.mark.parametrize("operation", ["PutObject", "GetObject"])
+def test_unavailable_error_carries_no_exception_chain_at_all(
+    client: Any, failure: Exception, expected_requests: int, operation: str
+) -> None:
+    # `from None` 在 except 裡丟時 `__context__` 仍串著原例外；Procrastinate 與日誌可能沿著它印出
+    # 主機，所以 `__cause__`、`__context__` 都要是 None，完整的 traceback 也不能有主機。
+    store = S3ObjectStore(client, BUCKET, attempts=2)
+    store.put(KEY, b"data", content_type=RAW_CONTENT_TYPE)
+    seen = _fail_first(client, operation, [failure] * 5)
+
+    with pytest.raises(ObjectStoreUnavailableError) as caught:
+        _access(store, operation)
+
+    assert len(seen) == expected_requests
+    assert HOST in str(failure)
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+    printed = "".join(traceback.format_exception(caught.value))
+    assert "ObjectStoreUnavailableError" in printed
+    assert HOST not in printed

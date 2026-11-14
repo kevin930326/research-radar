@@ -235,14 +235,16 @@ def test_every_status_table_is_swept_or_excused(migrated_database: TestDatabase)
 
 def test_status_table_check_catches_unregistered_table(migrated_database: TestDatabase) -> None:
     # 證明守門真的擋得住：在交易裡建一張有 status 欄的表，檢查完整個退回。
+    # 已經登記的真的狀態表（例如 weekly_run）照樣算登記過，只有新建的這張沒有。
+    already = {entry.table for entry in SWEEP_REGISTRY}
     with migrated_database.connect(OWNER_ROLE, autocommit=False) as connection:
         try:
             connection.execute(
                 "CREATE TABLE weekly_probe (id uuid PRIMARY KEY DEFAULT uuidv7(), status text)"
             )
-            problems = status_table_problems(connection, set(), STATUS_TABLE_EXCEPTIONS)
+            problems = status_table_problems(connection, already, STATUS_TABLE_EXCEPTIONS)
             registered = status_table_problems(
-                connection, {"weekly_probe"}, STATUS_TABLE_EXCEPTIONS
+                connection, {"weekly_probe", *already}, STATUS_TABLE_EXCEPTIONS
             )
         finally:
             connection.rollback()

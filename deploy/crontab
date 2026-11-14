@@ -4,8 +4,11 @@
 #   不在這裡直接跑工作，也不用 Procrastinate 的週期任務。之後搬到 K8s 時，每一行改成一個 CronJob。
 # - 新增排程的 Story：在 radar/domain/jobs.py 的 JOBS 給工作一個排程名稱，在這裡加一行，
 #   並在設定加這個排程的心跳網址（RADAR_HEARTBEAT_URL_<排程名稱>）。架構測試檢查這裡與 JOBS 一一對應。
-# - 有固定時刻的排程（例如每週一 03:00 台北時間）要寫明時區；目前只有每 15 分鐘的 sweep。
+# - 有固定時刻的排程要寫明時區。cron 用主機的時區解讀時間欄位。
 # - 安裝到主機的 crontab 與 compose 專案的實際路徑，寫在部署文件（Story 3.19）；路徑改了整份一起改。
 #
 # 分 時 日 月 週  指令
 */15 * * * * docker compose --project-directory /opt/research-radar exec -T worker radar enqueue sweep
+# 每週更新（weekly-update）：主機時區是 UTC 時＝台北時間每週一 03:00（UTC 週日 19:00）。
+# 主機時區在 Story 3.19 定案時確認；不是 UTC 就要跟著改這一行。時間與每週的行為由 Story 1.11 驗收。
+0 19 * * 0 docker compose --project-directory /opt/research-radar exec -T worker radar enqueue weekly-update

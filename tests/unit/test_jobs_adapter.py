@@ -28,7 +28,7 @@ from radar.adapters.jobs import (
     register_job,
     retry_stalled_jobs,
 )
-from radar.domain.jobs import PDF_LOCK, SWEEP, JobSpec, Queue
+from radar.domain.jobs import PDF_LOCK, RUN_WEEKLY_UPDATE, SWEEP, WEEKLY_UPDATE, JobSpec, Queue
 
 ITEM = uuid.UUID("018f0000-0000-7000-8000-0000000000aa")
 IDENTIFY = JobSpec("identify_upload", Queue.PDF)
@@ -65,6 +65,23 @@ def test_pdf_jobs_share_one_lock(app: procrastinate.App) -> None:
 
     assert [job["lock"] for job in _jobs(app)] == [PDF_LOCK, PDF_LOCK]
     assert [job["queue_name"] for job in _jobs(app)] == ["pdf", "pdf"]
+
+
+def test_job_lock_is_used_outside_the_pdf_queue(app: procrastinate.App) -> None:
+    other = uuid.UUID("018f0000-0000-7000-8000-0000000000bb")
+
+    defer_job(app, RUN_WEEKLY_UPDATE, {"weekly_run_id": ITEM})
+    defer_job(app, RUN_WEEKLY_UPDATE, {"weekly_run_id": other})
+    defer_job(app, WEEKLY_UPDATE, {})
+
+    jobs = _jobs(app)
+    assert [job["lock"] for job in jobs] == ["weekly_update", "weekly_update", None]
+    assert [job["queue_name"] for job in jobs] == ["ingest", "ingest", "ingest"]
+    assert [job["queueing_lock"] for job in jobs] == [
+        f"run_weekly_update:{ITEM}",
+        f"run_weekly_update:{other}",
+        "weekly_update",
+    ]
 
 
 def test_same_work_queued_twice_is_reported_not_raised(app: procrastinate.App) -> None:

@@ -30,6 +30,8 @@
 | [0021](0021-openalex-fetch-and-raw-storage.md) | OpenAlex 只篩期刊與年份、原始資料從回應原文切出每一篇的位元組；用量取本地加總與 OpenAlex 回報的較大者；去重看 `raw_fetch`、先存物件再寫列；領域設定 `config/*.yaml` 啟動時驗證 | 已接受（Kevin 2026-11-14） | AD-2、AD-18、AD-25、AD-29 |
 | [0022](0022-parsing-and-reparse.md) | OpenAlex 的解析是純函式、看不懂整篇略過；指紋 `source_hash` 的欄位與序列化；摘要在寫入函式裡寫、來源不再提供就刪、優先順序先寫成常數；排除規則的格式與正規化；`radar reparse` 只更新已匯入的論文、先放暫存表再一個交易套用 | 已接受（Kevin 2026-11-14） | AD-5、AD-7、AD-25、AD-31 |
 | [0023](0023-compose-file-at-repo-root.md) | 本機開發的 compose 檔放在 repo 根目錄 `compose.yaml`（`docker compose up` 不用加 `-f`）；`deploy/` 放 crontab、正式主機的 compose 等部署用的檔案 | 已接受（Kevin 2026-11-14） | AD-17 |
+| [0024](0024-secrets-into-containers.md) | 秘密進容器：api、worker 讀選填的 `.env.radar`（範本只有名稱、值全空），不讀整個 `.env`；正式主機的做法留到 3.19 | 提議 | AD-17、AD-29 |
+| [0025](0025-weekly-update-fetch-and-resume.md) | 每週更新的抓取：兩個工作＋佇列鎖、`fetching` 最多一筆；每本期刊每頁一個交易記進度並 upsert 暫存列（`batch_id`＝`weekly_run.id`）；收錄過濾在暫存前；sweep 時限 2 小時；1.8 停在 `fetching` | 提議 | AD-14、AD-19、AD-25 |
 
 「提議」表示還沒經過 Kevin 確認；PR 合併後改成「已接受」。
 

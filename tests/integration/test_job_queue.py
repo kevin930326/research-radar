@@ -13,7 +13,7 @@ import threading
 import time
 import uuid
 from collections.abc import Callable
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -26,7 +26,7 @@ from procrastinate import utils as procrastinate_utils
 
 from radar.adapters.fake import FakeHeartbeat
 from radar.adapters.jobs import create_job_app, defer_job, register_job, retry_stalled_jobs
-from radar.domain.jobs import PDF_LOCK, JobSpec, Queue
+from radar.domain.jobs import PDF_LOCK, RUN_WEEKLY_UPDATE, JobSpec, Queue
 from radar.domain.settings import Settings
 from radar.domain.sweep import SweepEntry
 from radar.entrypoints.worker.main import worker_options
@@ -155,7 +155,7 @@ def test_migration_creates_queue_objects_without_extensions(fresh_database: Test
     assert _admin_rows(fresh_database, "SELECT extname FROM pg_extension ORDER BY 1") == (
         extensions_before
     )
-    assert fresh_database.revisions() == {"0005"}
+    assert fresh_database.revisions() == {"0006"}
 
 
 def test_downgrade_to_0001_removes_every_queue_object(fresh_database: TestDatabase) -> None:
@@ -1166,3 +1166,173 @@ def test_worker_waits_for_migration_then_takes_jobs(fresh_database: TestDatabase
     warnings = [r for r in records if r["level"] == "warning" and "稍後重開" in str(r["event"])]
     assert warnings
     assert all("radar_app@" not in json.dumps(r, ensure_ascii=False) for r in records)
+
+
+# --- 每週更新：radar enqueue weekly-update ＋ 正式的 worker（Story 1.8） ------------------------
+
+# 正式的 worker（main()），只把 bootstrap 組的 OpenAlex 與物件儲存換成替身（不連網路）；
+# 兩個工作照正式的 register_tasks 登記與執行，期刊清單用 repo 的 config/journals.yaml。
+WEEKLY_UPDATE_WORKER_SCRIPT = """
+import contextlib
+
+import radar.entrypoints.worker.main as worker_main
+import radar.entrypoints.worker.tasks as worker_tasks
+from radar.adapters.fake import FakeObjectStore, FakePaperSource
+
+
+def fake_paper_source(settings, openalex_config):
+    # 正式的 adapter 用 with 開關；替身包一層 nullcontext。每本期刊回一頁空結果。
+    return contextlib.nullcontext(FakePaperSource())
+
+
+worker_tasks.build_paper_source = fake_paper_source
+worker_tasks.build_object_store = lambda settings: FakeObjectStore()
+raise SystemExit(worker_main.main())
+"""
+
+
+def test_enqueue_weekly_update_runs_both_jobs_on_worker(
+    migrated_fresh: TestDatabase, tmp_path: Path
+) -> None:
+    script = tmp_path / "weekly_update_worker.py"
+    script.write_text(WEEKLY_UPDATE_WORKER_SCRIPT, encoding="utf-8")
+    env = {"DATABASE_URL": migrated_fresh.app_url}
+    worker = _spawn([sys.executable, "-I", str(script)], env)
+    try:
+        result = _radar("enqueue", "weekly-update", env=env)
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "已排入 weekly-update" in result.stdout
+
+        _wait_until(
+            lambda: (
+                [(job["task_name"], job["status"]) for job in _jobs(migrated_fresh)]
+                == [("weekly_update", "succeeded"), ("run_weekly_update", "succeeded")]
+            ),
+            "weekly_update 排入的 run_weekly_update 也執行成功",
+        )
+    finally:
+        code, records, err = _stop(worker)
+
+    assert code == 0, err
+    scheduled, run = _jobs(migrated_fresh)
+    assert (scheduled["queue_name"], scheduled["lock"], scheduled["args"]) == ("ingest", None, {})
+    assert scheduled["queueing_lock"] == "weekly_update"
+    [(weekly_run_id, status, finished_at)] = _admin_rows(
+        migrated_fresh, "SELECT id, status, fetch_finished_at FROM weekly_run"
+    )
+    assert status == "fetching"
+    assert run["queue_name"] == "ingest"
+    assert run["lock"] == "weekly_update"
+    assert run["args"] == {"weekly_run_id": str(weekly_run_id)}
+    assert run["queueing_lock"] == f"run_weekly_update:{weekly_run_id}"
+    # 替身每本期刊回一頁空結果：14 本各送一次請求、各記一頁進度，全部抓完。
+    assert finished_at is not None
+    journals = _admin_rows(
+        migrated_fresh, "SELECT journal_key, pages, fetched, finished_at FROM weekly_run_journal"
+    )
+    assert len(journals) == 14
+    assert all(
+        pages == 1 and fetched == 0 and done is not None for _, pages, fetched, done in journals
+    )
+    assert _admin_rows(migrated_fresh, "SELECT count(*) FROM api_call") == [(14,)]
+    assert _admin_rows(migrated_fresh, "SELECT count(*) FROM paper") == [(0,)]
+    started = [r for r in records if r["event"] == "每週更新已排入抓取"]
+    assert [r["job_id"] for r in started] == [scheduled["id"]]
+    assert [r["job_id"] for r in records if r["event"] == "每週更新抓取完成"] == [run["id"]]
+
+
+# 正式的 worker（main()），OpenAlex 換成每頁停一下的替身（每本期刊一頁空結果）、物件儲存換成替身；
+# run_weekly_update 照正式的 register_tasks 登記與執行（對抗式審查第 5 條）。
+SLOW_WEEKLY_WORKER_SCRIPT = """
+import contextlib
+import sys
+import time
+
+import radar.entrypoints.worker.main as worker_main
+import radar.entrypoints.worker.tasks as worker_tasks
+from radar.adapters.fake import FakeObjectStore, FakePaperSource
+
+seconds_per_page = float(sys.argv[1])
+
+
+class SlowPaperSource(FakePaperSource):
+    def fetch_journal_page(self, query, cursor):
+        time.sleep(seconds_per_page)
+        return super().fetch_journal_page(query, cursor)
+
+
+def slow_paper_source(settings, openalex_config):
+    return contextlib.nullcontext(SlowPaperSource())
+
+
+worker_tasks.build_paper_source = slow_paper_source
+worker_tasks.build_object_store = lambda settings: FakeObjectStore()
+raise SystemExit(worker_main.main())
+"""
+
+
+def _job_events(database: TestDatabase) -> dict[tuple[object, str], datetime]:
+    """每個工作開始與成功的時間（佇列自己記的事件）。"""
+    rows = _admin_rows(
+        database,
+        "SELECT job_id, type::text, at FROM procrastinate_events"
+        " WHERE type IN ('started', 'succeeded') ORDER BY id",
+    )
+    events: dict[tuple[object, str], datetime] = {}
+    for job_id, kind, at in rows:
+        assert isinstance(at, datetime)
+        events[(job_id, str(kind))] = at
+    return events
+
+
+def test_weekly_update_runs_never_overlap_with_two_worker_slots(
+    migrated_fresh: TestDatabase, tmp_path: Path
+) -> None:
+    # worker 同時可以跑 2 個工作；第一筆 run_weekly_update 執行中再排第二筆（同一把佇列鎖）：
+    # 第二筆要等第一筆做完才開始，兩筆的執行時段不重疊。
+    with migrated_fresh.connect(APP_ROLE) as connection:
+        row = connection.execute(
+            "INSERT INTO weekly_run (status) VALUES ('fetching') RETURNING id"
+        ).fetchone()
+    assert row is not None
+    weekly_run_id = row[0]
+    script = tmp_path / "slow_weekly_worker.py"
+    script.write_text(SLOW_WEEKLY_WORKER_SCRIPT, encoding="utf-8")
+    env = {"DATABASE_URL": migrated_fresh.app_url, "RADAR_WORKER_CONCURRENCY": "2"}
+    # 14 本期刊各一頁、每頁停 0.3 秒：第一筆約 4 秒。
+    worker = _spawn([sys.executable, "-I", str(script), "0.3"], env)
+    job_app = create_job_app(migrated_fresh.app_url, max_connections=2, connect_timeout=5)
+    try:
+        with job_app.opened() as app:
+            assert defer_job(app, RUN_WEEKLY_UPDATE, {"weekly_run_id": weekly_run_id}) is True
+            _wait_until(
+                lambda: [job["status"] for job in _jobs(migrated_fresh)] == ["doing"],
+                "第一筆開始執行",
+            )
+            # 排隊鎖只擋排隊中的，第一筆執行中時第二筆排得進去（像 sweep 補排或手動再排）。
+            assert defer_job(app, RUN_WEEKLY_UPDATE, {"weekly_run_id": weekly_run_id}) is True
+            # worker 還有一個空位，第二筆仍在排隊：擋住它的是佇列鎖。
+            time.sleep(1.0)
+            assert [job["status"] for job in _jobs(migrated_fresh)] == ["doing", "todo"]
+        _wait_until(
+            lambda: [job["status"] for job in _jobs(migrated_fresh)] == ["succeeded"] * 2,
+            "兩筆都執行成功",
+        )
+    finally:
+        code, records, err = _stop(worker)
+
+    assert code == 0, err
+    first, second = _jobs(migrated_fresh)
+    assert first["lock"] == second["lock"] == "weekly_update"
+    events = _job_events(migrated_fresh)
+    first_started = events[(first["id"], "started")]
+    first_done = events[(first["id"], "succeeded")]
+    second_started = events[(second["id"], "started")]
+    second_done = events[(second["id"], "succeeded")]
+    assert first_started < first_done <= second_started < second_done, events
+    # 第一筆抓完 14 本；第二筆看到已經抓完，不再抓（只更新 updated_at）。
+    assert [r["job_id"] for r in records if r["event"] == "每週更新抓取完成"] == [first["id"]]
+    assert [r["job_id"] for r in records if r["event"] == "每週更新已經抓完，不再抓"] == [
+        second["id"]
+    ]
+    assert _admin_rows(migrated_fresh, "SELECT count(*) FROM api_call") == [(14,)]

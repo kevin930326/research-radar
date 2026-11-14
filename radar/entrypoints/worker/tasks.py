@@ -4,14 +4,37 @@
 （架構測試檢查兩邊一致）。
 """
 
+import uuid
+from collections.abc import Iterator
+from contextlib import ExitStack, contextmanager
+
 import procrastinate
 
 from radar.adapters.jobs import register_job
-from radar.domain.jobs import SWEEP
+from radar.config import ConfigError, load_domain_config
+from radar.domain.jobs import RUN_WEEKLY_UPDATE, SWEEP, WEEKLY_UPDATE
 from radar.domain.settings import Settings
 from radar.domain.sweep import SWEEP_REGISTRY
-from radar.entrypoints.bootstrap import WorkerParts
+from radar.domain.viewer import SystemViewer
+from radar.entrypoints.bootstrap import WorkerParts, build_object_store, build_paper_source
 from radar.services.sweep import sweep
+from radar.services.weekly_update import (
+    WeeklyFetchSetup,
+    open_and_run_weekly_update,
+    weekly_update,
+)
+
+
+class AdapterSetupError(Exception):
+    """建 adapter 或讀領域設定失敗（`ConfigError` 以外）。訊息只有原本的錯誤類別。
+
+    原例外的訊息可能帶設定值或網址（例如 botocore 的 `Invalid endpoint: <整個端點網址>`），
+    Procrastinate 記失敗時會印出例外與它的 `__cause__`／`__context__`，所以不串原例外。
+    """
+
+    def __init__(self, error_type: str) -> None:
+        self.error_type = error_type
+        super().__init__(f"建立 adapter 失敗（{error_type}）")
 
 
 def register_tasks(app: procrastinate.App, parts: WorkerParts, settings: Settings) -> None:
@@ -27,4 +50,47 @@ def register_tasks(app: procrastinate.App, parts: WorkerParts, settings: Setting
             parts.send_heartbeat,
         )
 
+    def weekly_update_job() -> None:
+        # 心跳在發佈快照之後才送（Story 1.9），這裡不送。
+        weekly_update(SystemViewer(), parts.database, parts.enqueue)
+
+    def run_weekly_update_job(weekly_run_id: uuid.UUID) -> None:
+        # service 先讀狀態，確認要抓才呼叫 open_setup：已經抓完、不是 fetching 時不讀設定、不建
+        # adapter；建不起來（缺金鑰、設定壞掉）時 service 也會更新 updated_at（ADR-0025）。
+        open_and_run_weekly_update(SystemViewer(), parts.database, open_setup, weekly_run_id)
+
+    def enter_setup(stack: ExitStack) -> WeeklyFetchSetup:
+        # 執行時才讀領域設定、建 OpenAlex 與物件儲存的 adapter：改 config/journals.yaml 不用重開
+        # worker，沒有抓取工作時也不佔記憶體。
+        domain_config = load_domain_config()
+        store = build_object_store(settings)
+        source = stack.enter_context(build_paper_source(settings, domain_config.openalex))
+        return WeeklyFetchSetup(
+            source=source,
+            store=store,
+            journals=domain_config.journals,
+            exclusion_rules=domain_config.exclusion_rules,
+            quota=domain_config.openalex.quota,
+        )
+
+    @contextmanager
+    def open_setup() -> Iterator[WeeklyFetchSetup]:
+        """`ConfigError`（訊息只列變數名稱與檔名）原樣往上丟；其他錯誤換成 `AdapterSetupError`。"""
+        with ExitStack() as stack:
+            setup: WeeklyFetchSetup | None = None
+            error_type = ""
+            try:
+                setup = enter_setup(stack)
+            except ConfigError:
+                raise
+            except Exception as exc:
+                error_type = type(exc).__name__
+            if setup is None:
+                # 在 except 外面丟：`from None` 仍會留下 __context__，Procrastinate 照樣會印。
+                raise AdapterSetupError(error_type)
+            # 抓取時的錯誤不經過上面的轉換：由 service 處理、原樣往上丟。
+            yield setup
+
     register_job(app, SWEEP, sweep_job, **retry)
+    register_job(app, WEEKLY_UPDATE, weekly_update_job, **retry)
+    register_job(app, RUN_WEEKLY_UPDATE, run_weekly_update_job, **retry)

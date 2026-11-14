@@ -14,7 +14,8 @@ from sqlalchemy import Connection
 import radar.repo.api_calls  # api_call
 import radar.repo.ingest_staging  # ingest_staging
 import radar.repo.papers  # paper、external_id、paper_abstract、paper_keyword
-import radar.repo.raw_fetches  # noqa: F401  # raw_fetch
+import radar.repo.raw_fetches  # raw_fetch
+import radar.repo.weekly_runs  # noqa: F401  # weekly_run、weekly_run_journal
 from radar.repo.migrations import include_name
 from radar.repo.models import Base
 

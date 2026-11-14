@@ -40,7 +40,12 @@ from radar.domain.viewer import MemberViewer, SystemViewer
 from radar.repo.api_calls import create_api_calls, get_api_usage_since
 from radar.repo.db import Database
 from radar.repo.raw_fetches import create_raw_fetches, find_stored_sha256s
-from radar.services.ingest import fetch_journal, start_of_utc_day
+from radar.services.ingest import (
+    FetchedPage,
+    JournalFetchError,
+    fetch_journal,
+    start_of_utc_day,
+)
 from tests.database import APP_ROLE, TestDatabase, migrate
 
 ISSN = "1471-7727"
@@ -126,6 +131,7 @@ def _fetch(
     cursor: str | None = None,
     quota: OpenAlexQuota = QUOTA,
     actor: Any = SYSTEM,
+    on_page: Any = None,
 ) -> Any:
     return fetch_journal(
         actor,
@@ -136,6 +142,7 @@ def _fetch(
         start_year=2016,
         quota=quota,
         cursor=cursor,
+        on_page=on_page,
         clock=lambda: NOW,
     )
 
@@ -707,3 +714,124 @@ def test_quota_reached_before_first_page_returns_none_cursor(database: Database)
     assert result.next_cursor is None
     assert result.pages == 0
     assert source.requests == []
+
+
+# --- on_page 與續跑用的 cursor（Story 1.8、D12(a)）-------------------------------------------
+
+
+def test_on_page_gets_each_stored_page_including_the_empty_last_one(
+    ingest_db: TestDatabase, database: TrackingDatabase
+) -> None:
+    # 第 1 頁、第 2 頁有資料，第 3 頁是空的最後一頁：三頁都交給 on_page。
+    source = FakePaperSource({ISSN: [[_record(1), _record(2)], [_record(3)], []]})
+    store = FakeObjectStore()
+    seen: list[tuple[FetchedPage, list[str], int, int]] = []
+
+    def on_page(page: FetchedPage) -> None:
+        # 交給 on_page 時：這一頁的原始資料與 raw_fetch 都寫好了，而且沒有開著的交易。
+        stored = sorted(row[0] for row in _rows(ingest_db, "SELECT external_key FROM raw_fetch"))
+        seen.append((page, stored, len(store.puts), database.open_transactions))
+
+    result = _fetch(database, source, store, on_page=on_page)
+
+    assert result.pages == 3
+    cursors = [request.cursor for request in source.requests]
+    assert [entry[0].sent_cursor for entry in seen] == cursors
+    assert [entry[0].next_cursor for entry in seen] == [cursors[1], cursors[2], None]
+    assert [[r.external_key for r in entry[0].records] for entry in seen] == [
+        ["W1", "W2"],
+        ["W3"],
+        [],
+    ]
+    assert [entry[1] for entry in seen] == [["W1", "W2"], ["W1", "W2", "W3"], ["W1", "W2", "W3"]]
+    assert [entry[2] for entry in seen] == [2, 3, 3]
+    assert [entry[3] for entry in seen] == [0, 0, 0]
+
+
+def test_on_page_errors_propagate_unchanged(database: Database) -> None:
+    source = FakePaperSource({ISSN: [[_record(1)], [_record(2)]]})
+
+    class StageError(Exception):
+        pass
+
+    def on_page(page: FetchedPage) -> None:
+        raise StageError("測試：暫存失敗")
+
+    with pytest.raises(StageError, match="暫存失敗"):
+        _fetch(database, source, FakeObjectStore(), on_page=on_page)
+
+    # 第 1 頁交給 on_page 就失敗了，不往下抓。
+    assert len(source.requests) == 1
+
+
+def test_source_failure_raises_journal_fetch_error_with_the_failed_pages_cursor(
+    ingest_db: TestDatabase, database: Database
+) -> None:
+    source = FakePaperSource({ISSN: [[_record(1)], [_record(2)], [_record(3)]]})
+    source.fail_once(ISSN, 2)
+    pages: list[FetchedPage] = []
+
+    with pytest.raises(JournalFetchError) as caught:
+        _fetch(database, source, FakeObjectStore(), on_page=pages.append)
+
+    second_page = source.requests[-1].cursor
+    assert second_page is not None
+    error = caught.value
+    assert isinstance(error, PaperSourceError)
+    assert (error.journal_key, error.resume_cursor) == ("io", second_page)
+    assert [call.http_status for call in error.calls] == [503]
+    assert "第 2 頁" in error.reason
+    assert second_page not in str(error)
+    assert [page.sent_cursor for page in pages] == [None]
+    # 失敗那次的 api_call 已經寫好（fetch_journal 寫，不要再寫一次）。
+    assert sorted(row[0] for row in _rows(ingest_db, "SELECT http_status FROM api_call")) == [
+        200,
+        503,
+    ]
+
+    # 從 resume_cursor 續跑：只從第 2 頁開始送。
+    source.requests.clear()
+    result = _fetch(database, source, FakeObjectStore(), cursor=error.resume_cursor)
+    assert source.requests[0].cursor == second_page
+    assert (result.pages, result.next_cursor) == (2, None)
+
+
+def test_failure_on_the_first_page_resumes_from_the_first_page(database: Database) -> None:
+    source = FakePaperSource({ISSN: [[_record(1)]]})
+    source.fail_once(ISSN, 1)
+
+    with pytest.raises(JournalFetchError) as caught:
+        _fetch(database, source, FakeObjectStore())
+
+    assert caught.value.resume_cursor is None
+
+
+def test_cursor_cycle_resumes_from_the_page_that_produced_the_bad_cursor(
+    ingest_db: TestDatabase, database: Database
+) -> None:
+    # * → A → B → A：B 那一頁給的 next_cursor 繞回 A。B 的原始資料照樣存好，但不交給 on_page、
+    # 不前進；續跑時要重送 B。
+    source = BoundedSource({ISSN: [[_record(1)], [_record(2)], [_record(3)]]}, cost_usd=Decimal(0))
+    source.point_next_cursor(ISSN, 3, 2)
+    pages: list[FetchedPage] = []
+
+    with pytest.raises(JournalFetchError, match="繞回") as caught:
+        _fetch(database, source, FakeObjectStore(), on_page=pages.append)
+
+    cursor_a, cursor_b = source.requests[1].cursor, source.requests[2].cursor
+    assert cursor_a is not None
+    assert cursor_b is not None
+    assert caught.value.resume_cursor == cursor_b
+    assert caught.value.journal_key == "io"
+    assert caught.value.calls == ()
+    for cursor in (cursor_a, cursor_b):
+        assert cursor not in str(caught.value)
+    assert [(page.sent_cursor, page.next_cursor) for page in pages] == [
+        (None, cursor_a),
+        (cursor_a, cursor_b),
+    ]
+    assert sorted(row[0] for row in _rows(ingest_db, "SELECT external_key FROM raw_fetch")) == [
+        "W1",
+        "W2",
+        "W3",
+    ]

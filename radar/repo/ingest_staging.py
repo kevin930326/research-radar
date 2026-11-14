@@ -31,7 +31,7 @@ from radar.domain.viewer import SystemViewer
 from radar.repo.models import Base
 from radar.repo.visibility import visible_to_system_only
 
-# --- 表的定義（`alembic check` 拿來和資料庫比對；遷移 0005 建表） ---------------------------
+# --- 表的定義（`alembic check` 拿來和資料庫比對；遷移 0005 建表、0006 加 `weekly_update`） -----
 
 ingest_staging_table = Table(
     "ingest_staging",
@@ -48,7 +48,7 @@ ingest_staging_table = Table(
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
     UniqueConstraint("batch_id", "source", "external_key"),
     Index("ix_ingest_staging_kind", "kind"),
-    CheckConstraint("kind IN ('reparse')", name="kind"),
+    CheckConstraint("kind IN ('reparse', 'weekly_update')", name="kind"),
     CheckConstraint("source IN ('openalex')", name="source"),
     CheckConstraint("external_key <> ''", name="external_key_not_empty"),
     CheckConstraint("source_hash ~ '^[0-9a-f]{64}$'", name="source_hash_format"),
@@ -143,6 +143,63 @@ def create_staged_papers(
             "fetched_ats": [item.paper.fetched_at for item in items],
             "parsed": [item.paper.model_dump_json() for item in items],
             "excluded_reasons": [item.excluded_reason for item in items],
+        },
+    )
+    return len(rows.all())
+
+
+def upsert_staged_papers(
+    connection: Connection,
+    *,
+    batch_id: uuid.UUID,
+    kind: StagingKind,
+    items: Sequence[StagingItem],
+) -> int:
+    """把 `items` 放進這一批的暫存表；同一批已經有同一篇（來源, 外部鍵）時覆寫。回傳寫了幾列。
+
+    - 同一次呼叫裡外部鍵重複的，只留最後一筆。
+    - 覆寫只在新的 `fetched_at` ≥ 暫存表裡的時做（`parsed`、`source_hash`、`fetched_at`、
+      `excluded_reason`）：比較舊的不蓋掉比較新的，那一列不算在回傳的列數裡。
+    - 在呼叫端開好的交易裡做，不 commit。
+
+    Raises:
+        ValueError: `kind` 不是 `StagingKind`，或 `items` 有不是 `StagingItem` 的（不碰資料庫）。
+    """
+    kind = StagingKind(kind)
+    if not all(isinstance(item, StagingItem) for item in items):
+        raise ValueError("items 只能放 StagingItem")
+    latest: dict[tuple[str, str], StagingItem] = {}
+    for item in items:
+        key = (item.paper.source, item.external_key)
+        latest.pop(key, None)  # 重新放到最後，保持「最後一筆」的順序
+        latest[key] = item
+    unique = list(latest.values())
+    if not unique:
+        return 0
+    rows = connection.execute(
+        text(
+            "INSERT INTO ingest_staging"
+            " (kind, batch_id, source, external_key, source_hash, fetched_at, parsed,"
+            " excluded_reason)"
+            " SELECT :kind, :batch_id, * FROM unnest("
+            "CAST(:sources AS text[]), CAST(:external_keys AS text[]),"
+            " CAST(:source_hashes AS text[]), CAST(:fetched_ats AS timestamptz[]),"
+            " CAST(CAST(:parsed AS text[]) AS jsonb[]), CAST(:excluded_reasons AS text[]))"
+            " ON CONFLICT (batch_id, source, external_key) DO UPDATE SET"
+            " parsed = EXCLUDED.parsed, source_hash = EXCLUDED.source_hash,"
+            " fetched_at = EXCLUDED.fetched_at, excluded_reason = EXCLUDED.excluded_reason"
+            " WHERE EXCLUDED.fetched_at >= ingest_staging.fetched_at"
+            " RETURNING id"
+        ),
+        {
+            "kind": kind.value,
+            "batch_id": batch_id,
+            "sources": [item.paper.source for item in unique],
+            "external_keys": [item.external_key for item in unique],
+            "source_hashes": [item.paper.source_hash for item in unique],
+            "fetched_ats": [item.paper.fetched_at for item in unique],
+            "parsed": [item.paper.model_dump_json() for item in unique],
+            "excluded_reasons": [item.excluded_reason for item in unique],
         },
     )
     return len(rows.all())

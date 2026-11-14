@@ -542,3 +542,16 @@
 - **MiB 與 MB**：MiB 是 1024×1024 位元組，MB（十進位）是 1,000,000 位元組，所以 750 MiB 約等於 786 MB；Docker 的 `mem_limit: 400m` 的 m 是 MiB。本專案 AGENTS.md 的「750 MB」以 MiB 計（Kevin 2026-11-14 決定）。
 - **Structural Seed（原始碼結構）**：架構文件裡畫出整個 repo 資料夾怎麼分的那一段，新的 Story 照它放檔案；本機的 compose 檔放根目錄是它的例外，理由在 ADR-0023。
 - **排程名稱 vs. 工作名稱**：排程名稱是 crontab 與心跳用的名字，用連字號（`weekly-update`，`radar enqueue weekly-update`）；工作名稱是程式裡的工作與檔名，用底線（`weekly_update`）。
+- **每週更新的狀態列（`weekly_run`）**：每次每週更新一列，記它走到哪個階段（抓取中、已發佈……）；抓取中的同時最多一筆。
+- **每本期刊的進度（`weekly_run_journal`）**：一次每週更新裡，每本期刊一列，記下一頁從哪裡抓、抓完了沒、抓了幾篇；中斷後照它接著抓。
+- **佇列鎖 vs. 排隊鎖**：佇列鎖（`lock`）讓帶同一把鎖的工作同時只跑一個，其他的排隊等；排隊鎖（`queueing_lock`）只擋「排隊中」的重複，已經在跑的不算。
+- **收錄過濾**：決定一篇論文算不算收錄範圍的檢查（類型是 article／review、有 DOI、是這本期刊、出版年不早於起始年）；不在範圍的只計數、不進暫存表。
+- **續跑 cursor（`resume_cursor`）**：抓取失敗時交回的「下次從這一頁開始」的書籤；那一頁的進度沒寫，所以下次重抓它。
+- **每頁的回呼（`on_page`）**：抓取每存好一頁就呼叫一次的函式，每週更新用它在同一個交易裡寫暫存列與進度。
+- **`.env.radar`**：只給容器（api、worker）讀的秘密檔，名稱清單在 `.env.radar.example`；檔不存在時容器照樣起得來（`required: false`），真的檔不進 git（ADR-0024）。
+- **env_file**：compose 裡「啟動容器時把某個檔裡的 `名稱=值` 變成容器環境變數」的設定。
+- **`BotoCoreError`**：boto3（AWS 的 Python 套件）在「沒拿到對方回應」時丟的錯誤總類，例如連不上、SSL 憑證驗證失敗、代理伺服器連不上；和「對方回了錯誤」的 `ClientError` 不同，訊息常帶端點網址，所以物件儲存的 adapter 一律換成不帶網址的例外。
+- **開抓取的函式（`open_setup`）**：worker 交給每週更新 service 的函式，呼叫時才讀領域設定、建 OpenAlex 與物件儲存的 adapter；service 先確認這一筆真的要抓才呼叫，像確認有客人才開爐子。
+- **佇列的事件表（`procrastinate_events`）**：佇列自己記的每個工作「何時排入、開始、成功、失敗」；測試用它比較兩筆工作的執行時段有沒有重疊。
+- **`format: raw`**：compose 的 env_file 讀法選項，等號後面整段原樣當成值，不做 `$` 變數替換，但引號與行尾註解也會算進值裡（需要 Docker Compose 2.30 以上）。
+- **例外鏈（`__cause__`／`__context__`）**：Python 例外身上記著「我是在處理哪個例外時發生的」的兩條線；`raise ... from None` 只是讓 traceback 不印出來，`__context__` 仍串著原例外，要在 `except` 區塊外面丟，這條線才是空的。
