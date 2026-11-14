@@ -1,6 +1,6 @@
 # ADR-0024：秘密進容器用 `.env.radar`（選填的 env_file）
 
-- 狀態：提議
+- 狀態：已接受（Kevin 2026-11-14）
 - 日期：2026-11-14
 - 對應：epics Story 1.8（D1）；架構文件 AD-17、AD-29；ADR-0003（部署拓撲）、ADR-0021（OpenAlex 金鑰與用量）、ADR-0023（compose 檔在根目錄）
 
