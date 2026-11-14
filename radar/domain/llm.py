@@ -19,7 +19,7 @@ import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
-from types import ModuleType
+from types import MappingProxyType, ModuleType
 from typing import Any, ClassVar, Final, Literal, cast, final, get_args
 
 from pydantic import BaseModel
@@ -53,9 +53,6 @@ EFFORTS: Final[frozenset[str]] = frozenset(get_args(Effort.__value__))
 # 每個工作用哪個模型寫在 `config/models.yaml`；讀設定時驗證那裡的模型都在這份白名單裡
 # （`domain/pricing.py` 的 `ModelsConfig`），兩邊對不上設定就讀不進來。
 ALLOWED_MODELS: Final[frozenset[str]] = frozenset({"claude-haiku-5-5"})
-
-# `output_schema` 只收這個模組最上層定義的類別（ADR-0029；寫法由架構測試守著）。
-SCHEMA_MODULE: Final = llm_schemas.__name__
 
 # 正常結束與長度截斷的 `stop_reason`（其餘都當格式不對）。
 END_TURN: Final = "end_turn"
@@ -309,7 +306,11 @@ def _freeze_schemas(module: ModuleType) -> dict[int, tuple[type[BaseModel], str]
 
 
 # 凍結的 schema 登記表（Opus 第四次確認審查）：只有這裡面的類別能當 `output_schema`。
-_FROZEN_SCHEMAS: Final = _freeze_schemas(llm_schemas)
+# 包成唯讀的 `MappingProxyType`，執行期不能增刪項目；`radar/` 裡只有這個模組碰得到它與
+# `_freeze_schemas`、`_render_schema`（`tests/arch/test_frozen_schema_registry.py`）。
+_FROZEN_SCHEMAS: Final[Mapping[int, tuple[type[BaseModel], str]]] = MappingProxyType(
+    _freeze_schemas(llm_schemas)
+)
 
 
 def _frozen_schema(value: object) -> str | None:
@@ -330,71 +331,17 @@ def _schema_json(output_schema: type[BaseModel] | None) -> str | None:
     return frozen
 
 
-def output_schema_named(name: str) -> type[BaseModel]:
-    """prompt 設定區寫的 schema 名稱 → `llm_schemas.py` 最上層的類別。
-
-    只收 `_is_schema_class` 認得的類別，而且一定要 `extra="forbid"`（模型多給的欄位要被擋下）。
-    `output_schema=` 的架構測試只把這個模組當例外，所以「依名稱取類別」只能寫在這裡。
+def frozen_schema_json(output_schema: object) -> str:
+    """登記表裡凍結的 JSON schema 字串（送出的就是這一份），給 `fingerprints.schema_sha256`
+    算雜湊、記進 `derivation_run` 的來歷。
 
     Raises:
-        TypeError: `name` 不是字串。
-        ValueError: 沒有這個類別、不是 schema 類別，或沒有設 `extra="forbid"`。
-            訊息不帶名稱以外的值。
+        TypeError: 不是 `llm_schemas.py` 最上層定義、登記表裡的模型類別。
     """
-    if type(name) is not str:
-        raise TypeError("output_schema 的名稱必須是字串")
-    if not name.isidentifier():
-        raise ValueError("output_schema 的名稱必須是 llm_schemas.py 裡的類別名稱")
-    candidate = vars(llm_schemas).get(name)
-    if candidate is None or not _is_schema_class(candidate):
-        raise ValueError(f"llm_schemas.py 最上層沒有叫 {name} 的 schema 類別")
-    cls = cast(type[BaseModel], candidate)
-    if cls.model_config.get("extra") != "forbid":
-        raise ValueError(f"schema {name} 要設 extra='forbid'（模型多給的欄位要被擋下）")
-    return cls
-
-
-def output_schema_json(output_schema: type[BaseModel]) -> str:
-    """送出的 JSON schema（排序過的 JSON 字串），給 `fingerprints.schema_sha256` 算雜湊。
-
-    和 `LlmRequest` 建立時凍結的是同一份。
-
-    Raises:
-        TypeError: 不是 `llm_schemas.py` 最上層的類別。
-    """
-    if not _is_schema_class(output_schema):
-        raise TypeError("output_schema 必須是 radar/domain/llm_schemas.py 最上層定義的類別")
-    schema = _schema_json(output_schema)
-    assert schema is not None
-    return schema
-
-
-def build_llm_request(
-    *,
-    model: str,
-    system: CloudSafeText,
-    content: tuple[CloudSafeText, ...],
-    max_tokens: int,
-    effort: Effort | None,
-    disable_thinking: bool,
-    output_schema_name: str | None,
-) -> LlmRequest:
-    """閘門用：依 prompt 設定區的 schema 名稱取類別、建 `LlmRequest`。
-
-    Raises:
-        TypeError, ValueError: 同 `output_schema_named` 與 `LlmRequest`。
-        NotCloudSafeError: 文字不是 `CloudSafeText`。
-    """
-    output_schema = None if output_schema_name is None else output_schema_named(output_schema_name)
-    return LlmRequest(
-        model=model,
-        system=system,
-        content=content,
-        max_tokens=max_tokens,
-        effort=effort,
-        disable_thinking=disable_thinking,
-        output_schema=output_schema,
-    )
+    frozen = _frozen_schema(output_schema)
+    if frozen is None:
+        raise TypeError("output_schema 必須是 radar/domain/llm_schemas.py 最上層定義的模型類別")
+    return frozen
 
 
 def _validate_request(request: LlmRequest) -> None:
@@ -465,8 +412,9 @@ def check_llm_request(obj: object) -> LlmRequest:
 def snapshot_llm_request(obj: object) -> LlmRequest:
     """adapter 入口：檢查後，用讀到的值重建一份新的 `LlmRequest`，adapter 之後只讀這一份。
 
-    每個欄位只讀一次，副本建立時再完整驗證一次、重新由模型類別產生 JSON schema，所以檢查與
-    送出之間沒有時間差可以鑽（例如建好後才改凍結的 schema 字串）。
+    每個欄位只讀一次，副本建立時再完整驗證一次、從 import 時凍結的登記表重新取 schema 字串
+    （不重新由模型類別產生），所以檢查與送出之間沒有時間差可以鑽（例如建好後才改請求上的
+    schema 字串）。
 
     Raises:
         NotCloudSafeError, TypeError, ValueError: 同 `check_llm_request` 與 `LlmRequest`。

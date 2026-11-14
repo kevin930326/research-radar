@@ -1,9 +1,9 @@
-"""LLM 閘門測試共用的小工具：在 tmp 資料夾寫 prompt 檔與登記、讀真的 `config/models.yaml`。
+"""LLM 閘門測試共用的小工具：在 tmp 資料夾寫 prompt 檔並暫時登記、讀真的 `config/models.yaml`。
 
-內容全部是測試自己編的（不是正式的 prompt）。
+prompt 的內容全部是測試自己編的（不是正式的 prompt）。登記寫進 `radar/domain/prompt_hashes.py`
+的登記表（policy 只認那裡的雜湊），`tests/conftest.py` 每個測試結束都會還原。
 """
 
-import json
 import threading
 import uuid
 from collections.abc import Callable
@@ -15,9 +15,10 @@ import psycopg
 
 from radar.adapters.fake import FakeLlmProvider
 from radar.config import load_models_config
+from radar.domain import prompt_hashes
 from radar.domain.ai_outputs import CallMode, GatewayConfig, LlmTask
 from radar.domain.fingerprints import prompt_sha256, schema_sha256
-from radar.domain.llm import LlmRequest, LlmResult, output_schema_json, output_schema_named
+from radar.domain.llm import LlmRequest, LlmResult, frozen_schema_json
 from radar.domain.papers import PaperOrigin, ParsedPaper
 from radar.domain.policy import CloudPolicy
 from radar.domain.pricing import ModelsConfig
@@ -25,6 +26,7 @@ from radar.domain.prompts import PROMPT_FILE_PATTERN, parse_prompt_file
 from radar.domain.scope import ScopeSettings
 from radar.repo.db import Database
 from radar.repo.papers import upsert_by_external_id
+from radar.services.prompt_loader import OUTPUT_SCHEMAS
 from tests.database import TestDatabase
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -60,14 +62,15 @@ def write_prompt(root: Path, task: LlmTask, version: int, text: str) -> Path:
 
 
 def register_prompts(root: Path, current: dict[LlmTask, int] | None = None) -> None:
-    """依 `root` 底下現有的檔案寫 `registry.json`（算檔案雜湊與 schema 雜湊）。
+    """依 `root` 底下現有的檔案，在 `prompt_hashes` 的登記表登記（算檔案雜湊與 schema 雜湊）。
 
-    `current` 沒給的工作用最大的版本。
+    會整個換掉登記表（`tests/conftest.py` 在測試結束時還原）。`current` 沒給的工作用最大的版本。
     """
-    registry: dict[str, object] = {}
+    hashes: dict[str, dict[int, tuple[str, str | None]]] = {}
+    currents: dict[str, int] = {}
     for directory in sorted(path for path in root.iterdir() if path.is_dir()):
         task = LlmTask(directory.name)
-        versions: dict[str, object] = {}
+        versions: dict[int, tuple[str, str | None]] = {}
         for file in sorted(directory.iterdir()):
             match = PROMPT_FILE_PATTERN.fullmatch(file.name)
             assert match is not None, file
@@ -76,12 +79,13 @@ def register_prompts(root: Path, current: dict[LlmTask, int] | None = None) -> N
             schema = None
             if parsed.settings.output_schema is not None:
                 schema = schema_sha256(
-                    output_schema_json(output_schema_named(parsed.settings.output_schema))
+                    frozen_schema_json(OUTPUT_SCHEMAS[parsed.settings.output_schema])
                 )
-            versions[match.group(1)] = {"sha256": prompt_sha256(content), "schema_sha256": schema}
-        chosen = (current or {}).get(task, max(int(number) for number in versions))
-        registry[task.value] = {"current": chosen, "versions": versions}
-    (root / "registry.json").write_text(json.dumps(registry, indent=2), encoding="utf-8")
+            versions[int(match.group(1))] = (prompt_sha256(content), schema)
+        hashes[task.value] = versions
+        currents[task.value] = (current or {}).get(task, max(versions))
+    prompt_hashes.PROMPT_FILE_HASHES = hashes
+    prompt_hashes.CURRENT_PROMPT_VERSIONS = currents
 
 
 def make_prompts(root: Path, *tasks: LlmTask, text: str | None = None) -> Path:

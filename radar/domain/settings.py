@@ -149,12 +149,14 @@ class Settings(BaseModel):
     anthropic_retry_wait_max: float = Field(default=10.0, gt=0, le=300)
     anthropic_retry_wait_jitter: float = Field(default=1.0, ge=0, le=60)
     anthropic_retry_after_max: int = Field(default=60, ge=0, le=600)
-    # 一次互動呼叫含所有重試的總時限（秒，AD-8 的硬性時間上限）：超過就不再重試。正在進行的那一次
-    # 嘗試不會被打斷，所以最壞是 deadline + timeout 秒。
+    # 一次互動呼叫含所有重試的總時限（秒，AD-8 的硬性時間上限）：超過就不再重試。stamina 在一次
+    # 嘗試失敗後才看有沒有超過總時限，沒超過就照退避等完再試一次，正在進行的那一次也不會被打斷，
+    # 所以最壞是 deadline + 最長的一次等待（retry_wait_max + jitter 與 retry_after_max 取大的）
+    # + timeout 秒。
     anthropic_deadline: int = Field(default=180, ge=1, le=3600)
     # 互動呼叫的 `derivation_run` 建立超過幾秒還是 running，sweep 就改成 failed
     # （`llm_run_expired`）。
-    # 要比 anthropic_deadline + anthropic_timeout 長，否則還在跑的呼叫會被誤判。
+    # 要比上面說的最壞時間長，否則還在跑的呼叫會被誤判。
     llm_run_stale_after: int = Field(default=900, ge=60, le=86_400)
 
     @property
@@ -177,11 +179,23 @@ class Settings(BaseModel):
         # 欄位依定義順序驗證：deadline、timeout 在前面；它們本身不合法時另有錯誤，這裡不重複報。
         deadline = info.data.get("anthropic_deadline")
         timeout = info.data.get("anthropic_timeout")
-        if isinstance(deadline, int) and isinstance(timeout, int) and value <= deadline + timeout:
-            raise ValueError(
-                "要大於 RADAR_ANTHROPIC_DEADLINE + RADAR_ANTHROPIC_TIMEOUT"
-                "（還在跑的呼叫會被誤判逾時）"
-            )
+        wait_max = info.data.get("anthropic_retry_wait_max")
+        jitter = info.data.get("anthropic_retry_wait_jitter")
+        retry_after_max = info.data.get("anthropic_retry_after_max")
+        if (
+            isinstance(deadline, int)
+            and isinstance(timeout, int)
+            and isinstance(wait_max, float)
+            and isinstance(jitter, float)
+            and isinstance(retry_after_max, int)
+        ):
+            longest_wait = max(wait_max + jitter, float(retry_after_max))
+            if value <= deadline + timeout + longest_wait:
+                raise ValueError(
+                    "要大於 RADAR_ANTHROPIC_DEADLINE + RADAR_ANTHROPIC_TIMEOUT + 最長的一次重試等待"
+                    "（RADAR_ANTHROPIC_RETRY_WAIT_MAX + RADAR_ANTHROPIC_RETRY_WAIT_JITTER 與"
+                    " RADAR_ANTHROPIC_RETRY_AFTER_MAX 取大的；還在跑的呼叫會被誤判逾時）"
+                )
         return value
 
     @field_validator("object_store_endpoint_url")

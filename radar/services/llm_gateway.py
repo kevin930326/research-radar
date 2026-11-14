@@ -5,7 +5,8 @@
 1. 從資料列推出要送的文字與來源（`build_llm_input`），每段經 `clear_for_cloud` 放行
    → 沒有輸入 `NO_INPUT`；放行擋下 `BLOCKED`（帶原因代碼）。
 2. 預算檢查（注入的 `budget_allows`；真正的 BudgetGuard 在 2.3）→ 不准 `DEFERRED_BUDGET`。
-3. 讀 prompt（`prompts/<工作>/v<N>.md`，雜湊對登記）、算 `input_sha256`、組 `LlmRequest`。
+3. 讀 prompt（`prompts/<工作>/v<N>.md`；policy 核對 domain 寫死的雜湊登記才放行）、算
+   `input_sha256`、組 `LlmRequest`。
 4. 離線保守估計輸入 token；超過 `max_input_tokens` 而且工作沒允許 → `TOO_LARGE`。
 5. 取得執行資格的短交易：advisory lock → 再問一次 `should_run`（有 `active`、平常流程的
    `rejected` 或 `running` 就 `SKIPPED`）→ 新增 `running` 的 `derivation_run`（部分唯一索引兜底），
@@ -57,7 +58,7 @@ from radar.domain.llm import (
     LlmResult,
     LlmTransientError,
     LlmUsage,
-    build_llm_request,
+    frozen_schema_json,
     system_prompt,
 )
 from radar.domain.permissions import Action, require
@@ -218,10 +219,11 @@ def run_llm_job(
     request = _build_request(prompt, task_model.model, content)
 
     # 4. 輸入太大就不送。
-    estimated = estimate_input_tokens(
-        [system_prompt(request), *(cloud_text(block) for block in request.content)],
-        config.models.token_estimate,
-    )
+    # 送出的 JSON schema 也算進輸入，一起估。
+    sent_texts = [system_prompt(request), *(cloud_text(block) for block in request.content)]
+    if prompt.schema_class is not None:
+        sent_texts.append(frozen_schema_json(prompt.schema_class))
+    estimated = estimate_input_tokens(sent_texts, config.models.token_estimate)
     if estimated > config.models.max_input_tokens and not task_model.allow_over_input_limit:
         return GatewayResult(GatewayOutcome.TOO_LARGE, reason=ErrorCode.LLM_INPUT_TOO_LARGE)
 
@@ -240,35 +242,48 @@ def run_llm_job(
         _fail_run(database, run_id, ErrorCode.LLM_CONFIGURATION)
         raise
     except LlmRejectedError as exc:
-        cost = _record_call(
-            database, config, run_id, key.model, exc.usage, exc.response_id, exc.request_id
-        )
+        try:
+            cost = _record_call(
+                database, config, run_id, key.model, exc.usage, exc.response_id, exc.request_id
+            )
+        except BaseException:
+            _try_fail_run(database, run_id)
+            raise
         return _write_result(actor, database, config, job, run_id, llm_input, exc.code, None, cost)
     except BaseException:
         _fail_run(database, run_id, ErrorCode.LLM_GATEWAY_ERROR)
         raise
 
-    # 7. 記帳。
-    cost = _record_call(
-        database,
-        config,
-        run_id,
-        key.model,
-        result.usage,
-        result.response_id,
-        result.request_id,
-        stop_reason=result.stop_reason,
-        raw=result.raw,
-    )
-
-    # 8. 驗證：Pydantic → domain → 存得進資料庫。
+    # 7、8 丟出非預期的例外（記帳的交易失敗、domain 驗證丟了 OutputRejectedError 以外的例外）時，
+    # 盡量把 run 改成 failed，不讓它停在 running 擋住同一組鍵，例外原樣丟出。
+    reject_reason: ErrorCode | None = None
+    output: BaseModel | str | None = None
     try:
-        output = _validated_output(prompt, result, job, llm_input)
-    except OutputRejectedError as exc:
-        return _write_result(actor, database, config, job, run_id, llm_input, exc.code, None, cost)
+        # 7. 記帳。
+        cost = _record_call(
+            database,
+            config,
+            run_id,
+            key.model,
+            result.usage,
+            result.response_id,
+            result.request_id,
+            stop_reason=result.stop_reason,
+            raw=result.raw,
+        )
+        # 8. 驗證：Pydantic → domain → 存得進資料庫。
+        try:
+            output = _validated_output(prompt, result, job, llm_input)
+        except OutputRejectedError as exc:
+            reject_reason = exc.code
+    except BaseException:
+        _try_fail_run(database, run_id)
+        raise
 
     # 9. 寫入結果。
-    return _write_result(actor, database, config, job, run_id, llm_input, None, output, cost)
+    return _write_result(
+        actor, database, config, job, run_id, llm_input, reject_reason, output, cost
+    )
 
 
 def expire_stale_runs(actor: Viewer, database: Database, older_than: timedelta) -> int:
@@ -296,14 +311,15 @@ def _build_request(
     prompt: LoadedPrompt, model: str, content: tuple[CloudSafeText, ...]
 ) -> LlmRequest:
     settings = prompt.settings
-    return build_llm_request(
+    # schema 類別由 loader 從 `OUTPUT_SCHEMAS` 取出；`LlmRequest` 再核對它在凍結的登記表裡。
+    return LlmRequest(
         model=model,
         system=prompt.template,
         content=content,
         max_tokens=settings.max_tokens,
         effort=settings.effort,
         disable_thinking=settings.disable_thinking,
-        output_schema_name=settings.output_schema,
+        output_schema=prompt.schema_class,
     )
 
 
@@ -324,14 +340,18 @@ def _acquire(
         "max_tokens": settings.max_tokens,
         "disable_thinking": settings.disable_thinking,
         "output_schema": settings.output_schema,
+        # 送出的凍結 schema 字串的雜湊：`Field(description=...)` 這類改動也看得出來（來歷）。
         "output_schema_sha256": prompt.schema_sha256,
     }
     with database.transaction() as connection:
         # 阻塞的交易級鎖：交易結束（commit 或退回）時自動放掉。
         Database.transaction_lock(connection, run_lock_key(key))
+        # 先查 running 再查表頭：READ COMMITTED 下兩句各自取快照，別人的表頭與 run 改 succeeded
+        # 在同一個交易 commit。先查表頭再查 running 的話，對方剛好在兩句之間 commit 時兩句都查不到，
+        # 就會再付一次錢；這個順序下一定看得到其中一個。
         if eval_run_id is None and (
-            find_blocking_ai_result(viewer, connection, key) is not None
-            or find_running_derivation_run_id(viewer, connection, key) is not None
+            find_running_derivation_run_id(viewer, connection, key) is not None
+            or find_blocking_ai_result(viewer, connection, key) is not None
         ):
             return None
         return create_derivation_run(
@@ -354,6 +374,15 @@ def _fail_run(database: Database, run_id: uuid.UUID, reason: ErrorCode) -> None:
     """自己的短交易把 run 改成 `failed`（已經不是 `running` 就不改）。"""
     with database.transaction() as connection:
         update_derivation_run_failed(connection, run_id, reason)
+
+
+def _try_fail_run(database: Database, run_id: uuid.UUID) -> None:
+    """出錯後的收尾：盡量把 run 改成 `failed`（`llm_gateway_error`）；這一步也失敗只記日誌，
+    讓原本的例外照樣往上丟。"""
+    try:
+        _fail_run(database, run_id, ErrorCode.LLM_GATEWAY_ERROR)
+    except Exception as cleanup:
+        log.warning("出錯後把 derivation_run 改成 failed 也失敗", error_type=type(cleanup).__name__)
 
 
 def _record_call(
@@ -442,13 +471,7 @@ def _write_result(
             context_values_version=job.context_values_version,
         )
     except BaseException as exc:
-        try:
-            _fail_run(database, run_id, ErrorCode.LLM_GATEWAY_ERROR)
-        except Exception as cleanup:
-            log.warning(
-                "寫結果失敗後把 derivation_run 改成 failed 也失敗",
-                error_type=type(cleanup).__name__,
-            )
+        _try_fail_run(database, run_id)
         log.error("寫 AI 結果失敗", task=job.task, error_type=type(exc).__name__)
         raise
     return GatewayResult(

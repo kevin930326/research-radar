@@ -135,6 +135,6 @@ def _still_current(
     )
     return (
         current_sha == run.key.input_sha256
-        and current_prompt_version(config.prompts_root, task) == run.key.prompt_version
+        and current_prompt_version(task) == run.key.prompt_version
         and config.models.task_model(task).model == run.key.model
     )

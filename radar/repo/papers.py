@@ -233,12 +233,21 @@ def find_paper_llm_source(
 ) -> PaperLlmSource | None:
     """組 LLM 輸入要用的資料列：論文標題與目前的摘要（`is_current` 的那一筆，沒有時是 None）。
 
-    `for_update` 為真時鎖住論文那一列（`FOR UPDATE OF paper`）：`services/ai_results.py` 寫成
-    `active` 之前先鎖住論文，核對與切換才不會被插隊（ADR-0009 第 8 步）。不存在或 `viewer`
+    `for_update` 為真時先鎖住論文那一列（`FOR UPDATE`），再讀標題與摘要：`services/ai_results.py`
+    寫成 `active` 之前先鎖住論文，核對與切換才不會被插隊（ADR-0009 第 8 步）。不存在或 `viewer`
     看不到都回 None。
     """
     visible = visible_papers(viewer, alias="paper")
-    lock = " FOR UPDATE OF paper" if for_update else ""
+    if for_update:
+        # 先單獨鎖論文列，再另一句讀摘要：鎖和 JOIN 寫在同一句時，等鎖結束後 PostgreSQL 只重新檢查
+        # 被鎖的論文列，JOIN 進來的摘要仍是等鎖前的快照，核對會拿到舊摘要。分開寫，第二句在
+        # READ COMMITTED 下會看到等鎖期間別人 commit 的摘要。
+        locked = connection.execute(
+            text(f"SELECT paper.id FROM paper WHERE {visible} AND paper.id = :id FOR UPDATE"),
+            {"id": paper_id},
+        ).one_or_none()
+        if locked is None:
+            return None
     row = (
         connection.execute(
             text(
@@ -246,7 +255,7 @@ def find_paper_llm_source(
                 " a.content AS abstract_content"
                 " FROM paper LEFT JOIN paper_abstract AS a"
                 " ON a.paper_id = paper.id AND a.is_current"
-                f" WHERE {visible} AND paper.id = :id{lock}"
+                f" WHERE {visible} AND paper.id = :id"
             ),
             {"id": paper_id},
         )

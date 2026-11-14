@@ -10,6 +10,7 @@
   文件內容沒辦法提早「關掉」標籤、假裝成文件外的指令。
 """
 
+import math
 import re
 import uuid
 from collections.abc import Mapping
@@ -297,7 +298,8 @@ def build_llm_input(source: PaperLlmSource, input_kind: InputKind) -> LlmInput:
 def check_output_storable(value: object) -> None:
     """模型輸出（解析好的 JSON 值或文字）裡每個字串（含物件的鍵）都存得進 PostgreSQL。
 
-    `jsonb` 與 `text` 都收不下 NUL 字元與單獨的代理字元；寫入時才失敗會讓整個交易退回，所以先擋。
+    `jsonb` 與 `text` 都收不下 NUL 字元與單獨的代理字元，`jsonb` 也收不下 NaN、Infinity（原始回應
+    用 `json.loads` 讀進來時會變成非有限的 float）；寫入時才失敗會讓整個交易退回，所以先擋。
     用堆疊走訪，不會遞迴過深。
 
     Raises:
@@ -311,6 +313,8 @@ def check_output_storable(value: object) -> None:
                 check_storable_text(item, "模型輸出")
             except ValueError:
                 raise OutputRejectedError(ErrorCode.LLM_OUTPUT_UNSTORABLE) from None
+        elif isinstance(item, float) and not math.isfinite(item):
+            raise OutputRejectedError(ErrorCode.LLM_OUTPUT_UNSTORABLE)
         elif isinstance(item, dict):
             stack.extend(item.keys())
             stack.extend(item.values())

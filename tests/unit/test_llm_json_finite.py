@@ -12,6 +12,7 @@ from radar.domain.errors import ErrorCode
 from radar.domain.llm import LlmMalformedResponseError, LlmRequest, interpret_completion
 from radar.domain.llm_schemas import FakeAnyObject as AnyObject
 from radar.domain.policy import CloudPolicy, CloudSafeText, ContentSource, clear_for_cloud
+from tests.prompt_support import template_text
 
 POLICY = CloudPolicy()
 
@@ -22,7 +23,7 @@ def _safe(text: str, source: ContentSource = ContentSource.TITLE) -> CloudSafeTe
 
 JSON_REQUEST = LlmRequest(
     model="claude-haiku-5-5",
-    system=_safe("請回 JSON。", ContentSource.PROMPT_TEMPLATE),
+    system=template_text("請回 JSON。"),
     content=(_safe("（假）標題"),),
     max_tokens=1024,
     output_schema=AnyObject,

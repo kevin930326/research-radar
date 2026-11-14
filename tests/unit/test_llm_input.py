@@ -120,6 +120,9 @@ def test_check_output_storable_accepts_normal_json() -> None:
         {"key": "lone \ud800 surrogate"},
         {"bad\x00key": "v"},
         ["ok", ["deep", {"x": "\udfff"}]],
+        {"n": float("nan")},
+        ["ok", {"x": float("inf")}],
+        float("-inf"),
     ],
 )
 def test_check_output_storable_rejects_unstorable_strings(value: object) -> None:

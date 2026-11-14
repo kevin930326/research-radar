@@ -273,7 +273,8 @@ class AnthropicLlmProvider:
             on=self._backoff,
             attempts=self._attempts,
             # 含所有重試的總時限（AD-8 的硬性時間上限）；超過就不再重試，丟出最後一次的錯誤。
-            # 正在進行的那一次嘗試不會被打斷（最壞是 deadline + timeout 秒）。None＝不限。
+            # 失敗後才檢查總時限、沒超過就等完退避再試，正在進行的那一次也不會被打斷（最壞是
+            # deadline + 最長的一次等待 + timeout 秒，見 Settings.anthropic_deadline）。None＝不限。
             timeout=self._deadline,
             wait_initial=self._retry_wait_initial,
             wait_max=self._retry_wait_max,

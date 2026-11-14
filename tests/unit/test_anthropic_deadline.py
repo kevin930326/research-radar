@@ -16,6 +16,7 @@ from radar.domain.llm import LlmRequest
 from radar.domain.policy import CloudPolicy, ContentSource, clear_for_cloud
 from radar.entrypoints.bootstrap import build_llm_provider
 from tests.anthropic_cassette import cassette_response
+from tests.prompt_support import template_text
 
 FAKE_KEY = "sk-ant-fake-deadline-test"
 POLICY = CloudPolicy()
@@ -24,7 +25,7 @@ POLICY = CloudPolicy()
 def _request() -> LlmRequest:
     return LlmRequest(
         model="claude-haiku-5-5",
-        system=clear_for_cloud("（假）任務", ContentSource.PROMPT_TEMPLATE, None, POLICY),
+        system=template_text("（假）任務"),
         content=(clear_for_cloud("（假）標題", ContentSource.TITLE, None, POLICY),),
         max_tokens=1024,
     )

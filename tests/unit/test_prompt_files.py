@@ -1,18 +1,12 @@
-"""prompt 檔的格式（`domain/prompts.py`）：`---` 包住的 `key: value` 設定區＋本文，與登記檔。"""
+"""prompt 檔的格式（`domain/prompts.py`、`domain/prompt_format.py`）：`---` 包住的 `key: value`
+設定區＋本文。
+"""
 
 import pytest
 
-from radar.domain.ai_outputs import LlmTask
-from radar.domain.prompts import (
-    PromptFormatError,
-    PromptIntegrityError,
-    PromptRegistry,
-    PromptSettings,
-    parse_prompt_file,
-)
+from radar.domain.prompt_format import split_prompt_file
+from radar.domain.prompts import PromptFormatError, PromptSettings, parse_prompt_file
 from tests.llm_support import prompt_text
-
-SHA = "a" * 64
 
 
 def test_parse_settings_and_body() -> None:
@@ -64,6 +58,9 @@ def test_body_keeps_template_text_without_variables() -> None:
         ("---\nmax_tokens: 10\noutput_schema: a.b\n---\n本文", "output_schema"),
         ("---\nnot a setting\n---\n本文", "key: value"),
         ("---\neffort: low\n---\n本文", "max_tokens"),
+        # 型別不放寬：1 不當 true、true 不當 1。
+        ("---\nmax_tokens: 10\ndisable_thinking: 1\n---\n本文", "disable_thinking"),
+        ("---\nmax_tokens: true\n---\n本文", "max_tokens"),
     ],
 )
 def test_bad_prompt_files_are_rejected(text: str, message: str) -> None:
@@ -71,40 +68,16 @@ def test_bad_prompt_files_are_rejected(text: str, message: str) -> None:
         parse_prompt_file(text)
 
 
-def test_registry_parses_versions() -> None:
-    registry = PromptRegistry.parse(
-        '{"zh_summary": {"current": 2, "versions": {'
-        f'"1": {{"sha256": "{SHA}", "schema_sha256": null}},'
-        f'"2": {{"sha256": "{SHA}", "schema_sha256": "{SHA}"}}'
-        "}}}"
-    )
+def test_split_gives_the_same_body_as_parse() -> None:
+    # policy 用 split_prompt_file 拿掉設定區，loader 用 parse_prompt_file 讀設定：本文一定一樣。
+    text = "---\r\nmax_tokens: 10\r\n---\r\n\r\n  第一行\r\n第二行  \r\n"
 
-    entry = registry.entry(LlmTask.ZH_SUMMARY)
-    assert entry.current == 2
-    assert sorted(entry.versions) == [1, 2]
-    assert entry.versions[2].schema_sha256 == SHA
+    settings, body = split_prompt_file(text)
+
+    assert settings == [(2, "max_tokens: 10")]
+    assert body == parse_prompt_file(text).body == "第一行\n第二行"
 
 
-def test_empty_registry_has_no_tasks() -> None:
-    registry = PromptRegistry.parse("{}")
-
-    assert dict(registry.tasks) == {}
-    with pytest.raises(PromptIntegrityError, match="classify"):
-        registry.entry(LlmTask.CLASSIFY)
-
-
-@pytest.mark.parametrize(
-    "raw",
-    [
-        "not json",
-        "[]",
-        '{"unknown_task": {"current": 1, "versions": {}}}',
-        f'{{"zh_summary": {{"current": 2, "versions": {{"1": {{"sha256": "{SHA}"}}}}}}}}',
-        '{"zh_summary": {"current": 1, "versions": {"1": {"sha256": "short"}}}}',
-        f'{{"zh_summary": {{"current": 1, "versions": {{"1": {{"sha256": "{SHA}", "x": 1}}}}}}}}',
-        f'{{"zh_summary": {{"current": "1", "versions": {{"1": {{"sha256": "{SHA}"}}}}}}}}',
-    ],
-)
-def test_bad_registry_is_rejected(raw: str) -> None:
-    with pytest.raises(PromptFormatError):
-        PromptRegistry.parse(raw)
+def test_split_rejects_non_str() -> None:
+    with pytest.raises(TypeError):
+        split_prompt_file(b"---\nmax_tokens: 10\n---\nbody")  # type: ignore[arg-type]

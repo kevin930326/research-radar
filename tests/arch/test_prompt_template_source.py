@@ -1,22 +1,22 @@
-"""`prompt_template` 這個來源不能由一般呼叫端自己標（ADR-0029、Opus 第三次確認審查第 2 點）。
+"""`prompt_template` 這個來源不能由一般呼叫端自己標（ADR-0029、Opus 第三次確認審查第 2 點、
+ADR-0030「依此更正」）。
 
-`clear_for_cloud` 遇到 `ContentSource.PROMPT_TEMPLATE` 不管開關一律放行，而 `LlmRequest.system`
-又規定要是這個來源；呼叫端只要把「模板 `.format(fulltext=...)`」的結果標成 `prompt_template`，
-付費全文就送得出去。2.2 會由專用的 prompt loader 從 `prompts/<工作>/v<N>.md` 讀檔放行模板，
-`clear_for_cloud` 改成拒收外部傳入的 `prompt_template`（spec 的 deferred）。在那之前先守住：
+2.2 起 `clear_for_cloud` 拒收 `ContentSource.PROMPT_TEMPLATE`；模板只能經 policy 的專用入口
+`clear_prompt_file` 放行（整個檔的雜湊要登記在 `domain/prompt_hashes.py`）。架構測試另外守住：
 
 - `radar/` 裡 `ContentSource.PROMPT_TEMPLATE`（名字、屬性、`from ... import`）與字串
   `"prompt_template"` 只能出現在 `domain/policy.py`；`domain/llm.py` 只能拿它來**比對**
-  （`is`／`==`），不能拿來放行。
-- 預留給 2.2 的 `services/prompt_loader.py`（現在還不存在；2.2 若放在別處，要把下面的
-  `PROMPT_LOADER` 一起改掉）**沒有**特別的許可：模板的來源由 policy 的專用入口自己標，loader
-  不需要也不准提到 `PROMPT_TEMPLATE`。這個檔存在時另外要守：不呼叫 `clear_for_cloud`（模板只經
+  （`is`／`==`），不能拿來放行。「比對」只算直接當 `Compare` 左邊或右邊的運算元：包在呼叫裡、
+  再拿呼叫的結果去比（例如 `clear_for_cloud(t, ContentSource.PROMPT_TEMPLATE, ...) is not None`）
+  不算比對（2.1 第五次確認審查第 2 點收緊）。
+- `services/prompt_loader.py` **沒有**特別的許可：模板的來源由 policy 的專用入口自己標，loader
+  不需要也不准提到 `PROMPT_TEMPLATE`。另外要守：不呼叫 `clear_for_cloud`（模板只經
   policy 的專用入口放行）、不用 `.format`／`.format_map`／`string.Template`／`%` 把變數填進模板
   （變數用分開的 `CloudSafeText` 區塊）。
 
 這條架構測試擋不到的寫法（ADR-0029 取捨）：`clear_for_cloud(text, cloud_source(既有的模板), ...)`
 沿用別的文字的來源、`"prompt" + "_template"` 這種組字串、走訪 `ContentSource` 挑出成員、
-`ContentSource(變數)`。2.2 讓 `clear_for_cloud` 拒收 `PROMPT_TEMPLATE` 之後，這些都會在執行期被擋。
+`ContentSource(變數)`。這些在執行期都會被 `clear_for_cloud` 拒收。
 
 掃描函式另外用 tmp 裡的假檔證明抓得到。
 """
@@ -31,7 +31,7 @@ MEMBER = "PROMPT" + "_TEMPLATE"
 VALUE = "prompt" + "_template"
 POLICY = RADAR / "domain" / "policy.py"
 LLM_MODULE = RADAR / "domain" / "llm.py"
-# 2.2 的 prompt loader 預留位置（架構文件還沒寫；2.2 若放在別處，改這裡並同步改 ADR-0029）。
+# 2.2 的 prompt loader（ADR-0030）。
 PROMPT_LOADER = RADAR / "services" / "prompt_loader.py"
 TEMPLATE_FILLERS = frozenset({"format", "format_map", "Template", "substitute", "safe_substitute"})
 
@@ -57,11 +57,12 @@ def outside_comparison_uses(path: Path, *, base: Path) -> list[str]:
     """這個檔裡不是拿來比對（`is`／`==` 等）的 `PROMPT_TEMPLATE` 用法，以及字串用法。"""
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     name = path.relative_to(base).as_posix()
+    # 只有直接當 Compare 左邊或右邊的運算元才算比對；不收整棵子樹（呼叫裡的參數不算）。
     in_comparison = {
-        id(sub)
+        id(operand)
         for node in ast.walk(tree)
         if isinstance(node, ast.Compare)
-        for sub in ast.walk(node)
+        for operand in (node.left, *node.comparators)
     }
     return [
         hit
@@ -117,9 +118,8 @@ def test_llm_module_only_compares_against_prompt_template() -> None:
 
 
 def test_prompt_loader_does_not_clear_or_fill_templates() -> None:
-    # 2.2 建立這個檔之前沒有東西可查；建立之後這條自動生效。
-    if not PROMPT_LOADER.exists():
-        return
+    # 2.2 起這個檔一定存在（不存在代表搬家了，要跟著改 PROMPT_LOADER）。
+    assert PROMPT_LOADER.exists()
     assert prompt_loader_violations(PROMPT_LOADER, base=ROOT) == []
 
 
@@ -137,6 +137,25 @@ def test_comparison_scanner(tmp_path: Path) -> None:
     assert sorted(outside_comparison_uses(sample, base=tmp_path)) == [
         f"llm.py:4 不是比對卻用 {MEMBER}",
         f"llm.py:5 用字串 {VALUE!r}",
+    ]
+
+
+def test_comparison_scanner_does_not_count_operands_nested_in_a_compare(tmp_path: Path) -> None:
+    # 把放行包在比較裡（比的是呼叫的結果）不算比對；直接的運算元才算。
+    sample = tmp_path / "llm.py"
+    sample.write_text(
+        "from radar.domain.policy import ContentSource\n"
+        f"a = clear_for_cloud(t, ContentSource.{MEMBER}, None, p) is not None\n"
+        f"b = [ContentSource.{MEMBER}] == sources\n"
+        f"c = source in (ContentSource.{MEMBER},)\n"
+        f"d = ContentSource.{MEMBER} is source is not ContentSource.{MEMBER}\n",
+        encoding="utf-8",
+    )
+
+    assert sorted(outside_comparison_uses(sample, base=tmp_path)) == [
+        f"llm.py:2 不是比對卻用 {MEMBER}",
+        f"llm.py:3 不是比對卻用 {MEMBER}",
+        f"llm.py:4 不是比對卻用 {MEMBER}",
     ]
 
 

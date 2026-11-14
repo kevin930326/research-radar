@@ -6,7 +6,9 @@
 - `clear_for_cloud(文字, 來源, 授權, 設定)` 依來源與授權決定放不放行；不放行丟
   `CloudClearanceError`（帶來源與 `domain/errors.py` 的原因代碼，不帶文字內容）。
 - 放行表（ADR-0029）：
-  - OpenAlex／Crossref 的摘要、標題、使用者的問題、prompt 模板：放行。
+  - OpenAlex／Crossref 的摘要、標題、使用者的問題：放行。
+  - prompt 模板：只能經 `clear_prompt_file` 放行（整個檔的雜湊要登記在 `domain/prompt_hashes.py`）；
+    `clear_for_cloud` 拒收 `PROMPT_TEMPLATE`，呼叫端不能自己把文字標成模板（ADR-0030「依此更正」）。
   - OA 全文：授權是 CC BY、CC BY-SA、CC0 才放行；其他（含 NC、ND 類 CC、`other-oa`、
     付費、不明、沒有授權資訊）要 `RADAR_PAYWALLED_FULLTEXT_LLM` 開著才放行。
   - 上傳的 PDF 內容：不看授權，一律當付費，開關開著才放行。
@@ -22,7 +24,10 @@ from typing import Final, NoReturn, TypeIs, assert_never, final
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from radar.domain import prompt_hashes
 from radar.domain.errors import ErrorCode
+from radar.domain.fingerprints import prompt_sha256
+from radar.domain.prompt_format import split_prompt_file
 
 
 class ContentSource(StrEnum):
@@ -263,7 +268,8 @@ def clear_for_cloud(
         TypeError: 參數型別不對（文字不是 `str`、來源不是 `ContentSource`、授權不是
             `ContentLicense`／None、設定不是 `CloudPolicy`）。
         CloudClearanceError: 擋下（`reason` 是 `cloud_blocked_paywalled`、`cloud_blocked_source`、
-            `cloud_blocked_empty` 或 `cloud_blocked_invalid_text`）。
+            `cloud_blocked_empty` 或 `cloud_blocked_invalid_text`）。來源是 `PROMPT_TEMPLATE` 時
+            一律丟 `cloud_blocked_source`：模板只能經 `clear_prompt_file` 放行。
     """
     if not isinstance(text, str):
         raise TypeError(f"text 必須是 str（收到 {type(text).__name__}）")
@@ -288,9 +294,12 @@ def clear_for_cloud(
             | ContentSource.CROSSREF_ABSTRACT
             | ContentSource.TITLE
             | ContentSource.USER_QUERY
-            | ContentSource.PROMPT_TEMPLATE
         ):
             pass
+        case ContentSource.PROMPT_TEMPLATE:
+            # 模板只經 clear_prompt_file 放行（核對登記的雜湊）；這裡收了，任何文字標成模板
+            # 都送得出去（例如把付費全文填進模板）。
+            raise CloudClearanceError(source, ErrorCode.CLOUD_BLOCKED_SOURCE)
         case ContentSource.OA_FULLTEXT:
             if license not in CLOUD_CLEARED_LICENSES and not policy.paywalled_fulltext_llm:
                 raise CloudClearanceError(source, ErrorCode.CLOUD_BLOCKED_PAYWALLED)
@@ -303,3 +312,35 @@ def clear_for_cloud(
         case _:
             assert_never(source)
     return CloudSafeText(text, source, clearance=_CLEARANCE)
+
+
+def clear_prompt_file(task: str, version: int, content: bytes) -> CloudSafeText:
+    """放行 prompt 檔的本文（系統提示），來源是 `PROMPT_TEMPLATE`。模板只有這一個入口。
+
+    `content` 是 `prompts/<task>/v<version>.md` 整個檔的原始位元組（由 `services/prompt_loader.py`
+    讀檔，這裡不做 I/O）。先核對整個檔的 SHA-256 和 `domain/prompt_hashes.py` 寫死的登記一樣，
+    核對過才拿掉設定區、放行本文；登記不從參數收，呼叫端造不出「自己登記的模板」。
+
+    Raises:
+        TypeError: 參數型別不對。
+        CloudClearanceError: 沒登記、雜湊對不上（`cloud_prompt_unregistered`），或不是 UTF-8
+            （`cloud_blocked_invalid_text`）。訊息不帶檔案內容。
+        PromptFormatError: 登記過的檔格式不對（沒有設定區、本文是空的）。
+    """
+    if type(task) is not str:
+        raise TypeError(f"task 必須是 str（收到 {type(task).__name__}）")
+    if type(version) is not int:
+        raise TypeError(f"version 必須是 int（收到 {type(version).__name__}）")
+    if type(content) is not bytes:
+        raise TypeError(f"content 必須是 bytes（收到 {type(content).__name__}）")
+    source = ContentSource.PROMPT_TEMPLATE
+    # 每次呼叫都從模組讀登記（不在 import 時複製一份）。
+    registered = prompt_hashes.PROMPT_FILE_HASHES.get(task, {}).get(version)
+    if registered is None or prompt_sha256(content) != registered[0]:
+        raise CloudClearanceError(source, ErrorCode.CLOUD_PROMPT_UNREGISTERED)
+    try:
+        text = content.decode("utf-8")
+    except UnicodeDecodeError:
+        raise CloudClearanceError(source, ErrorCode.CLOUD_BLOCKED_INVALID_TEXT) from None
+    _, body = split_prompt_file(text)
+    return CloudSafeText(body, source, clearance=_CLEARANCE)

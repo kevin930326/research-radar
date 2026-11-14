@@ -23,6 +23,7 @@ from radar.domain.ai_outputs import (
     OutputRejectedError,
 )
 from radar.domain.errors import ErrorCode
+from radar.domain.fingerprints import prompt_sha256, schema_sha256
 from radar.domain.llm import (
     LlmConfigurationError,
     LlmConnectionError,
@@ -31,6 +32,7 @@ from radar.domain.llm import (
     LlmServerError,
     LlmTimeoutError,
     LlmUsage,
+    frozen_schema_json,
 )
 from radar.domain.llm_schemas import FakeResearchQuestion
 from radar.domain.permissions import PermissionDeniedError
@@ -194,6 +196,16 @@ def test_normal_run_writes_run_call_and_active_header(
         ("zh_summary", 1, MODEL, "abstract", "interactive", "test-0.0.0", None,
          "FakeResearchQuestion", True)
     ]  # fmt: skip
+    # 送出的凍結 schema 字串的雜湊（只改 Field(description=...) 也看得出來）與整個 prompt 檔的雜湊。
+    hashes = execute(
+        db, "SELECT params ->> 'output_schema_sha256', prompt_sha256 FROM derivation_run"
+    )
+    assert hashes == [
+        (
+            schema_sha256(frozen_schema_json(FakeResearchQuestion)),
+            prompt_sha256((config.prompts_root / "zh_summary" / "v1.md").read_bytes()),
+        )
+    ]
     header = execute(
         db,
         "SELECT h.run_id, h.input_kind, h.input_sha256 = r.input_sha256, h.lang,"
@@ -646,6 +658,91 @@ def test_result_write_failure_keeps_ledger_and_fails_run(
     assert _runs(db) == [("failed", "llm_gateway_error")]
     assert execute(db, "SELECT cost_usd FROM llm_call") == [(_expected_cost(),)]
     assert table_counts(db)["zh_summary"] == 0
+
+
+def test_unexpected_validator_error_keeps_ledger_and_fails_run(
+    db: TestDatabase, database: Database, config: GatewayConfig, paper_id: uuid.UUID
+) -> None:
+    # domain 驗證丟了 OutputRejectedError 以外的例外：帳照記，run 不能停在 running。
+    def broken(_output: object, _input: object) -> None:
+        raise RuntimeError("測試：驗證函式壞了")
+
+    with pytest.raises(RuntimeError, match="驗證函式壞了"):
+        _run(database, _provider(), config, _job(paper_id, validate_output=broken))
+
+    assert _runs(db) == [("failed", "llm_gateway_error")]
+    assert execute(db, "SELECT cost_usd FROM llm_call") == [(_expected_cost(),)]
+    assert table_counts(db)["zh_summary"] == 0
+
+
+def test_ledger_write_failure_fails_run(
+    db: TestDatabase,
+    database: Database,
+    config: GatewayConfig,
+    paper_id: uuid.UUID,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def broken(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("測試：記帳失敗")
+
+    monkeypatch.setattr(llm_gateway, "create_llm_call", broken)
+
+    with pytest.raises(RuntimeError, match="記帳失敗"):
+        _run(database, _provider(), config, _job(paper_id))
+
+    assert _runs(db) == [("failed", "llm_gateway_error")]
+    assert table_counts(db)["llm_call"] == 0
+
+
+def test_raw_response_with_nan_is_kept_as_null(
+    db: TestDatabase, database: Database, config: GatewayConfig, paper_id: uuid.UUID
+) -> None:
+    # 原始回應用 json.loads 讀進來時 NaN 會變成 float；jsonb 收不下，改存 NULL、帳照記。
+    completion = fake_completion(GOOD, usage=USAGE, raw={"weird": float("nan")})
+
+    result = _run(database, _provider(completion), config, _job(paper_id))
+
+    assert result.outcome is GatewayOutcome.ACTIVE
+    assert execute(db, "SELECT raw_response IS NULL, cost_usd FROM llm_call") == [
+        (True, _expected_cost())
+    ]
+
+
+def test_expire_only_touches_old_interactive_running_runs(
+    db: TestDatabase, database: Database, config: GatewayConfig
+) -> None:
+    # 三筆 running：剛建立的互動 run、很久以前的 batch run、很久以前的互動 run；
+    # 只有最後一筆改 failed。
+    papers = [
+        create_paper(database, doi=f"10.1/expire{index}", openalex_id=f"W9{index}")
+        for index in range(3)
+    ]
+    for paper in papers:
+        _run(database, _provider(LlmTimeoutError("逾時")), config, _job(paper))
+    execute(
+        db,
+        "UPDATE derivation_run SET status = 'running', failure_reason = NULL, finished_at = NULL",
+    )
+    execute(
+        db,
+        "UPDATE derivation_run SET call_mode = 'batch', created_at = now() - interval '1 day'"
+        " WHERE paper_id = %s",
+        papers[1],
+    )
+    execute(
+        db,
+        "UPDATE derivation_run SET created_at = now() - interval '1 hour' WHERE paper_id = %s",
+        papers[2],
+    )
+
+    assert expire_stale_runs(SYSTEM, database, timedelta(minutes=15)) == 1
+
+    rows = execute(db, "SELECT paper_id, status, failure_reason FROM derivation_run")
+    assert sorted(rows, key=lambda row: papers.index(row[0])) == [
+        (papers[0], "running", None),
+        (papers[1], "running", None),
+        (papers[2], "failed", "llm_run_expired"),
+    ]
 
 
 # --- 其他：Batch 計價、權限、不支援的工作 ---------------------------------------------------------

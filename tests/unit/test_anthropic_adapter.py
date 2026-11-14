@@ -40,6 +40,7 @@ from radar.domain.llm_schemas import FakeResearchQuestion as ResearchQuestion
 from radar.domain.policy import CloudPolicy, CloudSafeText, ContentSource, clear_for_cloud
 from radar.ports import LlmProvider
 from tests.anthropic_cassette import NAMES, cassette_body, cassette_request, cassette_response
+from tests.prompt_support import template_text
 
 FAKE_KEY = "sk-ant-FAKE-KEY-for-tests-only"
 SECRET_ABSTRACT = "（假摘要）遠距工作讓團隊的知識分享變少 ABSTRACT-MARKER-9X"
@@ -65,7 +66,7 @@ def _safe(text: str, source: ContentSource = ContentSource.OPENALEX_ABSTRACT) ->
 def _request(**changes: Any) -> LlmRequest:
     values: dict[str, Any] = {
         "model": "claude-haiku-5-5",
-        "system": _safe(TASK, ContentSource.PROMPT_TEMPLATE),
+        "system": template_text(TASK),
         "content": (_safe("（假）標題", ContentSource.TITLE), _safe(SECRET_ABSTRACT)),
         "max_tokens": 1024,
     }

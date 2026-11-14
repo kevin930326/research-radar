@@ -630,14 +630,18 @@
 - **`snapshot_llm_request`（請求副本）**：adapter 送出前，把檢查過的請求用讀到的值重新建一份，之後只讀這份，像影印一份簽過名的文件再寄出，原件之後被塗改也影響不到寄出去的那份。
 - **TOCTOU（檢查與使用之間的時間差）**：先檢查、後使用時，中間被換掉的漏洞；本專案用「檢查後重建副本、只用副本」避開。
 - **`llm_schemas.py`（schema 模組）**：`radar/domain/llm_schemas.py`，給 LLM 的結構化輸出格式只能寫在這裡、而且只能寫字面值，像菜單只能印好，不能讓客人現場改字；`LlmRequest.output_schema` 只收這個模組最上層的類別。
-- **prompt loader**：2.2 要做的元件，只從 `prompts/<工作>/v<N>.md` 讀檔、把模板放行成 `prompt_template`；之後一般程式不能自己把文字標成模板。
+- **prompt loader**：`radar/services/prompt_loader.py`，只從 `prompts/<工作>/v<N>.md` 讀整個檔，原樣交給 policy 的 `clear_prompt_file` 核對雜湊後放行；loader 自己不放行、不提 `prompt_template`，一般程式也不能自己把文字標成模板。
 - **`<locals>`（函式裡定義的類別）**：Python 給函式內部定義的類別的名字標記；這種類別可以用執行期的資料臨時組出來，所以 schema 一律不收。
 - **`derivation_run`（來歷紀錄）**：每次呼叫模型記一筆「哪篇論文、哪個工作、哪版 prompt、哪個模型、輸入指紋、什麼時候、成功沒」，像實驗紀錄本的一頁（ADR-0030）。
 - **`llm_call`（呼叫帳）**：每次模型呼叫實際用了多少 token、花多少錢（美元，6 位小數）的帳；只能新增、不能改或刪。
 - **`input_sha256`（輸入指紋）**：把送給模型的文字、來源、工作代碼與分類表版本等算成一串固定長度的代碼；內容一樣指紋就一樣，用來判斷「這份輸入跑過沒」。
 - **`run_lock_key`（執行資格鎖的鍵）**：由（論文, 工作, prompt 版本, 模型, 輸入指紋）算出的 64 位元整數，當 advisory lock 的號碼牌；同一份輸入同時只有一個人拿得到。
 - **`should_run`（要不要跑）**：拿到鎖之後再問一次：同一份輸入已經有有效結果、平常流程的拒收結果或正在跑的，就不跑（`SKIPPED`）。
-- **prompt 登記檔（`prompts/registry.json`）**：記每個 prompt 版本檔案的 sha256 與 schema 的 sha256；檔案改了卻沒升版，讀檔時與測試都會對不上而擋下。
+- **prompt 雜湊登記（`radar/domain/prompt_hashes.py`）**：記每個 prompt 版本整個檔的 sha256 與凍結 schema 的 sha256，只能寫字面值；檔案或 schema 改了卻沒升版，放行時與測試都會對不上而擋下。取代原本的 `prompts/registry.json`。
+- **模板專用入口（`clear_prompt_file`）**：policy 裡唯一做得出系統提示的函式；拿 prompt 檔整個內容核對登記的雜湊，對得上才拿掉設定區、放行本文，像只收蓋了鋼印的公文。
+- **`MappingProxyType`**：Python 內建的唯讀字典外殼；看得到內容、不能增刪項目，用來包住凍結的 schema 登記表。
+- **符號連結（symlink）**：檔案系統裡指向另一個位置的「捷徑」；prompt loader 遇到就不讀，避免被指到 `prompts/` 以外的檔。
+- **`O_NOFOLLOW`**：開檔時的旗標，路徑最後一段是符號連結就直接失敗，不跟著捷徑走。
 - **升版（prompt）**：prompt 的模板或設定區要改時，不改舊檔，新增 `v<N+1>.md` 並登記；舊結果才說得清是哪版做的。
 - **保守估計（token）**：離線算輸入大約幾個 token 時寧可估多：每個位元組算一個 token 再加固定開銷，中文會被估得比實際多。
 - **`price_tier`（價格級別）**：這次呼叫用的是標準價還是長上下文價；總輸入超過 100,000 tokens 時整次改用長上下文價。

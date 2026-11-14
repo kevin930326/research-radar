@@ -321,7 +321,9 @@ def create_llm_call(connection: Connection, call: NewLlmCall) -> uuid.UUID:
 
     `raw_response` 要存得進 jsonb（呼叫端先用 `is_storable_json` 檢查，存不下就傳 None）。
     """
-    raw = None if call.raw_response is None else json.dumps(dict(call.raw_response))
+    raw = (
+        None if call.raw_response is None else json.dumps(dict(call.raw_response), allow_nan=False)
+    )
     value = connection.execute(
         text(
             "INSERT INTO llm_call"

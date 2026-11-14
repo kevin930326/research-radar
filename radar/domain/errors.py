@@ -16,6 +16,9 @@ class ErrorCode(StrEnum):
     CLOUD_BLOCKED_SOURCE = "cloud_blocked_source"  # 來源還沒取得授權（例如 Semantic Scholar）
     CLOUD_BLOCKED_EMPTY = "cloud_blocked_empty"  # 空字串或只有空白
     CLOUD_BLOCKED_INVALID_TEXT = "cloud_blocked_invalid_text"  # 編不成 UTF-8（例如單獨的代理字元）
+    # prompt 檔（`policy.clear_prompt_file`）：沒登記在 `domain/prompt_hashes.py`，或整個檔的雜湊
+    # 和登記的不一樣（改了內容或設定區卻沒升版）
+    CLOUD_PROMPT_UNREGISTERED = "cloud_prompt_unregistered"
     # 送出前核對：CloudSafeText 不在放行登記裡（被硬改過、空殼或已回收），不送出
     CLOUD_TEXT_NOT_REGISTERED = "cloud_text_not_registered"
 

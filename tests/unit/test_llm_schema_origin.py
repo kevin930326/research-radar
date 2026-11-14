@@ -21,6 +21,7 @@ from radar.domain.llm import LlmRequest
 from radar.domain.llm_schemas import FakeAnyObject, FakeResearchQuestion
 from radar.domain.policy import CloudPolicy, CloudSafeText, ContentSource, clear_for_cloud
 from tests.anthropic_cassette import cassette_response
+from tests.prompt_support import template_text
 
 POLICY = CloudPolicy()
 PAYWALLED = "（假）上傳 PDF 抽出的構面 PAYWALLED-MARKER-3R"
@@ -35,7 +36,7 @@ def _safe(text: str, source: ContentSource = ContentSource.TITLE) -> CloudSafeTe
 def _request(**changes: Any) -> LlmRequest:
     values: dict[str, Any] = {
         "model": "claude-haiku-5-5",
-        "system": _safe("請整理。", ContentSource.PROMPT_TEMPLATE),
+        "system": template_text("請整理。"),
         "content": (_safe("（假）標題"),),
         "max_tokens": 1024,
         "output_schema": FakeResearchQuestion,

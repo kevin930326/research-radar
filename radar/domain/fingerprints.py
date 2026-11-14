@@ -3,8 +3,8 @@
 - `source_hash`：論文資料的指紋（下面幾段）。
 - `input_sha256`：送給模型的內容（加會影響結果的設定檔版本）的指紋，`should_run` 與晚到結果的
   核對都比它（Story 2.2）。
-- `prompt_sha256`／`schema_sha256`：prompt 檔與結構化輸出 schema 的雜湊，記在
-  `prompts/registry.json`，改了內容卻沒升版就對不上。
+- `prompt_sha256`／`schema_sha256`：prompt 檔與結構化輸出 schema 的雜湊，登記在
+  `domain/prompt_hashes.py`，改了內容卻沒升版就對不上。
 - `run_lock_key`：取得執行資格時 advisory lock 的鍵（64 位元有號整數）。
 
 ## source_hash
@@ -123,7 +123,10 @@ def prompt_sha256(content: bytes) -> str:
 
 
 def schema_sha256(schema_json: str) -> str:
-    """結構化輸出 schema（`output_schema_json` 產生的正規 JSON 字串）的 SHA-256。"""
+    """結構化輸出 schema 的 SHA-256。
+
+    算的是 `llm.frozen_schema_json` 回的凍結 JSON 字串（送出的就是這一份）。
+    """
     if not isinstance(schema_json, str):
         raise TypeError("schema_sha256 只收 str（正規化的 JSON schema）")
     return hashlib.sha256(schema_json.encode("utf-8")).hexdigest()
