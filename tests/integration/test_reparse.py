@@ -30,7 +30,7 @@ from radar.domain.scope import ScopeSettings
 from radar.domain.staging import StagingItem, StagingKind
 from radar.domain.storage_keys import RAW_CONTENT_TYPE, raw_object_key
 from radar.domain.viewer import MemberViewer, SystemViewer
-from radar.repo.db import Database
+from radar.repo.db import Database, SessionLock
 from radar.repo.ingest_staging import (
     create_staged_papers,
     delete_staged_papers,
@@ -68,7 +68,13 @@ _WRITE_SQL = re.compile(
 
 
 class TrackingDatabase(Database):
-    """記下開著的交易數、開過幾個交易，以及（開啟記錄時）執行過的每一句 SQL。"""
+    """記下開著的交易數、開過幾個交易，以及（開啟記錄時）執行過的每一句 SQL。
+
+    1.9 起 reparse 的交易都走 `session_lock` 交出的 `SessionLock.transaction()`，不呼叫
+    `transaction()`；所以兩條路都要算：`opened` 含 `transaction()`、`session_lock` 拿鎖的那個
+    短交易、每個 `SessionLock.transaction()`；`open_transactions` 是此刻開著的
+    `transaction()` 與 `SessionLock.transaction()`（拿鎖的短交易在交出鎖之前就結束了）。
+    """
 
     def __init__(self, url: str) -> None:
         super().__init__(url, connect_timeout=5, pool_size=2)
@@ -81,14 +87,40 @@ class TrackingDatabase(Database):
         self.statements.append(statement)
 
     @contextmanager
-    def transaction(self) -> Iterator[Connection]:
+    def counting(self) -> Iterator[None]:
+        """區塊算一個開著的交易。"""
         self.opened += 1
         self.open_transactions += 1
         try:
-            with super().transaction() as connection:
-                yield connection
+            yield
         finally:
             self.open_transactions -= 1
+
+    @contextmanager
+    def transaction(self) -> Iterator[Connection]:
+        with self.counting(), super().transaction() as connection:
+            yield connection
+
+    @contextmanager
+    def session_lock(self, key: int) -> Iterator[SessionLock | None]:
+        self.opened += 1  # 拿鎖本身是一個短交易
+        with super().session_lock(key) as lock:
+            yield None if lock is None else TrackingSessionLock(lock, self)
+
+
+class TrackingSessionLock(SessionLock):
+    """包住真的 `SessionLock`：交易照樣由它開（同一條持鎖的連線、先確認鎖還在），
+    同時記進 `TrackingDatabase` 的計數。只轉交 `transaction()`，不用基底類別的狀態。
+    """
+
+    def __init__(self, inner: SessionLock, database: TrackingDatabase) -> None:
+        self._inner = inner
+        self._database = database
+
+    @contextmanager
+    def transaction(self) -> Iterator[Connection]:
+        with self._database.counting(), self._inner.transaction() as connection:
+            yield connection
 
 
 class GuardedStore(FakeObjectStore):
@@ -467,6 +499,17 @@ def test_batch_size_must_be_positive(database: TrackingDatabase, store: GuardedS
     with pytest.raises(ValueError, match="batch_size"):
         _reparse(database, store, batch_size=0)
     assert database.opened == 0
+
+
+def test_tracking_database_counts_the_lock_transactions(
+    database: TrackingDatabase, store: GuardedStore
+) -> None:
+    # 替身要真的數到 reparse 走的 `session_lock`／`SessionLock.transaction()`，上面的
+    # `open_during_gets`、`opened == 0` 才有作用（K8）。空資料庫的 reparse：拿鎖 1 個、
+    # 檢查每週更新＋清暫存 1 個、讀第一批 1 個、套用 1 個。
+    assert _reparse(database, store) == ReparseResult()
+    assert database.opened == 4
+    assert database.open_transactions == 0
 
 
 def test_empty_database_does_nothing(database: TrackingDatabase, store: GuardedStore) -> None:
