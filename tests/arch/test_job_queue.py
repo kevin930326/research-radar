@@ -44,6 +44,10 @@ STATUS_TABLE_EXCEPTIONS: dict[str, str] = {
         "Procrastinate 自己的佇列表；卡在執行中的工作由 sweep 的 stalled job 重試處理，"
         "不是登記清單的狀態表"
     ),
+    "snapshot": (
+        "在每週更新的套用交易裡建立並發佈（ADR-0026），交易外看不到建立中的快照，沒有會卡住的"
+        "中間狀態；推進它的是已登記的 weekly_run（抓完待套用時仍是 fetching，由 sweep 補排）"
+    ),
 }
 
 SETTINGS = Settings.model_validate({"database_url": "postgresql://radar_app@db:5432/radar"})

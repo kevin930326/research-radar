@@ -5,6 +5,8 @@
   `create_manual`（還沒有呼叫端，不建）。
 - 摘要和論文欄位一起在 `upsert_by_external_id` 裡寫（同一個「舊的不蓋掉新的」保護）；同一篇
   最多一筆 `is_current`，由這裡依 `ABSTRACT_SOURCE_PRIORITY` 決定。
+- `first_snapshot_id` 只由 `update_papers_first_snapshot` 寫（每週更新的套用交易呼叫，AD-19、
+  ADR-0011「快照」第 3 點）；`upsert_by_external_id` 不碰這個欄位。
 - 關鍵字由 `update_paper_keywords` 整批覆寫（每週套用與 `reparse` 在不是 STALE 時呼叫）。
   這個模組只寫 `paper_keyword`、不讀它（讀的查詢只放之後的 `repo/keyword_stats.py`，AD-31）。
 - `lab_visible` 只由這個模組寫：追蹤範圍內的論文、引用擴展（之後加上傳批次勾了分享）設為真，
@@ -56,7 +58,8 @@ from radar.repo.visibility import visible_papers
 
 log = structlog.get_logger(__name__)
 
-# --- 表的定義（`alembic check` 拿來和資料庫比對；遷移 0003 建表、0005 加欄位與兩張表） -------
+# --- 表的定義（`alembic check` 拿來和資料庫比對；遷移 0003 建表、0005 加欄位與兩張表、0007 加
+# `first_snapshot_id`） ----------------------------------------------------------------------
 
 _EMPTY_TEXT_ARRAY = text("'{}'::text[]")
 
@@ -87,6 +90,8 @@ paper_table = Table(
     Column("cited_by_count", Integer),
     # 目前這份資料的指紋（AD-25，`domain/fingerprints.py`）。
     Column("source_hash", Text),
+    # 由遷移 0007 加（Story 1.9）：第一次被算進哪一個快照；只由 `update_papers_first_snapshot` 寫。
+    Column("first_snapshot_id", Uuid, ForeignKey("snapshot.id"), index=True),
     CheckConstraint(
         "origin IN ('tracked', 'expansion', 'import', 'manual')",
         name="origin",
@@ -590,6 +595,27 @@ def update_paper_keywords(
             "names": [keyword.display_name for keyword in keywords],
         },
     )
+
+
+def update_papers_first_snapshot(connection: Connection, snapshot_id: uuid.UUID) -> int:
+    """把還沒有著落的追蹤範圍內論文一律指到這個快照；回傳指了幾篇（AD-19、ADR-0011 快照第 3 點）。
+
+    「還沒有著落」：`in_scope` 為真，而 `first_snapshot_id` 是 NULL 或指向狀態不是 `published` 的
+    快照（例如上一次失敗的）。已經指到已發佈快照的論文不動，範圍外的論文不指。
+
+    只有每週更新的套用交易呼叫（架構測試守著）；在呼叫端開好的交易裡做，不 commit。
+    """
+    rows = connection.execute(
+        text(
+            "UPDATE paper SET first_snapshot_id = :snapshot_id, updated_at = now()"
+            " WHERE in_scope"
+            " AND first_snapshot_id IS DISTINCT FROM :snapshot_id"
+            " AND (first_snapshot_id IS NULL OR first_snapshot_id IN"
+            " (SELECT id FROM snapshot WHERE status <> 'published'))"
+        ),
+        {"snapshot_id": snapshot_id},
+    )
+    return rows.rowcount
 
 
 def _warn_conflict(paper_id: uuid.UUID, external_id: ExternalId, owner: uuid.UUID) -> None:
