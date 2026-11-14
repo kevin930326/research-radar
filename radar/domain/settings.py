@@ -134,12 +134,17 @@ class Settings(BaseModel):
         try:
             parts = urlsplit(value)
             scheme, hostname = parts.scheme, parts.hostname
+            has_userinfo = parts.username is not None or parts.password is not None
         except Exception:
             raise ValueError("網址無法解析") from None
         if scheme not in OBJECT_STORE_URL_SCHEMES:
             raise ValueError("開頭必須是 https:// 或 http://")
         if not hostname:
             raise ValueError("缺少主機名稱")
+        if has_userinfo:
+            # 帳密走 RADAR_OBJECT_STORE_ACCESS_KEY_ID／SECRET_ACCESS_KEY（SecretStr），
+            # 放在網址裡會跟著網址出現在錯誤訊息與日誌。
+            raise ValueError("網址不能含帳號或密碼")
         return value
 
     @field_validator("database_url")

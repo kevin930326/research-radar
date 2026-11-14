@@ -150,3 +150,74 @@ def test_failure_prints_only_error_class(
     assert "s3cret-APP" not in result.output
     assert "db.example" not in result.output
     assert "s3cret-APP" not in capsys.readouterr().out
+
+
+FAKE_PASSWORD = "FAKE-PASSWORD-not-real-0000"
+FAKE_ENDPOINT = f"http://fake-user:{FAKE_PASSWORD}@bad-host.invalid:9000"
+
+
+def _store_init_fails(_settings: object) -> FakeObjectStore:
+    # botocore 建 client 時端點不合法，就是丟這種帶整個網址的 ValueError。
+    raise ValueError(f"Invalid endpoint: {FAKE_ENDPOINT}")
+
+
+@pytest.mark.usefixtures("env", "calls")
+def test_object_store_init_failure_prints_only_error_class(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(cli, "build_object_store", _store_init_fails)
+
+    # 不讓 CliRunner 吞掉例外：沒接住的話測試直接失敗（實際執行時會印出整段例外訊息）。
+    result = runner.invoke(cli.app, ["reparse"], catch_exceptions=False)
+
+    assert result.exit_code == 1
+    assert "ValueError" in result.stderr
+    assert '"error_type": "ValueError"' in result.stdout
+    captured = capsys.readouterr()
+    for text in (result.stdout, result.stderr, captured.out, captured.err):
+        assert FAKE_PASSWORD not in text
+        assert "fake-user" not in text
+        assert "bad-host.invalid" not in text
+        assert "test-secret-KEY" not in text
+    assert "重新解析完成" not in result.stdout
+
+
+@pytest.mark.usefixtures("env")
+def test_invalid_object_store_endpoint_prints_only_error_class(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # 真的 build_object_store：主機名稱不合法但通過設定驗證，botocore 建 client 時才失敗。
+    monkeypatch.setenv("RADAR_OBJECT_STORE_ENDPOINT_URL", "http://bad host!.invalid:9000")
+    monkeypatch.setenv("RADAR_OBJECT_STORE_ACCESS_KEY_ID", "FAKE-ACCESS-not-real")
+    monkeypatch.setenv("RADAR_OBJECT_STORE_SECRET_ACCESS_KEY", FAKE_PASSWORD)
+    called: list[None] = []
+    monkeypatch.setattr(cli, "reparse_papers", lambda *_a, **_k: called.append(None))
+
+    result = runner.invoke(cli.app, ["reparse"], catch_exceptions=False)
+
+    assert result.exit_code == 1
+    assert "ValueError" in result.stderr
+    captured = capsys.readouterr()
+    for text in (result.stdout, result.stderr, captured.out, captured.err):
+        assert "bad host!" not in text
+        assert FAKE_PASSWORD not in text
+        assert "FAKE-ACCESS-not-real" not in text
+        assert "s3cret-APP" not in text
+    assert called == []
+
+
+@pytest.mark.usefixtures("env")
+def test_endpoint_with_credentials_is_config_error(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], calls: dict[str, Any]
+) -> None:
+    monkeypatch.setenv("RADAR_OBJECT_STORE_ENDPOINT_URL", FAKE_ENDPOINT)
+
+    result = runner.invoke(cli.app, ["reparse"], catch_exceptions=False)
+
+    assert result.exit_code == 1
+    assert "RADAR_OBJECT_STORE_ENDPOINT_URL" in result.stderr
+    captured = capsys.readouterr()
+    for text in (result.stdout, result.stderr, captured.out, captured.err):
+        assert FAKE_PASSWORD not in text
+        assert "fake-user" not in text
+    assert "reparse" not in calls

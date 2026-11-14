@@ -123,11 +123,12 @@ def reparse() -> None:
     try:
         settings = load_settings()
         domain_config = load_domain_config()
-        store = build_object_store(settings)
     except ConfigError as exc:
         log.error("設定錯誤，無法重新解析", problems=exc.problems)
         _fail("設定錯誤，沒有重新解析：", exc.problems)
     try:
+        # 建立物件儲存的 client 也放在這裡：botocore 初始化失敗的訊息會帶整個端點網址。
+        store = build_object_store(settings)
         database = build_database(settings, pool_size=database_pool_size(settings, "cli"))
         result = reparse_papers(
             SystemViewer(),
@@ -136,6 +137,10 @@ def reparse() -> None:
             scope=domain_config.journals.scope_settings(),
             exclusion_rules=domain_config.exclusion_rules,
         )
+    except ConfigError as exc:
+        # build_object_store 缺設定時丟的；訊息只列環境變數名稱。
+        log.error("設定錯誤，無法重新解析", problems=exc.problems)
+        _fail("設定錯誤，沒有重新解析：", exc.problems)
     except Exception as exc:
         # 例外訊息可能含主機與帳號，只記類別名稱。
         log.error("重新解析失敗", error_type=type(exc).__name__)

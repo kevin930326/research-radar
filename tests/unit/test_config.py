@@ -421,3 +421,22 @@ def test_object_store_endpoint_url_must_be_http_with_host(value: str) -> None:
     assert "RADAR_OBJECT_STORE_ENDPOINT_URL" in problem
     assert value not in str(caught.value)
     assert "storage.example" not in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "https://fake-user:FAKE-PASSWORD-0000@storage.example",
+        "https://fake-user@storage.example",
+        "https://:FAKE-PASSWORD-0000@storage.example",
+    ],
+)
+def test_object_store_endpoint_url_rejects_credentials(value: str) -> None:
+    with pytest.raises(ConfigError) as caught:
+        load_settings({"DATABASE_URL": DB_URL, "RADAR_OBJECT_STORE_ENDPOINT_URL": value})
+
+    [problem] = caught.value.problems
+    assert "RADAR_OBJECT_STORE_ENDPOINT_URL" in problem
+    assert "FAKE-PASSWORD-0000" not in str(caught.value)
+    assert "fake-user" not in str(caught.value)
+    assert "storage.example" not in str(caught.value)

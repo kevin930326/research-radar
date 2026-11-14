@@ -133,11 +133,13 @@ deferred: []
 **Acceptance Criteria:**
 - Given 錄製的 OpenAlex 回應，when 用 `parse_openalex_work` 解析，then 得到含 DOI、標題、作者、期刊、出版年、卷期頁碼、類型、撤稿標記、還原的摘要與來源、`referenced_works`、`cited_by_count`、OpenAlex 關鍵字的 `ParsedPaper`，`source_hash` 只由摘要、撤稿標記與書目欄位決定，沒有摘要是 None 而不是空字串，出版年不被改。
 - Given `config/exclusion_rules.yaml`，when 論文標題符合一條規則，then reparse 後 `paper.excluded_reason` 是那條規則的代碼、論文沒有被刪；改設定檔（不改程式）再 reparse，結果跟著變。
-- Given 解析好的論文，when 寫入，then 摘要在 `paper_abstract`（來源 `openalex`、每篇最多一筆 `is_current`，資料庫保證），OpenAlex 關鍵字在 `paper_keyword`（來源 `openalex`），兩者都不影響 `source_hash`。
+- Given 解析好的論文，when 寫入，then 摘要在 `paper_abstract`（來源 `openalex`、每篇最多一筆 `is_current`，資料庫保證），OpenAlex 關鍵字在 `paper_keyword`（來源 `openalex`）；摘要算進 `source_hash`，關鍵字與被引用次數不算。
 - Given 已匯入的論文與已存的原始資料，when 解析函式多了一個欄位後執行 `radar reparse`，then 不連任何外部來源、那個欄位就有值（`tests/integration/test_reparse_cli.py`），且過程先寫 `ingest_staging`、最後一個交易套用，沒有寫 `first_snapshot_id` 或建立快照。
 - Given push 到 GitHub，when CI 跑完，then checks、image (amd64)、image (arm64)、manifest 全綠，`alembic check` 沒有差異，CI 不需要任何 secret。
 
 ## Spec Change Log
+
+- 2026-11-14 — Acceptance Criteria 第 3 條原本寫「兩者（摘要與關鍵字）都不影響 `source_hash`」，與 epics.md 的驗收（關鍵字與被引用次數不算進 `source_hash`）、Always 的指紋欄位清單（含 `abstract`）和程式矛盾，是寫法失誤。改成「摘要算進 `source_hash`，關鍵字與被引用次數不算」。只改規格文字，程式與測試不變（Review Triage Log 已記這筆 reject 的理由）。
 
 ## Review Triage Log
 
@@ -230,3 +232,19 @@ deferred: []
 - 排除規則只有 PRD 寫明的四條；`Editorial Board`、`Corrigendum` 等候選等 Kevin 決定。
 
 **CI 修正（第一次 push 後）**：CI 的 Linux 上 `tests/unit/test_openalex_parser.py::test_deeply_nested_object_is_parse_error` 失敗（10 萬層巢狀在 Linux 解得完、不會 RecursionError；Python 3.14 依 C 堆疊大小判斷遞迴深度，macOS 會丟）。這是本 Story 新寫的測試，原本的假設依平台而定。改成兩個測試：讓 `json.loads` 丟 `RecursionError`，確定轉成 `ParseError`（訊息「巢狀太深」）；真的 10 萬層內容只允許「解得完」或 `ParseError`，不能丟別種例外。程式沒改。
+
+## Codex 審查修正
+
+**意見（中）**：`radar reparse` 把 `build_object_store(settings)` 放在只接 `ConfigError` 的 try 區塊裡。設定驗證通過、但 botocore 建 client 時失敗（例如端點主機名稱不合法）會丟 `ValueError("Invalid endpoint: <整個網址>")`，沒被接住，實際執行時會整段印出來；網址帶帳密時密碼跟著外洩，違反指令說明的「只印錯誤類別、不印連線字串」。原本的測試只模擬 `reparse_papers()` 失敗，沒有涵蓋初始化階段。
+
+**修法**：
+- `radar/entrypoints/cli/__init__.py`：第一個 try 只留 `load_settings()` 與 `load_domain_config()`；`build_object_store` 搬進第二個 try（和建資料庫、`reparse_papers` 同一段），並在那裡先接 `ConfigError`（缺 `RADAR_OBJECT_STORE_*` 時照舊列出缺哪些環境變數），其他例外只印、只記錯誤類別名稱，退出碼 1。
+- `radar/domain/settings.py`：`object_store_endpoint_url` 的驗證順便拒絕網址裡的帳號或密碼（userinfo）；帳密應該放 `RADAR_OBJECT_STORE_ACCESS_KEY_ID`／`SECRET_ACCESS_KEY`（SecretStr）。錯誤訊息只寫「網址不能含帳號或密碼」，不含值。
+- 其他指令檢查過：`migrate` 的 `build_migration_runner`、`enqueue` 的 `build_job_enqueuer` 都已經在接一般例外的區塊裡；只接 `ConfigError` 的區塊只做讀環境變數與設定檔，不連線、不建 client。沒有要改的。
+
+**測試**（新增，沒有改既有測試）：
+- `tests/unit/test_cli_reparse.py::test_object_store_init_failure_prints_only_error_class`：`build_object_store` 換成丟出帶假帳密網址的 `ValueError`；`catch_exceptions=False` 讓沒接住的例外直接讓測試失敗；斷言退出碼 1、stderr 有 `ValueError`、日誌（JSON 在 stdout）有 `error_type`，stdout、stderr 與 capsys 都不含假密碼、假帳號、主機名稱。
+- `tests/unit/test_cli_reparse.py::test_invalid_object_store_endpoint_prints_only_error_class`：用真的 `build_object_store`，端點主機名稱不合法（通過設定驗證、botocore 才失敗），斷言同上，且沒有呼叫 `reparse_papers`。
+- `tests/unit/test_cli_reparse.py::test_endpoint_with_credentials_is_config_error`：端點帶帳密時在設定驗證就擋下，stderr 列出環境變數名稱、輸出不含帳密。
+- `tests/unit/test_config.py::test_object_store_endpoint_url_rejects_credentials`（三種寫法：帳號＋密碼、只有帳號、只有密碼）：`ConfigError` 只指出環境變數，不含值。
+- 拿掉修正確認會失敗：把 CLI 換回舊寫法，前兩個測試失敗（`ValueError: Invalid endpoint: ...` 直接丟出）；把設定驗證換回舊寫法，後兩組共 4 個測試失敗。
