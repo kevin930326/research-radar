@@ -463,6 +463,10 @@ def apply_weekly_update(
         conflicts=tally.conflicts,
         first_snapshot_assigned=tally.first_snapshot_assigned,
     )
+    if tally.staged == 0:
+        # 每週整本重掃，正常不會 0 篇；0 篇多半是查詢或解析壞了。照樣發佈（行為不變），
+        # 但留一筆警告讓人看得到（1.9 審查第 6 條）。
+        log.warning("這次每週更新沒有任何暫存論文", weekly_run_id=str(weekly_run_id))
     log.info(
         "每週更新已套用並發佈快照",
         weekly_run_id=str(weekly_run_id),

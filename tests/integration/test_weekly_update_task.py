@@ -179,12 +179,15 @@ def test_finished_run_builds_no_adapter_and_applies(
     assert [(number, run, status) for _id, number, run, status in _snapshots(weekly_db)] == [
         (1, run_id, "published")
     ]
+    # 這一筆暫存是 0 列，所以有「沒有任何暫存論文」的警告（1.9 審查第 6 條）。
     assert [log["event"] for log in logs] == [
         "每週更新已經抓完，不再抓",
         "這個排程沒有設定心跳網址，不送",
+        "這次每週更新沒有任何暫存論文",
         "每週更新已套用並發佈快照",
     ]
     assert logs[1]["check"] == "weekly-update"
+    assert logs[2]["log_level"] == "warning"
 
 
 def test_broken_journals_yaml_after_fetch_fails_to_prepare_the_apply(

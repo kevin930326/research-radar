@@ -391,6 +391,8 @@ def test_first_apply_writes_papers_and_publishes_snapshot_1(
     [done] = [log for log in logs if log["event"] == "每週更新已套用並發佈快照"]
     assert (done["snapshot_number"], done["staged"], done["created"]) == (1, staged, staged)
     assert isinstance(done["seconds"], float)
+    # 有暫存論文時，沒有「0 篇」的警告（1.9 審查第 6 條）。
+    assert not [log for log in logs if log["event"] == "這次每週更新沒有任何暫存論文"]
 
 
 # --- 中途失敗 ---------------------------------------------------------------------------------
