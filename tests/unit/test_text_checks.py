@@ -1,0 +1,133 @@
+"""2.4 抽出的共用文字檢查裡的數字解析（`radar/domain/validators/text_checks.py`），Story 2.6 Codex
+主審查後補：
+
+- 負號和數字隔一個空白（`β = - 0.42`）讀成負數，不再讀成 0.42。
+- 科學記號（`4.2 × 10^-2`、`10⁻²`、`10^-3`）：`numbers` 整段不取（不把 4.2、10、2 當成輸入裡的
+  數字）；`structured_numbers` 算出完整的值（0.042）。
+- `structured_numbers`（研究模型的結構化數值用）只有完整量級：`12 million` 只有 12000000。
+- 2.4 中文重點的行為：錯的正號、科學記號的碎片不再放行（更嚴）；原本被誤拒、寫對負號的寫法
+  （輸入 `= - 0.42`、輸出 `-0.42`）現在對得上。2.4 原本的測試斷言都沒改。
+"""
+
+import time
+from decimal import Decimal
+
+import pytest
+
+from radar.domain.ai_outputs import OutputRejectedError
+from radar.domain.errors import ErrorCode
+from radar.domain.validators.text_checks import (
+    InputVocabulary,
+    Number,
+    check_copy,
+    numbers,
+    structured_numbers,
+)
+from tests.unit.test_zh_summary_validator import _numbers_only
+
+
+def _n(value: str, *, percent: bool = False) -> Number:
+    return Decimal(value).normalize(), percent
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("β = - 0.42", {_n("-0.42")}),
+        ("(- 0.42)", {_n("-0.42")}),
+        ("β: - .42", {_n("-0.42")}),
+        ("β < - 0.1", {_n("-0.1")}),
+        ("3 - 5 years", {_n("3"), _n("5")}),  # 範圍，不是負號
+        ("β = -0.42", {_n("-0.42")}),
+    ],
+)
+def test_spaced_minus_after_an_equals_sign_is_a_minus(text: str, expected: set[Number]) -> None:
+    assert numbers(check_copy(text))[0] == expected
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["β = 4.2 × 10^-2", "β = 4.2 x 10^-2", "β = 4.2 × 10⁻²", "β = 4.2·10^−2", "β = 10^-3", "2^10"],
+)
+def test_scientific_notation_gives_no_fragments(text: str) -> None:
+    assert numbers(check_copy(text))[0] == set()
+
+
+@pytest.mark.parametrize(
+    ("text", "value"),
+    [
+        ("β = 4.2 × 10^-2", "0.042"),
+        ("β = 4.2 x 10^-2", "0.042"),
+        ("β = 4.2 × 10⁻²", "0.042"),
+        ("β = -4.2 × 10^-2", "-0.042"),
+        ("p = 10^-3", "0.001"),
+        ("N = 1.5 × 10^3", "1500"),
+    ],
+)
+def test_structured_numbers_read_the_whole_scientific_value(text: str, value: str) -> None:
+    found = structured_numbers(check_copy(text))
+
+    assert _n(value) in found
+    assert _n("4.2") not in found
+    assert _n("10") not in found
+
+
+@pytest.mark.parametrize(
+    ("text", "present", "absent"),
+    [
+        ("N = 12 million", "12000000", "12"),
+        ("1.2 thousand users", "1200", "1.2"),
+        ("12 萬名使用者", "120000", "12"),
+        ("two hundred users", "200", "2"),
+        ("β = - 0.42", "-0.42", "0.42"),
+    ],
+)
+def test_structured_numbers_keep_only_the_full_magnitude(
+    text: str, present: str, absent: str
+) -> None:
+    found = structured_numbers(check_copy(text))
+
+    assert _n(present) in found
+    assert _n(absent) not in found
+
+
+def test_input_vocabulary_of_zh_summary_still_keeps_unscaled_numbers() -> None:
+    # 2.4 原本的行為不變：中文重點可以寫「12 million」裡的 12。
+    vocabulary = InputVocabulary.build(check_copy("N = 12 million"))
+
+    assert {_n("12"), _n("12000000")} <= vocabulary.numbers
+
+
+# --- 2.4 中文重點：更嚴的兩種、原本誤拒的一種 ------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("method", "abstract"),
+    [
+        ("效果為 0.42", "The effect was β = - 0.42."),
+        ("效果為 4.2", "The effect was β = 4.2 × 10^-2."),
+        ("效果為 10", "The effect was β = 4.2 × 10^-2."),
+    ],
+)
+def test_zh_summary_no_longer_accepts_a_wrong_sign_or_a_fragment(
+    method: str, abstract: str
+) -> None:
+    with pytest.raises(OutputRejectedError) as caught:
+        _numbers_only(method, abstract)
+
+    assert caught.value.code is ErrorCode.ZH_SUMMARY_UNSUPPORTED_CONTENT
+
+
+def test_zh_summary_accepts_the_correct_sign_of_a_spaced_minus() -> None:
+    assert _numbers_only("效果為 -0.42", "The effect was β = - 0.42.").method == "效果為 -0.42"
+
+
+@pytest.mark.parametrize("unit", ["^", "1^", "a^b ", "10^", "× 10^-", "4.2×10^-2 "])
+def test_long_adversarial_scientific_text_is_quick(unit: str) -> None:
+    text = check_copy(unit * 16_000)
+    started = time.perf_counter()
+
+    numbers(text, keep_unscaled=True)
+    structured_numbers(text)
+
+    assert time.perf_counter() - started < 2

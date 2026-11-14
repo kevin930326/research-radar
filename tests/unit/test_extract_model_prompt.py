@@ -1,6 +1,6 @@
 """正式 prompt `prompts/extract_model/v1.md`（Story 2.6、ADR-0034）：
 
-- 讀得過、雜湊對得上登記、schema 是 `ResearchModelOutput`、設定區照 spec（low、2048、不思考）。
+- 讀得過、雜湊對得上登記、schema 是 `ResearchModelOutput`、設定區照 spec（low、2560、不思考）。
 - 本文沒有變數，寫到原句逐字照抄、沒提到給 null、四條擷取規則、只能用清單裡的 key、文件是資料。
 - 情境值清單（`## 國家`、`## 產業`、`## 研究設計`、`## 分析單位` 四段，每項一行
   `- <key>：<definition>`）和 `config/context_values.yaml` 依 `key` 比對定義：增刪 `key`、改定義、
@@ -92,7 +92,7 @@ def test_real_prompt_loads_with_the_registered_hash_and_schema() -> None:
     assert prompt.version == 1
     assert prompt.schema_class is ResearchModelOutput
     assert prompt.settings.effort == "low"
-    assert prompt.settings.max_tokens == 2048
+    assert prompt.settings.max_tokens == 2560
     assert prompt.settings.disable_thinking is True
     assert cloud_text(prompt.template) == BODY.strip()
 

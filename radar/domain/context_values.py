@@ -7,16 +7,25 @@
 
 - 四個情境欄位：國家、產業、研究設計、分析單位。模型只能回清單裡的 `key`；清單外的存空值並計數
   （`dropped_context_value_count`），不算拒收。
-- 國家與產業另有 `terms`（輸入裡要寫出其中一個，才算「明確寫出」；FR-3 擷取規則 4「不推測」）；
-  研究設計與分析單位沒有 `terms`。
-- 內容雜湊算每個欄位依 `key` 排序後的（`key`, 定義, `terms`），由
+- 國家與產業另有 `terms`（輸入裡要寫出其中一個，才算「明確寫出」；FR-3 擷取規則 4「不推測」），
+  可以再加 `excluded_terms`（包含某個 `terms` 的較長別的名稱，例如北韓全名包含 Republic of Korea；
+  `terms` 落在它裡面不算寫出）；研究設計與分析單位兩者都沒有。
+- 內容雜湊算每個欄位依 `key` 排序後的（`key`, 定義, `terms`, `excluded_terms`），由
   `domain/fingerprints.context_values_content_sha256` 算；顯示名稱（`name`）與項目順序不算。
 """
 
+import re
 from enum import StrEnum
 from typing import Self
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 
 from radar.domain import context_values_hashes
 from radar.domain.fingerprints import context_values_content_sha256
@@ -48,7 +57,8 @@ def _one_line_text(value: str, name: str) -> str:
 
 class ContextValueItem(BaseModel):
     """情境值清單的一項：`key`（寫進資料庫）、`name`（顯示名稱）、`definition`（給模型看）；
-    國家與產業另有 `terms`（輸入裡要寫出的英文字樣，不分大小寫）。"""
+    國家與產業另有 `terms`（輸入裡要寫出的英文字樣，不分大小寫），可以再有 `excluded_terms`
+    （包含某個 `terms` 的較長別的名稱；`terms` 落在它裡面不算寫出）。"""
 
     model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
 
@@ -57,6 +67,7 @@ class ContextValueItem(BaseModel):
     definition: str
     # YAML 的清單是 list：這一欄不用 strict（strict 的 tuple 不收 list），項目照樣只收字串。
     terms: tuple[str, ...] | None = Field(default=None, strict=False)
+    excluded_terms: tuple[str, ...] | None = Field(default=None, strict=False)
 
     @field_validator("key")
     @classmethod
@@ -75,20 +86,44 @@ class ContextValueItem(BaseModel):
     def _check_definition(cls, value: str) -> str:
         return _one_line_text(value, "definition")
 
-    @field_validator("terms")
+    @field_validator("terms", "excluded_terms")
     @classmethod
-    def _check_terms(cls, value: tuple[str, ...] | None) -> tuple[str, ...] | None:
+    def _check_terms(
+        cls, value: tuple[str, ...] | None, info: ValidationInfo
+    ) -> tuple[str, ...] | None:
+        name = info.field_name
         if value is None:
             return None
         if not value:
-            raise ValueError("terms 不能是空的（不需要就整個不寫）")
+            raise ValueError(f"{name} 不能是空的（不需要就整個不寫）")
         for term in value:
-            _one_line_text(term, "terms")
+            _one_line_text(term, str(name))
             if term != term.strip():
-                raise ValueError("terms 的每一項前後不能有空白")
+                raise ValueError(f"{name} 的每一項前後不能有空白")
         if len({term.casefold() for term in value}) != len(value):
-            raise ValueError("terms 有重複（不分大小寫）")
+            raise ValueError(f"{name} 有重複（不分大小寫）")
         return value
+
+    @model_validator(mode="after")
+    def _check_exclusions(self) -> Self:
+        if self.excluded_terms is None:
+            return self
+        if self.terms is None:
+            raise ValueError(f"{self.key} 沒有 terms，不能有 excluded_terms")
+        for excluded in self.excluded_terms:
+            if not any(_contains_word(excluded, term) for term in self.terms):
+                raise ValueError(
+                    f"{self.key} 的 excluded_terms「{excluded}」要包含某個 terms（才有排除的意義）"
+                )
+            if any(excluded.casefold() == term.casefold() for term in self.terms):
+                raise ValueError(f"{self.key} 的 excluded_terms「{excluded}」和 terms 一樣")
+        return self
+
+
+def _contains_word(longer: str, shorter: str) -> bool:
+    """`shorter` 是 `longer` 裡完整的字詞（不分大小寫，前後不接英文字母或數字）。"""
+    pattern = rf"(?<![0-9a-z]){re.escape(shorter.casefold())}(?![0-9a-z])"
+    return re.search(pattern, longer.casefold()) is not None
 
 
 def _check_field(items: tuple[ContextValueItem, ...], *, needs_terms: bool) -> None:
@@ -101,6 +136,8 @@ def _check_field(items: tuple[ContextValueItem, ...], *, needs_terms: bool) -> N
             raise ValueError(f"{item.key} 要有 terms（輸入要明確寫出才算）")
         if not needs_terms and item.terms is not None:
             raise ValueError(f"{item.key} 不能有 terms（只有國家與產業有）")
+        if not needs_terms and item.excluded_terms is not None:
+            raise ValueError(f"{item.key} 不能有 excluded_terms（只有國家與產業有）")
 
 
 class ContextValues(BaseModel):
@@ -152,7 +189,8 @@ def context_values_registry_problems(values: ContextValues) -> list[str]:
     對得上）。
 
     - 這個版本沒有登記 → 升了版卻沒登記。
-    - 登記的雜湊和內容算出來的不一樣 → `key`、定義、`terms` 或欄位改了卻沒升版。
+    - 登記的雜湊和內容算出來的不一樣 → `key`、定義、`terms`、`excluded_terms` 或欄位改了卻沒
+      升版。
     """
     registered = context_values_hashes.CONTEXT_VALUES_CONTENT_HASHES.get(values.version)
     if registered is None:

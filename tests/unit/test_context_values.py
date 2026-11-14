@@ -6,6 +6,7 @@
 - 每種格式錯都在讀取時擋下，訊息是「檔名：欄位路徑：原因」、每條一行。
 """
 
+import re
 from pathlib import Path
 
 import pytest
@@ -364,3 +365,83 @@ def test_duplicate_yaml_key_is_refused(tmp_path: Path) -> None:
     assert len(problems) == 1
     assert "version" in problems[0]
     assert "寫了兩次" in problems[0]
+
+
+# --- excluded_terms（Codex 主審查後補：較長的別的地名） -----------------------------------------
+
+
+def _contains_word(longer: str, shorter: str) -> bool:
+    pattern = rf"(?<![0-9a-z]){re.escape(shorter.casefold())}(?![0-9a-z])"
+    return re.search(pattern, longer.casefold()) is not None
+
+
+def test_real_list_excludes_north_korea_and_other_longer_names() -> None:
+    values = _real()
+    kr = values.item(ContextField.COUNTRY, "kr")
+    cn = values.item(ContextField.COUNTRY, "cn")
+    assert kr is not None
+    assert kr.excluded_terms is not None
+    assert cn is not None
+    assert cn.excluded_terms is not None
+    assert "Democratic People's Republic of Korea" in kr.excluded_terms
+    assert "Republic of China" in cn.excluded_terms
+
+
+def test_no_term_of_one_item_hides_inside_a_term_of_another() -> None:
+    # 一個項目的 terms 不能是另一個項目 terms 裡的完整字詞（否則寫出長的那個也會算成短的那個）；
+    # 有這種情況就要在短的那一項加 excluded_terms。
+    values = _real()
+    for field in TERM_FIELDS:
+        items = values.items(field)
+        for item in items:
+            for other in items:
+                if other.key == item.key:
+                    continue
+                for term in item.terms or ():
+                    for longer in other.terms or ():
+                        excluded = item.excluded_terms or ()
+                        assert not _contains_word(longer, term) or any(
+                            _contains_word(longer, ex) for ex in excluded
+                        ), (item.key, term, other.key, longer)
+
+
+@pytest.mark.parametrize("name", ["research_designs", "units_of_analysis"])
+def test_design_or_unit_with_excluded_terms_is_refused(tmp_path: Path, name: str) -> None:
+    data = _real_data()
+    item = _items(data, name)[0]
+    item["excluded_terms"] = ["online survey"]
+
+    problems = _problems(tmp_path, data)
+
+    assert len(problems) == 1
+    assert str(item["key"]) in problems[0]
+    assert "不能有 excluded_terms" in problems[0]
+
+
+@pytest.mark.parametrize(
+    ("excluded", "reason"),
+    [
+        (["Mainland"], "要包含某個 terms"),
+        (["Taiwanese"], "和 terms 一樣"),
+        (["Taiwanization"], "要包含某個 terms"),  # 只是字首，不是完整字詞
+        ([], "excluded_terms 不能是空的"),
+        (["Taiwan Strait", "taiwan strait"], "excluded_terms 有重複"),
+    ],
+)
+def test_bad_excluded_terms_are_refused(tmp_path: Path, excluded: list[str], reason: str) -> None:
+    data = _real_data()
+    _items(data, "countries")[0]["excluded_terms"] = excluded
+
+    problems = _problems(tmp_path, data)
+
+    assert len(problems) == 1
+    assert reason in problems[0]
+
+
+def test_excluded_terms_change_the_content_hash() -> None:
+    data = _real_data()
+    before = context_values_content_sha256(ContextValues.model_validate(data))
+    _items(data, "countries")[0]["excluded_terms"] = ["Taiwan Strait"]
+    after = context_values_content_sha256(ContextValues.model_validate(data))
+
+    assert before != after

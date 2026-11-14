@@ -1,8 +1,9 @@
 """研究模型的內容（Story 2.6、ADR-0012、ADR-0015、ADR-0034）。
 
 - `research_model` 加論文層級的內容欄位（全部可為 NULL）：`is_review_or_meta_analysis`、四個情境
-  欄位（情境值清單的 `key`）、`sample_size`、`limitations`、`future_research`，與三個計數
-  （`dropped_context_value_count`、`unsupported_context_value_count`、`corrected_support_count`）。
+  欄位（情境值清單的 `key`）、`sample_size`、`limitations`、`future_research`，與四個計數
+  （`dropped_context_value_count`、`unsupported_context_value_count`、`corrected_support_count`、
+  `cleared_value_count`）。
   CHECK：`key` 寫法、樣本數 ≥ 1、文字不是空白、計數不是負數、`rejected` 的內容與計數全是 NULL。
 - 新增 `construct`：以 `normalized_name` 為唯一鍵，`canonical_id` 不可為空、指向自己這張表（新構面
   指向自己，由 `repo/constructs.py` 寫入）。
@@ -34,6 +35,7 @@ _COUNT_COLUMNS = (
     "dropped_context_value_count",
     "unsupported_context_value_count",
     "corrected_support_count",
+    "cleared_value_count",
 )
 _CONTENT_COLUMNS = (
     "is_review_or_meta_analysis",
@@ -166,6 +168,7 @@ def upgrade() -> None:
         sa.Column("p_value", sa.Numeric(), nullable=True),
         sa.Column("sample_size", sa.Integer(), nullable=True),
         sa.Column("effect_type", sa.Text(), nullable=True),
+        sa.Column("result_quote", sa.Text(), nullable=True),
         sa.PrimaryKeyConstraint("id", name="pk_hypothesis"),
         sa.ForeignKeyConstraint(
             ["research_model_id"],
@@ -194,8 +197,14 @@ def upgrade() -> None:
         ),
         sa.CheckConstraint("ordinal >= 1", name="ck_hypothesis_ordinal_positive"),
         sa.CheckConstraint(
-            "sentence ~ '[^[:space:]]' AND (effect_type IS NULL OR effect_type ~ '[^[:space:]]')",
+            "sentence ~ '[^[:space:]]' AND (effect_type IS NULL OR effect_type ~ '[^[:space:]]')"
+            " AND (result_quote IS NULL OR result_quote ~ '[^[:space:]]')",
             name="ck_hypothesis_text_not_blank",
+        ),
+        sa.CheckConstraint(
+            "(support IN ('supported', 'not_supported', 'partially_supported'))"
+            " = (result_quote IS NOT NULL)",
+            name="ck_hypothesis_result_quote_matches_support",
         ),
         sa.CheckConstraint(
             "sentence_sha256 ~ '^[0-9a-f]{64}$'", name="ck_hypothesis_sentence_sha256_format"

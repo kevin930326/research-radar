@@ -60,11 +60,11 @@ TITLE = "Perceived usefulness and trust in mobile banking adoption"
 ABSTRACT = (
     "Based on a survey of 200 bank customers in Taiwan, we test a model of mobile banking "
     "adoption. Perceived usefulness is defined as the degree to which users believe the app "
-    "improves their banking. Perceived usefulness positively affects trust (β = 0.42, p < .01). "
+    "improves their banking. Perceived usefulness positively affects trust (β = 0.42, p = .01). "
     "Interviews with managers suggest that trust shapes loyalty. "
     "Future research should test other countries."
 )
-SENTENCE = "Perceived usefulness positively affects trust (β = 0.42, p < .01)."
+SENTENCE = "Perceived usefulness positively affects trust (β = 0.42, p = .01)."
 GOOD: dict[str, Any] = {
     "is_review_or_meta_analysis": False,
     "context": {
@@ -92,6 +92,7 @@ GOOD: dict[str, Any] = {
             "effect": "Trust",
             "evidence_type": "empirical_test",
             "support": "supported",
+            "result_quote": SENTENCE,
             "statistics": {
                 "beta": 0.42,
                 "p_value": 0.01,
@@ -101,7 +102,7 @@ GOOD: dict[str, Any] = {
         }
     ],
 }
-COUNTS = ("dropped", "unsupported", "corrected")
+COUNTS = ("dropped", "unsupported", "corrected", "cleared")
 DETAIL_TABLES = ("construct", "construct_mention", "hypothesis")
 
 
@@ -180,6 +181,7 @@ _HEADER_COLUMNS = (
     "dropped_context_value_count",
     "unsupported_context_value_count",
     "corrected_support_count",
+    "cleared_value_count",
 )
 
 
@@ -195,6 +197,7 @@ def _headers(db: TestDatabase, paper_id: uuid.UUID | None = None) -> list[dict[s
         header["dropped"] = header.pop("dropped_context_value_count")
         header["unsupported"] = header.pop("unsupported_context_value_count")
         header["corrected"] = header.pop("corrected_support_count")
+        header["cleared"] = header.pop("cleared_value_count")
     return headers
 
 
@@ -268,7 +271,7 @@ def test_good_reply_is_stored_as_active_en_with_constructs_and_hypotheses(
     ) == ("tw", "financial_services", "survey", "individual", 200)
     assert header["limitations"] is None
     assert header["future_research"] == "Future research should test other countries."
-    assert [header[name] for name in COUNTS] == [0, 0, 0]
+    assert [header[name] for name in COUNTS] == [0, 0, 0, 0]
 
     # 兩列構面，新構面的 canonical 指向自己。
     constructs = execute(
@@ -301,7 +304,7 @@ def test_good_reply_is_stored_as_active_en_with_constructs_and_hypotheses(
     # 系統提示裡，文件區塊是標題＋摘要。
     (request,) = provider.requests
     assert request.output_schema is ResearchModelOutput
-    assert request.max_tokens == 2048
+    assert request.max_tokens == 2560
     assert request.effort == "low"
     assert request.disable_thinking is True
     assert "- tw：" in system_prompt(request)
@@ -332,6 +335,12 @@ def _change(change: str) -> dict[str, Any]:
             data["hypotheses"].append(copy.deepcopy(hypothesis))
         case "blank_text":
             data["future_research"] = "   "
+        case "no_result_quote":
+            hypothesis["result_quote"] = None
+        case "hypothesis_only_result_quote":
+            hypothesis["result_quote"] = "Perceived usefulness positively affects trust"
+        case "punctuation_only_text":
+            data["future_research"] = "-"
     return data
 
 
@@ -382,7 +391,8 @@ def test_measurement_and_statistics_are_stored_in_their_columns(
     ]
     assert execute(
         db,
-        "SELECT beta::text, p_value, sample_size, effect_type, sentence_sha256 FROM hypothesis"
+        "SELECT beta::text, p_value, sample_size, effect_type, sentence_sha256, result_quote"
+        " FROM hypothesis"
         " WHERE research_model_id = %s",
         header["id"],
     ) == [
@@ -392,19 +402,49 @@ def test_measurement_and_statistics_are_stored_in_their_columns(
             180,
             "mediated effect",
             hypothesis_sentence_sha256(quote_key(SENTENCE).strip(" .,;:")),
+            SENTENCE,
         )
     ]
+
+
+def test_p_value_threshold_is_stored_as_null_and_counted(
+    db: TestDatabase,
+    database: Database,
+    config: GatewayConfig,
+    context_values: ContextValues,
+) -> None:
+    # Codex 審查：摘要只寫 p < .01，模型回 p_value = 0.01 時不存成確切的值。
+    threshold = SENTENCE.replace("p = .01", "p < .01")
+    paper = create_paper(database, title=TITLE, abstract=ABSTRACT.replace("p = .01", "p < .01"))
+    reply = _good()
+    reply["hypotheses"][0] |= {"sentence": threshold, "result_quote": threshold}
+
+    run = _run(database, config, context_values, paper, FakeLlmProvider([_reply(reply)]))
+
+    assert run.result is not None
+    assert run.result.outcome is GatewayOutcome.ACTIVE
+    header = _only(db)
+    assert [header[name] for name in COUNTS] == [0, 0, 0, 1]
+    (hypothesis,) = _hypotheses(db, header["id"])
+    assert (hypothesis["beta"], hypothesis["p"], hypothesis["support"]) == (
+        "0.42",
+        None,
+        "supported",
+    )
 
 
 @pytest.mark.parametrize(
     ("change", "counts", "check"),
     [
-        ("out_of_list", [2, 0, 0], {"country": None, "industry": None}),
-        ("inferred_country", [0, 1, 0], {"country": None, "industry": "financial_services"}),
-        ("qualitative_supported", [0, 0, 1], {}),
-        ("empirical_not_determined", [0, 0, 1], {}),
-        ("duplicate", [0, 0, 0], {}),
-        ("blank_text", [0, 0, 0], {"future_research": None}),
+        ("out_of_list", [2, 0, 0, 0], {"country": None, "industry": None}),
+        ("inferred_country", [0, 1, 0, 0], {"country": None, "industry": "financial_services"}),
+        ("qualitative_supported", [0, 0, 1, 0], {}),
+        ("empirical_not_determined", [0, 0, 1, 0], {}),
+        ("duplicate", [0, 0, 0, 0], {}),
+        ("blank_text", [0, 0, 0, 0], {"future_research": None}),
+        ("no_result_quote", [0, 0, 1, 0], {}),
+        ("hypothesis_only_result_quote", [0, 0, 1, 0], {}),
+        ("punctuation_only_text", [0, 0, 0, 1], {"future_research": None}),
     ],
 )
 def test_reply_is_corrected_and_counted_not_rejected(
@@ -432,6 +472,8 @@ def test_reply_is_corrected_and_counted_not_rejected(
     expected_support = {
         "qualitative_supported": "not_determined",
         "empirical_not_determined": "not_stated",
+        "no_result_quote": "not_stated",
+        "hypothesis_only_result_quote": "not_stated",
     }.get(change, "supported")
     assert hypothesis["support"] == expected_support
 
@@ -680,9 +722,10 @@ def test_two_papers_mentioning_the_same_construct_share_one_construct_row(
                 "effect": "Loyalty",
                 "evidence_type": "empirical_test",
                 "support": "supported",
+                "result_quote": "we find that trust increases loyalty (p < .05)",
                 "statistics": {
                     "beta": None,
-                    "p_value": 0.05,
+                    "p_value": None,
                     "sample_size": 150,
                     "effect_type": None,
                 },

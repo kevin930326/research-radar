@@ -264,6 +264,10 @@ class ClassificationContent:
 # 研究模型萃取 schema 的版本（PRD FR-3「定版並記版本號」）：`ResearchModelOutput` 與它的驗證規則
 # 改了就加一。記在 `derivation_run.params.extraction_schema_version`（和 prompt 版本一起當版本號）。
 EXTRACTION_SCHEMA_VERSION: Final = 1
+# 「判定了」的支持與否（FR-3 擷取規則 1：要有寫出結果的原文 `result_quote`）。
+DECIDED_SUPPORT: Final = frozenset(
+    {SupportLevel.SUPPORTED, SupportLevel.NOT_SUPPORTED, SupportLevel.PARTIALLY_SUPPORTED}
+)
 _SHA256_HEX: Final = re.compile(r"[0-9a-f]{64}")
 
 
@@ -340,11 +344,15 @@ class HypothesisContent:
     """一條關係（`hypothesis` 的一列，Story 2.6、ADR-0034）。
 
     `cause`、`effect` 是構面的 `normalized_name`；`ordinal` 是這篇裡的順序（從 1 開始）；
-    `sentence_sha256` 是正規化後原句的雜湊（「不同原句」數得出來，FR-3 擷取規則 3）。
-    支持與否已照 FR-3 擷取規則 1、2 改過：實證檢定一定不是 `not_determined`，其他證據類型一定是。
+    `sentence_sha256` 是原句所在的**來源句子**（輸入裡涵蓋原句的完整句子）正規化後的雜湊：同一句
+    的完整版與片段算同一句（「不同原句」數得出來，FR-3 擷取規則 3）。支持與否已照 FR-3 擷取規則
+    1、2 改過：實證檢定一定不是 `not_determined`，其他證據類型一定是；判定了（`supported`、
+    `not_supported`、`partially_supported`）就一定有 `result_quote`（寫出結果的原文），其他一定
+    沒有。
 
     Raises:
-        ValueError: 因果相同、原句空白、雜湊格式不對、證據類型與支持與否對不上、數字超出範圍。
+        ValueError: 因果相同、原句空白、雜湊格式不對、證據類型與支持與否對不上、判定了卻沒有結果
+            原文（或沒判定卻有）、數字超出範圍。
     """
 
     ordinal: int
@@ -358,6 +366,7 @@ class HypothesisContent:
     p_value: Decimal | None
     sample_size: int | None
     effect_type: str | None
+    result_quote: str | None
 
     def __post_init__(self) -> None:
         _check_count("ordinal", self.ordinal, minimum=1)
@@ -383,6 +392,9 @@ class HypothesisContent:
         _check_decimal("p_value", self.p_value, unit=True)
         _check_count("sample_size", self.sample_size, minimum=1)
         _check_optional_text("effect_type", self.effect_type)
+        _check_optional_text("result_quote", self.result_quote)
+        if (self.support in DECIDED_SUPPORT) != (self.result_quote is not None):
+            raise ValueError("判定了支持與否才有 result_quote，判定了就一定要有")
 
 
 @dataclass(frozen=True, slots=True)
@@ -392,8 +404,9 @@ class ResearchModelContent:
 
     只由 `domain/validators/research_model.validate_research_model` 從驗證過的模型輸出做出來，
     再經 `services/ai_results.py` 寫入；沒提到的欄位是 None。情境欄位是情境值清單的 `key`（清單外、
-    或國家與產業輸入沒寫出的已經換成 None 並計數）。三個計數：清單外丟掉的情境值、輸入沒寫出的
-    國家與產業、照擷取規則改過的支持與否。
+    或國家與產業輸入沒寫出的已經換成 None 並計數）。四個計數：清單外丟掉的情境值、輸入沒寫出的
+    國家與產業、照擷取規則改過的支持與否、不可靠而清成空值的欄位（只寫門檻的 p 值、只有標點的
+    原文欄位）。
 
     Raises:
         ValueError: 計數不是 ≥ 0 的整數、情境 `key` 寫法不對、構面正規化名稱重複、假設指到不在
@@ -411,6 +424,7 @@ class ResearchModelContent:
     dropped_context_value_count: int
     unsupported_context_value_count: int
     corrected_support_count: int
+    cleared_value_count: int
     constructs: tuple[ConstructMentionContent, ...]
     hypotheses: tuple[HypothesisContent, ...]
 
@@ -430,6 +444,7 @@ class ResearchModelContent:
             "dropped_context_value_count",
             "unsupported_context_value_count",
             "corrected_support_count",
+            "cleared_value_count",
         ):
             value = getattr(self, name)
             if value is None:

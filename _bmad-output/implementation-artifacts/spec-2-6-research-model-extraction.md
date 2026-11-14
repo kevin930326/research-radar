@@ -45,12 +45,12 @@ deferred:
 - schema v1 欄位照 PRD FR-3（見 Design Notes 的欄位表）；版本號是 prompt 版本＋`EXTRACTION_SCHEMA_VERSION = 1`（記在 `derivation_run.params`）。PRD 沒寫清楚的照最保守做法（Design Notes「保守解讀」），每一項列給 Kevin 決定。
 - 拒收（整筆 `rejected`、不寫內容）：假設原句、構面定義與其他「原文欄位」正規化後不在輸入（標題或摘要其中一段）裡；夾雙向控制字元／tag 字元／HTML 實體（全部字串）或標記連結（英文名、繁中標籤）；英文名或繁中標籤格式不對；構面重複；假設指到不在清單的構面或自己指自己；β／p／N 等數字超出範圍或不是輸入裡的數字；英文名的詞、繁中標籤的英文與數字不在輸入裡；同一句同一條關係給了互相衝突的值；格式錯、多欄、型別錯、截斷、拒答（既有代碼）。
 - 不拒收、改值並計數：情境值不在清單 → 空值、`dropped_context_value_count`；國家、產業的值在清單但輸入沒寫出（`terms` 都不在輸入）→ 空值、`unsupported_context_value_count`（規則 4）；證據類型不是實證檢定卻判了支持與否 → `not_determined`，實證檢定卻給 `not_determined` → `not_stated`，`corrected_support_count`（規則 1、2）；同一句、同一條關係、值都一樣的重複只留一筆（規則 3）。
-- 每條假設存 `sentence_sha256`（正規化後原句的雜湊），「不同原句」數得出來（規則 3）。
+- 每條假設存 `sentence_sha256`（來源句子的雜湊：原句對到的輸入完整句子，片段和完整版算同一句；Codex 審查後改），「不同原句」數得出來（規則 3）。
 - 構面以 `normalize_name` 為唯一鍵；新構面由 `repo/constructs.py` 建立，`canonical_id` 指向自己（AD-16）；`construct_mention`、`hypothesis` 指向原本的構面。
 - 情境值清單版本算進 `input_sha256`、記在 `derivation_run.context_values_version`；寫入時「現在的版本」＝寫入的行程載入的清單（`LlmJob.context_values`，同 2.5）。
 - 表頭 `lang` 是 `en`、`input_kind` 只有 `abstract`；`plan_for` 說 `no_input`／`not_applicable` 就不呼叫閘門、不寫任何列。
 - 內容只由 `services/ai_results.py` 從驗證過的輸出得出；`candidate`、`superseded` 照樣寫內容。
-- `max_tokens` 2048（算法見 Design Notes），`disable_thinking: true`、`effort: low`。
+- `max_tokens` 2560（算法見 Design Notes；Codex 審查加 `result_quote` 後從 2048 調高），`disable_thinking: true`、`effort: low`。
 - prompt 範例是自己編的虛構摘要（沒有 DOI、網址），範例回答本身通過驗證（測試核對）；新名詞進 `docs/glossary.md`；新決定寫 ADR-0034（提議）。
 
 **Never:**
@@ -173,6 +173,18 @@ deferred:
   - `[false]` `[reject]` 範圍外的修改（搬 2.4 檢查、改遷移測試） — brief 要求共用 2.4 的檢查且不改行為；遷移 head 0012→0013 是新增遷移的必要修改
   - `[low]` `[reject]` normalize_name 把其他標點換成空白，和 ADR-0012「去掉標點」字面不同 — 換成空白避免兩個詞黏在一起；Kevin 決定 9
 
+### 2026-11-15 — Codex 主審查（a5bbc1f）
+- verdicts: 8 findings — high 0, medium 7, low 1；全部接受並修正
+- findings:
+  - `[medium]` `[patch]` `normalize_name("Trust (🅰)")` 丟 ValueError — 括號內沒有字母或數字時不算縮寫；加 Unicode 反例與 property 測試、驗證路徑 fuzz 測試（只會通過或 OutputRejectedError）
+  - `[medium]` `[patch]` 原句片段與完整句雜湊不同、重複關係擋不住 — `sentence_sha256` 改用來源句子；改寫分支內新增的「不同原句」測試
+  - `[medium]` `[patch]` `p < .01` 卻填 0.01 會存下 — 不是確切值就存 null、記 `cleared_value_count`
+  - `[medium]` `[patch]` `β = - 0.42` 被讀成正數、`4.2 × 10^-2` 被拆成片段 — `text_checks.py`（2.4 共用）合併空格負號、科學記號整段遮掉；2.4 只變嚴（另外兩種原本誤擋的寫法改為接受），既有斷言不變
+  - `[medium]` `[patch]` `N = 12 million` 讓 sample_size 12 通過 — 結構化數值改用完整量級的 `structured_numbers`；2.4 不變
+  - `[medium]` `[patch]` Republic of Korea 包含在北韓全名裡 — 情境值加 `excluded_terms`（長的名稱優先）；檢查清單內其他包含關係
+  - `[medium]` `[patch]` Kevin 決定 5 採 B — schema 與 prompt v1 加 `result_quote`（判定支持與否時必填），沒有或不可信 → `not_stated` 並計數；直接改 v1、重新登記雜湊
+  - `[low]` `[patch]` 選填原文欄位只有標點 — 存 null、計數
+
 ## Design Notes
 
 **schema v1 欄位（`ResearchModelOutput`，全部必填、可空的給 null、`extra="forbid"`）：**
@@ -200,7 +212,7 @@ deferred:
 
 **遷移 0013：** `research_model` 加 `is_review_or_meta_analysis boolean`、`country`／`industry`／`research_design`／`unit_of_analysis text`（CHECK key 寫法）、`sample_size integer`（≥1）、`limitations`／`future_research text`（非空白）、三個計數 `integer`（≥0）；CHECK `rejected` 時內容與計數全 NULL。`construct`（`id` uuidv7、`normalized_name` UNIQUE 非空白、`canonical_id` NOT NULL FK 自己、`created_at`；canonical 索引）。`construct_mention`（`research_model_id` FK、`construct_id` FK、`name_en`、`label_zh` NOT NULL、`definition`、量測六欄（數字 CHECK）；UNIQUE(`research_model_id`, `construct_id`)、`construct_id` 索引）。`hypothesis`（`research_model_id` FK、`ordinal`、`sentence`、`sentence_sha256`、`cause_construct_id`／`effect_construct_id` FK、`evidence_type`／`support` CHECK、CHECK `(evidence_type = 'empirical_test') = (support <> 'not_determined')`、CHECK cause ≠ effect、`beta`、`p_value`（0～1）、`sample_size`（≥1）、`effect_type`；UNIQUE(`research_model_id`, `ordinal`)、UNIQUE（`research_model_id`, `sentence_sha256`, cause, effect，短名）、兩個構面外鍵索引）。
 
-**`max_tokens` 2048：** 一個構面約 35～75 tokens（有定義時較多；量測欄位多半是一個 `null`），一條假設約 75 tokens。10 個構面＋10 條假設＋情境與兩個原文欄位約 1,500 tokens，留三成餘裕。思考關掉。保守每秒 50 tokens，2048 tokens 約 41 秒，加輸入處理仍低於 60 秒逾時；單次輸出費用上限 2048 × 0.50／百萬＝0.001 美元。ADR-0031 的費用上限測試看的是 `PromptSettings` 的最大值 64,000，不受影響。超過的輸出截斷 → `llm_truncated` 拒收（關係超過約 14 條的摘要少見）。
+**`max_tokens` 2048（Codex 審查後改 2560，見 ADR-0034 決定 11）：** 一個構面約 35～75 tokens（有定義時較多；量測欄位多半是一個 `null`），一條假設約 75 tokens。10 個構面＋10 條假設＋情境與兩個原文欄位約 1,500 tokens，留三成餘裕。思考關掉。保守每秒 50 tokens，2048 tokens 約 41 秒，加輸入處理仍低於 60 秒逾時；單次輸出費用上限 2048 × 0.50／百萬＝0.001 美元。ADR-0031 的費用上限測試看的是 `PromptSettings` 的最大值 64,000，不受影響。超過的輸出截斷 → `llm_truncated` 拒收（關係超過約 14 條的摘要少見）。
 
 ## Verification
 

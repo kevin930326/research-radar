@@ -18,8 +18,12 @@ version: 1
 #   United States；IT services 不分大小寫就是 it services），也不要放會出現在別的國家、產業或
 #   樣本描述裡的字（American 會出現在 Latin American；Korea 會出現在 North Korea；university
 #   常是「大學生樣本」而不是教育業；shipping 常是電商的運費）。
+# - `excluded_terms`（只有國家與產業可以有、可省略）：包含某個 `terms` 的較長別的名稱（北韓全名
+#   Democratic People's Republic of Korea 包含 Republic of Korea、中華民國 Republic of China 包含
+#   China、New England 包含 England）；`terms` 只出現在這些名稱裡面時不算寫出。較長的 `terms`
+#   優先（People's Republic of China 是中國，不因包含 Republic of China 而排除）。
 #
-# 改內容（增刪 `key`、改 `definition` 或 `terms`、把項目搬到另一欄）一定要：
+# 改內容（增刪 `key`、改 `definition`、`terms` 或 `excluded_terms`、把項目搬到另一欄）一定要：
 #   1. `version` 加一，並在 `radar/domain/context_values_hashes.py` 登記新版本的內容雜湊（只增不改）；
 #   2. 新增 `prompts/extract_model/v<N+1>.md`（清單一起改）並登記 prompt 雜湊。
 # 沒升版或沒登記，讀設定時就 ConfigError。升版會讓全部有摘要的論文重新擷取（版本算進輸入指紋），
@@ -33,7 +37,8 @@ countries:
   - key: cn
     name: 中國
     definition: 中國大陸（China）。
-    terms: [China, Chinese, mainland China]
+    terms: [China, Chinese, mainland China, People's Republic of China]
+    excluded_terms: [Republic of China]
   - key: hk
     name: 香港
     definition: 香港（Hong Kong）。
@@ -46,6 +51,7 @@ countries:
     name: 南韓
     definition: 南韓（South Korea）。
     terms: [South Korea, South Korean, Republic of Korea]
+    excluded_terms: [Democratic People's Republic of Korea]
   - key: sg
     name: 新加坡
     definition: 新加坡（Singapore）。
@@ -54,6 +60,7 @@ countries:
     name: 印度
     definition: 印度（India）。
     terms: [India, Indian]
+    excluded_terms: [American Indian, Indian Ocean]
   - key: us
     name: 美國
     definition: 美國（United States）。
@@ -66,6 +73,7 @@ countries:
     name: 英國
     definition: 英國（United Kingdom）。
     terms: [United Kingdom, U.K., Britain, British, England]
+    excluded_terms: [New England, British Columbia]
   - key: de
     name: 德國
     definition: 德國（Germany）。
@@ -92,6 +100,7 @@ industries:
     name: 金融業
     definition: 銀行、保險、證券與其他金融服務。
     terms: [bank, banking, financial services, insurance, insurer]
+    excluded_terms: [World Bank, food bank, data bank]
   - key: healthcare
     name: 醫療照護
     definition: 醫院、診所與其他醫療照護服務。
