@@ -2,7 +2,8 @@
 ADR-0027）。
 
 統計模組＝`radar/repo/stats.py`，以及之後的 `radar/repo/relations.py`、`radar/repo/keyword_stats.py`
-（存在的才掃）。掃 `radar/` 每個 .py 檔的字串（f-string 的變數換成佔位字元、不含 docstring）：
+（存在的才掃）。掃 `radar/` 每個 .py 檔的字串（f-string 的變數換成佔位字元、不含 docstring、
+SQL 註解 `--`、`/* */` 先去掉）：
 
 1. 統計模組以外，同一個字串引用 `counted_paper` 又做彙總（`count(`、`sum(`、`avg(`、`GROUP BY`）
    就失敗。只引用、不彙總的可以（ADR-0011「點數字列出論文」：論文清單用同樣條件、從
@@ -10,15 +11,17 @@ ADR-0027）。
 2. 統計模組的 SQL 不讀 `paper` 表（`FROM paper`、`JOIN paper`、`FROM x, paper`；`paper_abstract`
    這類 `paper_*` 不算），也不 import `radar.repo.papers`。
 3. 統計模組以外的 `radar/repo` 模組，同一句 SQL 讀 `paper` 表又「數篇數」就失敗：有 `count(`、
-   `sum(`、`avg(`，沒有 `HAVING`，而且沒有 `GROUP BY`（整張表一個數字）或 `GROUP BY` 裡有
-   `publication_year`、`journal_issn_l`（依年份、期刊數）。依別的欄位分組再用 `HAVING` 篩
-   （例如找重複標題）不算。
+   `sum(`、`avg(`，而且沒有 `GROUP BY`（整張表一個數字），或 `GROUP BY` 提到 `publication_year`、
+   `journal_issn_l`（依年份、期刊數；`GROUP BY 1` 這種寫位置的，SELECT 那一段有這兩個欄位也算）。
+   有沒有 `HAVING` 都一樣。只依別的欄位分組（例如 `GROUP BY title_norm HAVING count(*) > 1` 找
+   重複標題）不算。
 4. 數 `counted_paper` 全部篇數的查詢只准是 `radar/repo/stats.py` 的 `list_cube_counts`，而且剛好
-   一個。「全部篇數」＝`FROM` 只有 `counted_paper`（頂多再 `LEFT JOIN paper_abstract`），`WHERE`
-   只有變數組進來的條件（可見條件）或只篩 `counted_paper` 自己的期刊、年份欄位，`SELECT` 數整列
-   （`count(*)`、`count(1)`、`count(id)`、`count(<別名>.id)`、`count(DISTINCT …id)`）。
-   其他計數（`pending_classification`、`topic`、`topic_pair`、`method`）要 `JOIN` 分類的表，或在
-   `WHERE` 寫分類的條件，就不是全部篇數。
+   一個。「全部篇數」＝一個 `SELECT` 的 `FROM` 有 `counted_paper`，`SELECT` 數整列（`count(*)`、
+   `count(1)`、`count(id)`、`count(<別名>.id)`、`count(<別名>.*)`、`count(DISTINCT …id)`），而且
+   `FROM` 到 `WHERE` 結束（含裡面的子查詢）沒有出現分類：名稱含 `classification`、`topic`、
+   `method` 的表或欄位（字串、註解裡的不算）。其他計數（`pending_classification`、`topic`、
+   `topic_pair`、`method`）要 `JOIN` 分類的表，或在 `WHERE` 寫分類的條件（例如
+   `NOT EXISTS (SELECT 1 FROM <分類表> …)`），才不是全部篇數；接別的表、加別的條件都還是。
 
 每條規則都用故意寫錯的假原始碼證明抓得到，也用正當的寫法證明不會誤擋。
 """
@@ -54,43 +57,29 @@ _FROM_LIST = re.compile(rf"(\bDELETE\s+)?\bFROM\s+(.+?){_CLAUSE_END}", re.IGNORE
 _PAPER_ITEM = re.compile(rf'\s*({_SCHEMA}"?paper"?)(?![\w.])', re.IGNORECASE)
 _AGGREGATE = re.compile(r"\b(?:count|sum|avg)\s*\(|\bGROUP\s+BY\b", re.IGNORECASE)
 _COUNTING = re.compile(r"\b(?:count|sum|avg)\s*\(", re.IGNORECASE)
-_HAVING = re.compile(r"\bHAVING\b", re.IGNORECASE)
-_GROUP_BY = re.compile(
-    r"\bGROUP\s+BY\s+(.+?)"
-    r"(?=\b(?:HAVING|ORDER|LIMIT|OFFSET|WINDOW|UNION|EXCEPT|INTERSECT|FOR)\b|[;)]|\Z)",
-    re.IGNORECASE | re.DOTALL,
-)
+_GROUP_BY = re.compile(r"\bGROUP\s+BY\b", re.IGNORECASE)
 # 數篇數時分組用的維度欄位（`counted_paper` 自己也只有這兩個維度）。
-_DIMENSIONS = frozenset({"publication_year", "journal_issn_l"})
 _DIMENSION = re.compile(r'(?<!\w)"?(?:publication_year|journal_issn_l)"?(?!\w)', re.IGNORECASE)
-_DIMENSION_ITEM = re.compile(
-    r'(?:"?[A-Za-z_]\w*"?\.)?"?(?:publication_year|journal_issn_l)"?', re.IGNORECASE
+_POSITION = re.compile(r"(?<![\w.])\d+(?![\w.])")
+# 子句在同一層括號裡到哪裡結束。
+_GROUP_BY_END = re.compile(
+    r"\b(?:HAVING|ORDER|LIMIT|OFFSET|WINDOW|UNION|EXCEPT|INTERSECT|FOR)\b|;", re.IGNORECASE
 )
-# `FROM counted_paper`；後面的別名、`LEFT JOIN paper_abstract` 另外看。
-_COUNTED_FROM = re.compile(rf'\bFROM\s+{_SCHEMA}"?counted_paper"?(?!\w)', re.IGNORECASE)
-_FROM_TAIL = re.compile(rf"(.*?){_CLAUSE_END}", re.IGNORECASE | re.DOTALL)
-# `counted_paper` 後面只准有別名，頂多再左接 `paper_abstract`（ON 裡不能再 JOIN、不能有逗號）。
-_ONLY_ABSTRACT = re.compile(
-    rf'\s*(?:(?:AS\s+)?"?(?P<alias>[A-Za-z_]\w*|{_PLACEHOLDER})"?)?'
-    rf'(?:\s+LEFT\s+(?:OUTER\s+)?JOIN\s+{_SCHEMA}"?paper_abstract"?'
-    r'(?:\s+(?:AS\s+)?"?[A-Za-z_]\w*"?)?\s+ON\s+(?:(?!\bJOIN\b)[^,])*)?\s*',
-    re.IGNORECASE | re.DOTALL,
+_SET_OPERATOR = re.compile(r"\b(?:UNION|EXCEPT|INTERSECT)\b", re.IGNORECASE)
+_FROM_WORD = re.compile(r"\bFROM\b", re.IGNORECASE)
+_FROM_END = re.compile(
+    r"\b(?:WHERE|GROUP|HAVING|ORDER|LIMIT|OFFSET|WINDOW|FOR|RETURNING)\b|;", re.IGNORECASE
 )
-_WHERE = re.compile(
-    r"\s*WHERE\s+(.*?)"
-    r"(?=\b(?:GROUP|ORDER|LIMIT|OFFSET|HAVING|WINDOW|UNION|EXCEPT|INTERSECT|RETURNING|FOR)\b"
-    r"|[;)]|\Z)",
-    re.IGNORECASE | re.DOTALL,
+_WHERE_END = re.compile(
+    r"\b(?:GROUP|HAVING|ORDER|LIMIT|OFFSET|WINDOW|FOR|RETURNING)\b|;", re.IGNORECASE
 )
 _STRING = re.compile(r"'(?:[^']|'')*'")
-_PARAMETER = re.compile(r"(?<!:):[A-Za-z_]\w*")
-_IDENTIFIER = re.compile(r"[A-Za-z_]\w*")
-_FROM_WORD = re.compile(r"\bFROM\b", re.IGNORECASE)
-# 只篩 `counted_paper` 自己的期刊、年份的 WHERE 會用到的字。
-_FILTER_WORDS = (
-    frozenset({"and", "or", "not", "in", "is", "null", "true", "false", "between", "any"})
-    | _DIMENSIONS
+# 分類的表或欄位：名稱含 classification、topic、method（AD-19 另外四種計數都要碰到其中一種）。
+_CLASSIFICATION = re.compile(
+    r"(?<![\w$])[A-Za-z_]*(?:classification|topic|method)\w*", re.IGNORECASE
 )
+# `counted_paper` 後面的別名（`AS c`、`c`、f-string 變數）。
+_ALIAS_AFTER = re.compile(rf'"?\s+(?:AS\s+)?"?([A-Za-z_]\w*|{_PLACEHOLDER})', re.IGNORECASE)
 _NOT_ALIASES = frozenset(
     {
         "where",
@@ -120,6 +109,87 @@ _NOT_ALIASES = frozenset(
 # --- 字串的收集 ---------------------------------------------------------------------------
 
 
+def _strip_comments(sql: str) -> str:
+    """去掉 SQL 註解（`--` 到行尾、`/* */`，可以巢狀），各換成一個空白。
+
+    單引號字串、雙引號名稱裡的 `--`、`/*` 不是註解，原樣留著。
+    """
+    out: list[str] = []
+    i, n = 0, len(sql)
+    while i < n:
+        char = sql[i]
+        if char in "'\"":
+            end = i + 1
+            while end < n:
+                if sql[end] == char:
+                    if sql.startswith(char * 2, end):
+                        end += 2
+                        continue
+                    break
+                end += 1
+            out.append(sql[i : end + 1])
+            i = end + 1
+        elif sql.startswith("--", i):
+            newline = sql.find("\n", i)
+            i = n if newline < 0 else newline
+            out.append(" ")
+        elif sql.startswith("/*", i):
+            depth, i = 1, i + 2
+            while i < n and depth:
+                if sql.startswith("/*", i):
+                    depth, i = depth + 1, i + 2
+                elif sql.startswith("*/", i):
+                    depth, i = depth - 1, i + 2
+                else:
+                    i += 1
+            out.append(" ")
+        else:
+            out.append(char)
+            i += 1
+    return "".join(out)
+
+
+def _blank_strings(sql: str) -> str:
+    """單引號字串的內容換成空白（長度不變），裡面的括號、名稱不算數。"""
+    return _STRING.sub(lambda match: "'" + " " * (len(match.group(0)) - 2) + "'", sql)
+
+
+def _depths(sql: str) -> list[int]:
+    """每個字元在第幾層括號裡（括號本身算外層）。"""
+    found: list[int] = []
+    depth = 0
+    for char in sql:
+        if char == ")":
+            depth = max(depth - 1, 0)
+        found.append(depth)
+        if char == "(":
+            depth += 1
+    return found
+
+
+def _flat(sql: str, depths: list[int], level: int) -> str:
+    """只留第 `level` 層的字元，更裡層的換成空白（長度不變，位置對得上）。"""
+    return "".join(char if depth == level else " " for char, depth in zip(sql, depths, strict=True))
+
+
+def _scope(depths: list[int], at: int) -> tuple[int, int]:
+    """`at` 所在那一層括號的範圍（不含括號本身）；最外層是整個字串。"""
+    level = depths[at]
+    start = at
+    while start > 0 and depths[start - 1] >= level:
+        start -= 1
+    end = at
+    while end < len(depths) and depths[end] >= level:
+        end += 1
+    return start, end  # 左右括號本身是外層，不在範圍裡
+
+
+def _first(pattern: re.Pattern[str], flat: str, start: int, end: int) -> int:
+    """`flat[start:end]` 裡 `pattern` 第一次出現的位置；沒有就是 `end`。"""
+    match = pattern.search(flat, start, end)
+    return match.start() if match else end
+
+
 def _docstring_ids(tree: ast.Module) -> set[int]:
     found: set[int] = set()
     for node in ast.walk(tree):
@@ -133,7 +203,7 @@ def _docstring_ids(tree: ast.Module) -> set[int]:
 def _literals(source: str) -> list[tuple[str, str | None]]:
     """模組裡的字串與它所在的函式（最外層的函式名稱；模組層是 None）。
 
-    f-string 的變數換成佔位字元；docstring 不算。
+    f-string 的變數換成佔位字元；docstring 不算；SQL 註解去掉。
     """
     tree = ast.parse(source)
     docstrings = _docstring_ids(tree)
@@ -149,7 +219,7 @@ def _literals(source: str) -> list[tuple[str, str | None]]:
                 else _PLACEHOLDER
                 for value in node.values
             ]
-            found.append(("".join(parts), function))
+            found.append((_strip_comments("".join(parts)), function))
             for value in node.values:  # 變數裡的運算式也可能有字串
                 if isinstance(value, ast.FormattedValue):
                     visit(value.value, function)
@@ -159,7 +229,7 @@ def _literals(source: str) -> list[tuple[str, str | None]]:
             and isinstance(node.value, str)
             and id(node) not in docstrings
         ):
-            found.append((node.value, function))
+            found.append((_strip_comments(node.value), function))
         for child in ast.iter_child_nodes(node):
             visit(child, function)
 
@@ -275,19 +345,22 @@ def stats_module_problems(sources: Mapping[str, str]) -> list[str]:
 
 def _counts_papers(literal: str) -> bool:
     """字串是不是「數篇數」的形狀（見模組說明第 3 條）。"""
-    if not _COUNTING.search(literal) or _HAVING.search(literal):
+    sql = _blank_strings(literal)
+    if not _COUNTING.search(sql):
         return False
-    groups = list(_GROUP_BY.finditer(literal))
+    groups = list(_GROUP_BY.finditer(sql))
     if not groups:
         return True
+    depths = _depths(sql)
     for group in groups:
-        for item in group.group(1).split(","):
-            item = item.strip()
-            if _DIMENSION_ITEM.fullmatch(item):
-                return True
-            # `GROUP BY 1, 2`：前面（SELECT 那一段）有維度欄位就當成依維度分組。
-            if item.isdigit() and _DIMENSION.search(literal[: group.start()]):
-                return True
+        start, end = _scope(depths, group.start())
+        flat = _flat(sql, depths, depths[group.start()])
+        clause = sql[group.end() : _first(_GROUP_BY_END, flat, group.end(), end)]
+        if _DIMENSION.search(clause):
+            return True
+        # `GROUP BY 1, 2`：SELECT 那一段有維度欄位就當成依維度分組。
+        if _POSITION.search(clause) and _DIMENSION.search(sql[start : group.start()]):
+            return True
     return False
 
 
@@ -309,42 +382,59 @@ def paper_aggregate_problems(sources: Mapping[str, str]) -> list[str]:
 # --- 4. counted_paper 的全部篇數只有一個查詢 -----------------------------------------------------
 
 
-def _only_filters_dimensions(where: str, aliases: set[str]) -> bool:
-    """WHERE 只有變數組進來的條件，或只篩 `counted_paper` 自己的期刊、年份。"""
-    rest = _PARAMETER.sub(" ", _STRING.sub(" ", where.replace(_PLACEHOLDER, " ")))
-    allowed = _FILTER_WORDS | {alias.lower() for alias in aliases}
-    return all(word.lower() in allowed for word in _IDENTIFIER.findall(rest))
+def _row_count_pattern(aliases: set[str]) -> re.Pattern[str]:
+    named = "|".join(re.escape(name) for name in sorted(aliases))
+    return re.compile(
+        rf'\bcount\s*\(\s*(?:\*|1|(?:DISTINCT\s+)?(?:"?(?:{named})"?\.)?(?:\*|"?id"?))\s*\)',
+        re.IGNORECASE,
+    )
 
 
 def _row_counts(literal: str) -> list[str]:
-    """字串裡數 `counted_paper` 全部篇數的計數（見模組說明第 4 條）。"""
+    """字串裡數 `counted_paper` 全部篇數的計數（見模組說明第 4 條）。
+
+    一個一個 `SELECT` 看（括號裡的子查詢、`UNION` 的每一段分開）：`FROM` 有 `counted_paper`、
+    SELECT 欄位數整列，`FROM` 到 `WHERE` 結束沒有分類的表或欄位，就是全部篇數。
+    """
+    sql = _blank_strings(literal)
+    depths = _depths(sql)
+    seen: set[tuple[int, int]] = set()
     found: list[str] = []
-    for source in _COUNTED_FROM.finditer(literal):
-        rest = literal[source.end() :]
-        tail_match = _FROM_TAIL.match(rest)
-        tail = tail_match.group(1) if tail_match else rest
-        shape = _ONLY_ABSTRACT.fullmatch(tail)
-        if shape is None:
-            continue  # 接了別的表：分類、主題…的計數
+    for mention in _COUNTED_PAPER.finditer(sql):
+        level = depths[mention.start()]
+        start, end = _scope(depths, mention.start())
+        flat = _flat(sql, depths, level)
+        # 同一層用 UNION／EXCEPT／INTERSECT 隔開的每一段是不同的 SELECT。
+        for operator in _SET_OPERATOR.finditer(flat, start, end):
+            if operator.end() <= mention.start():
+                start = operator.end()
+            else:
+                end = operator.start()
+                break
+        if (start, end) in seen:
+            continue
+        from_word = _FROM_WORD.search(flat, start, end)
+        if from_word is None or from_word.start() > mention.start():
+            continue
+        from_end = _first(_FROM_END, flat, from_word.end(), end)
+        if mention.start() >= from_end:
+            continue  # 在 WHERE 之類的地方提到，不是這個 SELECT 的來源
+        seen.add((start, end))
+        sources = flat[from_word.end() : from_end]
+        conditions = sql[from_word.end() : _first(_WHERE_END, flat, from_word.end(), end)]
+        if _CLASSIFICATION.search(conditions):
+            continue  # FROM 到 WHERE 結束碰到分類的表或欄位：分類的計數
         aliases = {"counted_paper"}
-        alias = shape.group("alias")
-        if alias is not None:
-            if alias.lower() in _NOT_ALIASES:
-                continue
-            aliases.add(alias)
-        where = _WHERE.match(rest[len(tail) :])
-        if where is not None and not _only_filters_dimensions(where.group(1), aliases):
-            continue  # WHERE 有分類之類的條件
-        # 這個 FROM 前面、上一個 FROM 之後那一段（SELECT 的欄位）裡數整列的計數。
-        before = literal[: source.start()]
-        previous = list(_FROM_WORD.finditer(before))
-        select = before[previous[-1].end() :] if previous else before
-        named = "|".join(re.escape(name) for name in sorted(aliases))
-        pattern = re.compile(
-            rf'\bcount\s*\(\s*(?:\*|1|(?:DISTINCT\s+)?(?:"?(?:{named})"?\.)?"?id"?)\s*\)',
-            re.IGNORECASE,
-        )
-        found += [" ".join(match.group(0).split()) for match in pattern.finditer(select)]
+        for source in _COUNTED_PAPER.finditer(sources):
+            alias = _ALIAS_AFTER.match(sources, source.end())
+            if alias is not None and alias.group(1).lower() not in _NOT_ALIASES:
+                aliases.add(alias.group(1))
+        select = sql[start : from_word.start()]
+        found += [
+            " ".join(match.group(0).split())
+            for match in _row_count_pattern(aliases).finditer(select)
+            if depths[start + match.start()] == level  # 子查詢裡的不算這一段的
+        ]
     return found
 
 
@@ -528,6 +618,24 @@ def test_paper_aggregate_check_catches_each_mistake() -> None:
             'SQL = """SELECT sum(cited_by_count)\n  FROM public.paper"""\n'
             'AVG = "SELECT AVG (cited_by_count) FROM x JOIN paper ON true"'
         ),
+        # 依年份、期刊分組的計數，加 HAVING、多分一個欄位、括號、註解都還是數篇數。
+        "radar/repo/having.py": (
+            "def by_year(viewer, c):\n"
+            '    return """SELECT publication_year, count(*) FROM paper\n'
+            '      GROUP BY publication_year HAVING count(*) > 0"""\n'
+            "def by_position(viewer, c):\n"
+            '    return "SELECT publication_year, count(*) FROM paper GROUP BY 1 HAVING true"\n'
+            "def dupes_in_journal(viewer, c):\n"
+            '    return """SELECT journal_issn_l, title_norm FROM paper\n'
+            '      GROUP BY journal_issn_l, title_norm HAVING count(*) > 1"""\n'
+            "def by_year_flag(viewer, c):\n"
+            '    return "SELECT count(*) FROM paper GROUP BY (p.publication_year), is_oa"\n'
+            "def by_year_commented(viewer, c):\n"
+            '    return """SELECT count(*) FROM paper -- 依標題 title_norm\n'
+            '      GROUP BY /* title_norm */ publication_year"""\n'
+            "def total_having(viewer, c):\n"
+            '    return "SELECT count(*) FROM paper HAVING count(*) > 0"\n'
+        ),
         # 不算：paper_* 的表、沒有數篇數、寫入、統計模組、repo 以外、docstring。
         "radar/repo/abstracts.py": 'SQL = "SELECT count(*) FROM paper_abstract GROUP BY source"',
         "radar/repo/reader.py": 'SQL = "SELECT id FROM paper WHERE id = :id"',
@@ -540,6 +648,12 @@ def test_paper_aggregate_check_catches_each_mistake() -> None:
     problems = paper_aggregate_problems(sources)
 
     assert [problem.split("：")[0] for problem in problems] == [
+        "radar/repo/having.py.by_year",
+        "radar/repo/having.py.by_position",
+        "radar/repo/having.py.dupes_in_journal",
+        "radar/repo/having.py.by_year_flag",
+        "radar/repo/having.py.by_year_commented",
+        "radar/repo/having.py.total_having",
         "radar/repo/papers.py.count_papers",
         "radar/repo/papers.py.list_years",
         "radar/repo/papers.py.by_journal",
@@ -550,15 +664,23 @@ def test_paper_aggregate_check_catches_each_mistake() -> None:
 
 
 def test_paper_aggregate_check_allows_duplicate_titles() -> None:
-    """依標題分組再用 HAVING 找重複、只列出年份（不數），都不是數篇數。"""
+    """依標題分組再用 HAVING 找重複、只列出年份（不數），都不是數篇數。
+
+    同一本期刊裡的重複標題要依期刊分組就會被擋（依期刊分組的計數一律算數篇數），改用 EXISTS。
+    """
     sources = {
         "radar/repo/papers.py": (
             "def find_duplicates(viewer, c):\n"
             '    return """SELECT title_norm, count(*) FROM paper\n'
             '      GROUP BY title_norm HAVING count(*) > 1"""\n'
             "def find_duplicates_in_journal(viewer, c):\n"
-            '    return """SELECT journal_issn_l, title_norm FROM paper\n'
-            '      GROUP BY journal_issn_l, title_norm HAVING count(*) > 1"""\n'
+            '    return """SELECT p.id, p.title_norm FROM paper AS p WHERE EXISTS (\n'
+            "      SELECT 1 FROM paper AS q WHERE q.title_norm = p.title_norm\n"
+            '        AND q.journal_issn_l = p.journal_issn_l AND q.id <> p.id)"""\n'
+            "def find_duplicates_commented(viewer, c):\n"
+            '    return """SELECT title_norm, count(*) FROM paper\n'
+            "      GROUP BY title_norm -- 不依 publication_year\n"
+            '      HAVING count(*) > 1"""\n'
             "def list_years(viewer, c):\n"
             '    return "SELECT publication_year FROM paper GROUP BY 1"\n'
             "def list_by_title(viewer, c):\n"
@@ -611,6 +733,58 @@ def test_cube_count_check_catches_each_mistake() -> None:
     ], problems
 
 
+def test_cube_count_check_catches_disguised_totals() -> None:
+    """加註解、型別轉換、括號、接別的表、子查詢不碰分類，都還是全部篇數。"""
+    sources = {
+        "radar/repo/stats.py": (
+            "def list_cube_counts(viewer, c):\n"
+            '    return f"SELECT count(*) FROM counted_paper AS c WHERE {c}"\n'
+            "def block_comment(viewer, c):\n"
+            '    return """SELECT publication_year, count(*) FROM counted_paper\n'
+            '      WHERE publication_year >= :year /* total */ GROUP BY publication_year"""\n'
+            "def line_comment(viewer, c):\n"
+            '    return """SELECT count(*) FROM counted_paper c -- paper_topic\n'
+            '      WHERE c.publication_year >= :year"""\n'
+            "def cast_call(viewer, c):\n"
+            '    return """SELECT count(*) FROM counted_paper\n'
+            '      WHERE publication_year >= CAST(:year AS integer)"""\n'
+            "def cast_colons(viewer, c):\n"
+            '    return "SELECT count(*) FROM counted_paper WHERE publication_year >= :year::int"\n'
+            "def string_mentions(viewer, c):\n"
+            "    return \"SELECT count(*) FROM counted_paper c WHERE 'paper_topic' <> ''\"\n"
+            "def not_exists_other(viewer, c):\n"
+            '    return f"""SELECT count(*) FROM counted_paper AS c\n'
+            "      WHERE (c.publication_year >= :year) AND NOT EXISTS (\n"
+            '        SELECT 1 FROM journal AS j WHERE j.issn_l = c.journal_issn_l) AND {c}"""\n'
+            "def join_journal(viewer, c):\n"
+            '    return """SELECT j.name, count(c.*) FROM counted_paper c\n'
+            '      JOIN journal j ON j.issn_l = c.journal_issn_l GROUP BY 1"""\n'
+            "def comma_journal(viewer, c):\n"
+            '    return "SELECT count(*) FROM journal j, public.counted_paper c WHERE true"\n'
+            "def scalar_subquery(viewer, c):\n"
+            '    return "SELECT (SELECT count(*) FROM counted_paper) AS n, 1 AS topic"\n'
+            "def union_branch(viewer, c):\n"
+            '    return """SELECT count(*) FROM paper_topic\n'
+            '      UNION ALL SELECT count(*) FROM counted_paper"""\n'
+        ),
+    }
+
+    problems = cube_count_problems(sources)
+
+    assert [problem.split("：")[0] for problem in problems] == [
+        "radar/repo/stats.py.block_comment",
+        "radar/repo/stats.py.line_comment",
+        "radar/repo/stats.py.cast_call",
+        "radar/repo/stats.py.cast_colons",
+        "radar/repo/stats.py.string_mentions",
+        "radar/repo/stats.py.not_exists_other",
+        "radar/repo/stats.py.join_journal",
+        "radar/repo/stats.py.comma_journal",
+        "radar/repo/stats.py.scalar_subquery",
+        "radar/repo/stats.py.union_branch",
+    ], problems
+
+
 def test_cube_count_check_allows_classification_counts() -> None:
     """AD-19 另外四種計數：counted_paper 加 JOIN 或分類的 WHERE 再 count，不是全部篇數。"""
     sources = {
@@ -643,6 +817,14 @@ def test_cube_count_check_allows_classification_counts() -> None:
             '    return f"""SELECT count(*) FROM counted_paper c\n'
             "      LEFT JOIN paper_classification x ON x.paper_id = c.id\n"
             '      WHERE x.id IS NULL AND {c}"""\n'
+            "def list_pending_parenthesized(viewer, c):\n"
+            '    return f"""SELECT count(*) FROM counted_paper AS c\n'
+            "      WHERE (c.publication_year >= :year) AND NOT EXISTS (\n"
+            "        SELECT 1 FROM paper_classification AS x /* 有效分類 */\n"
+            '        WHERE (x.paper_id = c.id)) AND {c}"""\n'
+            "def list_pending_by_column(viewer, c):\n"
+            '    return f"""SELECT count(*) FROM counted_paper AS c\n'
+            '      WHERE c.classification_status = :pending AND {c}"""\n'
             "def list_abstract_counts(viewer, c):\n"
             '    return f"""SELECT count(a.id) FROM counted_paper c\n'
             '      LEFT JOIN paper_abstract a ON a.paper_id = c.id WHERE {c}"""\n'
@@ -674,3 +856,9 @@ def test_cube_count_check_requires_exactly_one_at_home() -> None:
     assert cube_count_problems(two) == [
         "radar/repo/stats.py.list_cube_counts：數 counted_paper 全部篇數的計數有 2 個，只准一個"
     ]
+
+
+def test_strip_comments_keeps_strings_and_nested_blocks() -> None:
+    sql = "SELECT '--x', \"a/*b\" /* 1 /* 2 */ 3 */ FROM t -- z\nWHERE '/*' = '*/'"
+
+    assert _strip_comments(sql) == "SELECT '--x', \"a/*b\"   FROM t  \nWHERE '/*' = '*/'"
