@@ -230,8 +230,8 @@ def test_endpoint_with_credentials_is_config_error(
 
 
 def _lock_lost(*_args: Any, **_kwargs: Any) -> ReparseResult:
-    # 真的 AdvisoryLockLostError 的原因只帶錯誤類別（radar/repo/db.py）；外層訊息裡就算混進
-    # 連線字串也不該印出來，所以這裡另外把連線字串掛在例外鏈上。
+    # 這個替身證明 CLI 不印例外鏈（連線字串掛在鏈上）。CLI 會原樣印出例外訊息本身；訊息不含
+    # 連線字串，是由 radar/repo/db.py 組訊息的方式保證（原因只帶固定字串或錯誤類別）。
     try:
         raise RuntimeError(f"connection to {SECRET_URL} lost")
     except RuntimeError as cause:
