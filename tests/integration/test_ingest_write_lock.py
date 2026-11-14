@@ -908,7 +908,9 @@ def test_invalid_batch_size_sends_no_sql(
     # 一條連線都沒開、一句 SQL 都沒送：沒拿鎖、沒開交易、沒清暫存。
     assert counting.connects == 0
     assert counting.statements == []
-    assert _backends(lock_db) == backends_before
+    # 子集合而不是相等：_paper_tables 剛關掉的直接連線在資料庫端是非同步結束的，
+    # backends_before 可能多一條正在退出的；新開的連線一定不在 backends_before 裡。
+    assert set(_backends(lock_db)) <= set(backends_before)
     assert _lock_holders(lock_db) == 0
     assert store.gets == []
     assert _paper_tables(lock_db) == before
