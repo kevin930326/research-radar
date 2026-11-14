@@ -5,8 +5,9 @@
 1. 從資料列推出要送的文字與來源（`build_llm_input`），每段經 `clear_for_cloud` 放行
    → 沒有輸入 `NO_INPUT`；放行擋下 `BLOCKED`（帶原因代碼）。
 2. 預算檢查（`budget_allows`；正式程式一律傳 `services/budget.py` 的 `BudgetGuard(...)`，
-   `tests/arch/test_budget_guard_wiring.py` 守；測試可以傳 lambda）→ 不准 `DEFERRED_BUDGET`：
-   不讀 prompt、不寫任何列、不呼叫模型、不算失敗。
+   `tests/arch/test_budget_guard_wiring.py` 守；測試可以傳 lambda）→ 不准時只接續同一組鍵的
+   `llm_result_pending` run（不呼叫模型、不再記帳），沒有就 `DEFERRED_BUDGET`：不讀 prompt、
+   不寫任何列、不呼叫模型、不算失敗。讀帳本失敗或時鐘沒有時區時例外原樣丟出（不呼叫模型）。
 3. 讀 prompt（`prompts/<工作>/v<N>.md`；policy 核對 domain 寫死的雜湊登記才放行）、算
    `input_sha256`、組 `LlmRequest`。
 4. 離線保守估計輸入 token；超過 `max_input_tokens` 而且工作沒允許 → `TOO_LARGE`。
@@ -26,8 +27,9 @@
 時，帳照記，run 改成 `failed`（`llm_result_pending`），例外原樣丟出；下一次同一組鍵從存下的輸出
 接續 8、9，不再呼叫模型、不再記帳（ADR-0030）。只支援互動呼叫；Batch 由 Batch 的 Story 另做。
 
-預算檢查是「呼叫前看帳本」，帳在第 7 步才記，所以同時在途的呼叫彼此看不到：超支上限＝同時在途的
-呼叫數 × 單次最大費用（ADR-0031）。Anthropic workspace 的每月上限是第二道。
+預算檢查是「呼叫前看帳本」，帳在第 7 步才記，所以同時在途的呼叫彼此看不到（熔斷線與每個功能預算
+都一樣）：超支上限＝同時在途的呼叫數（worker 與所有呼叫閘門的 CLI 等行程加起來）× 單次最大費用
+（約 0.042 美元，ADR-0031）。Anthropic workspace 的每月上限是第二道。
 """
 
 import uuid
@@ -202,6 +204,9 @@ def run_llm_job(
         LookupError: 論文不存在。
         PromptIntegrityError, PromptFormatError: prompt 檔或登記不對（還沒寫任何列）。
         LlmConfigurationError: 金鑰、權限或模型設定不對（run 已改成 `failed`）。
+        ValueError: 預算檢查的時鐘回了沒有時區的時間（`BudgetGuard`；還沒呼叫模型、沒寫任何列）。
+        Exception: 預算檢查讀帳本時的資料庫錯誤原樣丟出（fail closed：不呼叫模型、不回
+            `DEFERRED_BUDGET`，由工作層重試）。
         Exception: 記帳後驗證或寫結果失敗（帳照記，run 盡量改成 `failed`／`llm_result_pending`，
             下一次接續），原樣往上丟。
     """

@@ -12,7 +12,14 @@ context:
   - '{project-root}/docs/adr/0009-model-choice-and-llm-gateway.md'
   - '{project-root}/docs/adr/0030-llm-gateway-ledger-and-prompts.md'
 warnings: ['oversized']
-deferred: []
+deferred:
+  - summary: >-
+      AI 區塊的 deferred_budget 狀態要等 Story 2.7 的 repo/ai_blocks.py 判定時讀預算狀態。
+    evidence: |-
+      epics 2.3 AC 寫「AI 區塊的狀態是 deferred_budget」，但 ai_blocks.py 是 2.7 的驗收條件（epics 第 1316 行）；ADR-0015 判定順序第 5 步「這個月的預算用完 → deferred_budget」由讀取時判定。2.3 只做到閘門回 DEFERRED_BUDGET 與 get_budget_status(...).allows(task)。
+    location: >-
+      radar/services/budget.py（get_budget_status）；之後的 radar/repo/ai_blocks.py
+    severity: medium
 ---
 
 <intent-contract>
@@ -97,7 +104,47 @@ deferred: []
 
 ## Design Notes
 
-並行：預算檢查是「呼叫前看帳本」，帳在呼叫後才記，所以同時在途的呼叫彼此看不到。超支上限＝同時在途的互動呼叫數 ×單次最大費用。單次最大費用：輸入最多 `max_input_tokens`（100,000，超過不送）× 0.10／百萬＝0.01 美元，加輸出 `max_tokens` × 0.50／百萬（prompt 設定區定；例如 16,000 → 0.008 美元），約 0.02 美元；同時在途數＝worker 的 `worker_concurrency`（預設 2、最多 8）加之後 api 的問答。最多超出約 8 × 0.02＝0.16 美元，遠低於 workspace 70 美元的第二道。Batch 送出時帳還沒記，整批可能超支，由 2.9 送出前預估費用處理（ADR-0031 交接）。
+並行：預算檢查是「呼叫前看帳本」，帳在呼叫後才記，所以同時在途的呼叫彼此看不到。超支上限＝同時在途的呼叫數 × 單次最大費用。單次最大費用：輸入最多 `max_input_tokens`（100,000，超過不送）× 0.10／百萬＝0.01 美元，加輸出 `max_tokens`（上限 64,000）× 0.50／百萬＝0.032 美元，約 0.042 美元（本專案不設快取）；同時在途數＝worker 的 `worker_concurrency`（預設 2、最多 8）加其他呼叫閘門的行程（2.10、2.12、評估、之後 api 的問答）。例如 10 個在途約 0.42 美元，遠低於 workspace 70 美元的第二道；功能預算也一樣可能超出這麼多。（審查後更正：原本照 `max_tokens` 16,000 舉例算成 0.16 美元。）
+
+接續：預算不准時，同一組鍵有 `llm_result_pending` 而且存下輸出的 run 照樣接續（不呼叫模型、不再記帳）；`_acquire(resume_only=True)` 只接續、不新增 run（合併 2.2 的 037bb4e 之後加，ADR-0031）。Batch 送出時帳還沒記，整批可能超支，由 2.9 送出前預估費用處理（ADR-0031 交接）。
+
+## Spec Change Log
+
+- 2026-11-15（協調者通知，非審查迴圈）：合併 2.2 的 Codex 主審查修正 `037bb4e`（記帳後出錯改接續 `llm_result_pending`、拒絕 Batch）。依協調者建議，預算不准時仍接續已付費、只差寫結果的 run；沒有可接續的照舊 `DEFERRED_BUDGET`，`_acquire(resume_only=True)` 不新增 run。Intent 不變（接續不呼叫模型、不花錢，不違反「預算不准時不呼叫模型」）。KEEP：預算不准、沒有 pending 時不讀 prompt、不寫列。
+
+## Review Triage Log
+
+### 2026-11-15 — Review pass
+- verdicts: 28 findings — high 0, medium 3, low 15, false 10, maybe-false 0
+- findings:
+  - `[low]` `[patch]` （verification-gap）`radar costs` 與 `BudgetGuard` 的預設時鐘沒有測試，改成 naive 會全部壞而測試照綠 — 加單元測試核對兩個 `_utc_now` 帶時區，加一個不傳 `clock=` 的 `BudgetGuard` 整合案例。
+  - `[low]` `[patch]` （verification-gap）並行測試用真的現在，跨台北月界時會失敗 — 月界前兩分鐘內 `pytest.skip`。
+  - `[false]` `[reject]` （verification-gap）接線架構測試目前沒有正式呼叫可掃 — 這是替之後的呼叫端立的規則，掃描器已用故意寫錯的原始碼證明有效；不是缺陷。
+  - `[medium]` `[patch]` （blind）超支上限算少了：`max_tokens` 上限 64,000，單次約 0.042 美元 — ADR-0031、名詞表、兩個模組說明、spec Design Notes 改成照設定上限算。
+  - `[medium]` `[patch]` （blind）在途數漏了 CLI／其他行程的呼叫，功能預算也有同樣的競態 — 同上一條一起改寫公式與說明。
+  - `[low]` `[patch]` （blind）沒有正式呼叫端、worker 啟動時不讀 `budget.yaml` — ADR 寫明接線交給第一個呼叫端（2.9／2.10），啟動時讀設定。
+  - `[low]` `[reject]` （blind）掃描器擋不住 `as BudgetGuard` 改名、`getattr`、固定舊月份的時鐘 — 要加 import 來源追蹤等分支，屬故意繞過，code review 會看到；日常不會發生。
+  - `[low]` `[patch]` （blind）`run_llm_job` 的 Raises 沒列預算步驟的例外，讀帳本失敗怎麼辦沒寫 — docstring 補上；ADR 寫明例外原樣丟出（不呼叫模型，由工作層重試）。
+  - `[medium]` `[patch]` （blind）熔斷後每週更新逐篇呼叫會有幾千次加總與警告 — ADR 寫明大批呼叫端要先用 `get_budget_status` 檢查一次（2.9 的交接）。
+  - `[low]` `[reject]` （blind）spec 的 `deferred` 是空的 — 修法是改這份 spec 本身；Batch 預估與功能預算數字已寫在 ADR-0031 與 PR 說明。
+  - `[low]` `[patch]` （blind）熔斷線可以設 0、功能預算可以高於熔斷線 — 0 是刻意的「全部停」，在設定檔註解與 ADR 寫明；高於熔斷線無害（熔斷線照樣管），不加檢查。
+  - `[low]` `[patch]` （blind）名詞表 `BudgetGuard` 兩條 — 合併成原本那一條。
+  - `[low]` `[patch]` （blind）並行測試跨月失敗＋`test_costs_cli.py` 從另一個測試模組 import 工具 — 跨月同第 2 條；共用工具搬到 `tests/llm_support.py`。
+  - `[low]` `[reject]` （blind）domain 用了 `pricing._decimal_from_string`；凍結模型裡的 dict 可變 — 改公開名稱要動 2.2 的模組、加公開介面；可變 dict 和既有 `ModelsConfig` 同一種寫法，沒有人會改它。
+  - `[false]` `[reject]` （blind）`derivation_run.task` 有不認得的值時 `LlmTask(row[0])` 會掛 — 遷移 0010 的 CHECK `ck_derivation_run_task` 只准六個值，資料庫寫不進別的。
+  - `[low]` `[patch]` （edge）並行測試跨月 — 同第 2 條。
+  - `[low]` `[reject]` （edge）掃描器跳過整個閘門檔 — 閘門檔只定義 `run_llm_job`，自己呼叫自己不會發生；要改成只跳過定義是額外分支。
+  - `[low]` `[reject]` （edge）`getattr(llm_gateway, "run_llm_job")` 繞過 — 同 blind 第 7 條。
+  - `[low]` `[patch]` （edge）讀帳本失敗時丟例外、不是 `DEFERRED_BUDGET` — 刻意的（失敗就不呼叫模型，也不假裝成預算用完）；docstring 與 ADR 寫明，同 blind 第 8 條。
+  - `[false]` `[defer]` （intent）AI 區塊的 `deferred_budget` 狀態沒有存、沒有驗 — `repo/ai_blocks.py` 是 Story 2.7 的驗收條件，判定時讀預算狀態（ADR-0015 判定順序第 5 步）；2.3 提供 `get_budget_status(...).allows(task)` 給它用。記入 deferred，PR 說明列為沒照 AC 字面做的地方。
+  - `[false]` `[reject]` （intent）正式 worker 沒有經過 `BudgetGuard` — 目前沒有任何正式呼叫閘門的程式；接線規則由架構測試守，ADR 寫明交接。
+  - `[false]` `[reject]` （intent）功能預算全是 null，正式環境不會只擋單一功能 — 文件沒有數字，照交代留空、列為 Kevin 決定；機制有測試。
+  - `[false]` `[reject]` （intent）只檢索只驗到狀態物件 — 問答在 Epic 5，AC 寫明「問答在 Epic 5 讀它」。
+  - `[false]` `[reject]` （intent）不自動重排 — ADR-0031 第 7 點：每週更新對所有該做的論文問 `should_run`，預算恢復後自然補上；是否要月初重排列為 Kevin 決定。
+  - `[low]` `[patch]` （intent）ADR-0031 說「照 AD-8 的順序」，沒講和 ADR-0009 表格（第 0 步、「丟出」）的差異 — ADR 選項 3 補一句。
+  - `[false]` `[reject]` （intent）並行可能超支 — ADR-0009 已接受「呼叫前看帳本」的取捨，上限已寫明。
+  - `[false]` `[reject]` （intent）`radar costs` 比 AC 多印功能預算、可呼叫、熔斷線、只檢索 — 描述；AC 要的三項都有，逐行比對有測試。
+  - `[false]` `[reject]` （intent）AC 沒要求的 workspace 上限驗證、字串金額、接線架構測試、ADR 與名詞 — 描述，不是缺陷。
 
 ## Verification
 

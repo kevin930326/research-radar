@@ -10,7 +10,7 @@
 workspace_limit_usd: "70"
 
 # 應用層熔斷線（NFR-3）：本月合計到達這個數字，全部 LLM 工作都不准呼叫（到達即擋），
-# 問答進入「只檢索」。必須低於 workspace_limit_usd。
+# 問答進入「只檢索」。必須低於 workspace_limit_usd。寫 "0" 表示全部停（功能預算寫 "0" 只停那個工作）。
 monthly_breaker_usd: "50"
 
 # 各功能（工作代碼）的每月預算：某個工作本月花費到達它的預算，只擋那個工作。

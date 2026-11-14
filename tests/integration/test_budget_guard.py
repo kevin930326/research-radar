@@ -17,7 +17,7 @@ from structlog.testing import capture_logs
 
 from radar.adapters.fake import FakeLlmProvider, fake_completion
 from radar.domain.ai_outputs import GatewayConfig, InputKind, LlmTask, OutputLang
-from radar.domain.budget import BUDGET_TIMEZONE, BudgetConfig
+from radar.domain.budget import BUDGET_TIMEZONE, BudgetConfig, month_window
 from radar.domain.llm import LlmUsage
 from radar.domain.pricing import llm_call_cost
 from radar.domain.viewer import SystemViewer
@@ -27,9 +27,11 @@ from radar.services.llm_gateway import GatewayOutcome, GatewayResult, LlmJob, ru
 from tests.database import TestDatabase, migrate
 from tests.llm_support import (
     GatedProvider,
+    budget_config,
     create_paper,
     execute,
     gateway_config,
+    insert_ledger,
     make_prompts,
     models_config,
     table_counts,
@@ -43,55 +45,6 @@ SYSTEM = SystemViewer()
 NOW = datetime(2026, 11, 15, 12, 0, tzinfo=TAIPEI)
 NEXT_MONTH = datetime(2026, 12, 1, 0, 0, tzinfo=TAIPEI)
 WAIT = 20.0
-
-
-def budget_config(**budgets: str | None) -> BudgetConfig:
-    """熔斷線 50、workspace 上限 70；沒給的工作沒有個別上限。"""
-    task_budgets: dict[str, str | None] = {task.value: None for task in LlmTask}
-    task_budgets.update(budgets)
-    return BudgetConfig.model_validate(
-        {"workspace_limit_usd": "70", "monthly_breaker_usd": "50", "task_budgets_usd": task_budgets}
-    )
-
-
-def insert_ledger(
-    db: TestDatabase,
-    paper_id: uuid.UUID,
-    task: LlmTask,
-    cost: str,
-    at: datetime,
-    *,
-    is_batch: bool = False,
-    eval_run_id: uuid.UUID | None = None,
-) -> None:
-    """假帳本：一筆做完的 `derivation_run` 加一筆 `llm_call`（`created_at`＝`at`）。"""
-    run_id = execute(
-        db,
-        "INSERT INTO derivation_run (paper_id, task, prompt_version, prompt_sha256, model,"
-        " input_sha256, input_kind, params, code_version, call_mode, eval_run_id, status,"
-        " finished_at, created_at)"
-        " VALUES (%s, %s, 1, %s, %s, %s, 'abstract', '{}'::jsonb, 'test', %s, %s, 'succeeded',"
-        " %s, %s) RETURNING id",
-        paper_id,
-        task.value,
-        "a" * 64,
-        MODEL,
-        uuid.uuid4().hex * 2,
-        "batch" if is_batch else "interactive",
-        eval_run_id,
-        at,
-        at,
-    )[0][0]
-    execute(
-        db,
-        "INSERT INTO llm_call (run_id, input_tokens, output_tokens, cache_creation_input_tokens,"
-        " cache_read_input_tokens, cost_usd, price_tier, is_batch, created_at)"
-        " VALUES (%s, 0, 0, 0, 0, %s, 'standard', %s, %s)",
-        run_id,
-        Decimal(cost),
-        is_batch,
-        at,
-    )
 
 
 @pytest.fixture
@@ -191,6 +144,13 @@ def test_breaker_lifts_next_month(
 
     assert result.outcome is GatewayOutcome.ACTIVE
     assert not get_budget_status(SYSTEM, database, budget_config(), now=NEXT_MONTH).retrieval_only
+
+
+def test_default_clock_allows_on_empty_ledger(database: Database) -> None:
+    # 不注入時鐘：用預設的 `_utc_now`（帶時區），空帳本一定准。
+    guard = BudgetGuard(database, budget_config())
+
+    assert all(guard(task) for task in LlmTask)
 
 
 def test_just_below_breaker_runs(
@@ -365,8 +325,11 @@ def test_concurrent_calls_both_pass_the_check_and_overshoot_is_bounded(
 
     閘門記的 `llm_call.created_at` 是資料庫真的現在，所以這個測試的時鐘與假帳本也用真的現在。
     """
+    now = datetime.now(UTC)
+    if month_window(now) != month_window(now + timedelta(minutes=2)):
+        pytest.skip("正好跨台北的月份邊界：閘門記的帳會落在下個月")
     other_paper = create_paper(database, doi="10.1/def", openalex_id="W2")
-    insert_ledger(db, paper_id, LlmTask.ZH_SUMMARY, "49.9998", datetime.now(UTC))
+    insert_ledger(db, paper_id, LlmTask.ZH_SUMMARY, "49.9998", now)
     guard = BudgetGuard(database, budget_config(), clock=lambda: datetime.now(UTC))
     first = GatedProvider(_provider())
     second = GatedProvider(_provider())

@@ -16,10 +16,13 @@ from typer.testing import CliRunner, Result
 
 import radar.entrypoints.cli as cli
 from radar.domain.ai_outputs import LlmTask
+from radar.domain.budget import BUDGET_TIMEZONE
 from radar.repo.db import Database
 from tests.database import ROOT, TestDatabase, migrate
-from tests.integration.test_budget_guard import NOW, TAIPEI, insert_ledger
-from tests.llm_support import create_paper, table_counts
+from tests.llm_support import create_paper, insert_ledger, table_counts
+
+TAIPEI = BUDGET_TIMEZONE
+NOW = datetime(2026, 11, 15, 12, 0, tzinfo=TAIPEI)
 
 runner = CliRunner()
 
