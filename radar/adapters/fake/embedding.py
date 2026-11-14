@@ -13,7 +13,7 @@ import struct
 from collections.abc import Sequence
 
 from radar.domain.llm import check_cloud_safe_text, check_cloud_safe_texts
-from radar.domain.policy import CloudSafeText
+from radar.domain.policy import CloudSafeText, cloud_text
 
 _DOCUMENT = "document"
 _QUERY = "query"
@@ -50,7 +50,7 @@ class FakeEmbeddingProvider:
         counter = 0
         while len(values) < self._dimensions:
             digest = hashlib.sha256(
-                f"{kind}\0{self._model_id}\0{counter}\0{text.text}".encode()
+                f"{kind}\0{self._model_id}\0{counter}\0{cloud_text(text)}".encode()
             ).digest()
             for (number,) in struct.iter_unpack(">I", digest):
                 values.append(number / 0xFFFFFFFF * 2 - 1)

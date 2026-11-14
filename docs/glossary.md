@@ -621,3 +621,7 @@
 - **`LlmRequest`／`LlmResult`／`Completion`**：LLM 呼叫的三種形狀：`LlmRequest` 是要送的內容（文字都是 `CloudSafeText`）；`Completion` 是 adapter 從回應取出、還沒判讀的中立形狀；`LlmResult` 是判讀成功的結果（文字、解析好的 JSON、用量、ids）。
 - **HTTP 529（過載）**：Anthropic 專用的狀態碼，代表服務暫時太忙；本專案當成服務端錯誤（暫時性），稍後重試。
 - **`request-id`**：Anthropic 在每個回應標頭裡附的請求編號；出問題時拿它問 Anthropic，本專案也記下來給帳本用。
+- **放行登記處**：`domain/policy.py` 私有的登記表，放行過的文字只存在這裡，`CloudSafeText` 物件只拿一個號碼，像寄物處只給號碼牌、東西放在櫃台；號碼牌被改過或過期就領不到東西（ADR-0029）。
+- **`cloud_text`**：送雲端之前取文字的唯一做法：確認是 `CloudSafeText`、號碼還在放行登記處，才回放行時的文字。
+- **`CloudSafeTextIntegrityError`**：`CloudSafeText` 的號碼不在放行登記處（被硬改過、物件已回收、不是經放行做出來的空殼）時丟的錯誤，原因代碼 `cloud_text_not_registered`，在送出任何請求之前就擋下。
+- **非有限的數值（inf、NaN）**：無限大或「不是數字」這類特殊浮點數；`1e400` 超過浮點數能表示的範圍，會被 JSON 解析成無限大，本專案把含這種值的 LLM 回應當成格式不對。

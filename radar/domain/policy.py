@@ -15,6 +15,8 @@
 - 新增來源時，`clear_for_cloud` 的 `match` 不寫規則就過不了 mypy（`assert_never`）。
 """
 
+import itertools
+import weakref
 from enum import StrEnum
 from typing import Final, NoReturn, assert_never, final
 
@@ -74,36 +76,86 @@ class CloudPolicy(BaseModel):
 # 放行用的私有記號：只有這個模組拿得到，`CloudSafeText` 的建構子要它（架構測試守著）。
 _CLEARANCE: Final = object()
 
+# 放行登記處（Codex 審查 PR #54 第 1 點）：放行過的文字與來源只存在這裡，`CloudSafeText` 物件本身
+# 只拿一個號碼（`_token`）。就算有人用 `object.__setattr__` 硬改物件，也只能把號碼換成另一筆
+# 已經放行的內容，換不進沒放行的文字；號碼不在登記裡（亂填、物件已經回收、用 `object.__new__`
+# 做出來的空殼）讀文字時就丟 `CloudSafeTextIntegrityError`。要繞過得直接改這個模組的私有狀態，
+# 架構測試守著 `radar/` 裡沒有別處碰它們。號碼只增不減、不重複使用；物件被回收時登記跟著刪掉。
+_REGISTRY: Final[dict[int, tuple[str, ContentSource]]] = {}
+_TOKENS: Final = itertools.count(1)
+
+
+class NotCloudSafeError(TypeError):
+    """port 收到的不是有效的 `CloudSafeText`（例如直接傳 `str`）。在送出任何請求前丟出。
+
+    訊息只有欄位名稱與收到的型別名稱，不含內容。`radar.domain.llm` 也匯出這個類別。
+    """
+
+
+class CloudSafeTextIntegrityError(NotCloudSafeError):
+    """`CloudSafeText` 的號碼不在放行登記裡：被硬改過、物件已經回收後又被拿來用，或不是經
+    `clear_for_cloud` 建立的空殼。原因代碼是 `cloud_text_not_registered`；訊息不含內容。
+    """
+
+    reason: Final = ErrorCode.CLOUD_TEXT_NOT_REGISTERED
+
+    def __init__(self) -> None:
+        super().__init__(
+            "CloudSafeText 不在放行登記裡（被改過或不是經 clear_for_cloud 建立），不送出"
+            f"（{ErrorCode.CLOUD_TEXT_NOT_REGISTERED.value}）"
+        )
+
 
 @final
 class CloudSafeText:
     """已經放行、可以送雲端的文字。只能由 `clear_for_cloud` 建立。
 
-    `repr`／`str` 只顯示來源與長度，不顯示內容（避免寫進日誌或錯誤訊息）；建立後不能改。
+    文字與來源存在本模組的放行登記處，物件只拿號碼；每次讀 `text`／`source` 都回登記處查，
+    查不到丟 `CloudSafeTextIntegrityError`。`repr`／`str` 只顯示來源與長度，不顯示內容
+    （避免寫進日誌或錯誤訊息）；建立後不能改、不能繼承、不能複製或序列化。
     """
 
-    __slots__ = ("_source", "_text")
+    __slots__ = ("__weakref__", "_token")
 
-    _source: ContentSource
-    _text: str
+    _token: int
 
     def __init__(self, text: str, source: ContentSource, *, clearance: object) -> None:
         if clearance is not _CLEARANCE:
             raise TypeError("CloudSafeText 只能由 domain/policy.py 的 clear_for_cloud 建立")
-        object.__setattr__(self, "_text", text)
-        object.__setattr__(self, "_source", source)
+        token = next(_TOKENS)
+        _REGISTRY[token] = (text, source)
+        object.__setattr__(self, "_token", token)
+        # 物件被回收時刪掉登記；號碼不重複使用，所以之後換成這個號碼也查不到。
+        weakref.finalize(self, _REGISTRY.pop, token, None)
 
     def __init_subclass__(cls) -> None:
         raise TypeError("CloudSafeText 不能被繼承")
 
+    def _entry(self) -> tuple[str, ContentSource]:
+        """回登記處查這個物件的文字與來源；查不到（號碼被改過、空殼）就丟錯。"""
+        token = getattr(self, "_token", None)
+        entry = _REGISTRY.get(token) if type(token) is int else None
+        if entry is None:
+            raise CloudSafeTextIntegrityError
+        return entry
+
     @property
     def text(self) -> str:
-        """要送出去的文字。"""
-        return self._text
+        """要送出去的文字（從放行登記處取）。
+
+        Raises:
+            CloudSafeTextIntegrityError: 不在放行登記裡。
+        """
+        return self._entry()[0]
 
     @property
     def source(self) -> ContentSource:
-        return self._source
+        """放行時的來源（從放行登記處取）。
+
+        Raises:
+            CloudSafeTextIntegrityError: 不在放行登記裡。
+        """
+        return self._entry()[1]
 
     def __setattr__(self, name: str, value: object) -> NoReturn:
         raise AttributeError("CloudSafeText 建立後不能改")
@@ -114,19 +166,38 @@ class CloudSafeText:
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, CloudSafeText):
             return NotImplemented
-        return self._source == other._source and self._text == other._text
+        return self._entry() == other._entry()
 
     def __hash__(self) -> int:
-        return hash((self._source, self._text))
+        return hash(self._entry())
 
     def __repr__(self) -> str:
-        return f"CloudSafeText(source={self._source.value!r}, length={len(self._text)})"
+        try:
+            text, source = self._entry()
+        except CloudSafeTextIntegrityError:
+            return "CloudSafeText(不在放行登記裡)"
+        return f"CloudSafeText(source={source.value!r}, length={len(text)})"
 
     __str__ = __repr__
 
     def __reduce__(self) -> NoReturn:
         # copy／pickle 會繞過建構子；不需要，直接擋。
         raise TypeError("CloudSafeText 不能被複製或序列化")
+
+
+def cloud_text(value: object) -> str:
+    """送出前取文字的唯一做法：確認是 `CloudSafeText`、號碼在放行登記裡，回放行時的文字。
+
+    Raises:
+        NotCloudSafeError: 不是 `CloudSafeText`。
+        CloudSafeTextIntegrityError: 不在放行登記裡（被改過、空殼、已回收）。
+    """
+    if not isinstance(value, CloudSafeText):
+        raise NotCloudSafeError(
+            f"要送雲端的文字必須是 CloudSafeText（收到 {type(value).__name__}），"
+            "要先經過 clear_for_cloud"
+        )
+    return value.text
 
 
 class CloudClearanceError(Exception):

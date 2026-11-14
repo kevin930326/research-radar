@@ -219,6 +219,12 @@ deferred:
   - `[false]` `[reject]` （意圖）固定聲明只在 adapter 層強制 — 替身不送任何東西；之後的 adapter 照 `system_prompt()`。
   - `[false]` `[reject]` （意圖）cassette 是手寫的 — 交代明訂用手寫、README 註明，列入 Kevin 待辦。
 
+### 2026-11-15 — Codex 審查 PR #54
+- verdicts: 2 findings — high 1, low 1
+- findings:
+  - `[high]` `[patch]` 放行後用 `object.__setattr__(safe, "_text", ...)` 能把內容換成沒放行的文字，adapter 只看型別、架構測試也抓不到 — 改成放行登記處：文字只存在 `policy.py` 私有的登記表，物件只拿號碼，讀文字一律經 `cloud_text`／`.text` 回登記表核對，查不到丟 `CloudSafeTextIntegrityError`（`cloud_text_not_registered`）；`LlmRequest`、`check_*`、Anthropic adapter、兩個替身都經這道核對；新增架構測試 `tests/arch/test_cloud_registry.py`（私有狀態只在 policy.py、domain 以外不用 `object.__setattr__`／`__new__`／`__delattr__` 與序列化模組）與反向測試 `tests/unit/test_cloud_registry.py`。
+  - `[low]` `[patch]` `json.loads` 把 `1e400` 解成 `inf` 放進 `LlmResult.parsed` — 解析後用堆疊走訪檢查每個浮點數有限，否則 `LlmMalformedResponseError`；測試在 `tests/unit/test_llm_json_finite.py`。
+
 ## Design Notes
 
 `CloudSafeText` 只靠 mypy 擋不住執行期的誤用，所以建構子收一個只有 `policy.py` 拿得到的私有記號：
@@ -228,7 +234,7 @@ _CLEARANCE: Final = object()
 
 @final
 class CloudSafeText:
-    __slots__ = ("_source", "_text")
+    __slots__ = ("__weakref__", "_token")  # 文字存在 policy.py 私有的放行登記處，物件只拿號碼
     def __init__(self, text: str, source: ContentSource, *, clearance: object) -> None:
         if clearance is not _CLEARANCE:
             raise TypeError("CloudSafeText 只能由 domain/policy.py 的 clear_for_cloud 建立")

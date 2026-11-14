@@ -51,6 +51,7 @@ from radar.domain.llm import (
     interpret_completion,
     system_prompt,
 )
+from radar.domain.policy import cloud_text
 
 ANTHROPIC_BASE_URL: Final = "https://api.anthropic.com"
 CONFIGURATION_STATUSES: Final = frozenset({401, 403, 404})
@@ -296,8 +297,9 @@ class AnthropicLlmProvider:
                 "type": "json_schema",
                 "schema": dict(request.output_schema),
             }
+        # 文字一律經 policy 的 cloud_text 拿：號碼不在放行登記裡（被硬改過）就丟錯、不送出。
         content: list[TextBlockParam] = [
-            {"type": "text", "text": block.text} for block in request.content
+            {"type": "text", "text": cloud_text(block)} for block in request.content
         ]
         try:
             raw = self._client.messages.with_raw_response.create(
