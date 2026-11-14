@@ -171,3 +171,14 @@ def test_image_includes_migrations() -> None:
 
     assert "!migrations/" in rules
     assert "COPY migrations ./migrations" in dockerfile
+
+
+def test_image_includes_domain_config() -> None:
+    # api、worker、CLI 啟動時驗證 config/*.yaml（AD-18）；映像裡沒有就起不來。
+    rules = (ROOT / ".dockerignore").read_text(encoding="utf-8").splitlines()
+    dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+
+    assert "!config/" in rules
+    assert "COPY config ./config" in dockerfile
+    assert (ROOT / "config" / "journals.yaml").is_file()
+    assert (ROOT / "config" / "openalex.yaml").is_file()

@@ -136,6 +136,8 @@ def test_api_without_migrations_dir_exits_with_error(tmp_path: Path) -> None:
             "DATABASE_URL": "postgresql://radar_app@127.0.0.1:1/radar",
             "RADAR_API_HOST": "127.0.0.1",
             "RADAR_API_PORT": str(_free_port()),
+            # 工作目錄換掉後領域設定也不在了；指回 repo 的 config/，才測得到「找不到遷移檔」。
+            "RADAR_CONFIG_DIR": str(ROOT / "config"),
         },
         cwd=tmp_path,
     )

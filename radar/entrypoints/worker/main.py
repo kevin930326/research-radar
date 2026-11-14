@@ -23,6 +23,7 @@ from radar.config import (
     ConfigError,
     WorkerConnections,
     heartbeat_urls,
+    load_domain_config,
     load_settings,
     worker_connection_split,
 )
@@ -147,6 +148,8 @@ async def run_until_signal(settings: Settings, connections: WorkerConnections) -
 def main() -> int:
     configure_logging()
     try:
+        # 領域設定（config/*.yaml）錯了也不啟動（AD-18）。
+        load_domain_config()
         settings = load_settings()
         connections = worker_connection_split(settings)
     except ConfigError as exc:

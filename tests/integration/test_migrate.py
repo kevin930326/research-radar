@@ -17,7 +17,7 @@ from radar.repo.migrations import MigrationScripts, read_schema_state, upgrade_t
 from tests.database import MIGRATIONS_DIR, ROOT, TestDatabase, migrate
 
 BIN = Path(sys.executable).parent
-HEAD = "0003"
+HEAD = "0004"
 
 
 def _run(
@@ -194,7 +194,11 @@ def test_migrate_without_migrations_dir_explains(tmp_path: Path) -> None:
     result = _run(
         "radar",
         "migrate",
-        env={"RADAR_MIGRATION_DATABASE_URL": "postgresql://radar_owner@127.0.0.1:1/radar"},
+        env={
+            "RADAR_MIGRATION_DATABASE_URL": "postgresql://radar_owner@127.0.0.1:1/radar",
+            # 工作目錄換掉後領域設定也不在了；指回 repo 的 config/，才測得到「找不到遷移檔」。
+            "RADAR_CONFIG_DIR": str(ROOT / "config"),
+        },
         cwd=tmp_path,
     )
 

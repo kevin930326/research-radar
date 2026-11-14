@@ -5,14 +5,23 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from radar.adapters.heartbeat import HttpHeartbeat
 from radar.adapters.jobs import JobApp, create_job_app, defer_job, retry_stalled_jobs
+from radar.config import ConfigError, env_name
+from radar.domain.domain_config import OpenAlexConfig
 from radar.domain.jobs import Enqueue
 from radar.domain.schema import SchemaState
 from radar.domain.settings import MigrationSettings, Settings
 from radar.repo.db import Database
 from radar.repo.migrations import MigrationScripts, read_schema_state, upgrade_to_head
+
+if TYPE_CHECKING:
+    # 只給型別註記用：OpenAlex 與物件儲存的 adapter（boto3 約 11 MB）在 build_* 函式裡才 import，
+    # api 行程為了 build_readiness_probes import 這個模組時不會載入它們（mem_limit 很緊）。
+    from radar.adapters.object_store import S3ObjectStore
+    from radar.adapters.openalex import OpenAlexSource
 
 # 入口不能直接 import radar.repo，這個例外從這裡轉出去給入口攔。
 from radar.repo.migrations import MigrationsNotFoundError as MigrationsNotFoundError
@@ -131,3 +140,62 @@ def build_worker(
             retry_after_max=settings.heartbeat_retry_after_max,
         ),
     )
+
+
+def build_paper_source(settings: Settings, openalex_config: OpenAlexConfig) -> OpenAlexSource:
+    """OpenAlex 的 `PaperSource`（呼叫、速率、額度設定來自 `config/openalex.yaml`）。
+
+    用完要 `close()`（或用 `with`）。不連線。
+
+    Raises:
+        ConfigError: 沒有設定 `RADAR_OPENALEX_API_KEY`。
+    """
+    if settings.openalex_api_key is None:
+        raise ConfigError([f"缺少環境變數 {env_name('openalex_api_key')}"])
+    from radar.adapters.openalex import OpenAlexSource
+
+    return OpenAlexSource(settings.openalex_api_key.get_secret_value(), openalex_config)
+
+
+def build_object_store(settings: Settings) -> S3ObjectStore:
+    """S3 相容物件儲存（R2、本機 RustFS）的 `ObjectStore`。不連線。
+
+    Raises:
+        ConfigError: 缺少 `RADAR_OBJECT_STORE_*` 裡必要的設定；訊息只列環境變數名稱。
+    """
+    endpoint_url = settings.object_store_endpoint_url
+    region = settings.object_store_region
+    bucket = settings.object_store_bucket
+    access_key_id = settings.object_store_access_key_id
+    secret_access_key = settings.object_store_secret_access_key
+    if (
+        endpoint_url is None
+        or region is None
+        or bucket is None
+        or access_key_id is None
+        or secret_access_key is None
+    ):
+        required = {
+            "object_store_endpoint_url": endpoint_url,
+            "object_store_region": region,
+            "object_store_bucket": bucket,
+            "object_store_access_key_id": access_key_id,
+            "object_store_secret_access_key": secret_access_key,
+        }
+        raise ConfigError(
+            [
+                f"缺少環境變數 {env_name(field)}"
+                for field, value in required.items()
+                if value is None
+            ]
+        )
+    from radar.adapters.object_store import S3ObjectStore, create_s3_client
+
+    client = create_s3_client(
+        endpoint_url=endpoint_url,
+        region=region,
+        access_key_id=access_key_id.get_secret_value(),
+        secret_access_key=secret_access_key.get_secret_value(),
+        timeout=settings.object_store_timeout,
+    )
+    return S3ObjectStore(client, bucket, attempts=settings.object_store_attempts)

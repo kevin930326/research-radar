@@ -366,3 +366,14 @@ def test_worker_settings_ranges(variable: str, value: str) -> None:
         load_settings({"DATABASE_URL": DB_URL, variable: value})
 
     assert variable in str(caught.value)
+
+
+@pytest.mark.parametrize("value", ["ftp://storage.example", "http://"])
+def test_object_store_endpoint_url_must_be_http_with_host(value: str) -> None:
+    with pytest.raises(ConfigError) as caught:
+        load_settings({"DATABASE_URL": DB_URL, "RADAR_OBJECT_STORE_ENDPOINT_URL": value})
+
+    [problem] = caught.value.problems
+    assert "RADAR_OBJECT_STORE_ENDPOINT_URL" in problem
+    assert value not in str(caught.value)
+    assert "storage.example" not in str(caught.value)

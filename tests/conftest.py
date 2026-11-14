@@ -4,16 +4,22 @@
 integration 另外加 `allow_hosts`，只放行連到本機（127.0.0.1、::1、localhost）。
 
 資料庫：integration 與 arch 用的測試資料庫 fixture 在這裡（做法見 `tests/database.py`）。
+
+錄製的外部 API 回應：`vcr_config`、`vcr_cassette_dir` 給 pytest-recording；設定只有
+`tests/vcr_settings.py` 一份，錄好的檔都在 `tests/cassettes/`。
 """
 
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 
+from tests import vcr_settings
 from tests.database import TestDatabase, create_database, drop_database, migrate
 
 TESTS_ROOT = Path(__file__).parent
+CASSETTES_DIR = TESTS_ROOT / "cassettes"
 MARKED_DIRS = ("unit", "integration", "arch")
 LOCAL_HOSTS = ["127.0.0.1", "::1", "localhost"]
 
@@ -64,3 +70,18 @@ def migrated_database() -> Iterator[TestDatabase]:
         yield database
     finally:
         drop_database(database)
+
+
+@pytest.fixture
+def vcr_config() -> dict[str, Any]:
+    """pytest-recording 的錄製設定（唯一一份在 `tests/vcr_settings.py`）。"""
+    return vcr_settings.vcr_config()
+
+
+@pytest.fixture(scope="module")
+def vcr_cassette_dir() -> str:
+    """錄好的回應都放 `tests/cassettes/`。
+
+    不照 pytest-recording 預設的「每個測試檔一個資料夾」。
+    """
+    return str(CASSETTES_DIR)

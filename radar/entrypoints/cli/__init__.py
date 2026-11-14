@@ -6,7 +6,13 @@ from typing import NoReturn
 import structlog
 import typer
 
-from radar.config import ConfigError, database_pool_size, load_migration_settings, load_settings
+from radar.config import (
+    ConfigError,
+    database_pool_size,
+    load_domain_config,
+    load_migration_settings,
+    load_settings,
+)
 from radar.domain.database_requirements import DatabaseRequirementsError
 from radar.domain.jobs import UnknownJobError, find_scheduled_job
 from radar.entrypoints.bootstrap import (
@@ -30,6 +36,11 @@ log = structlog.get_logger(__name__)
 @app.callback()
 def _root() -> None:
     """Research Radar 的指令列工具。"""
+    # 每個指令執行前先驗證領域設定（config/*.yaml，AD-18）；錯了就不執行、退出碼 1。
+    try:
+        load_domain_config()
+    except ConfigError as exc:
+        _fail("領域設定錯誤，沒有執行：", exc.problems)
 
 
 @app.command()
