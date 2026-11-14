@@ -11,7 +11,7 @@
      → `superseded`（晚到的結果不蓋掉新的）；
    - 都對 → 先把舊的 `active` 標成 `superseded`，再新增 `active`。
 3. `derivation_run` 還是 `running` 時，同一個交易改成 `succeeded`（被 sweep 改成 `failed` 的維持
-   `failed`）。
+   `failed`；原因是 `llm_result_pending` 的改成 `llm_run_expired`：已經寫了表頭，不再接續）。
 
 核對與切換在同一個交易、先鎖論文：兩筆結果同時要啟用時一定一筆等另一筆做完，最後有效的是
 目前輸入算出來的那一筆。`radar runs promote`（候選升正式，Epic 8）之後走同一個函式的另一個入口。
@@ -37,7 +37,11 @@ from radar.domain.permissions import Action, require
 from radar.domain.viewer import SystemViewer, Viewer
 from radar.repo.ai_outputs import create_ai_result, update_ai_results_superseded
 from radar.repo.db import Database
-from radar.repo.llm_ledger import find_derivation_run, update_derivation_run_succeeded
+from radar.repo.llm_ledger import (
+    find_derivation_run,
+    update_derivation_run_pending_settled,
+    update_derivation_run_succeeded,
+)
 from radar.repo.papers import find_paper_llm_source
 from radar.services.prompt_loader import current_prompt_version
 
@@ -111,6 +115,8 @@ def record_llm_result(
         )
         if run.status is RunStatus.RUNNING:
             update_derivation_run_succeeded(connection, run.id)
+        elif run.failure_reason == ErrorCode.LLM_RESULT_PENDING:
+            update_derivation_run_pending_settled(connection, run.id)
     return status
 
 

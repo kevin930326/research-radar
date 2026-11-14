@@ -3,6 +3,7 @@
 - 降到 0009 後五張表都不在，再升回來都在。
 - `radar_app` 對 `llm_call` 只能新增與讀取（帳不能改、不能刪）；對 `derivation_run` 與表頭表
   可以改狀態。
+- `llm_call` 存下的輸出：文字與拒收原因最多一個有值，原因代碼要合格式。
 """
 
 import subprocess
@@ -145,3 +146,19 @@ def test_second_running_run_for_same_key_is_refused_but_eval_is_not(db: TestData
         connection.execute(copy, (uuid.uuid4(), run_id))
         with pytest.raises(psycopg.errors.UniqueViolation):
             connection.execute(copy, (None, run_id))
+
+
+def test_llm_call_saved_output_checks(db: TestDatabase) -> None:
+    run_id = _seed_run(db)
+    insert = (
+        "INSERT INTO llm_call (run_id, input_tokens, output_tokens, cache_creation_input_tokens,"
+        " cache_read_input_tokens, cost_usd, price_tier, is_batch, output_text,"
+        " output_reject_reason) VALUES (%s, 1, 1, 0, 0, 0, 'standard', false, %s, %s)"
+    )
+    with db.connect(APP_ROLE) as connection:
+        with pytest.raises(psycopg.errors.CheckViolation):
+            connection.execute(insert, (run_id, "{}", "llm_refusal"))
+        with pytest.raises(psycopg.errors.CheckViolation):
+            connection.execute(insert, (run_id, None, "Not A Code"))
+        connection.execute(insert, (run_id, "{}", None))
+        assert connection.execute("SELECT output_text FROM llm_call").fetchall() == [("{}",)]

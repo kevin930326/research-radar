@@ -22,6 +22,13 @@ deferred:
     location: >-
       radar/services/llm_gateway.py（步驟 6 的 except LlmRejectedError）
     severity: medium
+  - summary: >-
+      Batch 的計價（五折）與生命週期（不受 sweep 時限、跟著批次結果走、批次取回後才記帳寫入）留給真正的 Batch Story；現在 `run_llm_job` 收到 `call_mode=BATCH` 直接丟 ValueError，不呼叫、不寫列。
+    evidence: |-
+      Codex 主審查（docs/runs/epic-2a/reviews/2.2-codex-output.md）指出：BATCH 仍走同步的 provider.complete，卻照五折記帳、run 標 batch 而不受 sweep 收尾。intent 的 Never 段本來就排除 Batch；pricing.llm_call_cost 的 is_batch 與 derivation_run.call_mode／llm_call.is_batch 欄位保留給 Batch Story。ADR-0030 決定 15。
+    location: >-
+      radar/services/llm_gateway.py（run_llm_job 開頭的 call_mode 檢查）
+    severity: medium
 ---
 
 <intent-contract>
@@ -146,7 +153,17 @@ deferred:
 
 - 2026-11-15（依此更正，協調者轉達 2.1 第五次確認審查的結論）：模板放行改成「loader 讀整個檔 → policy 的 `clear_prompt_file` 核對 domain 寫死的雜湊常數（`radar/domain/prompt_hashes.py`）→ 拿掉設定區、放行本文」，`clear_for_cloud` 拒收 `PROMPT_TEMPLATE`。這一條取代 2.1 spec deferred 第 51 行與 ADR-0029 第 115～117 行的延後做法（不由 policy 讀檔、雜湊清單不從參數收）；ADR-0029 的決定段不改，記錄在 ADR-0030 決定 7、11。另外：`_FROZEN_SCHEMAS` 改唯讀並加架構測試；`test_prompt_template_source.py` 的比對判定只算直接運算元；送出的凍結 schema 字串 sha256 記進 `derivation_run.params.output_schema_sha256`。Intent 與 AC 不變（AC 的「登記檔」現在指 `prompt_hashes.py`）。
 
+- 2026-11-15（Codex 主審查，協調者轉達）：（1）記帳後驗證或寫結果失敗時，重試會再呼叫模型、再付一次錢 → `llm_call` 加存模型輸出（`output_text`／`output_reject_reason`），記帳後出錯的 run 標 `failed`＋`llm_result_pending`，下一次同一組鍵在取得資格的交易裡把它改回 `running`、從存下的輸出接續驗證與寫入，不再呼叫模型；sweep 改看 `updated_at`（接續時重設），已存輸出的逾時 run 也標 `llm_result_pending`。（2）`call_mode=BATCH` 改成明確拒絕（ValueError），Batch 記入 deferred。（3）加架構測試 `test_prompt_registry_history.py`：拿 main 歷史上的登記檔比，已登記的版本不能刪、不能改雜湊。Intent 與 AC 不變（I/O 表「結果寫入失敗」那列的「盡量把 run 改 failed」照樣成立，原因代碼從 `llm_gateway_error` 改成 `llm_result_pending`）。ADR-0030 加選項 6、決定 14、15，取捨段補接續的限制。
+
 ## Review Triage Log
+
+### 2026-11-15 — Codex 主審查
+- 原文：`docs/runs/epic-2a/reviews/2.2-codex-output.md`；分流：`docs/runs/epic-2a/reviews/2.2-triage.md`。
+- findings:
+  - `[high]` `[patch]` 記帳後寫結果的交易失敗（或驗證函式丟非預期例外）時 run 改 `failed`，重試的 `_acquire` 只看 running／active／rejected，會新增 run、再呼叫模型、再記一筆帳 — 見 Spec Change Log 第 2 條（1）。原始回應存成 NULL（NaN、NUL）不影響接續：接續只讀 `output_text`；文字本身存不進 `text` 欄位時改存拒收原因 `llm_output_unstorable`，接續直接寫 rejected。加 11 個整合測試（寫入失敗後重試、驗證例外後重試、接續時重新驗證、呼叫時拒收、存不下的文字、原始回應 NULL、程式掛掉後 sweep 再接續、接續重設 sweep 時鐘、已寫 superseded 的 pending 不接續、評估只接續同一個 eval、沒有存輸出時不接續）與遷移 CHECK 測試、`SavedLlmOutput` 單元測試。
+  - `[medium]` `[patch]` `call_mode=BATCH` 走同步呼叫卻照五折記帳、不受 sweep — 改成明確拒絕；本分支新增的 `test_batch_call_mode_records_discounted_cost` 改成 `test_batch_call_mode_is_refused_before_anything`（推翻上一輪 Review pass 第 27 條的 reject）。
+  - `[medium]` `[patch]` 同時改 `v1.md` 與它登記的雜湊、版本不變，`test_prompt_registry.py` 照樣通過 — 加 git 歷史比對的架構測試與 tmp repo 示範；main 上還沒有登記檔，這條守衛在 2.2 合併進 main 之後才開始有東西可比（ADR-0030 取捨段）。
+
 
 ### 2026-11-15 — Review pass
 - verdicts: 41 findings — high 0, medium 12, low 25, false 4, maybe-false 0
@@ -200,8 +217,11 @@ deferred:
 ```python
 with database.transaction() as connection:
     Database.transaction_lock(connection, run_lock_key(key))   # 阻塞，交易結束自動放
-    if eval_run_id is None and _blocked(connection, key):        # 有 active／非評估 rejected／running
+    if eval_run_id is None and _blocked(connection, key):        # 有 running／active／非評估 rejected
         return SKIPPED
+    resumed = update_derivation_run_resumed(connection, key, eval_run_id)  # llm_result_pending → running
+    if resumed is not None:
+        return 接續(resumed, find_llm_call_output(...))           # 不呼叫模型，只驗證＋寫入
     run_id = create_derivation_run(connection, ...)              # 部分唯一索引兜底
 ```
 
@@ -276,3 +296,10 @@ with database.transaction() as connection:
 - `code_version` 分不出程式版本。
 - HTTP 400 的分類（deferred）。
 - 分類表／情境值清單的「現在版本」要等 2.5／2.6 接上。
+
+**Codex 主審查之後（2026-11-15）**：修了 1 筆 high、2 筆 medium（見 Review Triage Log「Codex 主審查」）。
+
+- 記帳後出錯不再重付：run 標 `llm_result_pending`，下一次從 `llm_call` 存下的輸出接續。
+- `call_mode=BATCH` 明確拒絕，Batch 記入 deferred。
+- 新架構測試守 prompt 登記只增不改（和 main 的歷史比）。
+- 這一輪依協調者指示不跑 integration、不起 `radar-ci`：新寫與改過的整合測試只過了 ruff 與 mypy，交 CI 跑。

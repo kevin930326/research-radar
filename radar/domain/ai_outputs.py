@@ -136,8 +136,32 @@ class DerivationRun:
 
 
 @dataclass(frozen=True, slots=True)
+class SavedLlmOutput:
+    """和帳一起存進 `llm_call` 的模型輸出，寫結果失敗後接續用（ADR-0030）。
+
+    剛好一個有值：`text` 是模型回的文字（還沒驗證，要存得進 `text` 欄位）；`reject_reason` 是
+    呼叫當下就判定拒收的原因（拒答、截斷、格式不對，或文字本身存不進資料庫）。
+
+    Raises:
+        ValueError: 兩個都有值或都沒有，或 `text` 存不進資料庫。
+    """
+
+    text: str | None
+    reject_reason: ErrorCode | None
+
+    def __post_init__(self) -> None:
+        if (self.text is None) == (self.reject_reason is None):
+            raise ValueError("text 與 reject_reason 要剛好一個有值")
+        if self.text is not None:
+            check_storable_text(self.text, "模型輸出")
+
+
+@dataclass(frozen=True, slots=True)
 class NewLlmCall:
-    """要新增的一筆 `llm_call`（一次模型呼叫的帳）。"""
+    """要新增的一筆 `llm_call`（一次模型呼叫的帳）。
+
+    `output`：存下的模型輸出（接續用）；沒有可存的（例如請求不合法、沒有回應）是 None。
+    """
 
     run_id: uuid.UUID
     input_tokens: int
@@ -151,6 +175,7 @@ class NewLlmCall:
     request_id: str | None
     stop_reason: str | None
     raw_response: Mapping[str, Any] | None
+    output: SavedLlmOutput | None = None
 
 
 @dataclass(frozen=True, slots=True)

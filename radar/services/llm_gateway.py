@@ -9,15 +9,20 @@
    `input_sha256`、組 `LlmRequest`。
 4. 離線保守估計輸入 token；超過 `max_input_tokens` 而且工作沒允許 → `TOO_LARGE`。
 5. 取得執行資格的短交易：advisory lock → 再問一次 `should_run`（有 `active`、平常流程的
-   `rejected` 或 `running` 就 `SKIPPED`）→ 新增 `running` 的 `derivation_run`（部分唯一索引兜底），
-   立刻 commit。評估（帶 `eval_run_id`）不問 `should_run`、不受 running 索引限制。
-6. 呼叫模型（不開著交易）。暫時性錯誤 → run `failed`、`TRANSIENT_FAILURE`；設定錯 → run
-   `failed` 後原樣丟出。
-7. 自己的短交易記 `llm_call`（有 usage 才記；費用由 `domain/pricing.py` 算）。
+   `rejected` 或 `running` 就 `SKIPPED`）→ 有 `llm_result_pending` 的 run 就改回 `running` 接續，
+   否則新增 `running` 的 `derivation_run`（部分唯一索引兜底），立刻 commit。評估（帶
+   `eval_run_id`）不問 `should_run`、不受 running 索引限制，只接續同一個 `eval_run_id` 的 run。
+6. 呼叫模型（不開著交易；接續時跳過 6、7）。暫時性錯誤 → run `failed`、`TRANSIENT_FAILURE`；
+   設定錯 → run `failed` 後原樣丟出。
+7. 自己的短交易記 `llm_call`（有 usage 才記；費用由 `domain/pricing.py` 算），連同模型回的文字
+   或呼叫當下的拒收原因（`SavedLlmOutput`）一起存。
 8. Pydantic 驗格式 → domain 驗證（工作的驗證函式）→ 確認輸出存得進資料庫；任何一步不過都是
    拒收（`rejected`＋原因代碼），不重試。
-9. `services/ai_results.py` 鎖論文列、核對後寫入（另一個短交易）。寫入失敗時帳照記，盡量把 run
-   改成 `failed`，例外原樣丟出。
+9. `services/ai_results.py` 鎖論文列、核對後寫入（另一個短交易）。
+
+記帳之後（8、9）出非預期的錯（驗證函式丟了 `OutputRejectedError` 以外的例外、寫入的交易失敗）
+時，帳照記，run 改成 `failed`（`llm_result_pending`），例外原樣丟出；下一次同一組鍵從存下的輸出
+接續 8、9，不再呼叫模型、不再記帳（ADR-0030）。只支援互動呼叫；Batch 由 Batch 的 Story 另做。
 """
 
 import uuid
@@ -45,6 +50,7 @@ from radar.domain.ai_outputs import (
     OutputRejectedError,
     ResultStatus,
     RunKey,
+    SavedLlmOutput,
     build_llm_input,
     check_output_storable,
     is_storable_json,
@@ -55,7 +61,6 @@ from radar.domain.llm import (
     LlmConfigurationError,
     LlmRejectedError,
     LlmRequest,
-    LlmResult,
     LlmTransientError,
     LlmUsage,
     frozen_schema_json,
@@ -71,8 +76,11 @@ from radar.repo.db import Database
 from radar.repo.llm_ledger import (
     create_derivation_run,
     create_llm_call,
+    find_llm_call_output,
     find_running_derivation_run_id,
     update_derivation_run_failed,
+    update_derivation_run_failed_or_pending,
+    update_derivation_run_resumed,
     update_expired_derivation_runs,
 )
 from radar.repo.papers import find_paper_llm_source
@@ -147,7 +155,8 @@ class GatewayResult:
     - `reason`：擋下、拒收或暫時性失敗的原因代碼。
     - `output`：通過驗證的輸出（Pydantic 模型；沒有 schema 時是文字），只有寫成 `active`／
       `candidate`／`superseded` 時有。
-    - `cost_usd`：有記 `llm_call` 時的費用。
+    - `cost_usd`：這一次有記 `llm_call` 時的費用（接續時沒有新記帳，是 None）。
+    - `resumed`：這一次是從存下的輸出接續（沒有呼叫模型）。
     """
 
     outcome: GatewayOutcome
@@ -155,6 +164,15 @@ class GatewayResult:
     reason: ErrorCode | None = None
     output: BaseModel | str | None = None
     cost_usd: Decimal | None = None
+    resumed: bool = False
+
+
+@dataclass(frozen=True)
+class _Claim:
+    """取得的執行資格：`saved` 有值代表接續（不呼叫模型）。"""
+
+    run_id: uuid.UUID
+    saved: SavedLlmOutput | None
 
 
 def run_llm_job(
@@ -171,14 +189,20 @@ def run_llm_job(
 
     Raises:
         PermissionDeniedError: `actor` 不是系統工作（不碰資料庫）。
-        ValueError: 工作沒有表頭表（2.2 只支援 `zh_summary`、`classify`、`extract_model`），或
-            分類表／情境值清單版本帶錯。
+        ValueError: 工作沒有表頭表（2.2 只支援 `zh_summary`、`classify`、`extract_model`）、
+            分類表／情境值清單版本帶錯，或 `config.call_mode` 不是互動（Batch 還不支援；都不碰
+            資料庫）。
         LookupError: 論文不存在。
         PromptIntegrityError, PromptFormatError: prompt 檔或登記不對（還沒寫任何列）。
         LlmConfigurationError: 金鑰、權限或模型設定不對（run 已改成 `failed`）。
-        Exception: 寫結果失敗（帳照記，run 盡量改成 `failed`），原樣往上丟。
+        Exception: 記帳後驗證或寫結果失敗（帳照記，run 盡量改成 `failed`／`llm_result_pending`，
+            下一次接續），原樣往上丟。
     """
     require(actor, Action.RUN_AI_JOBS, None)
+    if config.call_mode is not CallMode.INTERACTIVE:
+        # Batch 的計價（五折）與生命週期（不受 sweep 時限、跟著批次結果走）要等真正的 Batch
+        # 流程；現在這個入口是同步呼叫，照 Batch 記帳會少記一半（ADR-0030）。
+        raise ValueError("閘門目前只支援互動呼叫；Batch 由 Batch 的 Story 另做")
     task = LlmTask(job.task)
     if task not in HEADER_TABLES:
         raise ValueError(f"{task.value} 還沒有表頭表，閘門不支援（2.2 只支援有表頭的工作）")
@@ -228,9 +252,16 @@ def run_llm_job(
         return GatewayResult(GatewayOutcome.TOO_LARGE, reason=ErrorCode.LLM_INPUT_TOO_LARGE)
 
     # 5. 取得執行資格（短交易，立刻 commit）。
-    run_id = _acquire(database, config, job, key, prompt, llm_input, eval_run_id)
-    if run_id is None:
+    claim = _acquire(database, config, job, key, prompt, llm_input, eval_run_id)
+    if claim is None:
         return GatewayResult(GatewayOutcome.SKIPPED)
+    run_id = claim.run_id
+    if claim.saved is not None:
+        # 接續：模型已經回應、帳已經記過，只做 8、9。
+        log.info("從存下的輸出接續 LLM 工作", task=task.value, run_id=str(run_id))
+        return _finish(
+            actor, database, config, job, prompt, run_id, llm_input, claim.saved, None, True
+        )
 
     # 6. 呼叫（不開著交易）。
     try:
@@ -242,24 +273,33 @@ def run_llm_job(
         _fail_run(database, run_id, ErrorCode.LLM_CONFIGURATION)
         raise
     except LlmRejectedError as exc:
+        saved = SavedLlmOutput(text=None, reject_reason=exc.code)
         try:
             cost = _record_call(
-                database, config, run_id, key.model, exc.usage, exc.response_id, exc.request_id
+                database,
+                config,
+                run_id,
+                key.model,
+                exc.usage,
+                exc.response_id,
+                exc.request_id,
+                output=saved,
             )
         except BaseException:
             _try_fail_run(database, run_id)
             raise
-        return _write_result(actor, database, config, job, run_id, llm_input, exc.code, None, cost)
+        return _finish(actor, database, config, job, prompt, run_id, llm_input, saved, cost, False)
     except BaseException:
         _fail_run(database, run_id, ErrorCode.LLM_GATEWAY_ERROR)
         raise
 
-    # 7、8 丟出非預期的例外（記帳的交易失敗、domain 驗證丟了 OutputRejectedError 以外的例外）時，
-    # 盡量把 run 改成 failed，不讓它停在 running 擋住同一組鍵，例外原樣丟出。
-    reject_reason: ErrorCode | None = None
-    output: BaseModel | str | None = None
+    # 7. 記帳，連同輸出一起存（文字存不進資料庫就直接存拒收原因）。
+    saved = (
+        SavedLlmOutput(text=result.text, reject_reason=None)
+        if is_storable_json(result.text)
+        else SavedLlmOutput(text=None, reject_reason=ErrorCode.LLM_OUTPUT_UNSTORABLE)
+    )
     try:
-        # 7. 記帳。
         cost = _record_call(
             database,
             config,
@@ -270,25 +310,20 @@ def run_llm_job(
             result.request_id,
             stop_reason=result.stop_reason,
             raw=result.raw,
+            output=saved,
         )
-        # 8. 驗證：Pydantic → domain → 存得進資料庫。
-        try:
-            output = _validated_output(prompt, result, job, llm_input)
-        except OutputRejectedError as exc:
-            reject_reason = exc.code
     except BaseException:
         _try_fail_run(database, run_id)
         raise
 
-    # 9. 寫入結果。
-    return _write_result(
-        actor, database, config, job, run_id, llm_input, reject_reason, output, cost
-    )
+    # 8、9.
+    return _finish(actor, database, config, job, prompt, run_id, llm_input, saved, cost, False)
 
 
 def expire_stale_runs(actor: Viewer, database: Database, older_than: timedelta) -> int:
-    """把建立超過 `older_than` 還是 `running` 的互動 `derivation_run` 改成 `failed`
-    （`llm_run_expired`），回改了幾筆。sweep 每 15 分鐘呼叫一次。
+    """把超過 `older_than` 沒有進展還是 `running` 的互動 `derivation_run` 改成 `failed`，回改了
+    幾筆：已經存下輸出的記 `llm_result_pending`（下一次接續），否則記 `llm_run_expired`。sweep 每
+    15 分鐘呼叫一次。
 
     Raises:
         PermissionDeniedError: `actor` 不是系統工作（不碰資料庫）。
@@ -331,8 +366,9 @@ def _acquire(
     prompt: LoadedPrompt,
     llm_input: LlmInput,
     eval_run_id: uuid.UUID | None,
-) -> uuid.UUID | None:
-    """取得執行資格：同一個短交易裡上鎖、重問 `should_run`、新增 `running`。不用跑回 None。"""
+) -> _Claim | None:
+    """取得執行資格：同一個短交易裡上鎖、重問 `should_run`、接續 `llm_result_pending` 的 run 或
+    新增 `running`。不用跑回 None。"""
     viewer = SystemViewer()
     settings = prompt.settings
     params: dict[str, object] = {
@@ -354,7 +390,14 @@ def _acquire(
             or find_blocking_ai_result(viewer, connection, key) is not None
         ):
             return None
-        return create_derivation_run(
+        # 已經付過錢、只差寫結果的 run：改回 running，從存下的輸出接續（不再呼叫模型）。
+        resumed = update_derivation_run_resumed(connection, key, eval_run_id)
+        if resumed is not None:
+            saved = find_llm_call_output(viewer, connection, resumed)
+            if saved is None:  # 改回 running 的條件已經要求有存下的輸出
+                raise RuntimeError("接續的 derivation_run 沒有存下的輸出")
+            return _Claim(resumed, saved)
+        run_id = create_derivation_run(
             connection,
             NewDerivationRun(
                 key=key,
@@ -368,6 +411,7 @@ def _acquire(
                 eval_run_id=eval_run_id,
             ),
         )
+    return None if run_id is None else _Claim(run_id, None)
 
 
 def _fail_run(database: Database, run_id: uuid.UUID, reason: ErrorCode) -> None:
@@ -377,10 +421,12 @@ def _fail_run(database: Database, run_id: uuid.UUID, reason: ErrorCode) -> None:
 
 
 def _try_fail_run(database: Database, run_id: uuid.UUID) -> None:
-    """出錯後的收尾：盡量把 run 改成 `failed`（`llm_gateway_error`）；這一步也失敗只記日誌，
-    讓原本的例外照樣往上丟。"""
+    """出錯後的收尾：盡量把 run 改成 `failed`。已經有存下輸出的 `llm_call` 時記
+    `llm_result_pending`（下一次接續、不再付錢），否則記 `llm_gateway_error`。這一步也失敗只記
+    日誌（run 停在 running，sweep 之後照同一個規則收），讓原本的例外照樣往上丟。"""
     try:
-        _fail_run(database, run_id, ErrorCode.LLM_GATEWAY_ERROR)
+        with database.transaction() as connection:
+            update_derivation_run_failed_or_pending(connection, run_id, ErrorCode.LLM_GATEWAY_ERROR)
     except Exception as cleanup:
         log.warning("出錯後把 derivation_run 改成 failed 也失敗", error_type=type(cleanup).__name__)
 
@@ -396,10 +442,12 @@ def _record_call(
     *,
     stop_reason: str | None = None,
     raw: Mapping[str, Any] | None = None,
+    output: SavedLlmOutput,
 ) -> Decimal | None:
-    """自己的短交易記一筆 `llm_call`，回這次的費用（依送出的模型計價）。沒有 usage 時不記、回 None。
+    """自己的短交易記一筆 `llm_call`（連同存下的輸出），回這次的費用（依送出的模型計價）。沒有
+    usage 時不記、回 None（這時沒有東西可接續，之後出錯就是 `llm_gateway_error`）。
 
-    原始回應存不進 jsonb（例如含 NUL）時改存 NULL，帳照記。
+    原始回應存不進 jsonb（例如含 NUL、NaN）時改存 NULL，帳照記；接續只用 `output`，不看原始回應。
     """
     if usage is None:
         return None
@@ -420,24 +468,57 @@ def _record_call(
                 request_id=request_id,
                 stop_reason=stop_reason,
                 raw_response=raw if raw is not None and is_storable_json(dict(raw)) else None,
+                output=output,
             ),
         )
     return cost.cost_usd
 
 
+def _finish(
+    actor: Viewer,
+    database: Database,
+    config: GatewayConfig,
+    job: LlmJob,
+    prompt: LoadedPrompt,
+    run_id: uuid.UUID,
+    llm_input: LlmInput,
+    saved: SavedLlmOutput,
+    cost: Decimal | None,
+    resumed: bool,
+) -> GatewayResult:
+    """8、9：驗證存下的輸出、寫結果。剛呼叫完與接續走同一段。
+
+    驗證丟出 `OutputRejectedError` 以外的例外時盡量把 run 改成 `failed`（有帳就是
+    `llm_result_pending`），例外原樣丟出。
+    """
+    reject_reason = saved.reject_reason
+    output: BaseModel | str | None = None
+    if saved.text is not None:
+        try:
+            output = _validated_output(prompt, saved.text, job, llm_input)
+        except OutputRejectedError as exc:
+            reject_reason = exc.code
+        except BaseException:
+            _try_fail_run(database, run_id)
+            raise
+    return _write_result(
+        actor, database, config, job, run_id, llm_input, reject_reason, output, cost, resumed
+    )
+
+
 def _validated_output(
-    prompt: LoadedPrompt, result: LlmResult, job: LlmJob, llm_input: LlmInput
+    prompt: LoadedPrompt, text: str, job: LlmJob, llm_input: LlmInput
 ) -> BaseModel | str:
     """Pydantic → domain 驗證 → 存得進資料庫。不過丟 `OutputRejectedError`。"""
     output: BaseModel | str
     if prompt.schema_class is not None:
         try:
-            output = prompt.schema_class.model_validate_json(result.text, strict=True)
+            output = prompt.schema_class.model_validate_json(text, strict=True)
         except ValidationError:
             raise OutputRejectedError(ErrorCode.LLM_OUTPUT_INVALID) from None
         storable: object = output.model_dump(mode="json")
     else:
-        output = result.text
+        output = text
         storable = output
     if job.validate_output is not None:
         job.validate_output(output, llm_input)
@@ -455,8 +536,10 @@ def _write_result(
     reject_reason: ErrorCode | None,
     output: BaseModel | str | None,
     cost: Decimal | None,
+    resumed: bool,
 ) -> GatewayResult:
-    """經 `ai_results` 寫表頭。失敗時盡量把 run 改成 `failed`（帳已經記了），例外原樣丟出。"""
+    """經 `ai_results` 寫表頭。失敗時盡量把 run 改成 `failed`（有帳就是 `llm_result_pending`，
+    下一次接續），例外原樣丟出。"""
     try:
         status = record_llm_result(
             actor,
@@ -480,4 +563,5 @@ def _write_result(
         reason=reject_reason,
         output=None if status is ResultStatus.REJECTED else output,
         cost_usd=cost,
+        resumed=resumed,
     )

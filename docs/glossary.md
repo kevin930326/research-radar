@@ -646,7 +646,8 @@
 - **保守估計（token）**：離線算輸入大約幾個 token 時寧可估多：每個位元組算一個 token 再加固定開銷，中文會被估得比實際多。
 - **`price_tier`（價格級別）**：這次呼叫用的是標準價還是長上下文價；總輸入超過 100,000 tokens 時整次改用長上下文價。
 - **總時限（deadline）**：一次模型呼叫連同所有重試最多等多久（`RADAR_ANTHROPIC_DEADLINE`，預設 180 秒）；和單次請求的逾時（timeout）不同。
-- **逾時判定（`llm_run_expired`）**：sweep 把建立超過 `RADAR_LLM_RUN_STALE_AFTER` 還是 `running` 的互動呼叫改成 `failed`；之後才回來的結果只留作歷史（`superseded`）。
+- **逾時判定（`llm_run_expired`）**：sweep 把超過 `RADAR_LLM_RUN_STALE_AFTER` 沒有進展（看 `updated_at`）還是 `running` 的互動呼叫改成 `failed`；之後才回來的結果只留作歷史（`superseded`）。
+- **待寫入／接續（`llm_result_pending`）**：模型已經回答、錢也記帳了，只差把結果寫進去卻出錯時，run 標成「待寫入」；下一次同一份輸入不再呼叫模型，而是拿 `llm_call` 存下的輸出接著驗證、寫入，像外送已經付款，只差簽收，重新簽收就好，不必再點一次。
 - **晚到（late result）**：模型還在算的時候輸入被換掉，結果回來時已經不是現在的輸入；這種結果存成 `superseded`，不蓋掉新的。
 - **`GatewayOutcome`（閘門結果）**：`run_llm_job` 回的結果種類，例如 `ACTIVE`（寫成有效）、`SKIPPED`（不用跑）、`BLOCKED`（放行擋下）、`TOO_LARGE`（輸入太大不送）、`TRANSIENT_FAILURE`（暫時性錯誤，下次再跑）。
 - **`GatedProvider`（會等的替身）**：測試用的模型替身，呼叫時先停住，等測試說「放行」才回覆；用來排出並行情境的先後。

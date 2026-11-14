@@ -50,7 +50,8 @@ STATUS_TABLE_EXCEPTIONS: dict[str, str] = {
     ),
     "derivation_run": (
         "LLM 呼叫的來歷（Story 2.2、ADR-0030）：卡在 running 時不是重新排入工作，而是由 sweep 的"
-        "另一步（expire_stale_runs）判定逾時改成 failed、留給下一次再跑；Batch 的跟著批次走"
+        "另一步（expire_stale_runs）判定逾時改成 failed、留給下一次再跑（已存下輸出的標成"
+        " llm_result_pending，下一次接續、不再呼叫模型）；Batch 的跟著批次走"
     ),
     "zh_summary": "AI 表頭表（ADR-0015）：status 是結果的版本狀態，沒有會卡住的中間狀態",
     "classification": "AI 表頭表（ADR-0015）：status 是結果的版本狀態，沒有會卡住的中間狀態",

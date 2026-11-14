@@ -11,6 +11,7 @@ from radar.domain.ai_outputs import (
     NoLlmInputError,
     OutputRejectedError,
     PaperLlmSource,
+    SavedLlmOutput,
     abstract_content_source,
     build_llm_input,
     check_output_storable,
@@ -131,3 +132,20 @@ def test_check_output_storable_rejects_unstorable_strings(value: object) -> None
 
     assert caught.value.code is ErrorCode.LLM_OUTPUT_UNSTORABLE
     assert not is_storable_json(value)
+
+
+def test_saved_llm_output_holds_exactly_one_of_text_or_reason() -> None:
+    assert SavedLlmOutput(text="{}", reject_reason=None).text == "{}"
+    assert SavedLlmOutput(text="", reject_reason=None).text == ""
+    reason = ErrorCode.LLM_REFUSAL
+    assert SavedLlmOutput(text=None, reject_reason=reason).reject_reason is reason
+    with pytest.raises(ValueError, match="剛好一個"):
+        SavedLlmOutput(text=None, reject_reason=None)
+    with pytest.raises(ValueError, match="剛好一個"):
+        SavedLlmOutput(text="{}", reject_reason=ErrorCode.LLM_REFUSAL)
+
+
+@pytest.mark.parametrize("text", ["a\x00b", "a\ud800b"])
+def test_saved_llm_output_refuses_text_postgres_cannot_store(text: str) -> None:
+    with pytest.raises(ValueError, match="模型輸出"):
+        SavedLlmOutput(text=text, reject_reason=None)

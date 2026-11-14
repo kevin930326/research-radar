@@ -9,6 +9,7 @@ from dataclasses import replace
 from datetime import timedelta
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -21,6 +22,7 @@ from radar.domain.ai_outputs import (
     LlmTask,
     OutputLang,
     OutputRejectedError,
+    ResultStatus,
 )
 from radar.domain.errors import ErrorCode
 from radar.domain.fingerprints import prompt_sha256, schema_sha256
@@ -28,6 +30,7 @@ from radar.domain.llm import (
     LlmConfigurationError,
     LlmConnectionError,
     LlmError,
+    LlmInvalidRequestError,
     LlmRateLimitedError,
     LlmServerError,
     LlmTimeoutError,
@@ -40,6 +43,7 @@ from radar.domain.pricing import TaskModel, llm_call_cost
 from radar.domain.viewer import MemberViewer, SystemViewer
 from radar.repo.db import Database
 from radar.services import llm_gateway
+from radar.services.ai_results import record_llm_result
 from radar.services.llm_gateway import (
     GatewayOutcome,
     GatewayResult,
@@ -586,7 +590,7 @@ def test_result_after_sweep_expired_run_is_superseded(
     db: TestDatabase, database: Database, config: GatewayConfig, paper_id: uuid.UUID
 ) -> None:
     def sweep_meanwhile() -> None:
-        execute(db, "UPDATE derivation_run SET created_at = now() - interval '1 hour'")
+        execute(db, "UPDATE derivation_run SET updated_at = now() - interval '1 hour'")
         assert expire_stale_runs(SYSTEM, database, timedelta(minutes=15)) == 1
 
     provider = GatedProvider(_provider(), gated=False, before_reply=sweep_meanwhile)
@@ -655,7 +659,8 @@ def test_result_write_failure_keeps_ledger_and_fails_run(
     with pytest.raises(RuntimeError, match="寫入失敗"):
         _run(database, _provider(), config, _job(paper_id))
 
-    assert _runs(db) == [("failed", "llm_gateway_error")]
+    # 帳與輸出都存了：run 標成待寫入，下一次接續（見下面的接續測試）。
+    assert _runs(db) == [("failed", "llm_result_pending")]
     assert execute(db, "SELECT cost_usd FROM llm_call") == [(_expected_cost(),)]
     assert table_counts(db)["zh_summary"] == 0
 
@@ -670,7 +675,7 @@ def test_unexpected_validator_error_keeps_ledger_and_fails_run(
     with pytest.raises(RuntimeError, match="驗證函式壞了"):
         _run(database, _provider(), config, _job(paper_id, validate_output=broken))
 
-    assert _runs(db) == [("failed", "llm_gateway_error")]
+    assert _runs(db) == [("failed", "llm_result_pending")]
     assert execute(db, "SELECT cost_usd FROM llm_call") == [(_expected_cost(),)]
     assert table_counts(db)["zh_summary"] == 0
 
@@ -708,6 +713,332 @@ def test_raw_response_with_nan_is_kept_as_null(
     ]
 
 
+# --- 接續：已經付過錢、只差寫結果（ADR-0030） ----------------------------------------------------
+
+
+def _saved_outputs(db: TestDatabase) -> list[tuple[str | None, str | None]]:
+    return [
+        (row[0], row[1])
+        for row in execute(db, "SELECT output_text, output_reject_reason FROM llm_call")
+    ]
+
+
+def _break_result_write(monkeypatch: pytest.MonkeyPatch) -> None:
+    def broken(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("測試：寫入失敗")
+
+    monkeypatch.setattr(llm_gateway, "record_llm_result", broken)
+
+
+def test_retry_after_result_write_failure_resumes_without_calling_model(
+    db: TestDatabase,
+    database: Database,
+    config: GatewayConfig,
+    paper_id: uuid.UUID,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # 只準備一個回覆：第二次真的呼叫模型就會丟錯，`requests` 也會變兩筆。
+    provider = _provider()
+    _break_result_write(monkeypatch)
+    with pytest.raises(RuntimeError, match="寫入失敗"):
+        _run(database, provider, config, _job(paper_id))
+    assert _runs(db) == [("failed", "llm_result_pending")]
+    assert _saved_outputs(db) == [(GOOD, None)]
+    monkeypatch.undo()
+
+    result = _run(database, provider, config, _job(paper_id))
+
+    assert len(provider.requests) == 1
+    assert result.outcome is GatewayOutcome.ACTIVE
+    assert result.resumed is True
+    assert result.cost_usd is None  # 這一次沒有新記帳
+    assert isinstance(result.output, FakeResearchQuestion)
+    counts = table_counts(db)
+    assert (counts["derivation_run"], counts["llm_call"]) == (1, 1)
+    assert counts["cost_micro_usd"] == int(_expected_cost() * 1_000_000)
+    assert _runs(db) == [("succeeded", None)]
+    assert _headers(db) == [("active", None)]
+    assert execute(db, "SELECT run_id FROM zh_summary") == [(result.run_id,)]
+
+    # 寫成之後再跑一次：已經有 active，照常 SKIPPED。
+    assert _run(database, provider, config, _job(paper_id)) == GatewayResult(GatewayOutcome.SKIPPED)
+    assert len(provider.requests) == 1
+
+
+def test_retry_after_unexpected_validator_error_resumes_without_calling_model(
+    db: TestDatabase, database: Database, config: GatewayConfig, paper_id: uuid.UUID
+) -> None:
+    def broken(_output: object, _input: object) -> None:
+        raise RuntimeError("測試：驗證函式壞了")
+
+    seen: list[object] = []
+
+    def working(output: object, _input: object) -> None:
+        seen.append(output)
+
+    provider = _provider()
+    with pytest.raises(RuntimeError, match="驗證函式壞了"):
+        _run(database, provider, config, _job(paper_id, validate_output=broken))
+    assert _runs(db) == [("failed", "llm_result_pending")]
+
+    result = _run(database, provider, config, _job(paper_id, validate_output=working))
+
+    assert len(provider.requests) == 1
+    assert (result.outcome, result.resumed) == (GatewayOutcome.ACTIVE, True)
+    # 接續時照樣驗證。
+    assert len(seen) == 1
+    assert isinstance(seen[0], FakeResearchQuestion)
+    assert table_counts(db)["llm_call"] == 1
+    assert _runs(db) == [("succeeded", None)]
+    assert _headers(db) == [("active", None)]
+
+
+def test_resumed_output_is_validated_again_and_can_be_rejected(
+    db: TestDatabase, database: Database, config: GatewayConfig, paper_id: uuid.UUID
+) -> None:
+    # 接續時存下的輸出照樣走 Pydantic → domain 驗證；這次驗證說不行就寫 rejected，不再呼叫。
+    def broken(_output: object, _input: object) -> None:
+        raise RuntimeError("測試：驗證函式壞了")
+
+    def reject(_output: object, _input: object) -> None:
+        raise OutputRejectedError(ErrorCode.LLM_OUTPUT_INVALID, "測試：內容不行")
+
+    provider = _provider()
+    with pytest.raises(RuntimeError):
+        _run(database, provider, config, _job(paper_id, validate_output=broken))
+
+    result = _run(database, provider, config, _job(paper_id, validate_output=reject))
+
+    assert len(provider.requests) == 1
+    assert (result.outcome, result.reason, result.resumed) == (
+        GatewayOutcome.REJECTED,
+        ErrorCode.LLM_OUTPUT_INVALID,
+        True,
+    )
+    assert _headers(db) == [("rejected", "llm_output_invalid")]
+
+
+def test_rejected_at_call_is_saved_and_resumed_as_rejected(
+    db: TestDatabase,
+    database: Database,
+    config: GatewayConfig,
+    paper_id: uuid.UUID,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = _provider(fake_completion("x", usage=USAGE, stop_reason="refusal"))
+    _break_result_write(monkeypatch)
+    with pytest.raises(RuntimeError):
+        _run(database, provider, config, _job(paper_id))
+    assert _saved_outputs(db) == [(None, "llm_refusal")]
+    monkeypatch.undo()
+
+    result = _run(database, provider, config, _job(paper_id))
+
+    assert len(provider.requests) == 1
+    assert (result.outcome, result.reason, result.resumed) == (
+        GatewayOutcome.REJECTED,
+        ErrorCode.LLM_REFUSAL,
+        True,
+    )
+    assert _runs(db) == [("succeeded", None)]
+    assert _headers(db) == [("rejected", "llm_refusal")]
+
+
+def test_unstorable_text_is_saved_as_reject_reason_and_resumed(
+    db: TestDatabase,
+    database: Database,
+    config: GatewayConfig,
+    paper_id: uuid.UUID,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # 文字本身存不進 text 欄位（單獨的代理字元；JSON 解析收得下，PostgreSQL 收不下）：存拒收
+    # 原因，接續時直接寫 rejected。
+    provider = _provider(fake_completion('{"research_question": "a\ud800b"}', usage=USAGE))
+    _break_result_write(monkeypatch)
+    with pytest.raises(RuntimeError):
+        _run(database, provider, config, _job(paper_id))
+    assert _saved_outputs(db) == [(None, "llm_output_unstorable")]
+    monkeypatch.undo()
+
+    result = _run(database, provider, config, _job(paper_id))
+
+    assert len(provider.requests) == 1
+    assert (result.reason, result.resumed) == (ErrorCode.LLM_OUTPUT_UNSTORABLE, True)
+    assert _headers(db) == [("rejected", "llm_output_unstorable")]
+
+
+def test_resume_uses_saved_text_when_raw_response_was_null(
+    db: TestDatabase,
+    database: Database,
+    config: GatewayConfig,
+    paper_id: uuid.UUID,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # 原始回應含 NaN、存成 NULL：接續只用 `output_text`，不需要原始回應。
+    provider = _provider(fake_completion(GOOD, usage=USAGE, raw={"weird": float("nan")}))
+    _break_result_write(monkeypatch)
+    with pytest.raises(RuntimeError):
+        _run(database, provider, config, _job(paper_id))
+    assert execute(db, "SELECT raw_response IS NULL, output_text FROM llm_call") == [(True, GOOD)]
+    monkeypatch.undo()
+
+    result = _run(database, provider, config, _job(paper_id))
+
+    assert len(provider.requests) == 1
+    assert (result.outcome, result.resumed) == (GatewayOutcome.ACTIVE, True)
+
+
+def test_crash_before_write_is_swept_as_pending_and_resumed(
+    db: TestDatabase,
+    database: Database,
+    config: GatewayConfig,
+    paper_id: uuid.UUID,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # 模擬記帳後程式整個掛掉：寫結果失敗、收尾把 run 改 failed 也失敗，run 停在 running。
+    def broken_cleanup(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("測試：收尾也失敗")
+
+    provider = _provider()
+    _break_result_write(monkeypatch)
+    monkeypatch.setattr(llm_gateway, "update_derivation_run_failed_or_pending", broken_cleanup)
+    with pytest.raises(RuntimeError, match="寫入失敗"):
+        _run(database, provider, config, _job(paper_id))
+    monkeypatch.undo()
+    assert _runs(db) == [("running", None)]
+
+    # 還在時限內：照常 SKIPPED（同一組鍵有 running）。
+    assert _run(database, provider, config, _job(paper_id)).outcome is GatewayOutcome.SKIPPED
+
+    # 過了時限，sweep 看到已經存下輸出 → 待寫入（不是 llm_run_expired）。
+    execute(db, "UPDATE derivation_run SET updated_at = now() - interval '1 hour'")
+    assert expire_stale_runs(SYSTEM, database, timedelta(minutes=15)) == 1
+    assert _runs(db) == [("failed", "llm_result_pending")]
+
+    result = _run(database, provider, config, _job(paper_id))
+
+    assert len(provider.requests) == 1
+    assert (result.outcome, result.resumed) == (GatewayOutcome.ACTIVE, True)
+    assert table_counts(db)["llm_call"] == 1
+    # 接續時重設 updated_at：剛接續的 run 不會馬上被 sweep 收走。
+    assert expire_stale_runs(SYSTEM, database, timedelta(minutes=15)) == 0
+
+
+def test_resumed_run_restarts_the_sweep_clock(
+    db: TestDatabase,
+    database: Database,
+    config: GatewayConfig,
+    paper_id: uuid.UUID,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # 很久以前建立的待寫入 run 被接續時，sweep 從接續的時間起算（看 updated_at），不會在寫結果
+    # 之前把它判成逾時。
+    provider = _provider()
+    _break_result_write(monkeypatch)
+    with pytest.raises(RuntimeError):
+        _run(database, provider, config, _job(paper_id))
+    monkeypatch.undo()
+    execute(
+        db,
+        "UPDATE derivation_run SET created_at = now() - interval '1 day',"
+        " updated_at = now() - interval '1 day'",
+    )
+
+    def sweep_then_write(*args: Any, **kwargs: Any) -> ResultStatus:
+        assert expire_stale_runs(SYSTEM, database, timedelta(minutes=15)) == 0
+        return record_llm_result(*args, **kwargs)
+
+    monkeypatch.setattr(llm_gateway, "record_llm_result", sweep_then_write)
+
+    result = _run(database, provider, config, _job(paper_id))
+
+    assert (result.outcome, result.resumed) == (GatewayOutcome.ACTIVE, True)
+    assert _runs(db) == [("succeeded", None)]
+
+
+def test_pending_run_already_written_as_superseded_is_not_resumed(
+    db: TestDatabase,
+    database: Database,
+    config: GatewayConfig,
+    paper_id: uuid.UUID,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # 記帳後、寫結果前 sweep 判定逾時（已存輸出 → pending），原本的呼叫接著寫成 superseded：
+    # 已經有表頭，原因改成 llm_run_expired，之後不再接續，而是照常重跑。
+    def sweep_then_write(*args: Any, **kwargs: Any) -> ResultStatus:
+        execute(db, "UPDATE derivation_run SET updated_at = now() - interval '1 hour'")
+        assert expire_stale_runs(SYSTEM, database, timedelta(minutes=15)) == 1
+        assert _runs(db) == [("failed", "llm_result_pending")]
+        return record_llm_result(*args, **kwargs)
+
+    monkeypatch.setattr(llm_gateway, "record_llm_result", sweep_then_write)
+    provider = _provider(fake_completion(GOOD, usage=USAGE), fake_completion(GOOD, usage=USAGE))
+
+    late = _run(database, provider, config, _job(paper_id))
+
+    assert late.outcome is GatewayOutcome.SUPERSEDED
+    assert _runs(db) == [("failed", "llm_run_expired")]
+    monkeypatch.undo()
+
+    again = _run(database, provider, config, _job(paper_id))
+
+    assert (again.outcome, again.resumed) == (GatewayOutcome.ACTIVE, False)
+    assert len(provider.requests) == 2
+    assert _headers(db) == [("superseded", None), ("active", None)]
+
+
+def test_eval_pending_run_is_resumed_only_by_the_same_eval(
+    db: TestDatabase,
+    database: Database,
+    config: GatewayConfig,
+    paper_id: uuid.UUID,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    eval_run_id = uuid.uuid4()
+    provider = _provider(fake_completion(GOOD, usage=USAGE), fake_completion(GOOD, usage=USAGE))
+    _break_result_write(monkeypatch)
+    with pytest.raises(RuntimeError):
+        _run(database, provider, config, _job(paper_id), eval_run_id=eval_run_id)
+    monkeypatch.undo()
+
+    # 平常流程（或別的評估）不接手評估的 run：自己呼叫一次。
+    normal = _run(database, provider, config, _job(paper_id))
+    assert (normal.outcome, normal.resumed) == (GatewayOutcome.ACTIVE, False)
+    assert len(provider.requests) == 2
+
+    resumed = _run(database, provider, config, _job(paper_id), eval_run_id=eval_run_id)
+
+    assert (resumed.outcome, resumed.resumed) == (GatewayOutcome.CANDIDATE, True)
+    assert len(provider.requests) == 2
+    assert table_counts(db)["llm_call"] == 2
+
+
+def test_failure_without_saved_output_is_not_resumed(
+    db: TestDatabase,
+    database: Database,
+    config: GatewayConfig,
+    paper_id: uuid.UUID,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # 回應沒有 usage（例如請求不合法）就沒有帳、也沒有存輸出：寫結果失敗是 llm_gateway_error，
+    # 下一次照常重新呼叫。
+    provider = _provider(
+        LlmInvalidRequestError("測試：請求不合法", status=400),
+        fake_completion(GOOD, usage=USAGE),
+    )
+    _break_result_write(monkeypatch)
+    with pytest.raises(RuntimeError):
+        _run(database, provider, config, _job(paper_id))
+    assert _runs(db) == [("failed", "llm_gateway_error")]
+    assert table_counts(db)["llm_call"] == 0
+    monkeypatch.undo()
+
+    result = _run(database, provider, config, _job(paper_id))
+
+    assert (result.outcome, result.resumed) == (GatewayOutcome.ACTIVE, False)
+    assert len(provider.requests) == 2
+
+
 def test_expire_only_touches_old_interactive_running_runs(
     db: TestDatabase, database: Database, config: GatewayConfig
 ) -> None:
@@ -725,13 +1056,13 @@ def test_expire_only_touches_old_interactive_running_runs(
     )
     execute(
         db,
-        "UPDATE derivation_run SET call_mode = 'batch', created_at = now() - interval '1 day'"
+        "UPDATE derivation_run SET call_mode = 'batch', updated_at = now() - interval '1 day'"
         " WHERE paper_id = %s",
         papers[1],
     )
     execute(
         db,
-        "UPDATE derivation_run SET created_at = now() - interval '1 hour' WHERE paper_id = %s",
+        "UPDATE derivation_run SET updated_at = now() - interval '1 hour' WHERE paper_id = %s",
         papers[2],
     )
 
@@ -745,21 +1076,23 @@ def test_expire_only_touches_old_interactive_running_runs(
     ]
 
 
-# --- 其他：Batch 計價、權限、不支援的工作 ---------------------------------------------------------
+# --- 其他：Batch、權限、不支援的工作 -------------------------------------------------------------
 
 
-def test_batch_call_mode_records_discounted_cost(
+def test_batch_call_mode_is_refused_before_anything(
     db: TestDatabase, database: Database, prompts: Path, paper_id: uuid.UUID
 ) -> None:
+    # 這個入口是同步呼叫：照 Batch 五折記帳會少記一半、run 也不受 sweep 收尾。Batch 的計價與
+    # 生命週期留給真正的 Batch Story（ADR-0030），現在明確拒絕，不呼叫、不寫任何列。
     config = gateway_config(prompts, call_mode=CallMode.BATCH)
+    provider = _provider()
+    before = table_counts(db)
 
-    result = _run(database, _provider(), config, _job(paper_id))
+    with pytest.raises(ValueError, match="Batch"):
+        _run(database, provider, config, _job(paper_id))
 
-    assert result.cost_usd == _expected_cost(is_batch=True)
-    assert execute(db, "SELECT is_batch, cost_usd FROM llm_call") == [
-        (True, _expected_cost(is_batch=True))
-    ]
-    assert execute(db, "SELECT call_mode FROM derivation_run") == [("batch",)]
+    assert provider.requests == []
+    assert table_counts(db) == before
 
 
 def test_member_cannot_run_llm_jobs(

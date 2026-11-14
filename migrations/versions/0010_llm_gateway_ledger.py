@@ -4,7 +4,8 @@
   `running` 而且不是評估的部分唯一索引（同一份輸入同時只有一個在跑）。`eval_run_id` 暫不設外鍵
   （Epic 8 的 `eval_run` 還不存在）。
 - `llm_call`：一次呼叫的帳（`cost_usd numeric(12,6)`），`run_id` 唯一；`radar_app` 收回 UPDATE、
-  DELETE（0001 的預設權限會給四種，帳只能新增）。
+  DELETE（0001 的預設權限會給四種，帳只能新增）。`output_text`／`output_reject_reason` 存模型的
+  輸出（最多一個有值），寫結果失敗後從這裡接續、不再呼叫模型（ADR-0030）。
 - `zh_summary`、`classification`、`research_model`：只有表頭欄位（內容欄位由 2.4～2.6 加）；
   `(paper_id, lang) WHERE status = 'active'` 部分唯一索引；`abstract_id` 不設外鍵（ADR-0030）。
 
@@ -119,9 +120,9 @@ def upgrade() -> None:
         postgresql_where=sa.text("status = 'running' AND eval_run_id IS NULL"),
     )
     op.create_index(
-        "ix_derivation_run_running_created_at",
+        "ix_derivation_run_running_updated_at",
         "derivation_run",
-        ["created_at"],
+        ["updated_at"],
         postgresql_where=sa.text("status = 'running'"),
     )
 
@@ -140,6 +141,8 @@ def upgrade() -> None:
         sa.Column("request_id", sa.Text(), nullable=True),
         sa.Column("stop_reason", sa.Text(), nullable=True),
         sa.Column("raw_response", postgresql.JSONB(astext_type=sa.Text()), nullable=True),
+        sa.Column("output_text", sa.Text(), nullable=True),
+        sa.Column("output_reject_reason", sa.Text(), nullable=True),
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=_now(), nullable=False),
         sa.PrimaryKeyConstraint("id", name="pk_llm_call"),
         sa.ForeignKeyConstraint(
@@ -154,6 +157,14 @@ def upgrade() -> None:
         sa.CheckConstraint("cost_usd >= 0", name="ck_llm_call_cost_usd_not_negative"),
         sa.CheckConstraint(
             "price_tier IN ('standard', 'long_context')", name="ck_llm_call_price_tier"
+        ),
+        sa.CheckConstraint(
+            "output_text IS NULL OR output_reject_reason IS NULL",
+            name="ck_llm_call_output_at_most_one",
+        ),
+        sa.CheckConstraint(
+            "output_reject_reason IS NULL OR output_reject_reason ~ '^[a-z][a-z0-9_]*$'",
+            name="ck_llm_call_output_reject_reason_format",
         ),
     )
     # 帳只能新增（0001 的預設權限給了四種）。
@@ -216,7 +227,7 @@ def downgrade() -> None:
         op.drop_index(f"ix_{table}_paper_id", table_name=table)
         op.drop_table(table)
     op.drop_table("llm_call")
-    op.drop_index("ix_derivation_run_running_created_at", table_name="derivation_run")
+    op.drop_index("ix_derivation_run_running_updated_at", table_name="derivation_run")
     op.drop_index("uq_derivation_run_running", table_name="derivation_run")
     op.drop_index("ix_derivation_run_key", table_name="derivation_run")
     op.drop_table("derivation_run")
