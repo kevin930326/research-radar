@@ -225,6 +225,11 @@ deferred:
   - `[high]` `[patch]` 放行後用 `object.__setattr__(safe, "_text", ...)` 能把內容換成沒放行的文字，adapter 只看型別、架構測試也抓不到 — 改成放行登記處：文字只存在 `policy.py` 私有的登記表，物件只拿號碼，讀文字一律經 `cloud_text`／`.text` 回登記表核對，查不到丟 `CloudSafeTextIntegrityError`（`cloud_text_not_registered`）；`LlmRequest`、`check_*`、Anthropic adapter、兩個替身都經這道核對；新增架構測試 `tests/arch/test_cloud_registry.py`（私有狀態只在 policy.py、domain 以外不用 `object.__setattr__`／`__new__`／`__delattr__` 與序列化模組）與反向測試 `tests/unit/test_cloud_registry.py`。
   - `[low]` `[patch]` `json.loads` 把 `1e400` 解成 `inf` 放進 `LlmResult.parsed` — 解析後用堆疊走訪檢查每個浮點數有限，否則 `LlmMalformedResponseError`；測試在 `tests/unit/test_llm_json_finite.py`。
 
+### 2026-11-15 — Codex 複查 a7f9acd
+- verdicts: 1 finding — high 1
+- findings:
+  - `[high]` `[patch]` 一般物件讓 `__class__` 回 `CloudSafeText` 就騙得過 `isinstance`，`cloud_text` 又直接回 `value.text`，不查登記表 — 所有核對點改用 `is_cloud_safe_text`（`type(x) is CloudSafeText`），`cloud_text`／新的 `cloud_source` 用建類別時存下的 slot descriptor 讀號碼、直接查登記表；`CloudSafeText.text`／`.source` 反過來呼叫這兩個函式；新增架構規則「policy.py 以外不用 isinstance／issubclass 判斷 CloudSafeText」與反向測試 `tests/unit/test_cloud_disguise.py`。
+
 ## Design Notes
 
 `CloudSafeText` 只靠 mypy 擋不住執行期的誤用，所以建構子收一個只有 `policy.py` 拿得到的私有記號：

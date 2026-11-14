@@ -21,7 +21,13 @@ from dataclasses import dataclass, field
 from typing import Any, ClassVar, Final, Literal, get_args
 
 from radar.domain.errors import ErrorCode
-from radar.domain.policy import CloudSafeText, ContentSource, cloud_text
+from radar.domain.policy import (
+    CloudSafeText,
+    ContentSource,
+    cloud_source,
+    cloud_text,
+    is_cloud_safe_text,
+)
 from radar.domain.policy import CloudSafeTextIntegrityError as CloudSafeTextIntegrityError
 from radar.domain.policy import NotCloudSafeError as NotCloudSafeError
 
@@ -215,11 +221,14 @@ class LlmRequest:
 
 def _validate_request(request: LlmRequest) -> None:
     """`LlmRequest` 的每個欄位型別與值。訊息只有欄位名稱與型別名稱。"""
-    if not isinstance(request.system, CloudSafeText):
-        raise NotCloudSafeError(_not_cloud_safe("LlmRequest.system", request.system))
-    if request.system.source is not ContentSource.PROMPT_TEMPLATE:
+    system: object = request.system
+    if not is_cloud_safe_text(system):
+        raise NotCloudSafeError(_not_cloud_safe("LlmRequest.system", system))
+    # 來源經 policy 的 cloud_source 直接查放行登記處（號碼被硬改過丟 CloudSafeTextIntegrityError）。
+    system_source = cloud_source(system)
+    if system_source is not ContentSource.PROMPT_TEMPLATE:
         raise ValueError(
-            f"LlmRequest.system 的來源必須是 prompt_template（收到 {request.system.source.value}）"
+            f"LlmRequest.system 的來源必須是 prompt_template（收到 {system_source.value}）"
         )
     content: object = request.content
     if not isinstance(content, tuple):
@@ -227,7 +236,7 @@ def _validate_request(request: LlmRequest) -> None:
     if not content:
         raise ValueError("LlmRequest.content 至少要有一個區塊")
     for index, block in enumerate(content):
-        if not isinstance(block, CloudSafeText):
+        if not is_cloud_safe_text(block):
             raise NotCloudSafeError(_not_cloud_safe(f"LlmRequest.content[{index}]", block))
         # 核對號碼仍在放行登記裡（被 object.__setattr__ 硬改過的丟 CloudSafeTextIntegrityError）。
         cloud_text(block)
@@ -271,7 +280,7 @@ def check_cloud_safe_text(obj: object) -> CloudSafeText:
         NotCloudSafeError: 不是 `CloudSafeText`；被硬改過、不在放行登記裡的丟子類別
             `CloudSafeTextIntegrityError`。
     """
-    if not isinstance(obj, CloudSafeText):
+    if not is_cloud_safe_text(obj):
         raise NotCloudSafeError(_not_cloud_safe("要送雲端的文字", obj))
     cloud_text(obj)
     return obj
@@ -290,7 +299,7 @@ def check_cloud_safe_texts(obj: object) -> tuple[CloudSafeText, ...]:
         raise NotCloudSafeError(_not_cloud_safe("要送雲端的文字清單", obj, container=True))
     texts = tuple(obj)
     for index, item in enumerate(texts):
-        if not isinstance(item, CloudSafeText):
+        if not is_cloud_safe_text(item):
             raise NotCloudSafeError(_not_cloud_safe(f"要送雲端的文字清單[{index}]", item))
         cloud_text(item)
     return texts

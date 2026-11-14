@@ -18,7 +18,7 @@
 import itertools
 import weakref
 from enum import StrEnum
-from typing import Final, NoReturn, assert_never, final
+from typing import Final, NoReturn, TypeIs, assert_never, final
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -110,9 +110,12 @@ class CloudSafeTextIntegrityError(NotCloudSafeError):
 class CloudSafeText:
     """已經放行、可以送雲端的文字。只能由 `clear_for_cloud` 建立。
 
-    文字與來源存在本模組的放行登記處，物件只拿號碼；每次讀 `text`／`source` 都回登記處查，
-    查不到丟 `CloudSafeTextIntegrityError`。`repr`／`str` 只顯示來源與長度，不顯示內容
-    （避免寫進日誌或錯誤訊息）；建立後不能改、不能繼承、不能複製或序列化。
+    文字與來源存在本模組的放行登記處，物件只拿號碼；每次讀 `text`／`source` 都經模組函式
+    `cloud_text`／`cloud_source` 回登記處查，查不到丟 `CloudSafeTextIntegrityError`。
+    判斷「是不是 `CloudSafeText`」一律用 `is_cloud_safe_text`（`type(x) is CloudSafeText`），
+    不用 `isinstance`：`isinstance` 會相信物件自己報的 `__class__`，偽裝的物件騙得過。
+    `repr`／`str` 只顯示來源與長度，不顯示內容（避免寫進日誌或錯誤訊息）；
+    建立後不能改、不能繼承、不能複製或序列化。
     """
 
     __slots__ = ("__weakref__", "_token")
@@ -131,31 +134,23 @@ class CloudSafeText:
     def __init_subclass__(cls) -> None:
         raise TypeError("CloudSafeText 不能被繼承")
 
-    def _entry(self) -> tuple[str, ContentSource]:
-        """回登記處查這個物件的文字與來源；查不到（號碼被改過、空殼）就丟錯。"""
-        token = getattr(self, "_token", None)
-        entry = _REGISTRY.get(token) if type(token) is int else None
-        if entry is None:
-            raise CloudSafeTextIntegrityError
-        return entry
-
     @property
     def text(self) -> str:
-        """要送出去的文字（從放行登記處取）。
+        """要送出去的文字（經 `cloud_text` 從放行登記處取）。
 
         Raises:
             CloudSafeTextIntegrityError: 不在放行登記裡。
         """
-        return self._entry()[0]
+        return cloud_text(self)
 
     @property
     def source(self) -> ContentSource:
-        """放行時的來源（從放行登記處取）。
+        """放行時的來源（經 `cloud_source` 從放行登記處取）。
 
         Raises:
             CloudSafeTextIntegrityError: 不在放行登記裡。
         """
-        return self._entry()[1]
+        return cloud_source(self)
 
     def __setattr__(self, name: str, value: object) -> NoReturn:
         raise AttributeError("CloudSafeText 建立後不能改")
@@ -164,16 +159,16 @@ class CloudSafeText:
         raise AttributeError("CloudSafeText 建立後不能改")
 
     def __eq__(self, other: object) -> bool:
-        if not isinstance(other, CloudSafeText):
+        if not is_cloud_safe_text(other):
             return NotImplemented
-        return self._entry() == other._entry()
+        return _registered(self) == _registered(other)
 
     def __hash__(self) -> int:
-        return hash(self._entry())
+        return hash(_registered(self))
 
     def __repr__(self) -> str:
         try:
-            text, source = self._entry()
+            text, source = _registered(self)
         except CloudSafeTextIntegrityError:
             return "CloudSafeText(不在放行登記裡)"
         return f"CloudSafeText(source={source.value!r}, length={len(text)})"
@@ -185,19 +180,61 @@ class CloudSafeText:
         raise TypeError("CloudSafeText 不能被複製或序列化")
 
 
-def cloud_text(value: object) -> str:
-    """送出前取文字的唯一做法：確認是 `CloudSafeText`、號碼在放行登記裡，回放行時的文字。
+# 建好類別時就把號碼欄位的 slot descriptor 存下來：讀號碼直接經它，不經可被覆寫的屬性查找
+# （`__getattribute__`、`__getattr__`、類別上的 `_token` 被換掉都影響不到）。
+_TOKEN_SLOT: Final = CloudSafeText.__dict__["_token"]
+
+
+def is_cloud_safe_text(value: object) -> TypeIs[CloudSafeText]:
+    """`value` 的真實型別是不是 `CloudSafeText`。
+
+    用 `type(value) is CloudSafeText`，不用 `isinstance`：`isinstance` 會相信物件自己的
+    `__class__` 屬性，一般物件只要讓 `__class__` 回 `CloudSafeText` 就騙得過
+    （Codex 複查 PR #54）。`CloudSafeText` 不能繼承，所以兩者沒有別的差別。
+    """
+    return type(value) is CloudSafeText
+
+
+def _registered(value: object) -> tuple[str, ContentSource]:
+    """核對真實型別、讀號碼、查放行登記處，回（文字, 來源）。不經物件上任何可覆寫的屬性。
 
     Raises:
-        NotCloudSafeError: 不是 `CloudSafeText`。
-        CloudSafeTextIntegrityError: 不在放行登記裡（被改過、空殼、已回收）。
+        NotCloudSafeError: 真實型別不是 `CloudSafeText`。
+        CloudSafeTextIntegrityError: 號碼不在放行登記裡（被改過、空殼、已回收）。
     """
-    if not isinstance(value, CloudSafeText):
+    if not is_cloud_safe_text(value):
         raise NotCloudSafeError(
             f"要送雲端的文字必須是 CloudSafeText（收到 {type(value).__name__}），"
             "要先經過 clear_for_cloud"
         )
-    return value.text
+    try:
+        token = _TOKEN_SLOT.__get__(value, CloudSafeText)
+    except AttributeError:
+        raise CloudSafeTextIntegrityError from None
+    entry = _REGISTRY.get(token) if type(token) is int else None
+    if entry is None:
+        raise CloudSafeTextIntegrityError
+    return entry
+
+
+def cloud_text(value: object) -> str:
+    """送出前取文字的唯一做法：確認真實型別是 `CloudSafeText`、號碼在放行登記裡，回放行時的文字。
+
+    Raises:
+        NotCloudSafeError: 真實型別不是 `CloudSafeText`（包含偽裝 `__class__` 的物件）。
+        CloudSafeTextIntegrityError: 不在放行登記裡（被改過、空殼、已回收）。
+    """
+    return _registered(value)[0]
+
+
+def cloud_source(value: object) -> ContentSource:
+    """放行時的來源，核對方式同 `cloud_text`。
+
+    Raises:
+        NotCloudSafeError: 真實型別不是 `CloudSafeText`。
+        CloudSafeTextIntegrityError: 不在放行登記裡。
+    """
+    return _registered(value)[1]
 
 
 class CloudClearanceError(Exception):

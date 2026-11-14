@@ -10,6 +10,10 @@
   `object.__setattr__`，所以這條只管 `domain/` 以外；`domain/` 裡要硬改 `CloudSafeText` 也得碰到
   上一條守著的私有狀態才有用。
 
+- `radar/` 裡 `policy.py` 以外不能用 `isinstance`／`issubclass` 判斷 `CloudSafeText`（Codex 複查
+  PR #54）：`isinstance` 相信物件自己的 `__class__`，偽裝的物件騙得過；一律用 policy 的
+  `is_cloud_safe_text`（真實型別）或直接 `cloud_text`／`cloud_source`。
+
 掃描函式另外用 tmp 裡的假檔證明抓得到。這是新增的規則，沒有改 `test_cloud_clearance.py` 的既有掃描。
 """
 
@@ -201,3 +205,76 @@ def test_raw_object_scanner_allows_ordinary_code(tmp_path: Path) -> None:
     )
 
     assert raw_object_violations(sample, base=tmp_path) == []
+
+
+# --- 不用 isinstance 判斷 CloudSafeText -------------------------------------------------------
+
+CLASS_NAME = "CloudSafeText"
+
+
+def _mentions_class(node: ast.AST) -> bool:
+    return any(
+        (isinstance(sub, ast.Name) and sub.id == CLASS_NAME)
+        or (isinstance(sub, ast.Attribute) and sub.attr == CLASS_NAME)
+        for sub in ast.walk(node)
+    )
+
+
+def isinstance_violations(path: Path, *, base: Path) -> list[str]:
+    """這個檔裡用 `isinstance`／`issubclass` 判斷 `CloudSafeText` 的地方（含放在 tuple 裡）。"""
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    name = path.relative_to(base).as_posix()
+    return [
+        f"{name}:{node.lineno} 用 {node.func.id} 判斷 CloudSafeText"
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id in {"isinstance", "issubclass"}
+        and len(node.args) >= 2
+        and _mentions_class(node.args[1])
+    ]
+
+
+def test_outside_policy_nothing_uses_isinstance_on_cloud_safe_text() -> None:
+    offenders = [
+        hit
+        for path in _python_files([RADAR])
+        if path != POLICY
+        for hit in isinstance_violations(path, base=ROOT)
+    ]
+
+    assert offenders == []
+
+
+def test_isinstance_scanner_catches_each_form(tmp_path: Path) -> None:
+    sample = tmp_path / "sample.py"
+    sample.write_text(
+        "from radar.domain import policy\n"
+        "from radar.domain.policy import CloudSafeText\n"
+        "a = isinstance(x, CloudSafeText)\n"
+        "b = isinstance(x, policy.CloudSafeText)\n"
+        "c = isinstance(x, (str, CloudSafeText))\n"
+        "d = issubclass(type(x), CloudSafeText)\n",
+        encoding="utf-8",
+    )
+
+    hits = isinstance_violations(sample, base=tmp_path)
+
+    assert sorted(hits) == [
+        "sample.py:3 用 isinstance 判斷 CloudSafeText",
+        "sample.py:4 用 isinstance 判斷 CloudSafeText",
+        "sample.py:5 用 isinstance 判斷 CloudSafeText",
+        "sample.py:6 用 issubclass 判斷 CloudSafeText",
+    ]
+
+
+def test_isinstance_scanner_allows_real_type_checks(tmp_path: Path) -> None:
+    sample = tmp_path / "ok.py"
+    sample.write_text(
+        "from radar.domain.policy import CloudSafeText, is_cloud_safe_text\n"
+        "def f(x: object) -> bool:\n"
+        "    return is_cloud_safe_text(x) or type(x) is CloudSafeText or isinstance(x, str)\n",
+        encoding="utf-8",
+    )
+
+    assert isinstance_violations(sample, base=tmp_path) == []
