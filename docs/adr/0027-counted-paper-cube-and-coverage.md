@@ -83,8 +83,8 @@
    - **AD-19 另外四種計數這樣寫就不違規**（放 `repo/stats.py`，和 `list_cube_counts` 分開的函式）：
      - `topic`、`topic_pair`、`method`：`counted_paper` 再 `JOIN` 有效分類的表（`topic_pair` 接兩次、`a.topic < b.topic`），`WHERE` 套可見條件，`GROUP BY` 期刊、年份與 key 後 `count(*)`（`topic_pair` 用 `count(DISTINCT c.id)` 也可以）。
      - `pending_classification`：`counted_paper` 加 `WHERE {可見條件} AND NOT EXISTS (SELECT 1 FROM <分類表> …)`，或 `LEFT JOIN <分類表>` 再 `WHERE <分類表>.id IS NULL`。
-     - 分類的表或欄位名稱要寫在 SQL 字串裡；整段用 f-string 變數組進來的分類條件，測試看不到，會被當成全部篇數擋下。
-   - 判斷前先去掉 SQL 註解（`--`、可巢狀的 `/* */`；字串與雙引號名稱裡的不算），括號正確配對（Codex 複查 R1、R2 之後改成這樣）。
+     - 分類的表或欄位名稱要寫在 SQL 字串裡；整段用 f-string 變數組進來的分類條件，測試看不到，會被當成全部篇數擋下。分類表寫在 `WITH` 或 `count(*) FILTER (…)` 裡也看不到，同樣會被擋，要寫在 `FROM`～`WHERE` 之間。
+   - 判斷前先去掉 SQL 註解（`--`、可巢狀的 `/* */`；單引號字串與雙引號名稱裡的不算，`$$…$$`、`$tag$…$tag$` 與 `E'…'` 字串不支援，裡面的 `--` 會被誤當註解），括號正確配對（Codex 複查 R1、R2 之後改成這樣）。
 
 ## 理由
 
@@ -102,7 +102,7 @@
 - **`PublicViewer` 的 EXISTS 子查詢**比直接比欄位多一次索引查找（`paper.id` 主鍵＋`snapshot.id` 主鍵），量小時可忽略。
 - **其他四種 dim（`pending_classification`、`topic`、`topic_pair`、`method`）、`TrendParams`、本週新增、API 端點、示範站匯出**都還沒做，由之後的 Story 用同一個 `CubeRow` 補上。
 - **之後要加統計**：放 `repo/stats.py`（或 `relations.py`、`keyword_stats.py`），要分母時呼叫 `list_cube_counts`。
-- **架構測試只看程式裡的 SQL 字串**，擋得住常見的寫錯，擋不住所有寫法：用 SQLAlchemy 運算式組的查詢（例如 `func.count` 加 `paper_table`）、用 `+` 或 `join` 拼出來的 SQL、在 Python 裡 `len(...)` 數篇數，第 4 條沒列的計數寫法（例如 `count(c.journal_issn_l)`、`sum(1)`）、統計模組以外依 `paper` 的其他欄位（例如 `type`）數篇數、把 `paper` 包進子查詢再數，都看不到。第 3、4 條是看字串的形狀，不是真的解析 SQL（會去註解、配對括號、分開子查詢與 `UNION`，但不是完整的 SQL 解析器）：少見的寫法仍可能判斷錯；名稱裡剛好含 `topic`、`method`、`classification` 的非分類欄位會讓第 4 條放行。這些靠審查把關；寫 `relations.py`、`keyword_stats.py` 的 Story 審查時要特別看分母是不是來自 `list_cube_counts`。
+- **架構測試只看程式裡的 SQL 字串**，擋得住常見的寫錯，擋不住所有寫法：用 SQLAlchemy 運算式組的查詢（例如 `func.count` 加 `paper_table`）、用 `+` 或 `join` 拼出來的 SQL、在 Python 裡 `len(...)` 數篇數，第 4 條沒列的計數寫法（例如 `count(c.journal_issn_l)`、`sum(1)`）、統計模組以外依 `paper` 的其他欄位（例如 `type`）數篇數、把 `paper` 包進子查詢再數，都看不到。第 3、4 條是看字串的形狀，不是真的解析 SQL（會去註解、配對括號、分開子查詢與 `UNION`，但不是完整的 SQL 解析器）：少見的寫法仍可能判斷錯；名稱裡剛好含 `topic`、`method`、`classification` 的非分類欄位、別名或參數名（例如 `AS no_topic`、`:method_year`）會讓第 4 條放行。已知看不到的寫法（Codex 複查修正後的確認審查列出，決定不再加規則，因為每補一種寫法就多一種例外，邊際效益遞減）：依輸出別名分組（`SELECT publication_year AS yr, count(*) FROM paper GROUP BY yr`）；在統計模組裡用 CTE 或衍生表把 `counted_paper` 包一層再數、或 `LEFT JOIN` 分類表卻不篩再 `count(DISTINCT c.id)`，做出第二個全部篇數；SELECT 頂層的 `IS DISTINCT FROM` 會被當成 `FROM` 的開頭。也會誤擋：`GROUP BY 1` 的判斷看的是 `GROUP BY` 前面整段（含 `WHERE`），`WHERE publication_year > 2000 … GROUP BY 1 HAVING count(*) > 1` 這種找重複的寫法會被擋，改寫成具名欄位即可。這些靠審查把關；寫 `relations.py`、`keyword_stats.py` 的 Story 審查時要特別看分母是不是來自 `list_cube_counts`。
 - **數字不是凍結在快照上**（ADR-0011「乙」）：快照編號只固定「收進了哪些論文」。同一個快照編號之下，摘要補進來、`excluded_reason` 或年份被重新解析改掉，`radar coverage` 的數字都會跟著變；「快照前後各讀一次」只保證印出的快照編號和這一次的計數是同一個時間點。
 - **view 會擋住對它用到的 `paper` 欄位的改動**：之後的遷移要對 `id`、`journal_issn_l`、`publication_year`、`first_snapshot_id`、`lab_visible`、`in_scope`、`excluded_reason`、`snapshot.status` 做 `ALTER COLUMN … TYPE` 或 `DROP COLUMN`，PostgreSQL 會報錯，要在同一個遷移裡先 `DROP VIEW`、改完再重建，**重建後要再執行同一行 `REVOKE INSERT, UPDATE, DELETE ON counted_paper FROM radar_app`**：0001 的預設權限會讓重建的 view 重新拿到寫入權限（`test_app_role_only_has_select_on_the_view` 會抓到，但最好寫遷移時就記得）。view 不在 `Base.metadata`，`alembic check` 不會提醒。
 - **`radar rescope` 還沒做**：在它做好之前，從 `journals.yaml` 拿掉期刊後只能把期刊加回設定，`radar coverage` 才會恢復（錯誤訊息有寫）。反過來調高 `start_year` 或新加期刊不會報錯，舊論文的 `in_scope` 維持原樣，要等 `rescope` 重算（ADR-0011 取捨「`in_scope` 是存起來的值」）。
