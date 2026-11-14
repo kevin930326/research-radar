@@ -13,8 +13,11 @@ COPY pyproject.toml uv.lock ./
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --no-dev --no-install-project
 COPY radar ./radar
+# --reinstall-package radar：每次都從上面複製進來的原始碼重新打包。
+# 不加的話，uv 只看 pyproject.toml 有沒有變來決定要不要重包；快取掛載裡有舊的包時，
+# 程式改了、pyproject.toml 沒改，映像裡就會是舊程式（2026-11-14 第一次匯入時發生過）。
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --locked --no-dev --no-editable
+    uv sync --locked --no-dev --no-editable --reinstall-package radar
 
 FROM python:3.14-slim-trixie
 RUN groupadd --system --gid 10001 radar \
