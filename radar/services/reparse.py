@@ -3,6 +3,7 @@
 不收 `PaperSource`、不連任何外部來源；只讀 `raw_fetch` 與物件儲存。只更新已經匯入的論文
 （OpenAlex ID 已經在 `external_id`），不新增論文。解析結果先放 `ingest_staging`，最後一個交易
 套用；不寫 `first_snapshot_id`、不建立也不發佈快照。任何物件儲存的呼叫時都沒有開著的交易。
+每週更新正在抓取（有 `fetching` 的 `weekly_run`）時拒絕執行、不寫任何東西（ADR-0026 取捨）。
 """
 
 import hashlib
@@ -35,11 +36,26 @@ from radar.repo.ingest_staging import (
 )
 from radar.repo.papers import find_known_external_ids, update_paper_keywords, upsert_by_external_id
 from radar.repo.raw_fetches import list_latest_raw_fetches
+from radar.repo.weekly_runs import find_fetching_weekly_run
 
 log = structlog.get_logger(__name__)
 
 # 解析函式：`parse(content, fetched_at=...)`，看不懂丟 `ParseError`（測試可以換掉）。
 type Parse = Callable[..., ParsedPaper]
+
+
+class WeeklyUpdateInProgressError(Exception):
+    """每週更新正在進行（有一筆 `fetching` 的 `weekly_run`），所以不跑 reparse。
+
+    reparse 讀每篇最新的原始資料，會包含這一週抓了、還沒套用的；這時跑會把它們提早寫進論文，
+    每週套用失敗退回時也不會跟著退回。
+    """
+
+    def __init__(self, weekly_run_id: uuid.UUID) -> None:
+        super().__init__(
+            f"每週更新正在進行（weekly_run {weekly_run_id}），等它發佈或失敗後再跑 reparse"
+        )
+        self.weekly_run_id = weekly_run_id
 
 
 @dataclass(frozen=True)
@@ -94,7 +110,9 @@ def reparse_papers(
 ) -> ReparseResult:
     """用已存的原始資料重新解析已經匯入的論文。
 
-    1. 短交易刪掉上一次沒做完留下的 `kind='reparse'` 暫存列；產生新的 `batch_id`。
+    1. 短交易：有 `fetching` 的 `weekly_run` 就丟 `WeeklyUpdateInProgressError`（什麼都不寫）；
+       沒有才刪掉上一次沒做完留下的 `kind='reparse'` 暫存列；產生新的 `batch_id`。
+       只在開始時查一次，不是鎖：reparse 跑到一半才開始的每週更新擋不住。
     2. 每批：短交易讀 `batch_size` 個外部鍵最新的 `raw_fetch`，篩出 OpenAlex ID 已經在資料庫的；
        交易結束後逐一 GET 物件 → 解壓 → 核對 SHA-256 → 解析 → 核對 OpenAlex ID → 排除規則。
        任何一步失敗就計數、記警告日誌（只帶外部鍵與原因代碼）、略過那一篇。最後短交易寫這一批的
@@ -107,6 +125,7 @@ def reparse_papers(
     Raises:
         PermissionDeniedError: `actor` 不是系統工作（不碰資料庫與物件儲存）。
         ValueError: `batch_size` 不是正整數。
+        WeeklyUpdateInProgressError: 每週更新正在進行（不寫任何東西、不碰物件儲存）。
     """
     require(actor, Action.INGEST_PAPERS, None)
     if not isinstance(batch_size, int) or isinstance(batch_size, bool) or batch_size < 1:
@@ -115,6 +134,9 @@ def reparse_papers(
     counts = _Counts()
 
     with database.transaction() as connection:
+        fetching = find_fetching_weekly_run(viewer, connection)
+        if fetching is not None:
+            raise WeeklyUpdateInProgressError(fetching.id)
         delete_staged_papers_of_kind(connection, StagingKind.REPARSE)
     batch_id = uuid.uuid7()
 

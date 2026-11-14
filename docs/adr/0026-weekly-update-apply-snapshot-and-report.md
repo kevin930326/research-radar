@@ -81,6 +81,7 @@
 - **`snapshot.number` 取最大值＋1**：兩個不同的 `weekly_run` 同時套用時（照理不會，因為同時只有一筆 `fetching`，又有佇列鎖）唯一約束會擋下其中一個，那個交易整個退回、之後重試。
 - **套用失敗時重跑整個交易**：第一次匯入約一萬篇，失敗一次就要從頭寫一次；實測時間出來前接受。
 - **報表的讀取是一個 READ COMMITTED 的短交易**：抓取還在進行時，三個查詢之間剛好有一頁 commit，進度可能差一頁。這是檢查用的輸出，接受。
+- **每週更新正在抓取時 `radar reparse` 拒絕執行**（Story 1.9 審查第 4 條補充，不改上面的決定）：reparse 讀每篇最新的原始資料，會包含這一週抓了、還沒套用的；這時跑會把它們提早寫進論文，套用失敗退回時也不會跟著退回，第 2 週起兩個長交易還可能死結。所以 `reparse_papers` 一開始的短交易裡（清上次留下的暫存列之前）用 `find_fetching_weekly_run` 查，有 `fetching` 的 `weekly_run` 就丟錯（「每週更新正在進行（weekly_run …），等它發佈或失敗後再跑 reparse」），什麼都不寫，`radar reparse` 退出碼 1。只在開始時查一次，不是鎖：reparse 跑到一半才開始的每週更新擋不住（真的互斥要兩邊各拿同一把 advisory lock，等真的撞到再做）。reparse 只更新、不新增論文的行為不變（ADR-0022）。
 - **還沒做的（等 Kevin 實跑）**：第一次匯入的輸出、超過 5% 的原因、套用時間、`raw/` 大小、worker 有沒有被 OOM，由 Kevin 貼進 PR；之後寫回 ADR-0014 與架構文件的 Deferred。
 - **之後要改成兩個工作或一本期刊一個交易**：要動 `radar/services/weekly_update.py`、`radar/entrypoints/worker/tasks.py` 與 `tests/integration/test_weekly_apply.py`。
 

@@ -1,6 +1,7 @@
 """`config/import_baseline.yaml` 與 `radar.config.load_import_baseline`（Story 1.9、ADR-0026）。
 
-repo 裡的基準檔載得起來、合計 9,643、期刊代號和 `journals.yaml` 相同、和 OQ-02 的
+repo 裡的基準檔載得起來、合計 9,643、期刊代號都在 `journals.yaml` 裡（可以少：新加的期刊
+沒有基準，報表印「沒有基準」，NFR-9）、和 OQ-02 的
 `spikes/oq-02/output/results.json` 一致（檔不在就跳過）；壞的檔各有一條錯誤。
 """
 
@@ -34,11 +35,11 @@ def test_repo_baseline_loads_and_totals_9643() -> None:
         assert sorted(years) == list(range(2016, 2026))
 
 
-def test_repo_baseline_uses_the_journal_keys_of_journals_yaml() -> None:
+def test_repo_baseline_keys_are_a_subset_of_journals_yaml() -> None:
     baseline = load_import_baseline(_env(CONFIG))
     journals = load_domain_config(_env(CONFIG)).journals
 
-    assert list(baseline.journals) == [journal.key for journal in journals.journals]
+    assert set(baseline.journals) <= {journal.key for journal in journals.journals}
 
 
 def test_repo_baseline_matches_oq02_results() -> None:
