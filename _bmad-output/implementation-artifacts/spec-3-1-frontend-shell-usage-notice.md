@@ -2,10 +2,10 @@
 title: 'Story 3.1：前端骨架與使用須知'
 type: 'feature'
 created: '2026-11-15'
-baseline_revision: 'd7695f2e3699c082e7d66483679d9481b5ce7c8c'
-status: 'blocked'
+baseline_revision: 'c5a109fa704918b1410a16b6aca9440a0994649a'
+status: 'done'
 review_loop_iteration: 0
-followup_review_recommended: false
+followup_review_recommended: true
 context:
   - '{project-root}/AGENTS.md'
   - '{project-root}/_bmad-output/implementation-artifacts/epic-3-context.md'
@@ -14,7 +14,15 @@ context:
   - '{project-root}/_bmad-output/planning-artifacts/ux-designs/ux-research-radar-2026-11-12/EXPERIENCE.md'
   - '{project-root}/_bmad-output/planning-artifacts/ux-designs/ux-research-radar-2026-11-12/DESIGN.md'
 warnings: ['oversized']
-deferred: []
+deferred:
+  - summary: >-
+      「載入失敗」的「重新整理」按鈕與骨架畫面沒有在瀏覽器裡實際觸發過（只有靜態渲染測試）。
+    evidence: |-
+      states.test.tsx 只用 react-dom/server 檢查文字與按鈕存在，靜態渲染不帶 onClick；目前沒有任何路由會載入資料或出錯，
+      要觸發得另加測試專用的出錯路由。第一個有資料載入的 Story（3.14 論文清單）在 e2e 補「出錯 → 按重新整理 → 頁面重新載入」與骨架畫面。
+    location: >-
+      web/src/components/states/LoadFailed.tsx:12
+    severity: medium
 ---
 
 <intent-contract>
@@ -114,6 +122,52 @@ deferred: []
 
 ## Review Triage Log
 
+### 2026-11-15 — Review pass
+- verdicts: 42 findings — high 0, medium 11, low 27, false 4, maybe-false 0
+- findings:
+  - `[medium]` `[patch]` （Blind）頁面殼路由只收 GET／HEAD，`/api/` 底下的 POST 等方法回 405 而不是 404 JSON — 已修：路由收所有方法，`/api/` 一律 404、其他路徑非 GET／HEAD 回 405，補 unit 測試。
+  - `[low]` `[reject]` （Blind）`/assets/` 找不到的檔回 200 頁面殼 — 只在換版後舊分頁或打錯網址才遇到（目前沒有延遲載入的程式），兩種情況結果都是載入失敗；要加分支判斷，不值得。
+  - `[low]` `[reject]` （Blind）直接要 `/index.html` 沒有 `no-cache`、`/assets/*` 沒有 `immutable` — 站內連結都指向路由網址，不會直接要 `/index.html`；長快取是效能改善不是缺陷，正式機前面有 Cloudflare。
+  - `[medium]` `[patch]` （Blind）`.dockerignore` 的 `.env` 只比對根目錄，`!web/` 會把 `web/.env*` 放進 build context，Vite 會把 `VITE_` 值寫進產物 — 已修：加 `**/.env`、`**/.env.*`。
+  - `[medium]` `[patch]` （Blind）沒有測試證明安全標頭檔壞掉時 api 不啟動 — 與驗證缺口第 2 條同一根因；已修：參數化測試四種壞內容，`security_headers()` 與 `create_app()` 都立刻丟例外。
+  - `[low]` `[reject]` （Blind）截圖每次跑 e2e 都覆寫、沒有比對 — 這是刻意的：三張截圖是給 Kevin 在 PR 上看的人工檢查產物（交代第 3 點），自動檢查改用量位置的版面測試，避免跨作業系統字型渲染造成不穩；每次重拍讓截圖跟著程式更新。
+  - `[low]` `[reject]` （Blind）CI 失敗時沒有上傳 Playwright 報告與 trace — `list` reporter 會把失敗的斷言與位置印在 CI 日誌；加上傳要開放 `if: failure()`，牴觸「步驟不得有 if」的不變條件。
+  - `[low]` `[reject]` （Blind）CI 的兩個建置步驟和 Playwright webServer 重複建置 — 建置各不到 1 秒，浪費可忽略；保留獨立的建置步驟讓失敗位置清楚。
+  - `[low]` `[reject]` （Blind）`web` job 沒有 `npm audit` — ADR-0017 只要求 pip-audit；要不要對前端套件加漏洞審查是政策決定，列進 PR 說明的後續事項。
+  - `[medium]` `[patch]` （Blind）ESLint 的禁 fetch／禁 import 實作只管 pages、components，routes 的 loader、hooks 不受限 — 已修：套用到 `src/**`（`src/datasource/**` 除外）。
+  - `[low]` `[patch]` （Blind）版面測試沒有測斷點邊界 — 已修：加 767、768、900、1231、1232。
+  - `[low]` `[reject]` （Blind）每頁 `<title>` 相同、「找不到這一頁」沒有標題、骨架沒有 `role="status"` — 要加 EXPERIENCE.md 沒有的文字（文字必須逐字相同），需要 Kevin 定文字；列為要 Kevin 決定（h1）與 3.2 無障礙底線的事。
+  - `[low]` `[reject]` （Blind）冒煙測試沒比對 CSP 值、沒抓 `/assets/*.js` — 標頭值由 unit 測試鎖住、送檔由 unit 測試涵蓋；冒煙只確認映像組裝正確，要解析 index.html 才抓得到資源檔，加複雜度不值得。
+  - `[low]` `[patch]` （Blind）Node 大版本寫在 `.nvmrc` 與 Dockerfile 兩處，只有一邊被測試鎖住 — 已修：arch 測試斷言兩邊一致。
+  - `[low]` `[patch]` （Blind）新名詞沒進名詞表（Referrer-Policy、COOP、X-Frame-Options、SIL OFL、`--platform=$BUILDPLATFORM`） — 已修：補進 `docs/glossary.md`。
+  - `[false]` `[reject]` （Blind）ADR 裡的「image 要不要等 web」沒照決定格式提出 — ADR 只記錄取捨；這件事 Kevin 已在派工時決定（選項 A：另開 job、不改 `image.needs`），PR 說明會寫明。
+  - `[medium]` `[patch]` （Edge）未知 `/api/` 路徑的非 GET 方法回 405 — 與 Blind 第 1 條同一根因，同一個修正。
+  - `[low]` `[reject]` （Edge）頁面殼讓 FastAPI 的結尾斜線轉址失效，`/healthz/` 回頁面殼 — compose 健康檢查與冒煙都用沒有斜線的 `/healthz`、`/readyz`；要加轉址分支，日常不會遇到。
+  - `[low]` `[reject]` （Edge）直接要 `/index.html` 沒有 `no-cache` — 與 Blind 第 3 條同一根因，同理不修。
+  - `[low]` `[reject]` （Edge）`//api/x`、`/API/x` 這類非標準 API 路徑回頁面殼 — 前端與後端都只用小寫 `/api/v1`，非標準路徑本身就是錯的呼叫；加正規化不值得。
+  - `[low]` `[reject]` （Edge）標頭值含換行或非 latin-1 字元能通過啟動檢查 — 檔案在 repo、經過審查，unit 測試鎖住完整內容，改壞會被測試擋。
+  - `[low]` `[reject]` （Edge）FastAPI 預設的 `/docs`、`/redoc` 被嚴格 CSP 擋成空白 — 沒有任何文件或流程用到 `/docs`；要關掉文件頁或替它放寬 CSP 都是取捨，列入殘留風險。
+  - `[medium]` `[patch]` （Edge）e2e 的 init script 每次換頁都重設違規清單，多次導航的測試會漏掉前面頁面的 CSP 違規 — 已修：違規事件直接回報到 Node 端的清單。
+  - `[low]` `[patch]` （Edge）站內連結檢查用站台根目錄解析相對 href — 已修：改用目前頁面網址解析。
+  - `[low]` `[reject]` （Edge）截圖每次覆寫、不比對 — 與 Blind 第 6 條同一根因，同理不修。
+  - `[medium]` `[patch]` （Verification）安全標頭內容只鎖住 3 條 CSP 指令 — 已修：unit 測試逐條鎖 ADR-0029 的全部 CSP 指令、五個其他標頭與禁止 `unsafe-inline`／`unsafe-eval`。
+  - `[medium]` `[patch]` （Verification）標頭檔格式檢查與「啟動時就讀」沒有測試 — 與 Blind 第 5 條同一根因，同一個修正。
+  - `[medium]` `[patch]` （Verification）lint 違反檔沒涵蓋 `#datasource-impl`、`globalThis.fetch`、template literal 中文、e2e 路徑中文 — 已修：各加一個違反檔與測試案例。
+  - `[medium]` `[defer]` （Verification）「重新整理」按鈕沒有任何測試按過 — 目前沒有會出錯的路由，觸發要另加測試專用路由；記入 deferred，3.14 補。
+  - `[low]` `[reject]` （Verification other）截圖不比對、會弄髒工作目錄 — 與 Blind 第 6 條同一根因，同理不修。
+  - `[low]` `[reject]` （Intent）api 送真建置結果的整段沒有瀏覽器測試，e2e 跑在 vite preview — 交代第 4 點明確允許用 vite preview 加同一組標頭；api 的送檔有 unit 測試、映像組裝有冒煙測試。
+  - `[low]` `[reject]` （Intent）截圖不是自動關卡 — 與 Blind 第 6 條同一根因。
+  - `[low]` `[defer]` （Intent）載入中、載入失敗沒有在瀏覽器觸發 — 與驗證缺口第 4 條同一根因，一起 defer。
+  - `[false]` `[reject]` （Intent）映像不等 `web` job — Kevin 已決定（選項 A），不改 `image.needs`。
+  - `[low]` `[reject]` （Intent）文字比對只檢查出現在整份 EXPERIENCE.md，沒限定畫面 17 — e2e 另外逐條斷言畫面上的段落順序與內容；摘出清單是逐條手抄並審過，限定段落要解析 Markdown 結構，不值得。
+  - `[low]` `[reject]` （Intent）示範站檢查只掃 assets、成員版靠 `apiBase` 欄位保住 `/api/v1` — index.html 由 Vite 產生、不含程式；`apiBase` 之後的請求函式本來就要用。
+  - `[medium]` `[patch]` （Intent）ESLint 範圍只有 pages、components — 與 Blind 第 10 條同一根因，同一個修正。
+  - `[low]` `[reject]` （Intent）多放了幾個 3.1 沒用到的代幣、用了任意值寫法、全站留白用 1232 斷點 — 代幣名稱與值都照 DESIGN.md，3.2 會做完整對照；任意值列為要 Kevin 決定；目前只有使用須知一頁。
+  - `[low]` `[reject]` （Intent）裝了沒用到的 `@base-ui/react` 與 Stack 表外的套件 — Stack 表與 epics 列了 base-ui，之後元件會用；表外套件在 PR 說明逐一列出理由。
+  - `[false]` `[reject]` （Intent）鍵名第一段不是頁面名稱、h1 算不算多加的小標 — 規格指定共用警語放 `caveat` 命名空間、頁面要有一個 h1「使用須知」（畫面名稱），兩者都照規格。
+  - `[low]` `[patch]` （Intent）沒有直接證明 `assetsInlineLimit: 0` 生效 — 已修：e2e 斷言兩種建置的 CSS 都沒有 `url(data:`。
+  - `[false]` `[reject]` （Intent）`smoke.sh` 在 CI 啟動 compose — 「不啟動 docker compose」限的是本機實作過程；CI 的冒煙本來就用 compose（ADR-0017）。
+
 ## Design Notes
 
 - **單一來源的安全標頭**：放在 Python 套件裡，api 用 `importlib.resources` 讀；`vite.config.ts` 用相對路徑讀同一個檔給 `vite preview`。映像的 Node 段只需多複製這一個 JSON。Playwright 再斷言 preview 的標頭等於檔案內容，兩邊不可能走樣。
@@ -130,5 +184,26 @@ deferred: []
 
 ## Auto Run Result
 
-Status: blocked
-Blocking condition: 這個執行環境連不到 npm 官方 registry（`registry.npmjs.org` 在沙箱裡連線逾時；改用不經沙箱的方式執行被權限分類器拒絕），無法安裝 `web/` 的任何套件，所以無法實作與驗證前端。規格已寫完、可以直接接著實作：允許 npm registry 的網路存取後，把本檔的 `status` 改回 `ready-for-dev` 再派一次即可。
+Status: done（2026-11-15 第二次執行解除：改用官方別名網址安裝套件；lock 檔的 resolved 都是 registry.npmjs.org）
+
+**做了什麼：** 新建 `web/`（React 19.3.1、Vite 8.3.8、TS 6.0.3、TanStack Router／Query、Tailwind 4.3.5、i18next，版本與 Stack 表一致），成員版只有使用須知（第 3、4 段）與四種全站共用狀態，示範站只有路由殼；api 用單一來源的 `security_headers.json` 在所有回應加安全標頭，並以頁面殼路由送出 `web/dist`；CI 新增和 `checks` 平行的 `web` job；映像多一段在建置機原生架構上建前端。
+
+**改了哪些檔：**
+- `radar/entrypoints/api/security_headers.json`、`web.py` -- 安全標頭唯一來源、頁面殼路由（`/api/` 一律 404 JSON、其他非 GET／HEAD 回 405、擋路徑穿越）。
+- `radar/entrypoints/api/app.py`、`main.py` -- 中介層加標頭（含 500）、`create_app(..., web_dist=)`、main 另外 `mount_web`。
+- `tests/unit/test_api_web.py`、`tests/arch/test_web_ci.py` -- 新測試（既有測試沒改）。
+- `web/**` -- 前端專案、ESLint 規則與故意違反檔、i18n 與比對清單、Vitest、Playwright（版面量測、截圖、狀態、axe、站內連結、CSP）。
+- `Dockerfile`、`.dockerignore`、`.github/workflows/ci.yml`、`.github/scripts/smoke.sh` -- 映像建前端、CI `web` job、冒煙多檢查 `/` 與 `/api/`。
+- `docs/adr/0029-...md`（提議）、`docs/adr/README.md`、`docs/glossary.md`、`sprint-status.yaml`。
+
+**審查結果：** 42 條（medium 11、low 27、false 4）。patch 15 條（合併成 12 項修正：medium 7 個群組、low 5 項）；defer 2 條（同一根因：載入失敗按鈕與骨架沒在瀏覽器觸發，3.14 補）；reject 25 條，理由逐條記在 Review Triage Log。
+
+**建議再審一次：true。** 這一輪修了 7 個 medium 群組；未再審查的具體風險：頁面殼路由改成接所有方法後與之後新增的 POST API 路由的順序互動、ESLint 範圍擴大到整個 `src/`、e2e 的 CSP 回報改用 `exposeBinding`，以及 Firefox／WebKit 只會在 CI 第一次跑。
+
+**驗證：**
+- ruff check／format、mypy、import-linter（19 kept）全過；pytest unit 980 passed、1 xfailed；pytest arch 190 passed。
+- ESLint 0、tsc 0、Vitest 57 passed、兩種建置成功、Playwright（chromium）32 passed；三張截圖在 `web/e2e/screenshots/`。
+- `actions/setup-node` 用 GitHub API 對過 tag：改釘最新 v7.1.0（`949feb2413d6458794dcd2491c4babbbce0c15c1`）。
+- `docker build`：本機 Docker 裡的 `npm ci` 連不到 registry.npmjs.org（和本機 DNS 同一個問題），8 分鐘後取消；`node:26-trixie-slim` 映像拉得到。映像建置留給 CI 的 image job。
+
+**殘留風險：** Firefox／WebKit 與 `docker build` 第一次跑在 CI；FastAPI 預設 `/docs` 會被嚴格 CSP 擋成空白（沒人用，未處理）；前端套件沒有漏洞審查（ADR-0017 只要求 pip-audit）。
