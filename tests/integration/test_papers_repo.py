@@ -21,7 +21,7 @@ from radar.domain.viewer import MemberViewer, PublicViewer, SystemViewer
 from radar.repo import papers as papers_module
 from radar.repo.db import Database
 from radar.repo.papers import get_paper, upsert_by_external_id
-from tests.database import APP_ROLE, TestDatabase, connect_admin, migrate
+from tests.database import APP_ROLE, OWNER_ROLE, TestDatabase, connect_admin, migrate
 
 T1 = datetime(2026, 11, 1, 3, 0, tzinfo=UTC)
 T2 = T1 + timedelta(days=7)
@@ -513,16 +513,85 @@ def test_get_paper_follows_viewer(database: Database) -> None:
     assert member_private is None
     assert system_private is not None
     assert system_private.in_scope is False
-    # Story 1.10 之前，PublicViewer 一篇都看不到。
+    # 沒有發佈的快照，不在 counted_paper。
     assert public_shared is None
     assert missing is None
 
 
-@pytest.mark.skip(
-    reason="等 Story 1.10 建好 counted_paper：PublicViewer 只看得到 counted_paper 裡的論文"
-)
-def test_public_viewer_sees_counted_papers() -> None:
-    raise AssertionError("等 Story 1.10")
+def _owner(db: TestDatabase, sql: str, *params: object) -> list[tuple[Any, ...]]:
+    with db.connect(OWNER_ROLE) as connection:
+        cursor = connection.execute(sql, params)
+        return cursor.fetchall() if cursor.description else []
+
+
+def _snapshot(db: TestDatabase, number: int, status: str) -> uuid.UUID:
+    """用擁有者直接造一筆每週更新與它的快照（只在測試裡；正式只由每週更新的套用寫）。"""
+    [(run_id,)] = _owner(db, "INSERT INTO weekly_run (status) VALUES ('failed') RETURNING id")
+    as_of = T2 if status == "published" else None
+    [(snapshot_id,)] = _owner(
+        db,
+        "INSERT INTO snapshot (number, weekly_run_id, status, as_of) VALUES (%s, %s, %s, %s)"
+        " RETURNING id",
+        number,
+        run_id,
+        status,
+        as_of,
+    )
+    return uuid.UUID(str(snapshot_id))
+
+
+def test_public_viewer_sees_counted_papers(papers_db: TestDatabase, database: Database) -> None:
+    # PublicViewer 看得到的論文 ⇔ 在 counted_paper 裡（AD-4、AD-5）：追蹤範圍內、沒有被排除、
+    # first_snapshot_id 指向已發佈的快照。
+    published = _snapshot(papers_db, 1, "published")
+    building = _snapshot(papers_db, 2, "building")
+    failed = _snapshot(papers_db, 3, "failed")
+    counted = _upsert(database, _paper(doi="10.1/a", openalex_id=None))
+    excluded = _upsert(
+        database, _paper(doi="10.1/b", openalex_id=None), excluded_reason="editors_comments"
+    )
+    out_of_scope = _upsert(
+        database,
+        _paper(doi="10.1/c", openalex_id=None, journal_issn_l="0960-085X"),
+        origin=PaperOrigin.IMPORT,
+    )
+    unassigned = _upsert(database, _paper(doi="10.1/d", openalex_id=None))
+    on_building = _upsert(database, _paper(doi="10.1/e", openalex_id=None))
+    on_failed = _upsert(database, _paper(doi="10.1/f", openalex_id=None))
+    for result, snapshot_id in (
+        (counted, published),
+        (excluded, published),
+        (out_of_scope, published),  # 範圍外的即使指定了已發佈的快照也一樣不算
+        (on_building, building),
+        (on_failed, failed),
+    ):
+        _owner(
+            papers_db,
+            "UPDATE paper SET first_snapshot_id = %s WHERE id = %s",
+            snapshot_id,
+            result.paper_id,
+        )
+
+    public = PublicViewer()
+    with database.transaction() as connection:
+        seen = {
+            name: get_paper(public, connection, result.paper_id)
+            for name, result in {
+                "counted": counted,
+                "excluded": excluded,
+                "out_of_scope": out_of_scope,
+                "unassigned": unassigned,
+                "on_building": on_building,
+                "on_failed": on_failed,
+            }.items()
+        }
+        system_sees = get_paper(SystemViewer(), connection, out_of_scope.paper_id)
+
+    counted_paper = seen.pop("counted")
+    assert counted_paper is not None
+    assert counted_paper.id == counted.paper_id
+    assert seen == dict.fromkeys(seen)  # 其他都是 None
+    assert system_sees is not None
 
 
 # --- CHECK 約束 ---------------------------------------------------------------------------

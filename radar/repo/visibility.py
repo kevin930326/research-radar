@@ -10,6 +10,8 @@ from radar.domain.viewer import MemberViewer, PublicViewer, SystemViewer, Viewer
 
 # 別名直接組進 SQL，所以只收小寫識別字（PostgreSQL 的名稱上限 63 個字元）。
 _ALIAS = re.compile(r"[a-z_][a-z0-9_]{0,62}")
+# `PublicViewer` 的 EXISTS 子查詢裡 `counted_paper` 的別名；外面的別名不能和它相同。
+_COUNTED_ALIAS = "visible_counted"
 
 
 def visible_papers(viewer: Viewer, *, alias: str = "paper") -> str:
@@ -18,24 +20,31 @@ def visible_papers(viewer: Viewer, *, alias: str = "paper") -> str:
     - `MemberViewer`：`lab_visible` 為真的論文。（AD-4 的「或在這位成員的 `library_item`」
       等 `library_item` 建好時補上。）
     - `SystemViewer`：全部。
-    - `PublicViewer`：暫時一篇都看不到；等 Story 1.10 建好 `counted_paper` 後改成「在
-      `counted_paper` 裡」（AD-4、AD-5）。
+    - `PublicViewer`：看得到的論文 ⇔ 在 `counted_paper` 裡（AD-4、AD-5）：追蹤範圍內、沒有被排除、
+      已算進某個已發佈的快照。用 `EXISTS` 子查詢接，所以 `alias` 是 `paper` 表或 `counted_paper`
+      都可以用（兩者的 `id` 是同一個）。
 
     回傳的字串只由驗證過的識別字組成，不含任何值。
 
     Raises:
-        ValueError: `alias` 不是小寫識別字。
+        ValueError: `alias` 不是小寫識別字，或和子查詢裡的別名 `visible_counted` 相同（內外別名
+            相同時條件永遠成立）。
         TypeError: `viewer` 不是三種讀者身分之一。
     """
     if not _ALIAS.fullmatch(alias):
         raise ValueError(f"別名只能是小寫識別字：{alias!r}")
+    if alias == _COUNTED_ALIAS:
+        raise ValueError(f"別名不能是 {_COUNTED_ALIAS!r}（可見條件的子查詢用了這個名稱）")
     match viewer:
         case MemberViewer():
             return f'"{alias}".lab_visible'
         case SystemViewer():
             return "TRUE"
         case PublicViewer():
-            return "FALSE"
+            return (
+                f"EXISTS (SELECT 1 FROM counted_paper AS {_COUNTED_ALIAS}"
+                f' WHERE {_COUNTED_ALIAS}.id = "{alias}".id)'
+            )
         case _:
             raise TypeError(f"不認得的讀者身分：{type(viewer).__name__}")
 

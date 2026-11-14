@@ -12,7 +12,6 @@
 收錄篇數與有摘要的篇數不在這裡印（AD-5：論文的篇數只由之後的 `repo/stats.py` 算，Story 1.10）。
 """
 
-import unicodedata
 import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -25,6 +24,8 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_vali
 
 from radar.domain.domain_config import JournalsConfig
 from radar.domain.snapshot import Snapshot, SnapshotStatus
+from radar.domain.text_table import display_width as display_width
+from radar.domain.text_table import render_table
 from radar.domain.weekly_run import JournalProgress, WeeklyRun, WeeklyRunStatus
 
 # 套用超過這個時間，第一次匯入可以改成一本期刊一個交易（AD-19 的預設門檻；這裡只用來加註）。
@@ -315,7 +316,7 @@ def _years_table(rows: Sequence[JournalReportRow]) -> list[str]:
     grand = sum(sum(row.fetched_by_year.values()) for row in started)
     body.append(["合計", *map(_number, totals), _number(grand)])
     header = ["期刊", *map(str, years), "合計"]
-    return _table(header, body, align="l" + "r" * (len(years) + 1))
+    return render_table(header, body, align="l" + "r" * (len(years) + 1))
 
 
 def _skips_table(rows: Sequence[JournalReportRow]) -> list[str]:
@@ -341,7 +342,7 @@ def _skips_table(rows: Sequence[JournalReportRow]) -> list[str]:
             _number(sum(row.unparseable for row in started)),
         ]
     )
-    return _table(["期刊", "排除", "收錄範圍外", "解析失敗"], body, align="lrrr")
+    return render_table(["期刊", "排除", "收錄範圍外", "解析失敗"], body, align="lrrr")
 
 
 def _comparison_cells(label: str, comparison: Comparison) -> list[str]:
@@ -363,23 +364,4 @@ def _comparison_cells(label: str, comparison: Comparison) -> list[str]:
 def _comparison_table(report: ImportReport) -> list[str]:
     body = [_comparison_cells(row.key, row.comparison) for row in report.rows]
     body.append(_comparison_cells("有基準的合計", report.total))
-    return _table(["期刊", "本次", "基準", "差異", ""], body, align="lrrrl")
-
-
-def display_width(text: str) -> int:
-    """終端機上的顯示寬度：全形字（East Asian Width 是 F 或 W）算 2，其他算 1。"""
-    return sum(2 if unicodedata.east_asian_width(char) in "FW" else 1 for char in text)
-
-
-def _table(header: Sequence[str], body: Sequence[Sequence[str]], *, align: str) -> list[str]:
-    """依顯示寬度對齊的表格；`align` 每欄一個字元（`l` 靠左、`r` 靠右），欄與欄之間兩個空白。"""
-    table = [list(header), *(list(row) for row in body)]
-    widths = [max(display_width(row[index]) for row in table) for index in range(len(header))]
-    lines: list[str] = []
-    for row in table:
-        cells: list[str] = []
-        for index, cell in enumerate(row):
-            padding = " " * (widths[index] - display_width(cell))
-            cells.append(cell + padding if align[index] == "l" else padding + cell)
-        lines.append("  ".join(cells).rstrip())
-    return lines
+    return render_table(["期刊", "本次", "基準", "差異", ""], body, align="lrrrl")

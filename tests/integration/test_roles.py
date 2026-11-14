@@ -31,7 +31,7 @@ def test_app_role_reads_but_cannot_change_alembic_version(
     migrated_database: TestDatabase,
 ) -> None:
     with migrated_database.connect(APP_ROLE) as app:
-        assert app.execute("SELECT version_num FROM alembic_version").fetchall() == [("0007",)]
+        assert app.execute("SELECT version_num FROM alembic_version").fetchall() == [("0008",)]
         for statement in (
             "UPDATE alembic_version SET version_num = 'x'",
             "INSERT INTO alembic_version VALUES ('x')",
