@@ -48,7 +48,7 @@ deferred:
       radar/domain/policy.py CLOUD_CLEARED_LICENSES
     severity: low
   - summary: >-
-      prompt_template 由呼叫端自標、一律放行：2.2 由專用 prompt loader（預留 radar/services/prompt_loader.py）從 prompts/<工作>/v<N>.md 讀檔放行模板，clear_for_cloud 改成拒收外部傳入的 prompt_template；模板的變數一律以分開的 CloudSafeText 區塊（照真正的來源放行）放進 content，不能 .format 進 system。
+      prompt_template 由呼叫端自標、一律放行。2.2 要做：（1）clear_for_cloud 改成拒收 PROMPT_TEMPLATE；（2）policy.py 另開模板專用放行入口，不收一般字串，要自己讀 prompts/ 底下的檔（路徑解析後不能跑出 prompts/、不跟符號連結跑出去），或用 ADR-0009 的模板雜湊清單核對內容；（3）放行前拿掉 prompt 檔的設定區，只放行內文；（4）prompt loader（預留 radar/services/prompt_loader.py，2.2 若換位置要同步改 tests/arch/test_prompt_template_source.py 與 ADR-0029）只找檔、讀設定區、呼叫 policy 的入口，不碰 PROMPT_TEMPLATE、不呼叫 clear_for_cloud、不填模板（2.1 的架構測試已守）；（5）模板的變數一律照真正的來源放行、以分開的 CloudSafeText 區塊放進 content，不能 .format 進 system。架構測試擋不到：cloud_source(既有模板) 沿用來源、"prompt" + "_template" 組字串、走訪 ContentSource、ContentSource(變數)，要靠（1）在執行期擋。
     evidence: |-
       Opus 第三次確認審查：clear_for_cloud("請根據以下全文整理：" + 上傳 PDF 文字, PROMPT_TEMPLATE, ...) 在開關關著時照樣放行，送出的 system 含那段文字。2.1 先加架構測試（tests/arch/test_prompt_template_source.py）：radar/ 裡 PROMPT_TEMPLATE 只能出現在 policy.py、llm.py 與預留的 prompt loader。
     location: >-
@@ -256,6 +256,14 @@ deferred:
 - findings:
   - `[medium]` `[patch]` schema 類別能在執行期用沒放行的文字組出來（函式裡的類別、`Literal[tuple(names)]`、`Field(description=變數)`、變數預設值、`Enum` 函式寫法、事後改 `__doc__`） — `output_schema` 只收 `radar/domain/llm_schemas.py` 最上層的類別（執行期查 `<locals>`、模組歸屬與模組裡的名字）；產生 schema 時拿掉模型與列舉的 `description`；架構測試 `tests/arch/test_llm_schemas.py` 規定那個模組只能寫字面值、`output_schema=` 只收從它 import 的類別；反向測試 `tests/unit/test_llm_schema_origin.py`。本分支測試裡自己定義的 schema 類別改成 import 那個模組的 `FakeAnyObject`／`FakeResearchQuestion`（斷言不變）。
   - `[medium]` `[defer]` `prompt_template`／`user_query` 由呼叫端自標、一律放行 — 2.1 先加架構測試 `tests/arch/test_prompt_template_source.py`；主體（prompt loader、`clear_for_cloud` 拒收外部 `prompt_template`、`user_query` 專用入口）記進 deferred，2.2／Epic 5 做。
+
+### 2026-11-15 — Opus 第四次確認審查 e80cfe5
+- verdicts: 4 findings — medium 2, low 2
+- findings:
+  - `[medium]` `[patch]` 列舉與 TypedDict 的 title／description 照樣送出、延後建好的模型事後改 `__doc__` 會送 — 改成 import 時凍結 schema 登記表，凍結前統一拿掉最上層與每個 `$defs` 的 title、description；父類別白名單（不收 TypedDict、NamedTuple），建表時遇到就報錯。
+  - `[medium]` `[patch]` 已放行類別的執行期改動（`model_config["json_schema_extra"]`、可變預設值）會送出 — 同上，送出只用 import 時凍結的字串；架構測試另禁可變預設值。
+  - `[low]` `[patch]` `output_schema=` 架構規則會誤抓 2.2 gateway 的自然寫法 — 改成只禁止當場算出來的值（呼叫、lambda、容器字面值、推導式、字串），測試 docstring 寫明 2.2 的寫法。
+  - `[low]` `[patch]` D2 延後內容不完整 — deferred、ADR-0029、epic-2-context 補上 policy 專用入口不收字串、去設定區、loader 約束與擋不到的寫法；prompt loader 移出白名單、加自己的約束，`llm.py` 只能比對。
 
 ## Design Notes
 

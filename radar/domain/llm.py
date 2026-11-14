@@ -16,15 +16,17 @@
 
 import json
 import math
-import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from enum import Enum
+from types import ModuleType
 from typing import Any, ClassVar, Final, Literal, cast, final, get_args
 
 from pydantic import BaseModel
-from pydantic.json_schema import GenerateJsonSchema, JsonSchemaValue, model_json_schema
+from pydantic.json_schema import GenerateJsonSchema, model_json_schema
 from pydantic_core import core_schema
 
+from radar.domain import llm_schemas
 from radar.domain.errors import ErrorCode
 from radar.domain.policy import (
     CloudSafeText,
@@ -52,7 +54,7 @@ EFFORTS: Final[frozenset[str]] = frozenset(get_args(Effort.__value__))
 ALLOWED_MODELS: Final[frozenset[str]] = frozenset({"claude-haiku-5-5"})
 
 # `output_schema` 只收這個模組最上層定義的類別（ADR-0029；寫法由架構測試守著）。
-SCHEMA_MODULE: Final = "radar.domain.llm_schemas"
+SCHEMA_MODULE: Final = llm_schemas.__name__
 
 # 正常結束與長度截斷的 `stop_reason`（其餘都當格式不對）。
 END_TURN: Final = "end_turn"
@@ -214,8 +216,8 @@ class LlmRequest:
     - `model`：必須在 `ALLOWED_MODELS` 裡。
     - `effort`、`disable_thinking`：Haiku 5.5 的思考設定。
     - `output_schema`：要固定 JSON 格式時，傳 `radar/domain/llm_schemas.py` 最上層定義的
-      Pydantic 模型**類別**（不收 dict、函式裡定義的類別、別的模組的類別）；
-      建立時由類別產生 JSON schema 並凍結成字串，送出時才轉回 dict，建好之後改不到。
+      Pydantic 模型**類別**（不收 dict、函式裡定義的類別、別的模組的類別）；schema 在
+      import 本模組時就產生好、凍結在登記表裡，送出時只用凍結的字串，之後改類別都改不到。
       有給時回應必須是 JSON 物件。schema 和 `model` 一樣會送到雲端，所以也在放行範圍內
       （ADR-0029）：只收寫在程式裡的類別，不收外部文字組出來的 schema。
 
@@ -250,59 +252,81 @@ class LlmRequest:
         return schema
 
 
-class _SchemaWithoutTitles(GenerateJsonSchema):
-    """產生 JSON schema 時，模型與列舉不放 `title`（由名稱推出，只是多花 token）與 `description`
-    （來自 docstring；`__doc__` 建好後還能被改，所以一律不送）。欄位的 `Field(description=...)`
-    照送（架構測試要求寫成字面值）。"""
+class _SchemaWithoutFieldTitles(GenerateJsonSchema):
+    """產生 JSON schema 時不放欄位的 `title`（由欄位名稱推出，只是多花 token）。"""
 
     def field_title_should_be_set(
         self, schema: core_schema.CoreSchema | core_schema.ModelField | Any
     ) -> bool:
         return False
 
-    def model_schema(self, schema: core_schema.ModelSchema) -> JsonSchemaValue:
-        result = super().model_schema(schema)
-        result.pop("title", None)
-        result.pop("description", None)
-        return result
 
-    def enum_schema(self, schema: core_schema.EnumSchema) -> JsonSchemaValue:
-        result = super().enum_schema(schema)
-        result.pop("title", None)
-        result.pop("description", None)
-        return result
+def _render_schema(cls: type[BaseModel]) -> str:
+    """由模型類別產生 JSON schema，拿掉最上層與每個 `$defs` 項目的 `title`、`description`，
+    凍結成排序過的 JSON 字串。
 
-
-def _schema_json(output_schema: type[BaseModel] | None) -> str | None:
-    """由 Pydantic 模型類別產生 JSON schema，凍結成排序過的 JSON 字串。"""
-    if output_schema is None:
-        return None
+    型別層級的 `title`／`description` 來自類別名稱與 docstring（模型、列舉都一樣），一律不送；
+    欄位的 `Field(description=...)` 在 `properties` 裡，照送（架構測試要求寫成字面值）。
+    """
     # 用模組函式，不呼叫類別上可被覆寫的 `model_json_schema`。
-    schema = model_json_schema(output_schema, schema_generator=_SchemaWithoutTitles)
+    schema = model_json_schema(cls, schema_generator=_SchemaWithoutFieldTitles)
+    definitions: list[dict[str, Any]] = [schema, *schema.get("$defs", {}).values()]
+    for definition in definitions:
+        definition.pop("title", None)
+        definition.pop("description", None)
     return json.dumps(schema, ensure_ascii=False, sort_keys=True, allow_nan=False)
 
 
-def _is_schema_class(value: object) -> bool:
-    """是 `SCHEMA_MODULE` 最上層定義的 `BaseModel` 子類別。
+def _freeze_schemas(module: ModuleType) -> dict[int, tuple[type[BaseModel], str]]:
+    """import 時把 schema 模組最上層每個模型類別的 JSON schema 產生好、凍結起來。
 
-    - 看真實型別是不是 metaclass（偽裝 `__class__` 的物件不算）。
-    - 函式裡臨時定義的類別（`__qualname__` 含 `<locals>`）、巢狀類別、別的模組的類別都不收：
-      這些都可以在執行期用沒放行的文字組出來（`Literal[tuple(names)]`、`Field(description=變數)`）。
-    - 模組裡那個名字真的指向這個類別（`__module__`、`__qualname__` 可以亂改，但改了對不上）。
+    之後送出只用凍結的字串，執行期不再重新產生：import 之後才改 `__doc__`、`model_config`、
+    欄位預設值、`model_rebuild`，或把別的類別 `setattr` 進模組，都影響不到送出的 schema。
+    鍵是 `id(類別)`，值裡留著類別本身（查表時用 `is` 核對，類別也不會被回收、id 不會被重用）。
+
+    Raises:
+        RuntimeError: 模組裡有不是 `BaseModel`／`Enum` 子類別的類別（例如 `TypedDict`）、名字與
+            `__qualname__` 對不上，或模型沒有建好（`__pydantic_complete__` 是 False）。
     """
-    if not issubclass(type(value), type):
-        return False
-    # 上一行已確認真實型別是 metaclass（value 是真的類別）；cast 只是讓 mypy 收窄。
-    cls = cast(type, value)
-    if not issubclass(cls, BaseModel) or cls is BaseModel:
-        return False
-    module, qualname = cls.__module__, cls.__qualname__
-    if type(module) is not str or type(qualname) is not str:
-        return False
-    if module != SCHEMA_MODULE or not qualname.isidentifier():
-        return False
-    owner = sys.modules.get(module)
-    return owner is not None and vars(owner).get(qualname) is cls
+    frozen: dict[int, tuple[type[BaseModel], str]] = {}
+    for name, value in vars(module).items():
+        if not issubclass(type(value), type):
+            continue
+        cls = cast(type, value)
+        if cls.__module__ != module.__name__:
+            continue  # import 進來的名字（BaseModel、StrEnum 等）
+        if cls.__qualname__ != name:
+            raise RuntimeError(f"{module.__name__}.{name} 和類別的 __qualname__ 對不上")
+        if issubclass(cls, Enum):
+            continue  # 列舉只能當欄位型別，不能直接當 output_schema
+        if not issubclass(cls, BaseModel):
+            raise RuntimeError(f"{module.__name__}.{name} 必須是 BaseModel 或 Enum 的子類別")
+        if not cls.__pydantic_complete__:
+            raise RuntimeError(f"{module.__name__}.{name} 沒有建好（型別標註引用了還沒定義的型別）")
+        frozen[id(cls)] = (cls, _render_schema(cls))
+    return frozen
+
+
+# 凍結的 schema 登記表（Opus 第四次確認審查）：只有這裡面的類別能當 `output_schema`。
+_FROZEN_SCHEMAS: Final = _freeze_schemas(llm_schemas)
+
+
+def _frozen_schema(value: object) -> str | None:
+    """`value` 是登記表裡的類別就回凍結的 schema 字串，否則回 None。用 `is` 核對類別。"""
+    entry = _FROZEN_SCHEMAS.get(id(value))
+    if entry is None or entry[0] is not value:
+        return None
+    return entry[1]
+
+
+def _schema_json(output_schema: type[BaseModel] | None) -> str | None:
+    """送出用的凍結 schema 字串（`output_schema` 已經驗證過在登記表裡）。"""
+    if output_schema is None:
+        return None
+    frozen = _frozen_schema(output_schema)
+    if frozen is None:  # pragma: no cover - _validate_request 已經擋下
+        raise TypeError("LlmRequest.output_schema 不在凍結的 schema 登記表裡")
+    return frozen
 
 
 def _validate_request(request: LlmRequest) -> None:
@@ -342,7 +366,7 @@ def _validate_request(request: LlmRequest) -> None:
         raise ValueError("LlmRequest.effort 只能是 low、medium、high 或 None")
     if type(request.disable_thinking) is not bool:
         raise TypeError("LlmRequest.disable_thinking 必須是 bool")
-    if request.output_schema is not None and not _is_schema_class(request.output_schema):
+    if request.output_schema is not None and _frozen_schema(request.output_schema) is None:
         raise TypeError(
             "LlmRequest.output_schema 必須是 radar/domain/llm_schemas.py 最上層定義的"
             " Pydantic 模型類別或 None（不收 dict、函式裡定義的類別、別的模組的類別）"

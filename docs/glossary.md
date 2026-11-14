@@ -632,3 +632,5 @@
 - **`llm_schemas.py`（schema 模組）**：`radar/domain/llm_schemas.py`，給 LLM 的結構化輸出格式只能寫在這裡、而且只能寫字面值，像菜單只能印好，不能讓客人現場改字；`LlmRequest.output_schema` 只收這個模組最上層的類別。
 - **prompt loader**：2.2 要做的元件，只從 `prompts/<工作>/v<N>.md` 讀檔、把模板放行成 `prompt_template`；之後一般程式不能自己把文字標成模板。
 - **`<locals>`（函式裡定義的類別）**：Python 給函式內部定義的類別的名字標記；這種類別可以用執行期的資料臨時組出來，所以 schema 一律不收。
+- **凍結的 schema 登記表**：`radar/domain/llm.py` 在 import 時就把 `llm_schemas.py` 每個模型的 JSON schema 產生好、存成字串，之後送出只用這份；像先把菜單印好封存，之後有人在原稿上塗改也不影響已印好的那份。
+- **`$defs`**：JSON schema 裡放「共用型別定義」的區塊（例如巢狀的模型、列舉）；本專案凍結前會把每個定義的 `title`、`description` 拿掉。
