@@ -1,6 +1,6 @@
 # ADR-0021：OpenAlex 怎麼抓、原始資料怎麼切與存、額度怎麼算
 
-- 狀態：提議（等 Kevin 在 PR 確認）
+- 狀態：已接受（Kevin 2026-11-14）
 - 日期：2026-11-14
 - 對應：epics Story 1.6；PRD FR-2、FR-10、FR-36；NFR-6、NFR-9；架構文件 AD-2、AD-18、AD-25、AD-29；ADR-0014（本 ADR 只寫「怎麼做」，不改 ADR-0014 的決定）
 
@@ -78,6 +78,10 @@ ADR-0014 定了「`PaperSource` 回原始紀錄、先存再解析、`raw/<來源
 - **`raw_fetch` 有列、物件被刪掉時不會補存**：`raw/` 只有一份、沒有自動刪除（ADR-0014）；之後要做保留規則時，刪物件要連 `raw_fetch` 一起處理。
 - **和規格寫法的差別**：規格寫 boto3 用 `retries={"max_attempts": 1}`，但 botocore 的 `max_attempts` 是「重試幾次」（不含第一次），實測會多送一次；改用 `total_max_attempts=1`（含第一次），才是規格要的「botocore 自己的重試關掉」。
 - **什麼時候重新考慮**：OpenAlex 改回應格式（例如 `results` 不再是頂層陣列）；加第二個資料來源時（切片與用量的寫法要不要共用）。
+
+## Kevin 2026-11-14 的確認
+
+- **期刊代號**（`config/journals.yaml`，含 I&M＝`im`、I&O＝`io`）、**14 本共用起始年 `start_year: 2016`**、**抓取只篩期刊＋年份（不在抓取時篩 type）**：Kevin 2026-11-14 接受。代號在第一次匯入（Story 1.8）之後再改，就要連資料一起搬。
 
 ## 名詞
 

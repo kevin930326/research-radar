@@ -115,7 +115,7 @@ deferred:
 
 ## Design Notes
 
-- **compose 檔放根目錄**：Structural Seed 寫 `deploy/` 放 compose 檔，但驗收條件要求在乾淨的 clone 直接 `docker compose up`。本機開發用根目錄 `compose.yaml`；正式／試用主機的 compose（只有 api、worker、cloudflared）在 Story 3.19 放 `deploy/`。
+- **compose 檔放根目錄**：Structural Seed 寫 `deploy/` 放 compose 檔，但驗收條件要求在乾淨的 clone 直接 `docker compose up`。本機開發用根目錄 `compose.yaml`；正式／試用主機的 compose（只有 api、worker、cloudflared）在 Story 3.19 放 `deploy/`。2026-11-14 已補 ADR-0023（Kevin 接受），架構文件的原始碼結構同步改成根目錄 `compose.yaml`。
 - **worker 的 graceful timeout**：`RADAR_WORKER_SHUTDOWN_GRACEFUL_TIMEOUT` 預設 30 秒，compose `stop_grace_period: 45s`；api 用 uvicorn 的 `timeout_graceful_shutdown`（`RADAR_API_SHUTDOWN_GRACEFUL_TIMEOUT` 預設 10 秒），`stop_grace_period: 20s`。測試讀 compose 與設定預設值比大小（compose 有覆寫就用覆寫值）。
 - **uvicorn 的訊號**：`main()` 先裝一個只記錄的 SIGTERM handler，uvicorn 結束後重丟的訊號落在它身上，`main()` 正常 return、記「正常關機」。
 - **已經有的起點**：`pyproject.toml`（相依已用 `uv add` 加好，Python 3.14 虛擬環境在 `.venv`）、`uv.lock`、空的 `radar/__init__.py` 已建立，在此基礎上補設定區塊；增減相依一律用 `uv add`／`uv remove`（`/opt/homebrew/bin/uv`）。`sprint-status.yaml`、`epic-1-context.md`、這份 spec 的改動不是實作的一部分，不要動。Docker 映像 `pgvector/pgvector:0.8.7-pg18-trixie`、`rustfs/rustfs:1.0.5`、`python:3.14-slim-trixie`、`ghcr.io/astral-sh/uv:0.13.7` 已 pull。

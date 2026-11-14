@@ -724,7 +724,8 @@ research-radar/
     public/          # 靜態資源（60 秒示範檔與預覽圖、靜態星系圖）
     src/
       pages/  components/  datasource/  stats/  generated/  i18n/
-  deploy/            # compose 檔、crontab、release.sh、demo-worker/
+  compose.yaml       # 本機開發的 compose 檔（ADR-0023）
+  deploy/            # crontab、release.sh、demo-worker/、正式主機的 compose（本機的 compose 在根目錄，見 ADR-0023）
   tests/             # unit/ integration/ arch/ golden/（stats/、burst/、keywords/、format/、exports/） fixtures/ cassettes/
   evals/             # 評估腳本與報告（不含標註資料）
   docs/

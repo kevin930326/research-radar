@@ -99,7 +99,7 @@
 actual_hours: {}
 
 generated: 11-14-2026 03:46
-last_updated: 11-14-2026 13:30
+last_updated: 11-14-2026 15:20
 project: research-radar
 project_key: NOKEY
 tracking_system: file-system
@@ -111,8 +111,8 @@ development_status:
   1-3-資料庫遷移起點與-schema-體檢: done
   1-4-背景工作與排程入口: done
   1-5-識別碼正規化-論文表與權限的底層: done
-  1-6-從-openalex-抓資料-保存原始資料: review
-  1-7-解析原始資料與重新解析: review
+  1-6-從-openalex-抓資料-保存原始資料: done
+  1-7-解析原始資料與重新解析: done
   1-8-第一次匯入的抓取-暫存與中斷續跑: backlog
   1-9-第一次匯入的套用-快照-1-與基準比對: backlog
   1-10-摘要來源與覆蓋率計數: backlog

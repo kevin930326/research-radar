@@ -1,6 +1,6 @@
 # ADR-0017：CI 流程：固定檢查、兩種架構各自冒煙、冒煙通過才推映像
 
-- 狀態：提議（等 Kevin 在 PR 確認）
+- 狀態：已接受（Kevin 2026-11-14）
 - 日期：2026-11-14
 - 對應：PRD NFR-6、NFR-15、NFR-18；epics Story 1.2；架構文件 AD-17、AD-18、AD-29；ADR-0003（多架構映像）
 
@@ -90,6 +90,10 @@ Story 1.1 之前沒有 CI：檢查只在 Kevin 的 Mac 手動跑，映像只在 
 - **`image` 在 pull_request 事件也拿著 `packages: write`**：權限是寫在 job 上的，PR 事件不會推映像，但權限還在。接受這個取捨：拆成兩個 job 要多建一次映像；而且來自 fork 的 PR，GitHub 本來就只給唯讀的 token。
 - **GHCR 的標籤只增不減**：每個分支的每次 push 都會多三個標籤（`<sha>-amd64`、`<sha>-arm64`、`<sha>`），目前沒有保留期或清理規則；私有 package 的儲存空間算在帳號的額度裡。要不要設清理規則、保留多久，留給 Kevin 決定。
 - **gitleaks、pip-audit 升版要手動改**：gitleaks 的版本與 SHA-256 在 workflow；pip-audit 跟著 `uv.lock`。
+
+## Kevin 2026-11-14 的確認
+
+- **CI 對所有分支的 push 都跑**（不縮成只跑 `main` 與 PR）、**GHCR 的舊標籤先不清理**：Kevin 2026-11-14 接受（「取捨」最後兩項留給 Kevin 決定的事）。分鐘數或儲存空間吃緊時再改。
 
 ## 名詞
 

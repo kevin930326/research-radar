@@ -23,12 +23,13 @@
 | [0014](0014-raw-first-ingest-and-weekly-rescan.md) | 原始資料先存再解析；每週更新把 14 本期刊整本重掃 | 提議 | AD-25 |
 | [0015](0015-ai-output-tables-and-processing-plan.md) | AI 產出怎麼存、怎麼換版；哪一種論文做哪些處理 | 提議 | AD-7、AD-30 |
 | [0016](0016-keyword-stats-and-burst-detection.md) | 關鍵字統計只有一個來源；爆紅關鍵字當場算，空年從序列拿掉 | 提議（空年的算法、已經結束的爆紅怎麼列、兩個篇數的連結，Kevin 2026-11-13 已確認） | AD-5、AD-31 |
-| [0017](0017-ci-pipeline.md) | CI：固定檢查依序跑、amd64／arm64 原生執行機各自冒煙、冒煙通過且是 push 事件才推 GHCR；測試預設封鎖網路 | 提議 | AD-17、AD-18、AD-29 |
-| [0018](0018-database-migrations-and-roles.md) | 資料庫遷移用 Alembic、所有遷移在一個交易裡；第一個遷移只檢查功能並給應用程式角色預設權限；本機與 CI 也建 `radar_owner`、`radar_app` 兩個角色；`/readyz` 沒遷移或落後回 503、比程式新照常就緒；連線數預算 | 提議 | AD-15、AD-17、AD-18、AD-29 |
-| [0019](0019-worker-and-queue-integration.md) | worker 接上 Procrastinate：佇列的 SQL 凍結成檔由 Alembic 執行；連線池自己開；監督迴圈處理訊號與重開；做完的工作紀錄全留；排程只在 `deploy/crontab` | 提議 | AD-14、AD-15、AD-17、AD-18 |
-| [0020](0020-identifiers-and-paper-writes.md) | 識別碼的正規化規則（ISSN 不驗檢查碼）；論文寫入先新增再認領識別碼、每個來源一欄抓取時間、識別碼衝突不合併；viewer、權限表與資料層的架構測試 | 提議 | AD-3、AD-4、AD-5、AD-6、AD-25、AD-27 |
-| [0021](0021-openalex-fetch-and-raw-storage.md) | OpenAlex 只篩期刊與年份、原始資料從回應原文切出每一篇的位元組；用量取本地加總與 OpenAlex 回報的較大者；去重看 `raw_fetch`、先存物件再寫列；領域設定 `config/*.yaml` 啟動時驗證 | 提議 | AD-2、AD-18、AD-25、AD-29 |
-| [0022](0022-parsing-and-reparse.md) | OpenAlex 的解析是純函式、看不懂整篇略過；指紋 `source_hash` 的欄位與序列化；摘要在寫入函式裡寫、來源不再提供就刪、優先順序先寫成常數；排除規則的格式與正規化；`radar reparse` 只更新已匯入的論文、先放暫存表再一個交易套用 | 提議 | AD-5、AD-7、AD-25、AD-31 |
+| [0017](0017-ci-pipeline.md) | CI：固定檢查依序跑、amd64／arm64 原生執行機各自冒煙、冒煙通過且是 push 事件才推 GHCR；測試預設封鎖網路 | 已接受（Kevin 2026-11-14） | AD-17、AD-18、AD-29 |
+| [0018](0018-database-migrations-and-roles.md) | 資料庫遷移用 Alembic、所有遷移在一個交易裡；第一個遷移只檢查功能並給應用程式角色預設權限；本機與 CI 也建 `radar_owner`、`radar_app` 兩個角色；`/readyz` 沒遷移或落後回 503、比程式新照常就緒；連線數預算 | 已接受（Kevin 2026-11-14） | AD-15、AD-17、AD-18、AD-29 |
+| [0019](0019-worker-and-queue-integration.md) | worker 接上 Procrastinate：佇列的 SQL 凍結成檔由 Alembic 執行；連線池自己開；監督迴圈處理訊號與重開；做完的工作紀錄全留；排程只在 `deploy/crontab` | 已接受（Kevin 2026-11-14） | AD-14、AD-15、AD-17、AD-18 |
+| [0020](0020-identifiers-and-paper-writes.md) | 識別碼的正規化規則（ISSN 不驗檢查碼）；論文寫入先新增再認領識別碼、每個來源一欄抓取時間、識別碼衝突不合併；viewer、權限表與資料層的架構測試 | 已接受（Kevin 2026-11-14） | AD-3、AD-4、AD-5、AD-6、AD-25、AD-27 |
+| [0021](0021-openalex-fetch-and-raw-storage.md) | OpenAlex 只篩期刊與年份、原始資料從回應原文切出每一篇的位元組；用量取本地加總與 OpenAlex 回報的較大者；去重看 `raw_fetch`、先存物件再寫列；領域設定 `config/*.yaml` 啟動時驗證 | 已接受（Kevin 2026-11-14） | AD-2、AD-18、AD-25、AD-29 |
+| [0022](0022-parsing-and-reparse.md) | OpenAlex 的解析是純函式、看不懂整篇略過；指紋 `source_hash` 的欄位與序列化；摘要在寫入函式裡寫、來源不再提供就刪、優先順序先寫成常數；排除規則的格式與正規化；`radar reparse` 只更新已匯入的論文、先放暫存表再一個交易套用 | 已接受（Kevin 2026-11-14） | AD-5、AD-7、AD-25、AD-31 |
+| [0023](0023-compose-file-at-repo-root.md) | 本機開發的 compose 檔放在 repo 根目錄 `compose.yaml`（`docker compose up` 不用加 `-f`）；`deploy/` 放 crontab、正式主機的 compose 等部署用的檔案 | 已接受（Kevin 2026-11-14） | AD-17 |
 
 「提議」表示還沒經過 Kevin 確認；PR 合併後改成「已接受」。
 

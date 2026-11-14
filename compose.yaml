@@ -56,6 +56,8 @@ services:
     depends_on:
       db:
         condition: service_healthy
+    # api 350m＋worker 400m＝750 MiB（Docker 的 m 是 MiB）。AGENTS.md 的 750 MB 以 MiB 計
+    # （Kevin 2026-11-14 決定）；PDF 子行程的記憶體到 Epic 6 實測再定（ADR-0003）。
     mem_limit: 350m
     # 比 RADAR_API_SHUTDOWN_GRACEFUL_TIMEOUT 長，Docker 才不會在請求做完前強制關掉。
     stop_grace_period: 20s
@@ -70,6 +72,7 @@ services:
     depends_on:
       db:
         condition: service_healthy
+    # 750 MiB 的另一半，見 api 的 mem_limit 註解。
     mem_limit: 400m
     # 比 RADAR_WORKER_SHUTDOWN_GRACEFUL_TIMEOUT 長（ADR-0004）。
     stop_grace_period: 45s
