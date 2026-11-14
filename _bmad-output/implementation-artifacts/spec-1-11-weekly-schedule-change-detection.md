@@ -51,12 +51,12 @@ deferred:
 - **遷移 0009**（`migrations/versions/0009_weekly_failures_and_source_changes.py`）：`weekly_run.failure_count integer NOT NULL DEFAULT 0`＋CHECK `failure_count >= 0`（`ck_weekly_run_failure_count_not_negative`）；`paper.source_changed_at timestamptz`（NULL＝寫入以來 `source_hash` 沒變過）。downgrade 反向拿掉。view `counted_paper` 不用到這兩欄，不必重建。
 - **上限怎麼算**（ADR-0028）：一筆 `weekly_run` 從建立起累計的失敗次數，跨 Procrastinate 的工作重試、sweep 補排、下一週 cron 接著同一筆都一起算；中間有進度也不歸零（cursor 繞圈時每次都會「前進」一頁，歸零就永遠停不下來）。不算失敗的：額度停下、reparse 正在跑而先不做、略過（不是 `fetching`）、已經抓完又被排入。
 - **設定**：`Settings.weekly_update_max_failures: int = Field(default=8, ge=1, le=100)`（環境變數 `RADAR_WEEKLY_UPDATE_MAX_FAILURES`；預設值是 `radar/domain/weekly_run.py` 的 `DEFAULT_MAX_FAILURES`）；`.env.example` 加一行與說明。`[ASSUMPTION]` 預設 8：工作層重試預設 3 次（一次排入最多 4 次嘗試），sweep 2 小時後補排再 4 次，大約 2 小時多一點標 `failed`。
-- **`radar/repo/weekly_runs.py`**：表定義加欄與 CHECK；`WeeklyRun` 加 `failure_count`；新增 `update_weekly_run_failure(connection, weekly_run_id, *, max_failures) -> WeeklyRunFailure | None`：只在 `status='fetching'` 時把 `failure_count` 加一、加完到上限就同一句改成 `failed`，回（失敗次數, 是否標成失敗）；不是 `fetching` 回 None。不改 `updated_at`（那是 `update_weekly_run_touched` 的事）。
+- **`radar/repo/weekly_runs.py`**：表定義加欄與 CHECK；`WeeklyRun` 加 `failure_count`；新增 `update_weekly_run_failure(connection, weekly_run_id, *, max_failures) -> WeeklyRunFailure | None`（**已改，見文末「Codex 主審查修正」**）：只在 `status='fetching'` 時把 `failure_count` 加一、加完到上限就同一句改成 `failed`，回（失敗次數, 是否標成失敗）；不是 `fetching` 回 None。不改 `updated_at`（那是 `update_weekly_run_touched` 的事）。
 - **`radar/services/weekly_update.py`**：
-  - `_touch_after_failure` 換成 `_record_failure(database, weekly_run_id, max_failures)`：一個短交易依序 `update_weekly_run_touched`、`update_weekly_run_failure`，標成 `failed` 時同一個交易 `delete_staged_papers(weekly_run_id)`。之後記日誌：沒到上限記警告「每週更新失敗，已記一次」（`weekly_run_id`、`failures`、`max_failures`）；到上限記錯誤「每週更新重試到上限，標成失敗」（再加 `staged_deleted`）。這個交易本身失敗時照舊只記警告「每週更新失敗後更新 updated_at 也失敗」、不蓋掉原本的例外。原本的例外照樣往上丟（之後的工作重試讀到 `failed` 就略過）。
+  - （**已改成兩個交易，見文末「Codex 主審查修正」**）`_touch_after_failure` 換成 `_record_failure(database, weekly_run_id, max_failures)`：一個短交易依序 `update_weekly_run_touched`、`update_weekly_run_failure`，標成 `failed` 時同一個交易 `delete_staged_papers(weekly_run_id)`。之後記日誌：沒到上限記警告「每週更新失敗，已記一次」（`weekly_run_id`、`failures`、`max_failures`）；到上限記錯誤「每週更新重試到上限，標成失敗」（再加 `staged_deleted`）。這個交易本身失敗時照舊只記警告「每週更新失敗後更新 updated_at 也失敗」、不蓋掉原本的例外。原本的例外照樣往上丟（之後的工作重試讀到 `failed` 就略過）。
   - `run_weekly_update`、`open_and_run_weekly_update`、`advance_weekly_update`、`apply_weekly_update` 加關鍵字參數 `max_failures: int = DEFAULT_MAX_FAILURES`；不是正整數丟 `ValueError`、不碰資料庫。既有呼叫與測試不用改。
   - `apply_weekly_update`：逐列寫入時某一列丟例外，先記錯誤日誌「每週更新套用時這一列寫不進去」（`weekly_run_id`、`external_key`、錯誤類別；不帶內容）再往上丟（1.9 deferred：看得出是哪一列）；`WeeklyApplyResult` 加 `changed`（`source_hash` 變了的既有論文篇數），完成的 info 日誌也帶它。
-- **`radar/repo/papers.py`／`radar/domain/papers.py`**：表定義加 `source_changed_at`；`_update_existing` 鎖論文時一起讀舊的 `source_hash`，要寫的不同（含舊的是 NULL）就把 `source_changed_at` 設成 `now()`，否則保留原值；`UpsertResult` 加 `source_changed: bool`（`CREATED`、`STALE` 一律 False）。`source_changed` 用 `field(default=False, compare=False)`：結果相等仍只看（論文, 結果, 衝突），既有測試的相等比對不用改。`StoredPaper` 加 `source_changed_at`（預設 None），`get_paper` 讀出。reparse 經同一個函式，所以 reparse 讓指紋變了也會記（ADR-0028）。被引用次數、關鍵字照舊每次覆寫，不進指紋、不動 `source_changed_at`。
+- **`radar/repo/papers.py`／`radar/domain/papers.py`**：表定義加 `source_changed_at`；`_update_existing` 鎖論文時一起讀舊的 `source_hash`，要寫的不同（含舊的是 NULL）就把 `source_changed_at` 設成 `now()`（**已改成 `clock_timestamp()`，見文末「Codex 主審查修正」**），否則保留原值；`UpsertResult` 加 `source_changed: bool`（`CREATED`、`STALE` 一律 False）。`source_changed` 用 `field(default=False, compare=False)`：結果相等仍只看（論文, 結果, 衝突），既有測試的相等比對不用改。`StoredPaper` 加 `source_changed_at`（預設 None），`get_paper` 讀出。reparse 經同一個函式，所以 reparse 讓指紋變了也會記（ADR-0028）。被引用次數、關鍵字照舊每次覆寫，不進指紋、不動 `source_changed_at`。
 - **worker**（`radar/entrypoints/worker/tasks.py`）：`advance_weekly_update(..., max_failures=settings.weekly_update_max_failures)`。
 - **`radar/domain/sweep.py`**：註解改成現況（重試到上限的那一筆會變 `failed`，sweep 不再補排）。
 - **crontab**：`deploy/crontab` 的 `0 19 * * 0 … radar enqueue weekly-update` 不改；`[ASSUMPTION]` 主機時區 UTC、專案路徑 `/opt/research-radar`，由 Story 3.19 部署時確認。
@@ -211,3 +211,14 @@ Status: done
 **驗證：** ruff、ruff format、mypy、lint-imports 全過（19 條契約）；`pytest -m unit` 925 passed、1 xfailed；`pytest -m "integration or arch"` 520 passed、1 xfailed；`alembic check` 沒有差異；`test_ingest_write_lock.py` 14 passed。
 
 **剩下的風險：** 壞列日誌從 spec 的「錯誤」改成「警告」（避免改 1.9 既有測試），要 Kevin 決定；預設上限 8 是 `[ASSUMPTION]`；crontab 的主機時區與路徑待 3.19 確認。
+
+## Codex 主審查修正（2f336b8）
+
+PR #51 的 Codex 主審查（docs/runs 底下的 triage，不進 repo）提出 3 條，修正後的設計以 ADR-0028 為準：
+
+- **C1（高）已標成 failed 的那一筆，舊工作不能再寫**：每頁兩個寫入交易（`raw_fetch`、暫存＋進度）的第一句用 `update_weekly_run_touched_while_fetching`：只在「仍是 `fetching`、而且 `failure_count < max_failures`」時更新 `updated_at` 並鎖住那一列到交易結束。沒更新到就整個交易不寫、記警告、回 `skipped`，不算失敗、不送心跳。`services/ingest.fetch_journal` 多可選參數 `write_raw`。套用時到上限的也不能改成 `published`。
+- **C2（中）失敗次數先存，再另外收尾**：`_record_failure` 拆成兩個交易：
+  1. `update_weekly_run_touched`＋`update_weekly_run_failure`（只加次數、回加完的次數）；
+  2. 到上限時 `_finish_failed`：`update_weekly_run_failed` 改成 `failed`，同一個交易刪暫存。
+  收尾失敗時次數已經存下，之後 `_read_run`、套用、下一次 cron（`weekly_update(..., max_failures)`）都只先收尾。`WeeklyRunFailure` 刪除。
+- **C3（中）`source_changed_at` 用 `clock_timestamp()`**：在 `SELECT … FOR UPDATE` 拿到論文列鎖之後才執行。不等鎖的長交易仍可能落在快照 `as_of` 之前，之後重新處理以指紋或待處理標記判斷（ADR-0028 取捨）。
