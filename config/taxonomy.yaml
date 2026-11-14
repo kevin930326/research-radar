@@ -5,8 +5,8 @@ version: 1
 # 清單照 PRD FR-15（沿用 brief 初版），只經 `radar/config.py` 的 `load_taxonomy` 讀。
 #
 # - `key`：小寫英文加底線，寫進 `classification_label`，寫出去之後不改名。
-# - `name`：顯示名稱（畫面用）。只改 `name` 或項目順序不算改內容、不必升分類表版本；但 prompt 的
-#   分類清單照這裡的順序逐字核對，所以改順序時要嘛 prompt 維持原順序，要嘛新增一版 prompt。
+# - `name`：顯示名稱（畫面用）。只改 `name` 或項目順序不算改內容：分類表與 prompt 都不必升版
+#   （prompt 只列 `key` 與定義，測試依 `key` 比對、不看順序）。
 # - `definition`：給模型看的定義，寫死在 `prompts/classify/v<N>.md` 的分類清單裡（一行一項）。
 #
 # 改內容（增刪 `key`、改 `definition`、把項目搬到另一欄）一定要：

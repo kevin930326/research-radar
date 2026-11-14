@@ -71,8 +71,8 @@ PROMPT_FILE_HASHES: dict[str, dict[int, tuple[str, str | None]]] = {
   拿 main 第一父提交那條線上的登記比，已經進 main 的版本被改或被刪都會失敗（要完整的 git
   歷史；合併前在分支裡改還沒進 main 的版本不算）。
 - prompt 升版等於「做法變了」：同一篇論文會照平常的流程重跑一次，新的結果取代舊的（ADR-0015）。
-- **`classify` 的分類清單**：`## 主題`、`## 方法` 之下每項一行 `- <key>：<definition>`，照
-  `config/taxonomy.yaml` 的順序。分類表的 `key`、定義或欄位改了，要同時升分類表版本（登記
+- **`classify` 的分類清單**：`## 主題`、`## 方法` 之下每項一行 `- <key>：<definition>`（不寫顯示
+  名稱）；`tests/unit/test_classify_prompt.py` 依 `key` 和 `config/taxonomy.yaml` 比對定義，不看
+  順序。分類表的 `key`、定義或欄位改了，要同時升分類表版本（登記
   `radar/domain/taxonomy_hashes.py`）與 prompt 版本（新增 `classify/v<N+1>.md`）；只改顯示名稱或
-  順序不必升分類表版本，但順序改了清單就和模板對不上，要嘛模板照舊順序、要嘛一起升 prompt 版本
-  （ADR-0033）。
+  順序兩邊都不必升版（AD-18、ADR-0033）。

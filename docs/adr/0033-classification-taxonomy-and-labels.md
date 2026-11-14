@@ -42,8 +42,8 @@
 ## 決定
 
 1. **分類表 `config/taxonomy.yaml`**：最上面 `version`（從 1 開始的整數），`topics`（6 個）、`methods`（5 個）各項 `key`、`name`（顯示名稱）、`definition`（給模型看，一行）。清單照 PRD FR-15，`key` 小寫英文加底線：主題 `erp`、`supply_chain`、`e_commerce`、`it_project_management`、`information_economics`、`ai_data_analytics`；方法 `survey_sem`、`interview_case_study`、`experiment`、`data_analysis_ml`、`literature_review`。只經 `radar/config.py` 的 `load_taxonomy` 讀（Pydantic 驗格式，再核對雜湊登記）。錯誤是 `ConfigError`（「檔名：欄位：原因」）：缺 `version`、`version` 不是正整數、多欄、`key` 寫法不對、同一欄或兩欄之間 `key` 重複、用了保留字 `unclassified`、某一欄是空的、`name`／`definition` 空白或換行、內容改了沒升版、版本沒登記。
-2. **內容雜湊與登記**：`domain/fingerprints.taxonomy_content_sha256` 只算每個欄位依 `key` 排序後的（`key`, 定義），加算法版本；`name` 與順序不算。登記在 `radar/domain/taxonomy_hashes.py`（`TAXONOMY_CONTENT_HASHES`：版本 → 雜湊），只寫字面值、只增不改、只有 `domain/taxonomy.py` 讀（`tests/arch/test_taxonomy_hashes.py`）。和 prompt 登記一樣寫死在 domain，不從參數收。
-3. **清單放 prompt 模板（選項 1C）**：`prompts/classify/v1.md` 的 `## 主題`、`## 方法` 之下每項一行 `- <key>：<definition>`，照設定檔順序；`tests/unit/test_classify_prompt.py` 從設定檔產生同樣格式的兩段後逐字比對。模板不含變數，`unclassified` 不寫進 prompt（模型都不符合就給空陣列）。
+2. **內容雜湊與登記**：`domain/fingerprints.taxonomy_content_sha256` 只算每個欄位依 `key` 排序後的（`key`, 定義），加算法版本；`name` 與順序不算。登記在 `radar/domain/taxonomy_hashes.py`（`TAXONOMY_CONTENT_HASHES`：版本 → 雜湊），只寫字面值、只有 `domain/taxonomy.py` 讀；只增不改由 git 歷史守著：比照 prompt 登記（`test_prompt_registry_history.py`），拿 main 第一父提交那條線上進入 main 時的登記比，已登記的版本被改雜湊或被刪就失敗，淺層 clone 明確失敗（都在 `tests/arch/test_taxonomy_hashes.py`）。和 prompt 登記一樣寫死在 domain，不從參數收。
+3. **清單放 prompt 模板（選項 1C）**：`prompts/classify/v1.md` 的 `## 主題`、`## 方法` 之下每項一行 `- <key>：<definition>`，不寫顯示名稱；`tests/unit/test_classify_prompt.py` 把兩段讀成 `key` → 定義，和設定檔依 `key` 比對（不看順序）。所以只改顯示名稱或順序，分類表與 prompt 都不必升版（AD-18）。模板不含變數，`unclassified` 不寫進 prompt（模型都不符合就給空陣列）。
 4. **schema `ClassificationOutput`**：`topics`、`methods` 都是 `list[str]`、沒有預設值、`extra="forbid"`，不放 `enum`、不放陣列長度限制（結構化輸出支援 array、不支援陣列長度限制，claude-api skill 的 `shared/tool-use-concepts.md` 查證）。多欄、缺欄、型別錯（數字、物件、字串當陣列）沿用 `llm_output_invalid`；非 JSON、截斷、拒答沿用既有代碼。
 5. **正規化（選項 2B，`domain/validators/classification.py`）**：每欄先去重（完全相同的字串只留一個、不算丟掉），再只留分類表裡**這一欄**的 `key`（完全相同才算）；其餘都丟掉並計數：清單外的、大小寫不同、前後有空白、放錯欄位、`unclassified`、夾指令的字串。主題不剩時存 `unclassified`；方法不剩就沒有方法標籤。正規化不會拒收；`ClassificationValidator` 只在輸出不是 `ClassificationOutput` 時拒收 `llm_output_invalid`。
 6. **內容型別 `ClassificationContent`**（`domain/ai_outputs.py`）：`topics`、`methods` 是排序過、不重複的 `key` tuple，`topics` 至少一個，`unclassified` 只能單獨出現在 `topics`，`dropped_label_count` ≥ 0。`NewAiResult.classification` 在 `rejected` 時必須是 None，也不能和 `zh_summary` 同時有值。
@@ -63,7 +63,7 @@
 ## 取捨
 
 - **改分類表內容要升兩個版本**：分類表版本（登記內容雜湊）與 prompt 版本（新增 `classify/v<N+1>.md`）；兩者都會讓全部論文重跑，結果一致。改之前照 ADR-0015 先問 Kevin。50 篇金標準標註開始前要定版。
-- **只改順序時 prompt 對不上**：內容雜湊不看順序，但 prompt 的清單照設定檔順序逐字比對，所以只改設定檔順序會讓 `test_classify_prompt.py` 失敗；要嘛設定檔維持原順序，要嘛升 prompt 版本（會重跑全部論文）。只改 `name` 不受影響（`name` 不進 prompt）。
+- **prompt 裡的順序和設定檔可以不同**：核對不看順序（Codex 主審查後改），只改設定檔順序或顯示名稱不必升任何版本；代價是模型看到的清單順序固定在模板裡，要改模板裡的順序就得新增 prompt 版本（會重跑全部論文）。
 - **看不出丟掉的是哪些字**：只存數量；要查原文看 `llm_call.output_text`（模型回的文字照存）。
 - **重複的清單外標籤只算一次**：先去重再計數，`["blockchain", "blockchain"]` 計 1。
 - **清單外的字串含 NUL 或單獨的代理字元時是拒收**：閘門在 domain 驗證之後會檢查整份輸出存不存得進資料庫（`llm_output_unstorable`），這一步看的是原始輸出，所以這種標籤不是「丟掉」而是整筆拒收。實際上很少見。

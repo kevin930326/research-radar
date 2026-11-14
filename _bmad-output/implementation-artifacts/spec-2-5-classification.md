@@ -108,6 +108,12 @@ deferred:
 
 ## Spec Change Log
 
+### 2026-11-15 — Codex 主審查（PR #59）後修正
+- 觸發：Codex 主審查三筆 medium。(1) classify 的 `LlmJob` 沒帶 `taxonomy` 會付錢後才失敗；(2) 分類表雜湊登記沒有 git 歷史的只增不改測試；(3) 只改顯示名稱或順序會讓測試失敗，違反 AC。
+- 修改：`LlmJob` 建構時規定 classify 必帶 `taxonomy`；`tests/arch/test_taxonomy_hashes.py` 比照 `test_prompt_registry_history.py` 加 git 歷史核對；prompt 清單與正式設定測試改成依 `key` 比對、不看順序與顯示名稱；Design Notes 的清單格式改寫。
+- 避免的狀態：付了錢卻寫不進結果、已登記的分類表版本被偷改、改顯示名稱或順序被迫升版。
+- KEEP：清單仍寫死在模板（選項 1C）；內容雜湊算法不變；分類表 v1 的內容雜湊與 prompt v1 的檔案雜湊不變。
+
 ## Review Triage Log
 
 ### 2026-11-15 — Review pass
@@ -140,7 +146,7 @@ deferred:
 ## Design Notes
 
 - **分類清單放 prompt 模板、不另開 content 區塊**：模板只能經 `clear_prompt_file` 放行（雜湊登記），content 區塊的來源只能從論文資料列推出；把設定檔內容另外送出去，就得在 policy 新增來源或放行入口（動 2.1 的閘門）。寫死在模板裡、用單元測試核對「模板裡的清單＝設定檔」最保守；代價是分類表內容改了要同時升分類表版本與 prompt 版本（兩者都會讓全部重跑，結果一致）。寫進 ADR-0033。
-- prompt 裡的清單格式（測試照這個從設定檔產生後比對）：`## 主題` 之下每項一行 `- <key>：<definition>`，`## 方法` 同樣，項目照設定檔順序。
+- prompt 裡的清單格式：`## 主題` 之下每項一行 `- <key>：<definition>`，`## 方法` 同樣；測試依 `key` 和設定檔比對定義，不看順序、不含顯示名稱（Codex 主審查後改，見 Spec Change Log）。
 - **遷移 0012**：`classification.dropped_label_count integer NULL`；CHECK `dropped_label_count IS NULL OR dropped_label_count >= 0`、`status <> 'rejected' OR dropped_label_count IS NULL`。`classification_label`：`id uuid PK default uuidv7()`、`classification_id uuid NOT NULL FK classification.id`、`field text NOT NULL CHECK IN ('topic','method')`、`key text NOT NULL CHECK key ~ '^[a-z][a-z0-9_]*$'`、CHECK `field = 'topic' OR key <> 'unclassified'`、UNIQUE(`classification_id`, `field`, `key`)（也當外鍵索引）。2.2 既有的分類表頭（沒有內容）計數是 NULL。
 - **`max_tokens` 512**：輸出最多 11 個 `key`（每個約 3～5 tokens）加 JSON 約 80 tokens；思考關掉；留 6 倍空間給不聽話的輸出（寫太多就截斷 → `rejected`）。保守每秒 50 tokens 約 10 秒 < 60 秒逾時。單次費用上限的測試看的是 `PromptSettings` 的最大值 64,000，不受影響。
 - **「現在的分類表版本」**：行程啟動時讀一次分類表，改設定要重啟（AD-18）；互動呼叫的開始與寫入在同一個行程、同一個物件，所以 `LlmJob.taxonomy` 就是寫入當下的設定。Batch 匯入（2.9）由匯入的行程傳它載入的分類表。這一條回應 ADR-0030 取捨段「2.5 接設定時改成寫入當下讀設定」。

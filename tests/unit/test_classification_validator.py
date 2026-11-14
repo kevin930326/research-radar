@@ -253,6 +253,13 @@ def test_llm_job_refuses_taxonomy_version_that_does_not_match(version: str | Non
         _job(taxonomy_version=version)
 
 
+@pytest.mark.parametrize("version", [TAXONOMY.version_label, None])
+def test_llm_job_refuses_classify_without_taxonomy(version: str | None) -> None:
+    # 建構時就擋：不會走到閘門，所以不呼叫模型、不記帳（寫入時才發現就已經付了錢）。
+    with pytest.raises(ValueError, match="classify 一定要帶分類表"):
+        _job(taxonomy=None, taxonomy_version=version)
+
+
 def test_llm_job_refuses_taxonomy_for_other_tasks() -> None:
     with pytest.raises(ValueError, match="classify"):
         _job(task=LlmTask.ZH_SUMMARY, lang=OutputLang.ZH_HANT)

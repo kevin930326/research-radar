@@ -1,6 +1,7 @@
 """`config/taxonomy.yaml` 與 `load_taxonomy`（Story 2.5、ADR-0033）：
 
-- 真的設定讀得過，是 PRD FR-15 的清單（6 個主題、5 個方法），`version` 寫在最上面。
+- 真的設定讀得過，`key` 是 PRD FR-15 的清單（6 個主題、5 個方法；不看顯示名稱與順序），
+  `version` 寫在最上面。
 - 內容（`key`、定義、欄位）改了卻沒升版、升了版沒登記 → `ConfigError`。
 - 只改顯示名稱或順序 → 照樣讀得過、內容雜湊不變。
 - 每種格式錯都在讀取時擋下，訊息是「檔名：欄位路徑：原因」、每條一行。
@@ -20,21 +21,20 @@ from tests.llm_support import ROOT
 REAL_PATH = ROOT / "config" / TAXONOMY_FILE
 REAL = REAL_PATH.read_text(encoding="utf-8")
 
-PRD_TOPICS = {
-    "erp": "ERP",
-    "supply_chain": "供應鏈",
-    "e_commerce": "電子商務",
-    "it_project_management": "IT 專案管理",
-    "information_economics": "資訊經濟",
-    "ai_data_analytics": "AI／資料分析",
-}
-PRD_METHODS = {
-    "survey_sem": "問卷／SEM",
-    "interview_case_study": "訪談／個案",
-    "experiment": "實驗",
-    "data_analysis_ml": "資料分析／機器學習",
-    "literature_review": "文獻回顧",
-}
+# PRD FR-15 的清單，只核對 `key`（不寫死顯示名稱與順序：只改這兩樣不算改內容，AD-18）。
+PRD_TOPIC_KEYS = frozenset(
+    {
+        "erp",
+        "supply_chain",
+        "e_commerce",
+        "it_project_management",
+        "information_economics",
+        "ai_data_analytics",
+    }
+)
+PRD_METHOD_KEYS = frozenset(
+    {"survey_sem", "interview_case_study", "experiment", "data_analysis_ml", "literature_review"}
+)
 
 
 def _real_data() -> dict[str, object]:
@@ -77,10 +77,8 @@ def test_real_taxonomy_is_the_prd_list() -> None:
 
     assert taxonomy.version == 1
     assert taxonomy.version_label == "1"
-    assert {item.key: item.name for item in taxonomy.topics} == PRD_TOPICS
-    assert {item.key: item.name for item in taxonomy.methods} == PRD_METHODS
-    assert taxonomy.keys(TaxonomyField.TOPIC) == tuple(PRD_TOPICS)
-    assert taxonomy.keys(TaxonomyField.METHOD) == tuple(PRD_METHODS)
+    assert set(taxonomy.keys(TaxonomyField.TOPIC)) == PRD_TOPIC_KEYS
+    assert set(taxonomy.keys(TaxonomyField.METHOD)) == PRD_METHOD_KEYS
     assert taxonomy_registry_problems(taxonomy) == []
 
 
