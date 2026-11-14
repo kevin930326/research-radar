@@ -147,3 +147,36 @@ def test_finished_run_builds_no_adapter_and_reads_no_config(
     # 已經抓完：只更新 updated_at（sweep 2 小時後才再補排）。
     assert _updated_at(weekly_db, run_id) > before
     assert [log["event"] for log in logs] == ["每週更新已經抓完，不再抓"]
+
+
+BAD_HOST = "bad host!.abc123account.r2.example"
+
+
+def test_adapter_setup_error_does_not_carry_the_endpoint(
+    weekly_db: TestDatabase, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # botocore 對這個網址丟 `ValueError: Invalid endpoint: <整個網址>`；Procrastinate 記失敗時
+    # 會印例外與它串著的例外，所以往上丟的例外與 __cause__／__context__ 都不能帶主機
+    # （確認審查第 8 條）。
+    settings = {
+        "openalex_api_key": "test-openalex-key",
+        **OBJECT_STORE,
+        "object_store_endpoint_url": f"http://{BAD_HOST}:9000",
+    }
+    task = _task(weekly_db, monkeypatch, ROOT / "config", **settings)
+    run_id, before = _fetching_run(weekly_db)
+
+    with capture_logs() as logs, pytest.raises(worker_tasks.AdapterSetupError) as caught:
+        task(weekly_run_id=str(run_id))
+
+    error = caught.value
+    assert error.error_type == "ValueError"
+    assert error.__cause__ is None
+    assert error.__context__ is None
+    for text in (str(error), repr(error), *map(str, error.args)):
+        assert BAD_HOST not in text
+    assert BAD_HOST not in str(logs)
+    assert _updated_at(weekly_db, run_id) > before
+    assert _progress_rows(weekly_db) == 0
+    [logged] = [log for log in logs if log["log_level"] == "error"]
+    assert (logged["weekly_run_id"], logged["error"]) == (str(run_id), "AdapterSetupError")
