@@ -75,11 +75,15 @@
 7. **截至日期用台北時間。** `domain/snapshot.py` 的 `DATA_TIMEZONE = Asia/Taipei`、`data_cutoff_date(as_of)`（ADR-0011「資料截止日」；naive datetime 丟錯）。匯入報表仍印 UTC（ADR-0026 取捨），這裡是資料的截至日期，照 ADR-0011。
    - **和 ADR-0011 不一樣的地方**：ADR-0011 把時區列為 `config/` 的值，經計數方塊回應的 `params`（`TrendParams.timezone`）帶給前端。`TrendParams` 由第一個做趨勢的 Story 定義（AR-24），這次只有指令要印日期，所以先寫成 domain 的常數。做 `TrendParams` 的 Story 要把時區搬進設定，`data_cutoff_date` 改成收時區參數，這個常數拿掉。
 8. **唯讀指令 `radar coverage`**（名稱沿用 epics 的 `[ASSUMPTION]`）。依序印：`快照 N：截至 YYYY-MM-DD（台北時間）`、收錄篇數（total）期刊 × 年份表、有摘要的篇數（with_abstract）期刊 × 年份表、依摘要來源分的篇數表（欄＝`ABSTRACT_SOURCE_PRIORITY` 的來源＋「沒有摘要」＋「合計」；`uploaded_pdf` 永遠不是目前的摘要，不列）。年份欄從出現過的最小年到最大年；設定裡每本期刊都有一列（沒有論文印 0）。表格工具從 `domain/import_report.py` 搬到 `domain/text_table.py` 共用。不讀 `config/import_baseline.yaml`、不做基準比對（1.9 留下、等 Kevin 決定）。
-9. **架構測試守 AD-5**（`tests/arch/test_stats_queries.py`，每條都用假原始碼證明抓得到）：
-   - `radar/` 裡字串含 `counted_paper` 的只有統計模組（`repo/stats.py`，及之後的 `relations.py`、`keyword_stats.py`）與 `repo/visibility.py`。
-   - 統計模組的 SQL 不 `FROM`／`JOIN` `paper`（`paper_*` 不算）、不 import `radar.repo.papers`。
-   - 統計模組以外的 `radar/repo` 模組，同一句 SQL 讀 `paper` 又做彙總（`count(`、`sum(`、`avg(`、`GROUP BY`）就失敗。
-   - 數 `counted_paper` 整列的計數（`count(*)`、`count(1)`、`count(<別名>.id)`、`count(DISTINCT <別名>.id)`）只在 `list_cube_counts`，而且剛好一個。
+9. **架構測試守 AD-5**（`tests/arch/test_stats_queries.py`，每條都用假原始碼證明抓得到，也用正當的寫法證明不會誤擋）：
+   - 統計模組（`repo/stats.py`，及之後的 `relations.py`、`keyword_stats.py`）以外，同一個字串引用 `counted_paper` 又做彙總（`count(`、`sum(`、`avg(`、`GROUP BY`）就失敗。**只引用、不彙總的可以**：ADR-0011「點數字列出論文」（約第 168 行）定案論文清單的 API 用同樣條件、從 `counted_paper` 與有效分類查，所以 `repo/papers.py` 的清單查詢可以 `JOIN counted_paper`；`repo/visibility.py` 的 `PublicViewer` 條件也是。AD-5 管的是「統計查詢放哪裡」，不是「誰能引用這個 view」。清單要附總篇數時這條會擋，由做清單的 Story 決定總篇數從哪裡來。
+   - 統計模組的 SQL 不讀 `paper`（`FROM paper`、`JOIN paper`、逗號接法 `FROM counted_paper c, paper p`；`paper_*` 不算）、不 import `radar.repo.papers`。
+   - 統計模組以外的 `radar/repo` 模組，同一句 SQL 讀 `paper` 又「數篇數」就失敗：有 `count(`、`sum(`、`avg(`，沒有 `HAVING`，而且沒有 `GROUP BY`（整張表一個數字）或 `GROUP BY` 裡有 `publication_year`、`journal_issn_l`（`GROUP BY 1` 這種寫位置的，SELECT 那一段有這兩個欄位也算）。依別的欄位分組（例如找重複標題 `GROUP BY title_norm HAVING count(*) > 1`）不算。想知道某一篇在不在，用 `EXISTS` 或 `SELECT 1 … LIMIT 1`，不要 `count(*)`。
+   - 數 `counted_paper` **全部篇數**的查詢只准是 `list_cube_counts`，而且剛好一個。「全部篇數」＝`FROM` 只有 `counted_paper`（頂多再 `LEFT JOIN paper_abstract`），`WHERE` 只有變數組進來的條件（可見條件）或只篩 `counted_paper` 自己的期刊、年份，`SELECT` 數整列（`count(*)`、`count(1)`、`count(id)`、`count(<別名>.id)`、`count(DISTINCT …id)`）。
+   - **AD-19 另外四種計數這樣寫就不違規**（放 `repo/stats.py`，和 `list_cube_counts` 分開的函式）：
+     - `topic`、`topic_pair`、`method`：`counted_paper` 再 `JOIN` 有效分類的表（`topic_pair` 接兩次、`a.topic < b.topic`），`WHERE` 套可見條件，`GROUP BY` 期刊、年份與 key 後 `count(*)`（`topic_pair` 用 `count(DISTINCT c.id)` 也可以）。
+     - `pending_classification`：`counted_paper` 加 `WHERE {可見條件} AND NOT EXISTS (SELECT 1 FROM <分類表> …)`，或 `LEFT JOIN <分類表>` 再 `WHERE <分類表>.id IS NULL`。
+     - 分類的條件要寫在 SQL 字串裡；整段用 f-string 變數組進來的 `WHERE`，測試只當成可見條件，會被當成全部篇數擋下。
 
 ## 理由
 
@@ -97,9 +101,9 @@
 - **`PublicViewer` 的 EXISTS 子查詢**比直接比欄位多一次索引查找（`paper.id` 主鍵＋`snapshot.id` 主鍵），量小時可忽略。
 - **其他四種 dim（`pending_classification`、`topic`、`topic_pair`、`method`）、`TrendParams`、本週新增、API 端點、示範站匯出**都還沒做，由之後的 Story 用同一個 `CubeRow` 補上。
 - **之後要加統計**：放 `repo/stats.py`（或 `relations.py`、`keyword_stats.py`），要分母時呼叫 `list_cube_counts`。
-- **架構測試只看程式裡的 SQL 字串**，擋得住常見的寫錯，擋不住所有寫法：用 SQLAlchemy 運算式組的查詢（例如 `func.count` 加 `paper_table`）、用 `+` 或 `join` 拼出來的 SQL、在 Python 裡 `len(...)` 數篇數，以及第 4 條沒列的計數寫法（例如 `count(c.journal_issn_l)`、`sum(1)`）都看不到。這些靠審查把關；寫 `relations.py`、`keyword_stats.py` 的 Story 審查時要特別看分母是不是來自 `list_cube_counts`。
+- **架構測試只看程式裡的 SQL 字串**，擋得住常見的寫錯，擋不住所有寫法：用 SQLAlchemy 運算式組的查詢（例如 `func.count` 加 `paper_table`）、用 `+` 或 `join` 拼出來的 SQL、在 Python 裡 `len(...)` 數篇數，第 4 條沒列的計數寫法（例如 `count(c.journal_issn_l)`、`sum(1)`）、統計模組以外依 `paper` 的其他欄位（例如 `type`）數篇數、把 `paper` 包進子查詢再數，都看不到。第 3、4 條是看字串的形狀，不是真的解析 SQL：`GROUP BY` 寫在子查詢、`ON` 裡有括號這類寫法可能判斷錯。這些靠審查把關；寫 `relations.py`、`keyword_stats.py` 的 Story 審查時要特別看分母是不是來自 `list_cube_counts`。
 - **數字不是凍結在快照上**（ADR-0011「乙」）：快照編號只固定「收進了哪些論文」。同一個快照編號之下，摘要補進來、`excluded_reason` 或年份被重新解析改掉，`radar coverage` 的數字都會跟著變；「快照前後各讀一次」只保證印出的快照編號和這一次的計數是同一個時間點。
-- **view 會擋住對它用到的 `paper` 欄位的改動**：之後的遷移要對 `id`、`journal_issn_l`、`publication_year`、`first_snapshot_id`、`lab_visible`、`in_scope`、`excluded_reason`、`snapshot.status` 做 `ALTER COLUMN … TYPE` 或 `DROP COLUMN`，PostgreSQL 會報錯，要在同一個遷移裡先 `DROP VIEW`、改完再重建。view 不在 `Base.metadata`，`alembic check` 不會提醒。
+- **view 會擋住對它用到的 `paper` 欄位的改動**：之後的遷移要對 `id`、`journal_issn_l`、`publication_year`、`first_snapshot_id`、`lab_visible`、`in_scope`、`excluded_reason`、`snapshot.status` 做 `ALTER COLUMN … TYPE` 或 `DROP COLUMN`，PostgreSQL 會報錯，要在同一個遷移裡先 `DROP VIEW`、改完再重建，**重建後要再執行同一行 `REVOKE INSERT, UPDATE, DELETE ON counted_paper FROM radar_app`**：0001 的預設權限會讓重建的 view 重新拿到寫入權限（`test_app_role_only_has_select_on_the_view` 會抓到，但最好寫遷移時就記得）。view 不在 `Base.metadata`，`alembic check` 不會提醒。
 - **`radar rescope` 還沒做**：在它做好之前，從 `journals.yaml` 拿掉期刊後只能把期刊加回設定，`radar coverage` 才會恢復（錯誤訊息有寫）。反過來調高 `start_year` 或新加期刊不會報錯，舊論文的 `in_scope` 維持原樣，要等 `rescope` 重算（ADR-0011 取捨「`in_scope` 是存起來的值」）。
 
 ## 名詞

@@ -10,7 +10,8 @@ ADR-0027）。
 view 不在 `Base.metadata` 裡，`alembic check` 不比對它（autogenerate 只看表）。
 之後的遷移要對 view 用到的欄位（`paper` 的 `id`、`journal_issn_l`、`publication_year`、
 `first_snapshot_id`、`lab_visible`、`in_scope`、`excluded_reason`，`snapshot.status`）改型別或刪除時，
-PostgreSQL 會擋下，要在同一個遷移裡先 `DROP VIEW`、改完再重建。
+PostgreSQL 會擋下，要在同一個遷移裡先 `DROP VIEW`、改完再重建；重建後要再執行同一行
+`REVOKE INSERT, UPDATE, DELETE`（0001 的預設權限會讓重建的 view 重新拿到寫入權限）。
 
 版本：0008
 上一版：0007

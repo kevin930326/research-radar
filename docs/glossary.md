@@ -575,3 +575,5 @@
 - **try-lock（試拿鎖）**：拿鎖時不排隊等，拿不到就立刻回「沒拿到」，由程式決定要拒絕還是改天再來（`pg_try_advisory_lock` 這一類函式）。
 - **寫入鎖（`INGEST_WRITE_LOCK_KEY`）**：本專案約定的一把 advisory lock，保護原始資料與論文不被 reparse 和每週更新同時改；reparse 拿獨佔、每週更新拿共用。
 - **作廢連線（invalidate）**：把一條資料庫連線直接關掉、不放回連線池；用在解鎖失敗時，讓 PostgreSQL 在連線結束時自動放掉這條連線拿著的鎖。
+- **逗號接法（`FROM a, b`）**：SQL 接兩張表的舊寫法，把表名用逗號隔開、在 `WHERE` 寫對應條件，效果和 `JOIN … ON` 一樣；架構測試找「有沒有讀 `paper` 表」時兩種都要看。
+- **`HAVING`**：SQL 裡「分組之後再篩」的條件，例如 `GROUP BY title_norm HAVING count(*) > 1` 只留下出現兩次以上的標題（找重複）；`WHERE` 是分組之前篩每一列。
