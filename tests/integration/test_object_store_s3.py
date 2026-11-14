@@ -6,6 +6,7 @@ stamina 重試，而 botocore 自己不重試（每次嘗試只送一個請求�
 """
 
 import time
+import traceback
 from collections.abc import Iterator
 from typing import Any
 
@@ -394,3 +395,36 @@ def test_other_botocore_errors_raise_without_the_host_and_are_not_retried(
     assert caught.value.__cause__ is None
     assert caught.value.__suppress_context__
     assert HOST not in str(logs)
+
+
+# --- 例外鏈完全斷開（Codex 補審 C1）---------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected_requests"),
+    [
+        (EndpointConnectionError(endpoint_url=f"https://{HOST}"), 2),
+        (SSLError(endpoint_url=f"https://{HOST}", error="certificate verify failed"), 1),
+    ],
+    ids=["retryable-out-of-attempts", "not-retryable"],
+)
+@pytest.mark.parametrize("operation", ["PutObject", "GetObject"])
+def test_unavailable_error_carries_no_exception_chain_at_all(
+    client: Any, failure: Exception, expected_requests: int, operation: str
+) -> None:
+    # `from None` 在 except 裡丟時 `__context__` 仍串著原例外；Procrastinate 與日誌可能沿著它印出
+    # 主機，所以 `__cause__`、`__context__` 都要是 None，完整的 traceback 也不能有主機。
+    store = S3ObjectStore(client, BUCKET, attempts=2)
+    store.put(KEY, b"data", content_type=RAW_CONTENT_TYPE)
+    seen = _fail_first(client, operation, [failure] * 5)
+
+    with pytest.raises(ObjectStoreUnavailableError) as caught:
+        _access(store, operation)
+
+    assert len(seen) == expected_requests
+    assert HOST in str(failure)
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+    printed = "".join(traceback.format_exception(caught.value))
+    assert "ObjectStoreUnavailableError" in printed
+    assert HOST not in printed

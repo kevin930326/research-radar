@@ -94,8 +94,8 @@ def test_seconds_parser() -> None:
 
 
 # D1（ADR-0024）：只有 api、worker 各讀一個只放 RADAR_* 秘密的 `.env.radar`，
-# 檔案不存在也照樣起得來。
-ENV_RADAR = [{"path": ".env.radar", "required": False}]
+# 檔案不存在也照樣起得來；`format: raw` 讓值原樣讀入，不做 `$` 替換（Codex 補審 C2）。
+ENV_RADAR = [{"path": ".env.radar", "required": False, "format": "raw"}]
 
 
 def test_only_api_and_worker_read_optional_env_radar_and_no_interpolation() -> None:
@@ -111,6 +111,16 @@ def test_only_api_and_worker_read_optional_env_radar_and_no_interpolation() -> N
     # 仍然不做變數替換（compose 會讀 .env 做 ${...} 替換，但這裡完全不用）。
     assert "${" not in raw
     assert not re.search(r"\$[A-Za-z_]", raw)
+
+
+@pytest.mark.parametrize("name", ["api", "worker"])
+def test_env_radar_is_read_raw_without_interpolation(name: str) -> None:
+    # 沒有 `format: raw` 時，`.env.radar` 裡的 `abc$X` 會被改寫、`${X}` 會取到主機或 .env 的值。
+    (entry,) = _services()[name]["env_file"]
+
+    assert entry["path"] == ".env.radar"
+    assert entry["required"] is False
+    assert entry["format"] == "raw"
 
 
 def test_published_ports_bind_localhost_only() -> None:

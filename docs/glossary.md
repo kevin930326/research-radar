@@ -553,3 +553,5 @@
 - **`BotoCoreError`**：boto3（AWS 的 Python 套件）在「沒拿到對方回應」時丟的錯誤總類，例如連不上、SSL 憑證驗證失敗、代理伺服器連不上；和「對方回了錯誤」的 `ClientError` 不同，訊息常帶端點網址，所以物件儲存的 adapter 一律換成不帶網址的例外。
 - **開抓取的函式（`open_setup`）**：worker 交給每週更新 service 的函式，呼叫時才讀領域設定、建 OpenAlex 與物件儲存的 adapter；service 先確認這一筆真的要抓才呼叫，像確認有客人才開爐子。
 - **佇列的事件表（`procrastinate_events`）**：佇列自己記的每個工作「何時排入、開始、成功、失敗」；測試用它比較兩筆工作的執行時段有沒有重疊。
+- **`format: raw`**：compose 的 env_file 讀法選項，等號後面整段原樣當成值，不做 `$` 變數替換，但引號與行尾註解也會算進值裡（需要 Docker Compose 2.30 以上）。
+- **例外鏈（`__cause__`／`__context__`）**：Python 例外身上記著「我是在處理哪個例外時發生的」的兩條線；`raise ... from None` 只是讓 traceback 不印出來，`__context__` 仍串著原例外，要在 `except` 區塊外面丟，這條線才是空的。
