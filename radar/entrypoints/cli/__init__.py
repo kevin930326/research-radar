@@ -1,7 +1,8 @@
 """`radar` 指令：專案唯一的 CLI 入口（NFR-11）。typer 只能出現在這個套件。"""
 
+import uuid
 from importlib.metadata import version as package_version
-from typing import NoReturn
+from typing import Annotated, NoReturn
 
 import structlog
 import typer
@@ -10,10 +11,12 @@ from radar.config import (
     ConfigError,
     database_pool_size,
     load_domain_config,
+    load_import_baseline,
     load_migration_settings,
     load_settings,
 )
 from radar.domain.database_requirements import DatabaseRequirementsError
+from radar.domain.import_report import render_import_report
 from radar.domain.jobs import UnknownJobError, find_scheduled_job
 from radar.domain.viewer import SystemViewer
 from radar.entrypoints.bootstrap import (
@@ -24,9 +27,15 @@ from radar.entrypoints.bootstrap import (
     build_object_store,
 )
 from radar.entrypoints.logging_config import configure_logging
+from radar.services.import_report import get_import_report
 from radar.services.jobs import enqueue_scheduled_job
 from radar.services.migrations import migrate_database
-from radar.services.reparse import reparse_papers
+from radar.services.reparse import (
+    AdvisoryLockLostError,
+    ReparseBusyError,
+    WeeklyUpdateInProgressError,
+    reparse_papers,
+)
 
 # 例外時不印區域變數：裡面可能有連線字串。
 app = typer.Typer(
@@ -35,6 +44,10 @@ app = typer.Typer(
     pretty_exceptions_show_locals=False,
 )
 log = structlog.get_logger(__name__)
+
+# 資源指令：`radar weekly-run <動詞>`（Conventions「CLI」：`radar <名詞> <動詞>`）。
+weekly_run_app = typer.Typer(help="每週更新（weekly_run）。", no_args_is_help=True)
+app.add_typer(weekly_run_app, name="weekly-run")
 
 
 @app.callback()
@@ -117,7 +130,11 @@ def reparse() -> None:
     """只用已存的原始資料重新解析已經匯入的論文（不連 OpenAlex 或任何外部來源）。
 
     排除規則改了、或解析多了欄位時跑這個。解析結果先放暫存表、最後一個交易套用；
-    不新增論文、不建立快照。設定錯誤或執行失敗退出碼 1，只印錯誤類別，不印連線字串。
+    不新增論文、不建立快照。每週更新正在抓取、或另一個 reparse 正在跑時拒絕執行、不寫任何東西，
+    退出碼 1。
+    持有寫入鎖的連線在兩個交易之間斷了（例如資料庫重啟）時中止、退出碼 1，印出原因與「直接重跑即可」
+    （已經 commit 的不受影響）；斷在交易進行中時印一般的失敗訊息，同樣不會 commit。
+    設定錯誤或執行失敗退出碼 1，只印錯誤類別，不印連線字串。
     """
     configure_logging()
     try:
@@ -137,6 +154,16 @@ def reparse() -> None:
             scope=domain_config.journals.scope_settings(),
             exclusion_rules=domain_config.exclusion_rules,
         )
+    except WeeklyUpdateInProgressError as exc:
+        log.error("每週更新正在進行，沒有重新解析", weekly_run_id=str(exc.weekly_run_id))
+        _fail(str(exc), [])
+    except ReparseBusyError as exc:
+        log.error("另一個 reparse 或每週更新正在寫入，沒有重新解析")
+        _fail(str(exc), [])
+    except AdvisoryLockLostError as exc:
+        # 訊息與原因只帶錯誤類別，不帶連線字串（radar/repo/db.py）。
+        log.error("寫入鎖不見了，重新解析中止", reason=exc.reason)
+        _fail(f"{exc}；直接重跑 radar reparse 即可", [])
     except ConfigError as exc:
         # build_object_store 缺設定時丟的；訊息只列環境變數名稱。
         log.error("設定錯誤，無法重新解析", problems=exc.problems)
@@ -156,6 +183,47 @@ def reparse() -> None:
     typer.echo(f"更新：{result.updated}")
     typer.echo(f"資料較舊、沒寫：{result.stale}")
     typer.echo(f"識別碼衝突：{result.conflicts}")
+
+
+@weekly_run_app.command("report")
+def weekly_run_report(
+    weekly_run_id: Annotated[
+        uuid.UUID | None, typer.Option("--id", help="每週更新的 id；不給就是最新的一筆")
+    ] = None,
+) -> None:
+    """印出一次每週更新的匯入報表（只讀，不改任何資料）。
+
+    每本期刊每年的過濾前篇數、依期刊的排除篇數、和 OQ-02 基準（config/import_baseline.yaml）
+    的差異。沒有任何每週更新或找不到這個 id：退出碼 1；--id 不是 UUID：退出碼 2；
+    設定錯誤或讀不到資料庫：退出碼 1，只印錯誤類別，不印連線字串。
+    """
+    configure_logging()
+    try:
+        settings = load_settings()
+        domain_config = load_domain_config()
+        baseline = load_import_baseline()
+    except ConfigError as exc:
+        log.error("設定錯誤，無法產生匯入報表", problems=exc.problems)
+        _fail("設定錯誤，沒有產生報表：", exc.problems)
+    try:
+        database = build_database(settings, pool_size=database_pool_size(settings, "cli"))
+        report = get_import_report(
+            SystemViewer(),
+            database,
+            weekly_run_id,
+            journals=domain_config.journals,
+            baseline=baseline,
+        )
+    except Exception as exc:
+        # 例外訊息可能含主機與帳號，只記類別名稱。
+        log.error("讀取匯入報表失敗", error_type=type(exc).__name__)
+        _fail(f"讀取匯入報表失敗（{type(exc).__name__}）；細節見日誌", [])
+    if report is None:
+        if weekly_run_id is None:
+            _fail("還沒有任何每週更新", [])
+        _fail(f"找不到這次每週更新：{weekly_run_id}", [])
+    for line in render_import_report(report):
+        typer.echo(line)
 
 
 def _fail(headline: str, problems: list[str]) -> NoReturn:

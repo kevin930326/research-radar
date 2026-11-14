@@ -155,7 +155,7 @@ def test_migration_creates_queue_objects_without_extensions(fresh_database: Test
     assert _admin_rows(fresh_database, "SELECT extname FROM pg_extension ORDER BY 1") == (
         extensions_before
     )
-    assert fresh_database.revisions() == {"0006"}
+    assert fresh_database.revisions() == {"0007"}
 
 
 def test_downgrade_to_0001_removes_every_queue_object(fresh_database: TestDatabase) -> None:
@@ -1220,7 +1220,11 @@ def test_enqueue_weekly_update_runs_both_jobs_on_worker(
     [(weekly_run_id, status, finished_at)] = _admin_rows(
         migrated_fresh, "SELECT id, status, fetch_finished_at FROM weekly_run"
     )
-    assert status == "fetching"
+    # 抓完後接著套用（Story 1.9）：狀態從 fetching 變 published，快照 1 發佈。
+    assert status == "published"
+    assert _admin_rows(migrated_fresh, "SELECT number, weekly_run_id, status FROM snapshot") == [
+        (1, weekly_run_id, "published")
+    ]
     assert run["queue_name"] == "ingest"
     assert run["lock"] == "weekly_update"
     assert run["args"] == {"weekly_run_id": str(weekly_run_id)}
@@ -1330,9 +1334,101 @@ def test_weekly_update_runs_never_overlap_with_two_worker_slots(
     second_started = events[(second["id"], "started")]
     second_done = events[(second["id"], "succeeded")]
     assert first_started < first_done <= second_started < second_done, events
-    # 第一筆抓完 14 本；第二筆看到已經抓完，不再抓（只更新 updated_at）。
+    # 第一筆抓完 14 本並套用、發佈；第二筆看到的是已發佈，略過（Story 1.9）。
     assert [r["job_id"] for r in records if r["event"] == "每週更新抓取完成"] == [first["id"]]
-    assert [r["job_id"] for r in records if r["event"] == "每週更新已經抓完，不再抓"] == [
+    assert [r["job_id"] for r in records if r["event"] == "每週更新已套用並發佈快照"] == [
+        first["id"]
+    ]
+    assert [r["job_id"] for r in records if r["event"] == "每週更新不是抓取中，略過"] == [
         second["id"]
     ]
     assert _admin_rows(migrated_fresh, "SELECT count(*) FROM api_call") == [(14,)]
+
+
+# --- 每週更新端到端：抓取中斷、重試續跑、套用、快照 1、匯入報表（Story 1.9） ----------------
+
+# 正式的 worker（main()），OpenAlex 換成回 I&O 三頁（錄好的回應，CC0）、第 2 頁第一次失敗的替身，
+# 物件儲存換成替身；替身放在模組層級，工作重試時沿用同一個（失敗只發生一次）。
+RESUMING_WEEKLY_WORKER_SCRIPT = """
+import contextlib
+import sys
+from datetime import UTC, datetime
+
+sys.path.insert(0, sys.argv[1])  # 讀錄好的回應（tests/openalex_cassette.py）
+
+import radar.entrypoints.worker.main as worker_main
+import radar.entrypoints.worker.tasks as worker_tasks
+from radar.adapters.fake import FakeObjectStore, FakePaperSource
+from radar.domain.raw_records import RawRecord, RawSource
+from tests.openalex_cassette import ISSN_L, cassette_pages, work_bytes
+
+FETCHED_AT = datetime(2026, 11, 16, 2, 0, tzinfo=UTC)
+pages = [
+    [
+        RawRecord(RawSource.OPENALEX, work["id"].rsplit("/", 1)[-1], work_bytes(work), FETCHED_AT)
+        for work in page
+    ]
+    for page in cassette_pages()
+]
+source = FakePaperSource({ISSN_L: pages})
+source.fail_once(ISSN_L, 2)
+store = FakeObjectStore()
+
+worker_tasks.build_paper_source = lambda settings, openalex_config: contextlib.nullcontext(source)
+worker_tasks.build_object_store = lambda settings: store
+raise SystemExit(worker_main.main())
+"""
+
+
+def test_weekly_update_resumes_after_retry_applies_and_reports(
+    migrated_fresh: TestDatabase, tmp_path: Path
+) -> None:
+    script = tmp_path / "resuming_weekly_worker.py"
+    script.write_text(RESUMING_WEEKLY_WORKER_SCRIPT, encoding="utf-8")
+    env = {"DATABASE_URL": migrated_fresh.app_url, "RADAR_JOB_RETRY_WAIT": "1"}
+    worker = _spawn([sys.executable, "-I", str(script), str(ROOT)], env)
+    try:
+        result = _radar("enqueue", "weekly-update", env=env)
+        assert result.returncode == 0, result.stdout + result.stderr
+
+        _wait_until(
+            lambda: (
+                [(job["task_name"], job["status"]) for job in _jobs(migrated_fresh)]
+                == [("weekly_update", "succeeded"), ("run_weekly_update", "succeeded")]
+            ),
+            "run_weekly_update 重試後續跑、套用成功",
+            timeout=60,
+        )
+    finally:
+        code, records, err = _stop(worker)
+
+    assert code == 0, err
+    _scheduled, run = _jobs(migrated_fresh)
+    # 第 1 次在 I&O 第 2 頁失敗，第 2 次從那一頁續跑、抓完並套用。
+    assert run["attempts"] == 2
+    [(weekly_run_id, status)] = _admin_rows(migrated_fresh, "SELECT id, status FROM weekly_run")
+    assert status == "published"
+    assert _admin_rows(migrated_fresh, "SELECT number, weekly_run_id, status FROM snapshot") == [
+        (1, weekly_run_id, "published")
+    ]
+    assert _admin_rows(migrated_fresh, "SELECT count(*) FROM paper") == [(200,)]
+    assert _admin_rows(migrated_fresh, "SELECT count(*) FROM ingest_staging") == [(0,)]
+    assert [r["event"] for r in records if r.get("journal") == "io" and r["level"] == "error"] == [
+        "每週更新抓取失敗，進度已保存"
+    ]
+    # 心跳在套用之後送（沒設網址：記一筆警告、不送），只有一次。
+    heartbeats = [r for r in records if r["event"] == "這個排程沒有設定心跳網址，不送"]
+    assert [(r["check"], r["job_id"]) for r in heartbeats] == [("weekly-update", run["id"])]
+
+    report = _radar("weekly-run", "report", env={"DATABASE_URL": migrated_fresh.app_url})
+
+    assert report.returncode == 0, report.stdout + report.stderr
+    lines = report.stdout.splitlines()
+    assert lines[0] == f"每週更新 {weekly_run_id}"
+    assert lines[1] == "狀態：已發佈"
+    assert any(line.startswith("快照 1：截至 ") for line in lines)
+    io_rows = [line for line in lines if line.split()[:1] == ["io"]]
+    # 每年的過濾前篇數、排除篇數、和基準比對各一列；I&O 的基準是 180。
+    assert len(io_rows) == 3
+    assert io_rows[0].split()[-1] == "248"
+    assert io_rows[2].split()[1:4] == ["225", "180", "+25.0%"]

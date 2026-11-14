@@ -1,4 +1,5 @@
-"""`weekly_run` 與 `weekly_run_journal` 表：表的定義與唯一的寫入者（AD-14、ADR-0004、ADR-0025）。
+"""`weekly_run` 與 `weekly_run_journal` 表：表的定義與唯一的寫入者（AD-14、ADR-0004、ADR-0025、
+ADR-0026）。
 
 - `weekly_run`：一次每週更新一列；同時只能有一筆 `fetching`（部分唯一索引）。
 - `weekly_run_journal`：每本期刊抓到哪一頁、過濾前後各幾篇；每暫存完一頁更新一次，和那一頁的
@@ -152,6 +153,26 @@ def find_fetching_weekly_run(viewer: SystemViewer, connection: Connection) -> We
     return None if row is None else _weekly_run(row)
 
 
+def find_latest_weekly_run(viewer: SystemViewer, connection: Connection) -> WeeklyRun | None:
+    """最新的一筆 `weekly_run`（`created_at`、再 `id` 最新的）；一筆都沒有就回 None。
+
+    Raises:
+        TypeError: `viewer` 不是 `SystemViewer`。
+    """
+    visible = visible_to_system_only(viewer)  # 不是 SystemViewer 就在碰連線之前丟錯
+    row = (
+        connection.execute(
+            text(
+                f"SELECT {_RUN_COLUMNS} FROM weekly_run WHERE {visible}"
+                " ORDER BY created_at DESC, id DESC LIMIT 1"
+            )
+        )
+        .mappings()
+        .one_or_none()
+    )
+    return None if row is None else _weekly_run(row)
+
+
 def list_weekly_run_journals(
     viewer: SystemViewer, connection: Connection, weekly_run_id: uuid.UUID
 ) -> dict[str, JournalProgress]:
@@ -292,5 +313,27 @@ def update_weekly_run_fetch_finished(connection: Connection, weekly_run_id: uuid
             " RETURNING id"
         ),
         {"id": weekly_run_id, "status": WeeklyRunStatus.FETCHING.value},
+    )
+    return len(rows.all()) == 1
+
+
+def update_weekly_run_published(connection: Connection, weekly_run_id: uuid.UUID) -> bool:
+    """這筆是 `fetching` 而且已經全部抓完時改成 `published`；回傳有沒有改到。
+
+    套用交易的第一句：它拿到這一列的鎖，並行的第二個套用會等第一個交易結束，再判斷時已經不是
+    `fetching`，就不會改到（互斥，ADR-0026）。和其他寫入在同一個交易，中途失敗時一起退回。
+    在呼叫端開好的交易裡做，不 commit。
+    """
+    rows = connection.execute(
+        text(
+            "UPDATE weekly_run SET status = :published, updated_at = now()"
+            " WHERE id = :id AND status = :fetching AND fetch_finished_at IS NOT NULL"
+            " RETURNING id"
+        ),
+        {
+            "id": weekly_run_id,
+            "published": WeeklyRunStatus.PUBLISHED.value,
+            "fetching": WeeklyRunStatus.FETCHING.value,
+        },
     )
     return len(rows.all()) == 1

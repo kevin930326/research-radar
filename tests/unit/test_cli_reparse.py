@@ -11,7 +11,7 @@ from radar.adapters.fake import FakeObjectStore
 from radar.domain.domain_config import ExclusionRulesConfig
 from radar.domain.scope import ScopeSettings
 from radar.domain.viewer import SystemViewer
-from radar.services.reparse import ReparseResult
+from radar.services.reparse import AdvisoryLockLostError, ReparseResult
 
 runner = CliRunner()
 ROOT = Path(__file__).resolve().parents[2]
@@ -227,3 +227,37 @@ def test_endpoint_with_credentials_is_config_error(
         assert FAKE_PASSWORD not in text
         assert "fake-user" not in text
     assert "reparse" not in calls
+
+
+def _lock_lost(*_args: Any, **_kwargs: Any) -> ReparseResult:
+    # 這個替身證明 CLI 不印例外鏈（連線字串掛在鏈上）。CLI 會原樣印出例外訊息本身；訊息不含
+    # 連線字串，是由 radar/repo/db.py 組訊息的方式保證（原因只帶固定字串或錯誤類別）。
+    try:
+        raise RuntimeError(f"connection to {SECRET_URL} lost")
+    except RuntimeError as cause:
+        raise AdvisoryLockLostError("持有鎖的連線斷了（OperationalError）") from cause
+
+
+@pytest.mark.usefixtures("env", "calls")
+def test_lost_write_lock_prints_reason_and_rerun_hint(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(cli, "reparse_papers", _lock_lost)
+
+    result = runner.invoke(cli.app, ["reparse"], catch_exceptions=False)
+
+    assert result.exit_code == 1
+    # 印出例外裡的安全訊息（原因、已 commit 的不受影響）與「直接重跑」，不是只有類別名稱。
+    [headline] = result.stderr.splitlines()
+    assert headline == (
+        "寫入鎖已經不在了（持有鎖的連線斷了（OperationalError）），這次作業中止；"
+        "已經 commit 的交易不受影響；直接重跑 radar reparse 即可"
+    )
+    assert "細節見日誌" not in result.stderr
+    # 日誌（JSON，寫在 stdout）記原因。
+    assert '"reason": "持有鎖的連線斷了（OperationalError）"' in result.stdout
+    captured = capsys.readouterr()
+    for text in (result.stdout, result.stderr, captured.out, captured.err):
+        assert "s3cret-APP" not in text
+        assert "db.example" not in text
+    assert "重新解析完成" not in result.stdout

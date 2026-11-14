@@ -32,6 +32,7 @@
 | [0023](0023-compose-file-at-repo-root.md) | 本機開發的 compose 檔放在 repo 根目錄 `compose.yaml`（`docker compose up` 不用加 `-f`）；`deploy/` 放 crontab、正式主機的 compose 等部署用的檔案 | 已接受（Kevin 2026-11-14） | AD-17 |
 | [0024](0024-secrets-into-containers.md) | 秘密進容器：api、worker 讀選填的 `.env.radar`（範本只有名稱、值全空），不讀整個 `.env`；正式主機的做法留到 3.19 | 提議 | AD-17、AD-29 |
 | [0025](0025-weekly-update-fetch-and-resume.md) | 每週更新的抓取：兩個工作＋佇列鎖、`fetching` 最多一筆；每本期刊每頁一個交易記進度並 upsert 暫存列（`batch_id`＝`weekly_run.id`）；收錄過濾在暫存前；sweep 時限 2 小時；1.8 停在 `fetching` | 提議 | AD-14、AD-19、AD-25 |
+| [0026](0026-weekly-update-apply-snapshot-and-report.md) | 每週更新的套用：接在同一個工作、一個交易（搶 `weekly_run` 那一列當互斥）寫論文、指定 `first_snapshot_id`、發佈快照、刪暫存列，commit 後才送心跳；快照主鍵照慣例、`as_of` 用發佈時間；唯讀的 `radar weekly-run report` 與基準檔 `config/import_baseline.yaml`、5% 規則；一本期刊一個交易的退路先不做 | 提議 | AD-5、AD-19、AD-25 |
 
 「提議」表示還沒經過 Kevin 確認；PR 合併後改成「已接受」。
 
