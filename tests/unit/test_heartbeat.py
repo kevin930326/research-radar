@@ -175,10 +175,63 @@ def test_429_waits_the_seconds_given_by_retry_after(waits: list[float]) -> None:
     assert waits == [7.0]
 
 
-def test_retry_after_is_capped(waits: list[float]) -> None:
-    # 對方給極大值（一天）時最多等 retry_after_max 秒，不卡住 worker。
+def test_huge_retry_after_gives_up_this_round_without_waiting(
+    waits: list[float], capsys: pytest.CaptureFixture[str]
+) -> None:
+    # 對方給極大值（一天）：不等、不重送，這次心跳記成失敗，不卡住 worker（ADR-0019 決定第 8 點）。
+    configure_logging()
     seen: list[httpx2.Request] = []
     replies = [httpx2.Response(429, headers={"Retry-After": "86400"})]
+
+    _timed_heartbeat(_responses(replies, seen))("sweep")
+
+    assert len(seen) == 1
+    assert waits == []
+    out = capsys.readouterr().out
+    assert "心跳送出失敗" in out
+    assert "已送出心跳" not in out
+
+
+def test_retry_after_over_the_limit_sends_once_and_logs_failure(
+    waits: list[float], capsys: pytest.CaptureFixture[str]
+) -> None:
+    # 對方要等 60 秒、上限 30：不可以截短成 30 秒就重送（限流期間會把次數用完），
+    # 這一輪只送一次、不等，記成失敗（2026-11-14 Codex 補複查）。
+    configure_logging()
+    seen: list[httpx2.Request] = []
+    replies = [httpx2.Response(429, headers={"Retry-After": "60"})] * 3
+
+    _timed_heartbeat(_responses(replies, seen))("sweep")
+
+    assert len(seen) == 1
+    assert waits == []
+    out = capsys.readouterr().out
+    assert "超過上限" in out
+    assert '"reason": "HTTP 429"' in out
+    assert "心跳送出失敗" in out
+    assert "已送出心跳" not in out
+    assert "s3cret-TOKEN" not in out
+
+
+def test_retry_after_within_the_limit_waits_exactly_that_long(
+    waits: list[float], capsys: pytest.CaptureFixture[str]
+) -> None:
+    # 對方要等 20 秒、上限 30：照 20 秒等再重送（不是一般退避的 2 秒，也不是上限的 30 秒）。
+    configure_logging()
+    seen: list[httpx2.Request] = []
+    replies = [httpx2.Response(429, headers={"Retry-After": "20"})]
+
+    _timed_heartbeat(_responses(replies, seen))("sweep")
+
+    assert len(seen) == 2
+    assert waits == [20.0]
+    assert "已送出心跳" in capsys.readouterr().out
+
+
+def test_retry_after_equal_to_the_limit_still_waits(waits: list[float]) -> None:
+    # 剛好等於上限算「不超過」：照等。
+    seen: list[httpx2.Request] = []
+    replies = [httpx2.Response(429, headers={"Retry-After": "30"})]
 
     _timed_heartbeat(_responses(replies, seen))("sweep")
 
