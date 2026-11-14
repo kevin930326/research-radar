@@ -12,6 +12,8 @@ import radar.services.sweep as sweep_module
 from radar.adapters.fake import FakeHeartbeat, FakeJobQueue
 from radar.domain.jobs import SWEEP, JobSpec, Queue, UnknownJobError
 from radar.domain.sweep import SWEEP_BATCH_LIMIT, SweepEntry
+from radar.domain.viewer import MemberViewer, PublicViewer, SystemViewer
+from radar.repo.sweep import find_stuck_ids
 from radar.services.jobs import enqueue_scheduled_job
 from radar.services.scheduled import run_scheduled_job
 from radar.services.sweep import SweepResult, sweep
@@ -101,7 +103,10 @@ def stuck_rows(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[uuid.UUID]]:
     """替換 repo 的查詢：每張表回傳這裡設定的卡住的列。"""
     rows: dict[str, list[uuid.UUID]] = {}
 
-    def find_stuck_ids(connection: Any, entry: SweepEntry, limit: int) -> list[uuid.UUID]:
+    def find_stuck_ids(
+        viewer: Any, connection: Any, entry: SweepEntry, limit: int
+    ) -> list[uuid.UUID]:
+        assert isinstance(viewer, SystemViewer)
         assert connection == "connection"
         assert limit == SWEEP_BATCH_LIMIT
         return rows.get(entry.table, [])
@@ -203,3 +208,19 @@ def test_retry_stalled_failure_sends_no_heartbeat() -> None:
     with pytest.raises(ConnectionError):
         sweep(FakeDatabase(), (), FakeJobQueue().enqueue, broken, heartbeat)  # type: ignore[arg-type]
     assert heartbeat.sent == []
+
+
+# --- repo.sweep.find_stuck_ids ------------------------------------------------------------
+
+
+class UntouchableConnection:
+    """任何操作都讓測試失敗：證明身分不對時在碰資料庫之前就丟錯。"""
+
+    def __getattr__(self, name: str) -> Any:
+        raise AssertionError(f"不該碰連線：{name}")
+
+
+@pytest.mark.parametrize("viewer", [MemberViewer(member_id=ROW_A, is_admin=True), PublicViewer()])
+def test_find_stuck_ids_only_accepts_system_viewer(viewer: Any) -> None:
+    with pytest.raises(TypeError, match="SystemViewer"):
+        find_stuck_ids(viewer, UntouchableConnection(), ENTRY, SWEEP_BATCH_LIMIT)  # type: ignore[arg-type]

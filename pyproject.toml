@@ -31,6 +31,7 @@ module-root = ""
 
 [dependency-groups]
 dev = [
+    "hypothesis==6.170.15",
     "import-linter==2.16",
     "mypy==2.4.1",
     "pip-audit==2.10.1",
