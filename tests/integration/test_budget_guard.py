@@ -22,6 +22,7 @@ from radar.domain.llm import LlmUsage
 from radar.domain.pricing import llm_call_cost
 from radar.domain.viewer import SystemViewer
 from radar.repo.db import Database
+from radar.services import llm_gateway
 from radar.services.budget import BudgetGuard, get_budget_status
 from radar.services.llm_gateway import GatewayOutcome, GatewayResult, LlmJob, run_llm_job
 from tests.database import TestDatabase, migrate
@@ -88,8 +89,17 @@ def _run(
     config: GatewayConfig,
     job: LlmJob,
     guard: BudgetGuard,
+    eval_run_id: uuid.UUID | None = None,
 ) -> GatewayResult:
-    return run_llm_job(SYSTEM, database, provider, config, job, budget_allows=guard)  # type: ignore[arg-type]
+    return run_llm_job(
+        SYSTEM,
+        database,
+        provider,  # type: ignore[arg-type]
+        config,
+        job,
+        budget_allows=guard,
+        eval_run_id=eval_run_id,
+    )
 
 
 def _guard(
@@ -394,16 +404,114 @@ def test_pending_run_is_resumed_even_when_budget_is_exhausted(
     assert len(provider.requests) == 1
 
 
+def _make_pending(
+    db: TestDatabase,
+    database: Database,
+    config: GatewayConfig,
+    paper_id: uuid.UUID,
+    eval_run_id: uuid.UUID | None = None,
+) -> None:
+    """預算還准時跑一次、驗證函式故意壞掉：留下一筆存了輸出的 `llm_result_pending` run。"""
+
+    def broken(_output: object, _input: object) -> None:
+        raise RuntimeError("測試：驗證函式壞了")
+
+    job = LlmJob(paper_id, LlmTask.ZH_SUMMARY, InputKind.ABSTRACT, OutputLang.ZH_HANT, broken)
+    with pytest.raises(RuntimeError, match="驗證函式壞了"):
+        _run(database, _provider(), config, job, _guard(database), eval_run_id)
+    assert execute(
+        db,
+        "SELECT count(*) FROM derivation_run"
+        " WHERE paper_id = %s AND failure_reason = 'llm_result_pending'",
+        paper_id,
+    ) == [(1,)]
+
+
 def test_budget_denied_without_pending_run_never_creates_a_run(
     db: TestDatabase, database: Database, config: GatewayConfig, paper_id: uuid.UUID
 ) -> None:
     # 別的論文有 pending 的 run 不算：鍵不同。
+    _make_pending(db, database, config, paper_id)
     insert_ledger(db, paper_id, LlmTask.ZH_SUMMARY, "50", NOW)
     other_paper = create_paper(database, doi="10.1/def", openalex_id="W2")
     before = table_counts(db)
     provider = _provider()
 
     result = _run(database, provider, config, _job(other_paper), _guard(database))
+
+    assert result == GatewayResult(GatewayOutcome.DEFERRED_BUDGET)
+    assert provider.requests == []
+    assert table_counts(db) == before
+
+
+def test_budget_denied_eval_resumes_only_its_own_pending_run(
+    db: TestDatabase, database: Database, config: GatewayConfig, paper_id: uuid.UUID
+) -> None:
+    eval_run_id = uuid.uuid4()
+    _make_pending(db, database, config, paper_id, eval_run_id)
+    insert_ledger(db, paper_id, LlmTask.ZH_SUMMARY, "50", NOW)
+    guard = _guard(database)
+    before = table_counts(db)
+    provider = _provider()
+
+    # 平常流程與別的評估都不接續這個評估留下的 run：預算不准就延後，不新增 run、不呼叫模型。
+    normal = _run(database, provider, config, _job(paper_id), guard)
+    other_eval = _run(database, provider, config, _job(paper_id), guard, uuid.uuid4())
+
+    assert normal == GatewayResult(GatewayOutcome.DEFERRED_BUDGET)
+    assert other_eval == GatewayResult(GatewayOutcome.DEFERRED_BUDGET)
+    assert provider.requests == []
+    assert table_counts(db) == before
+
+    resumed = _run(database, provider, config, _job(paper_id), guard, eval_run_id)
+
+    assert (resumed.outcome, resumed.resumed) == (GatewayOutcome.CANDIDATE, True)
+    assert provider.requests == []
+    assert table_counts(db)["llm_call"] == before["llm_call"]  # 接續不再記帳
+
+
+def test_budget_denied_with_pending_but_running_run_defers(
+    db: TestDatabase, database: Database, config: GatewayConfig, paper_id: uuid.UUID
+) -> None:
+    # 同一組鍵已經有人在跑（例如另一個行程剛接續了它）：預算不准時不再接續、也不新增 run。
+    _make_pending(db, database, config, paper_id)
+    execute(
+        db,
+        "INSERT INTO derivation_run (paper_id, task, prompt_version, prompt_sha256, model,"
+        " input_sha256, input_kind, params, taxonomy_version, context_values_version,"
+        " code_version, call_mode, eval_run_id, status)"
+        " SELECT paper_id, task, prompt_version, prompt_sha256, model, input_sha256, input_kind,"
+        " params, taxonomy_version, context_values_version, code_version, call_mode,"
+        " eval_run_id, 'running' FROM derivation_run WHERE failure_reason = 'llm_result_pending'",
+    )
+    insert_ledger(db, paper_id, LlmTask.ZH_SUMMARY, "50", NOW)
+    before = table_counts(db)
+    provider = _provider()
+
+    result = _run(database, provider, config, _job(paper_id), _guard(database))
+
+    assert result == GatewayResult(GatewayOutcome.DEFERRED_BUDGET)
+    assert provider.requests == []
+    assert table_counts(db) == before
+    assert execute(
+        db, "SELECT count(*) FROM derivation_run WHERE failure_reason = 'llm_result_pending'"
+    ) == [(1,)]
+
+
+def test_budget_denied_when_pending_run_is_gone_by_the_time_of_the_lock(
+    db: TestDatabase,
+    database: Database,
+    config: GatewayConfig,
+    paper_id: uuid.UUID,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # 鎖外看到可接續的 run、進鎖時已經被別人接走：只回 DEFERRED_BUDGET，不新增 run。
+    monkeypatch.setattr(llm_gateway, "_has_resumable_run", lambda *_args: True)
+    insert_ledger(db, paper_id, LlmTask.ZH_SUMMARY, "50", NOW)
+    before = table_counts(db)
+    provider = _provider()
+
+    result = _run(database, provider, config, _job(paper_id), _guard(database))
 
     assert result == GatewayResult(GatewayOutcome.DEFERRED_BUDGET)
     assert provider.requests == []
