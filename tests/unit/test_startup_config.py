@@ -73,12 +73,15 @@ def test_worker_does_not_start(
     assert any(problem.startswith(BAD_FIELD) for problem in problems), problems
 
 
-@pytest.mark.parametrize("args", [["version"], ["enqueue", "sweep"], ["migrate"]])
+@pytest.mark.parametrize("args", [["version"], ["enqueue", "sweep"], ["migrate"], ["reparse"]])
 def test_cli_command_does_not_run(
     bad_config: Path, monkeypatch: pytest.MonkeyPatch, args: list[str]
 ) -> None:
     monkeypatch.setattr(cli, "build_job_enqueuer", _fail_if_called)
     monkeypatch.setattr(cli, "build_migration_runner", _fail_if_called)
+    monkeypatch.setattr(cli, "build_database", _fail_if_called)
+    monkeypatch.setattr(cli, "build_object_store", _fail_if_called)
+    monkeypatch.setattr(cli, "reparse_papers", _fail_if_called)
     monkeypatch.setenv("RADAR_MIGRATION_DATABASE_URL", "postgresql://radar_owner@db:5432/radar")
 
     result = runner.invoke(cli.app, args)
@@ -97,6 +100,8 @@ def test_cli_missing_config_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
     assert result.exit_code == 1
     assert "journals.yaml：找不到檔案" in result.stderr
     assert "openalex.yaml：找不到檔案" in result.stderr
+    assert "exclusion_rules.yaml：找不到檔案" in result.stderr
+    assert "keyword_sources.yaml：找不到檔案" in result.stderr
 
 
 def test_cli_good_config_runs(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -105,3 +110,74 @@ def test_cli_good_config_runs(monkeypatch: pytest.MonkeyPatch) -> None:
     result = runner.invoke(cli.app, ["version"])
 
     assert result.exit_code == 0
+
+
+# --- Story 1.7 的兩個新設定檔改壞時也不啟動 --------------------------------------------------
+
+NEW_FILE_BREAKAGES = {
+    "exclusion_rules": (
+        "exclusion_rules.yaml",
+        "reason: editors_comments",
+        "reason: Bad-Code",
+        "exclusion_rules.yaml：rules.0.reason：",
+    ),
+    "keyword_sources": (
+        "keyword_sources.yaml",
+        "active: openalex",
+        "active: crossref",
+        "keyword_sources.yaml：active：",
+    ),
+}
+
+
+@pytest.fixture(params=list(NEW_FILE_BREAKAGES))
+def broken_new_file(
+    request: pytest.FixtureRequest, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> str:
+    filename, old, new, expected = NEW_FILE_BREAKAGES[request.param]
+    target = tmp_path / "config"
+    shutil.copytree(ROOT / "config", target)
+    path = target / filename
+    text = path.read_text(encoding="utf-8")
+    assert old in text
+    path.write_text(text.replace(old, new), encoding="utf-8")
+    monkeypatch.setenv("RADAR_CONFIG_DIR", str(target))
+    monkeypatch.setenv("DATABASE_URL", APP_URL)
+    return expected
+
+
+def test_api_does_not_start_with_bad_new_file(
+    broken_new_file: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(api_main, "build_readiness_probes", _fail_if_called)
+
+    assert api_main.main() == 1
+
+    problems = _problems(capsys.readouterr().out)
+    assert any(problem.startswith(broken_new_file) for problem in problems), problems
+
+
+def test_worker_does_not_start_with_bad_new_file(
+    broken_new_file: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(worker_main, "build_worker", _fail_if_called)
+
+    assert worker_main.main() == 1
+
+    problems = _problems(capsys.readouterr().out)
+    assert any(problem.startswith(broken_new_file) for problem in problems), problems
+
+
+@pytest.mark.parametrize("args", [["version"], ["reparse"]])
+def test_cli_does_not_run_with_bad_new_file(
+    broken_new_file: str, monkeypatch: pytest.MonkeyPatch, args: list[str]
+) -> None:
+    monkeypatch.setattr(cli, "build_database", _fail_if_called)
+    monkeypatch.setattr(cli, "build_object_store", _fail_if_called)
+    monkeypatch.setattr(cli, "reparse_papers", _fail_if_called)
+
+    result = runner.invoke(cli.app, args)
+
+    assert result.exit_code == 1
+    assert f"- {broken_new_file}" in result.stderr
+    assert result.stdout == ""

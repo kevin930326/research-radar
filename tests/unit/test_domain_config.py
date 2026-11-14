@@ -10,6 +10,8 @@ from pathlib import Path
 import pytest
 
 from radar.config import ConfigError, config_dir, load_domain_config
+from radar.domain.domain_config import KeywordSourcesConfig
+from radar.domain.papers import KeywordSource
 
 ROOT = Path(__file__).resolve().parents[2]
 CONFIG = ROOT / "config"
@@ -87,9 +89,11 @@ def test_models_are_frozen() -> None:
 def test_missing_files_each_get_a_problem(tmp_path: Path) -> None:
     problems = _load(tmp_path)
 
-    assert len(problems) == 2
+    assert len(problems) == 4
     assert problems[0].startswith("journals.yaml：找不到檔案")
     assert problems[1].startswith("openalex.yaml：找不到檔案")
+    assert problems[2].startswith("exclusion_rules.yaml：找不到檔案")
+    assert problems[3].startswith("keyword_sources.yaml：找不到檔案")
 
 
 def test_invalid_yaml(config_copy: Path) -> None:
@@ -274,3 +278,103 @@ def test_cyclic_alias_is_reported_not_crashed(config_copy: Path) -> None:
     assert len(problems) == 1
     assert problems[0].startswith("journals.yaml：")
     assert "循環參照" in problems[0]
+
+
+# --- 排除規則與關鍵字來源（Story 1.7） -----------------------------------------------------
+
+
+def test_real_exclusion_rules_and_keyword_source() -> None:
+    config = load_domain_config({"RADAR_CONFIG_DIR": str(CONFIG)})
+
+    assert [rule.reason for rule in config.exclusion_rules.rules] == [
+        "editors_comments",
+        "research_spotlights",
+        "about_our_authors",
+        "erratum",
+    ]
+    assert config.exclusion_rules.rules[0].title_starts_with == ("Editor's Comments",)
+    assert config.keyword_sources.active is KeywordSource.OPENALEX
+
+
+def test_scope_settings_come_from_journals() -> None:
+    journals = load_domain_config({"RADAR_CONFIG_DIR": str(CONFIG)}).journals
+
+    scope = journals.scope_settings()
+
+    assert scope.journals == frozenset(EXPECTED_ISSN_L.values())
+    assert scope.start_year == 2016
+
+
+def test_bad_exclusion_reason(config_copy: Path) -> None:
+    _replace(config_copy / "exclusion_rules.yaml", "reason: editors_comments", "reason: Bad-Code")
+
+    problems = _load(config_copy)
+
+    assert len(problems) == 1
+    assert problems[0].startswith("exclusion_rules.yaml：rules.0.reason：")
+
+
+@pytest.mark.parametrize(
+    ("content", "location"),
+    [
+        ("rules:\n  - reason: x\n", "rules.0"),  # 一個比對字串都沒有
+        ("rules:\n  - reason: x\n    title_equals: []\n", "rules.0"),
+        ("rules:\n  - reason: x\n    title_starts_with: ['  ']\n", "rules.0.title_starts_with"),
+        ("rules:\n  - reason: x\n    title_equals: [1]\n", "rules.0.title_equals.0"),
+        ("rules:\n  - reason: x\n    title_equals: [a]\n    other: 1\n", "rules.0.other"),
+        ("{}\n", "rules"),
+    ],
+)
+def test_exclusion_rule_shape(config_copy: Path, content: str, location: str) -> None:
+    (config_copy / "exclusion_rules.yaml").write_text(content, encoding="utf-8")
+
+    problems = _load(config_copy)
+
+    assert problems, problems
+    assert all(problem.startswith(f"exclusion_rules.yaml：{location}") for problem in problems), (
+        problems
+    )
+
+
+def test_empty_exclusion_rules_are_allowed(config_copy: Path) -> None:
+    (config_copy / "exclusion_rules.yaml").write_text("rules: []\n", encoding="utf-8")
+
+    config = load_domain_config({"RADAR_CONFIG_DIR": str(config_copy)})
+
+    assert config.exclusion_rules.rules == ()
+
+
+def test_unknown_keyword_source(config_copy: Path) -> None:
+    _replace(config_copy / "keyword_sources.yaml", "active: openalex", "active: crossref")
+
+    problems = _load(config_copy)
+
+    assert len(problems) == 1
+    assert problems[0].startswith("keyword_sources.yaml：active：")
+
+
+def test_keyword_source_values_are_the_only_allowed_ones(config_copy: Path) -> None:
+    for source in KeywordSource:
+        _write_active(config_copy, source.value)
+        assert load_domain_config(
+            {"RADAR_CONFIG_DIR": str(config_copy)}
+        ).keyword_sources.active == (source)
+    schema = KeywordSourcesConfig.model_json_schema()
+    allowed = schema["$defs"]["KeywordSource"]["enum"]
+    assert allowed == [source.value for source in KeywordSource]
+
+
+def _write_active(directory: Path, value: str) -> None:
+    (directory / "keyword_sources.yaml").write_text(f"active: {value}\n", encoding="utf-8")
+
+
+def test_new_files_problems_are_reported_together(config_copy: Path) -> None:
+    _replace(config_copy / "exclusion_rules.yaml", "reason: erratum", "reason: Bad")
+    _replace(config_copy / "keyword_sources.yaml", "active: openalex", "active: crossref")
+
+    problems = _load(config_copy)
+
+    assert [problem.split("：")[0] for problem in problems] == [
+        "exclusion_rules.yaml",
+        "keyword_sources.yaml",
+    ]

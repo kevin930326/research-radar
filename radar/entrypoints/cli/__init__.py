@@ -15,14 +15,18 @@ from radar.config import (
 )
 from radar.domain.database_requirements import DatabaseRequirementsError
 from radar.domain.jobs import UnknownJobError, find_scheduled_job
+from radar.domain.viewer import SystemViewer
 from radar.entrypoints.bootstrap import (
     MigrationsNotFoundError,
+    build_database,
     build_job_enqueuer,
     build_migration_runner,
+    build_object_store,
 )
 from radar.entrypoints.logging_config import configure_logging
 from radar.services.jobs import enqueue_scheduled_job
 from radar.services.migrations import migrate_database
+from radar.services.reparse import reparse_papers
 
 # 例外時不印區域變數：裡面可能有連線字串。
 app = typer.Typer(
@@ -106,6 +110,47 @@ def enqueue(
         log.error("排入工作失敗", schedule=job, error_type=type(exc).__name__)
         _fail(f"排入失敗（{type(exc).__name__}）；細節見日誌", [])
     typer.echo(f"已排入 {job}" if queued else f"{job} 已經在排隊，沒有再排一筆")
+
+
+@app.command()
+def reparse() -> None:
+    """只用已存的原始資料重新解析已經匯入的論文（不連 OpenAlex 或任何外部來源）。
+
+    排除規則改了、或解析多了欄位時跑這個。解析結果先放暫存表、最後一個交易套用；
+    不新增論文、不建立快照。設定錯誤或執行失敗退出碼 1，只印錯誤類別，不印連線字串。
+    """
+    configure_logging()
+    try:
+        settings = load_settings()
+        domain_config = load_domain_config()
+        store = build_object_store(settings)
+    except ConfigError as exc:
+        log.error("設定錯誤，無法重新解析", problems=exc.problems)
+        _fail("設定錯誤，沒有重新解析：", exc.problems)
+    try:
+        database = build_database(settings, pool_size=database_pool_size(settings, "cli"))
+        result = reparse_papers(
+            SystemViewer(),
+            database,
+            store,
+            scope=domain_config.journals.scope_settings(),
+            exclusion_rules=domain_config.exclusion_rules,
+        )
+    except Exception as exc:
+        # 例外訊息可能含主機與帳號，只記類別名稱。
+        log.error("重新解析失敗", error_type=type(exc).__name__)
+        _fail(f"重新解析失敗（{type(exc).__name__}）；細節見日誌", [])
+    typer.echo("重新解析完成")
+    typer.echo(f"讀到的論文（外部鍵）：{result.raw_keys}")
+    typer.echo(f"不在資料庫、略過：{result.not_in_database}")
+    typer.echo(f"物件不見：{result.missing_object}")
+    typer.echo(f"內容指紋對不上：{result.hash_mismatch}")
+    typer.echo(f"解析失敗：{result.parse_error}")
+    typer.echo(f"ID 對不上：{result.id_mismatch}")
+    typer.echo(f"放進暫存表：{result.staged}")
+    typer.echo(f"更新：{result.updated}")
+    typer.echo(f"資料較舊、沒寫：{result.stale}")
+    typer.echo(f"識別碼衝突：{result.conflicts}")
 
 
 def _fail(headline: str, problems: list[str]) -> NoReturn:

@@ -28,6 +28,7 @@
 | [0019](0019-worker-and-queue-integration.md) | worker 接上 Procrastinate：佇列的 SQL 凍結成檔由 Alembic 執行；連線池自己開；監督迴圈處理訊號與重開；做完的工作紀錄全留；排程只在 `deploy/crontab` | 提議 | AD-14、AD-15、AD-17、AD-18 |
 | [0020](0020-identifiers-and-paper-writes.md) | 識別碼的正規化規則（ISSN 不驗檢查碼）；論文寫入先新增再認領識別碼、每個來源一欄抓取時間、識別碼衝突不合併；viewer、權限表與資料層的架構測試 | 提議 | AD-3、AD-4、AD-5、AD-6、AD-25、AD-27 |
 | [0021](0021-openalex-fetch-and-raw-storage.md) | OpenAlex 只篩期刊與年份、原始資料從回應原文切出每一篇的位元組；用量取本地加總與 OpenAlex 回報的較大者；去重看 `raw_fetch`、先存物件再寫列；領域設定 `config/*.yaml` 啟動時驗證 | 提議 | AD-2、AD-18、AD-25、AD-29 |
+| [0022](0022-parsing-and-reparse.md) | OpenAlex 的解析是純函式、看不懂整篇略過；指紋 `source_hash` 的欄位與序列化；摘要在寫入函式裡寫、來源不再提供就刪、優先順序先寫成常數；排除規則的格式與正規化；`radar reparse` 只更新已匯入的論文、先放暫存表再一個交易套用 | 提議 | AD-5、AD-7、AD-25、AD-31 |
 
 「提議」表示還沒經過 Kevin 確認；PR 合併後改成「已接受」。
 

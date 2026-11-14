@@ -841,8 +841,15 @@ def test_each_table_has_one_writer_module() -> None:
     sources = _repo_sources()
 
     assert writer_problems(sources) == []
-    # 掃描真的看得到寫入：papers 是 paper 與 external_id 的寫入者。
-    assert written_tables(sources["radar.repo.papers"]) == {"paper", "external_id"}
+    # 掃描真的看得到寫入：papers 是 paper、external_id、摘要、關鍵字的寫入者；
+    # ingest_staging 是暫存表的寫入者。
+    assert written_tables(sources["radar.repo.papers"]) == {
+        "paper",
+        "external_id",
+        "paper_abstract",
+        "paper_keyword",
+    }
+    assert written_tables(sources["radar.repo.ingest_staging"]) == {"ingest_staging"}
 
 
 def test_writer_check_catches_each_mistake() -> None:

@@ -1,4 +1,9 @@
-"""領域設定的型別（AD-18）：`config/journals.yaml` 與 `config/openalex.yaml`。
+"""領域設定的型別（AD-18）：`config/` 下的四個檔。
+
+- `journals.yaml`：追蹤的期刊（`JournalsConfig`）。
+- `openalex.yaml`：OpenAlex 的呼叫設定（`OpenAlexConfig`）。
+- `exclusion_rules.yaml`：標記非研究文章的排除規則（`ExclusionRulesConfig`，PRD FR-8）。
+- `keyword_sources.yaml`：目前用哪個關鍵字來源（`KeywordSourcesConfig`，ADR-0016）。
 
 檔案只由 `radar/config.py` 讀（YAML safe load、重複的鍵也算錯），讀進來後用這裡的模型驗證；
 api、worker 啟動時與 CLI 每個指令執行前都驗證一次，錯了就不啟動。
@@ -11,6 +16,8 @@ from urllib.parse import urlsplit
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from radar.domain.identifiers import normalize_issn_l
+from radar.domain.papers import KeywordSource
+from radar.domain.scope import ScopeSettings
 
 _FROZEN = ConfigDict(frozen=True, extra="forbid")
 
@@ -66,6 +73,12 @@ class JournalsConfig(BaseModel):
         if problems:
             raise ValueError("；".join(problems))
         return journals
+
+    def scope_settings(self) -> ScopeSettings:
+        """追蹤範圍的設定：這些期刊的 ISSN-L 與起始年（`domain/scope.py` 的 `is_in_scope` 用）。"""
+        return ScopeSettings(
+            frozenset(journal.issn_l for journal in self.journals), start_year=self.start_year
+        )
 
 
 class OpenAlexRetry(BaseModel):
@@ -129,10 +142,59 @@ class OpenAlexConfig(BaseModel):
         return value.rstrip("/")
 
 
+class ExclusionRule(BaseModel):
+    """一條排除規則：標題符合 `title_equals` 或 `title_starts_with` 其中一個字串就標成 `reason`。
+
+    比對前標題與規則字串都做同一個正規化（`domain/exclusion.py` 的 `normalize_title`）。
+    """
+
+    model_config = _FROZEN
+
+    # 寫進 `paper.excluded_reason` 的代碼：小寫英文開頭、只用小寫英文、數字、底線。
+    reason: str = Field(pattern=r"^[a-z][a-z0-9_]*$", max_length=64)
+    title_equals: tuple[str, ...] = ()
+    title_starts_with: tuple[str, ...] = ()
+
+    @field_validator("title_equals", "title_starts_with")
+    @classmethod
+    def _no_blank_strings(cls, values: tuple[str, ...]) -> tuple[str, ...]:
+        for index, value in enumerate(values):
+            if not value.strip():
+                raise ValueError(f"第 {index} 個字串是空白")
+        return values
+
+    @model_validator(mode="after")
+    def _require_a_pattern(self) -> Self:
+        if not self.title_equals and not self.title_starts_with:
+            raise ValueError("title_equals 與 title_starts_with 至少要有一個非空白字串")
+        return self
+
+
+class ExclusionRulesConfig(BaseModel):
+    """`config/exclusion_rules.yaml`：依檔案順序比對，第一條符合的勝出；可以是空清單。"""
+
+    model_config = _FROZEN
+
+    rules: tuple[ExclusionRule, ...]
+
+
+class KeywordSourcesConfig(BaseModel):
+    """`config/keyword_sources.yaml`：目前畫面與統計用哪個關鍵字來源（ADR-0016）。
+
+    寫入不看這個值：OpenAlex 的關鍵字一律以 `openalex` 寫入；換來源時先寫新來源、再改 `active`。
+    """
+
+    model_config = _FROZEN
+
+    active: KeywordSource
+
+
 class DomainConfig(BaseModel):
-    """兩個領域設定檔合在一起。"""
+    """四個領域設定檔合在一起。"""
 
     model_config = _FROZEN
 
     journals: JournalsConfig
     openalex: OpenAlexConfig
+    exclusion_rules: ExclusionRulesConfig
+    keyword_sources: KeywordSourcesConfig

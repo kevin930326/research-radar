@@ -9,7 +9,13 @@ from typing import Any, Literal
 import yaml
 from pydantic import BaseModel, SecretStr, ValidationError
 
-from radar.domain.domain_config import DomainConfig, JournalsConfig, OpenAlexConfig
+from radar.domain.domain_config import (
+    DomainConfig,
+    ExclusionRulesConfig,
+    JournalsConfig,
+    KeywordSourcesConfig,
+    OpenAlexConfig,
+)
 from radar.domain.jobs import scheduled_jobs
 from radar.domain.settings import MigrationSettings, Settings, heartbeat_url_field
 
@@ -146,6 +152,8 @@ CONFIG_DIR_FIELD = "config_dir"
 DEFAULT_CONFIG_DIR = "config"
 JOURNALS_FILE = "journals.yaml"
 OPENALEX_FILE = "openalex.yaml"
+EXCLUSION_RULES_FILE = "exclusion_rules.yaml"
+KEYWORD_SOURCES_FILE = "keyword_sources.yaml"
 
 
 def config_dir(environ: Mapping[str, str] | None = None) -> Path:
@@ -155,9 +163,10 @@ def config_dir(environ: Mapping[str, str] | None = None) -> Path:
 
 
 def load_domain_config(environ: Mapping[str, str] | None = None) -> DomainConfig:
-    """讀 `RADAR_CONFIG_DIR` 下的 `journals.yaml` 與 `openalex.yaml` 並驗證。
+    """讀 `RADAR_CONFIG_DIR` 下的 `journals.yaml`、`openalex.yaml`、`exclusion_rules.yaml`、
+    `keyword_sources.yaml` 並驗證。
 
-    兩個檔的問題一起回報，每條寫成「檔名：欄位路徑：原因」（例如
+    四個檔的問題一起回報，每條寫成「檔名：欄位路徑：原因」（例如
     `journals.yaml：journals.2.issn_l：…`）；缺檔、不是合法 YAML、同一個 mapping 的鍵寫兩次
     也各有一條。
 
@@ -168,9 +177,26 @@ def load_domain_config(environ: Mapping[str, str] | None = None) -> DomainConfig
     problems: list[str] = []
     journals = _load_yaml_model(directory, JOURNALS_FILE, JournalsConfig, problems)
     openalex = _load_yaml_model(directory, OPENALEX_FILE, OpenAlexConfig, problems)
-    if problems or journals is None or openalex is None:
+    exclusion_rules = _load_yaml_model(
+        directory, EXCLUSION_RULES_FILE, ExclusionRulesConfig, problems
+    )
+    keyword_sources = _load_yaml_model(
+        directory, KEYWORD_SOURCES_FILE, KeywordSourcesConfig, problems
+    )
+    if (
+        problems
+        or journals is None
+        or openalex is None
+        or exclusion_rules is None
+        or keyword_sources is None
+    ):
         raise ConfigError(problems)
-    return DomainConfig(journals=journals, openalex=openalex)
+    return DomainConfig(
+        journals=journals,
+        openalex=openalex,
+        exclusion_rules=exclusion_rules,
+        keyword_sources=keyword_sources,
+    )
 
 
 def _load_yaml_model[T: BaseModel](

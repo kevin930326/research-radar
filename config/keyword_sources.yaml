@@ -1,0 +1,8 @@
+# 關鍵字來源（AD-18 領域設定、ADR-0016；api、worker、CLI 啟動時由 radar/config.py 驗證）。
+#
+# - active：畫面與統計目前用哪個來源的關鍵字。可用的值只有程式裡 KeywordSource 那一份清單
+#   （現在只有 openalex），和 paper_keyword.source 的 CHECK 是同一份。
+#
+# 寫入不看這個值：OpenAlex 的關鍵字一律以 openalex 寫進 paper_keyword。換來源時照
+# ADR-0016 第 8 點：先把新來源的關鍵字寫進去、再改這裡的 active、之後才清掉舊的。
+active: openalex

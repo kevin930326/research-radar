@@ -22,7 +22,7 @@ from sqlalchemy import (
     text,
 )
 
-from radar.domain.raw_records import RawRecord, RawSource
+from radar.domain.raw_records import RawFetchRef, RawRecord, RawSource
 from radar.domain.viewer import SystemViewer
 from radar.repo.models import Base
 from radar.repo.visibility import visible_to_system_only
@@ -69,6 +69,44 @@ def find_stored_sha256s(
         {"source": RawSource(source).value, "sha256s": wanted},
     )
     return frozenset(str(value) for value in rows.scalars())
+
+
+def list_latest_raw_fetches(
+    viewer: SystemViewer,
+    connection: Connection,
+    source: RawSource,
+    *,
+    after_external_key: str | None,
+    limit: int,
+) -> list[RawFetchRef]:
+    """每個外部鍵最新（抓取時間最晚）的那一列，依外部鍵排序；只取外部鍵大於
+    `after_external_key`（None＝從頭）的，最多 `limit` 個外部鍵（keyset 分頁）。
+
+    Raises:
+        TypeError: `viewer` 不是 `SystemViewer`。
+        ValueError: `limit` 不是正整數。
+    """
+    visible = visible_to_system_only(viewer)  # 不是 SystemViewer 就在碰連線之前丟錯
+    if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
+        raise ValueError("limit 要是正整數")
+    parameters: dict[str, object] = {"source": RawSource(source).value, "limit": limit}
+    after = ""
+    if after_external_key is not None:
+        after = " AND external_key > :after"
+        parameters["after"] = after_external_key
+    rows = connection.execute(
+        text(
+            "SELECT DISTINCT ON (external_key) external_key, sha256, fetched_at FROM raw_fetch"
+            f" WHERE {visible} AND source = :source{after}"
+            " ORDER BY external_key, fetched_at DESC"
+            " LIMIT :limit"
+        ),
+        parameters,
+    )
+    return [
+        RawFetchRef(external_key=external_key, sha256=sha256, fetched_at=fetched_at)
+        for external_key, sha256, fetched_at in rows
+    ]
 
 
 # --- 寫入 ---------------------------------------------------------------------------------
