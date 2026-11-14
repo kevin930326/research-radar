@@ -6,9 +6,10 @@ from pathlib import Path
 
 import pytest
 
-from radar.config import BUDGET_FILE, ConfigError, load_budget_config
+from radar.config import BUDGET_FILE, ConfigError, load_budget_config, load_models_config
 from radar.domain.ai_outputs import LlmTask
 from radar.domain.budget import BudgetConfig
+from radar.domain.prompts import PromptSettings
 from tests.llm_support import ROOT
 
 REAL = (ROOT / "config" / BUDGET_FILE).read_text(encoding="utf-8")
@@ -37,6 +38,27 @@ def test_real_config_matches_nfr_3() -> None:
     assert set(config.task_budgets_usd) == set(LlmTask)
     # 文件沒有寫各功能的數字：全部留 null（只受熔斷線管），不猜。
     assert all(config.task_budget(task) is None for task in LlmTask)
+
+
+def test_real_models_config_keeps_overspend_bound_of_adr_0031() -> None:
+    """ADR-0031 決定 6 的單次最大費用（約 0.042 美元）只在這些設定下成立。
+
+    哪個工作打開 `allow_over_input_limit`，輸入就不受 100,000 tokens 管、整次改用長上下文價，
+    上限要先重算並設硬上限（改 ADR-0031），再改這個測試。
+    """
+    models = load_models_config({"RADAR_CONFIG_DIR": str(ROOT / "config")})
+
+    assert not any(task.allow_over_input_limit for task in models.tasks.values())
+    # 輸入上限不超過長上下文的門檻：送得出去的呼叫一律照一般價。
+    assert models.max_input_tokens <= models.long_context_threshold_tokens
+    max_output = PromptSettings.model_json_schema()["properties"]["max_tokens"]["maximum"]
+    assert max_output == 64_000
+    per_call = {
+        models.models[task.model].input_usd_per_mtok * models.max_input_tokens / 1_000_000
+        + models.models[task.model].output_usd_per_mtok * max_output / 1_000_000
+        for task in models.tasks.values()
+    }
+    assert per_call == {Decimal("0.042")}
 
 
 def test_real_config_documents_sources_and_null_meaning() -> None:

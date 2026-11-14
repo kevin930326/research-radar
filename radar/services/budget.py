@@ -7,7 +7,8 @@
 
 預算檢查是「呼叫前看帳本」，帳在呼叫後才記，同時在途的呼叫彼此看不到（熔斷線與每個功能預算都一樣）：
 超支上限＝同時在途的呼叫數（worker 加上所有呼叫閘門的 CLI 等行程）× 單次最大費用（約 0.042 美元），
-例如 10 個在途約 0.42 美元（ADR-0031）。Anthropic workspace 的 70 美元上限是第二道。
+例如 10 個在途約 0.42 美元（ADR-0031）。這個上限只在帳都記得進去、沒有工作打開
+`allow_over_input_limit` 時成立（ADR-0031 決定 6）。Anthropic workspace 的 70 美元上限是第二道。
 """
 
 from collections.abc import Callable
