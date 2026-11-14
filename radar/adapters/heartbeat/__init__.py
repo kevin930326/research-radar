@@ -57,8 +57,9 @@ class HttpHeartbeat:
 
     - 這個檢查沒設網址：記警告、不送。
     - 連線錯誤、逾時、429、5xx：由 stamina 重試，最多 `attempts` 次（含第一次）。
-      回應帶 `Retry-After` 時照對方給的秒數等，但最多等 `retry_after_max` 秒（對方給極大值時
-      不卡住排程）；沒帶就指數退避：從 `wait_initial` 秒開始、每次加倍、最多 `wait_max` 秒，
+      回應帶 `Retry-After` 時：不超過 `retry_after_max` 秒就照對方給的秒數等（不截短）；
+      超過就這一輪不再重試、記成失敗（不提早重送，也不卡住排程，ADR-0019 決定第 8 點）。
+      沒帶就指數退避：從 `wait_initial` 秒開始、每次加倍、最多 `wait_max` 秒，
       再加 0～`wait_jitter` 秒的隨機抖動。
     - 等待與次數的預設值和 `Settings` 的 `heartbeat_*` 一致；正式程式由 `bootstrap.py` 從設定傳入。
     - 送不出去：只記錯誤，不丟例外，不讓工作因此失敗。
@@ -102,12 +103,23 @@ class HttpHeartbeat:
         log.info("已送出心跳", check=check)
 
     def _backoff(self, error: Exception) -> bool | float:
-        """stamina 的退避判斷：不重試回 False；照一般退避回 True；照 `Retry-After` 回秒數。"""
+        """stamina 的退避判斷：不重試回 False；照一般退避回 True；照 `Retry-After` 回秒數。
+
+        對方要等的時間超過 `retry_after_max`：回 False，這一輪不再重試，例外照常往外丟，
+        由 `__call__` 記成心跳失敗。不截短成上限再送：限流期間提早重送只會把次數用完。
+        """
         if not isinstance(error, RetryableHeartbeatError):
             return False
         if error.retry_after is None:
             return True
-        return min(error.retry_after, self._retry_after_max)
+        if error.retry_after > self._retry_after_max:
+            log.warning(
+                "對方要求等待的時間超過上限，這一輪不再重試",
+                retry_after=error.retry_after,
+                retry_after_max=self._retry_after_max,
+            )
+            return False
+        return error.retry_after
 
     def _send(self, url: str) -> None:
         with httpx2.Client(timeout=self._timeout, transport=self._transport) as client:
