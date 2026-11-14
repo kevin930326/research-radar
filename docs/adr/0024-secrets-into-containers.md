@@ -30,7 +30,7 @@
 
 ## 理由
 
-1. **進容器的東西看得到清單。** 範本列幾個就只有幾個；擁有者連線字串不會跟著進長駐的容器。
+1. **進容器的東西和 `.env` 分開。** `env_file` 會把 `.env.radar` 的每一行都放進 api、worker 的容器；範本只是建議清單，真的檔裡放什麼由 Kevin 負責。和直接讀 `.env`（選項 A）比，至少 `.env` 裡給主機上的指令用的值不會自動跟著進容器。不要把 `RADAR_MIGRATION_DATABASE_URL`（資料庫擁有者的連線字串）放進 `.env.radar`：放了它就會進長駐的容器；也不要把整個 `.env` 複製成 `.env.radar`。
 2. **乾淨的 clone 與 CI 不用多做事。** `required: false` 讓沒有這個檔時照樣 `docker compose up`；本機 Docker Compose v5.6.0 支援這個寫法（在 scratchpad 用假值試過：沒有檔時不報錯、有檔時變數進得了容器、`environment` 的值優先）。
 3. **正式主機的做法不用現在決定。** 正式主機只有 api、worker、cloudflared，compose 檔也是另一份（ADR-0023），3.19 再依主機的情況選。
 
@@ -39,6 +39,7 @@
 - **多一個要自己建的檔**：`.env` 給在主機上跑的指令（`radar migrate`、測試）用，`.env.radar` 給容器用；同一個值（例如 OpenAlex key）可能兩邊都要寫。接受，換到的是兩邊的範圍分得清楚。
 - **秘密仍是環境變數**：容器裡 `docker inspect`、`/proc/*/environ` 看得到。本機與 CI 接受；正式主機要不要改成 Docker secrets 在 3.19 決定。
 - **要 Docker Compose 2.24 以上**：`env_file` 的 `path`／`required` 寫法是 2.24 才有的；版本太舊時整個 compose 檔解析失敗，連 CI 只起 `db`、`rustfs` 那一步也會失敗。本機是 v5.6.0；CI runner 與正式主機的版本在 3.19 一起確認。
+- **沒有「啟動時拒絕擁有者連線字串」的防呆**：`.env.radar` 裡多放了 `RADAR_MIGRATION_DATABASE_URL` 時，api、worker 照樣起得來，只靠範本與這份 ADR 的警告。秘密的清單與隔離屬 Story 11.4，防呆留到那時一起做。
 - **之後改回讀整個 `.env`**：只要改 `compose.yaml` 的 `env_file` 與架構測試 `tests/arch/test_compose.py`；但要先確認 `.env` 裡沒有不該進容器的值。
 
 ## 名詞

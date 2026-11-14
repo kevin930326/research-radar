@@ -12,7 +12,7 @@ OpenAlex 內容只用錄好的回應（`tests/openalex_cassette.py`，CC0）與�
 import re
 import uuid
 from collections import Counter
-from collections.abc import Iterator
+from collections.abc import Iterator, MutableMapping
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -51,7 +51,13 @@ from radar.repo.weekly_runs import (
 )
 from radar.services import weekly_update as weekly_update_module
 from radar.services.ingest import JournalFetchError
-from radar.services.weekly_update import WeeklyFetchResult, run_weekly_update, weekly_update
+from radar.services.weekly_update import (
+    WeeklyFetchResult,
+    WeeklyFetchSetup,
+    open_and_run_weekly_update,
+    run_weekly_update,
+    weekly_update,
+)
 from tests.database import APP_ROLE, OWNER_ROLE, TestDatabase, migrate
 from tests.openalex_cassette import ISSN_L, cassette_pages, cassette_work, work_bytes
 
@@ -1020,3 +1026,167 @@ def test_staging_kind_check_accepts_weekly_update_only_besides_reparse(
         connection.execute(sql, ("weekly_update", "a" * 64))
         with pytest.raises(psycopg.errors.CheckViolation):
             connection.execute(sql, ("first_import", "a" * 64))
+
+
+# --- open_and_run_weekly_update：確認要抓才開 adapter（對抗式審查第 1 條） ---------------------
+
+
+class _SetupBrokenError(Exception):
+    """模擬開 adapter 失敗（缺金鑰、設定壞掉）；訊息帶一段不該進日誌的內容。"""
+
+
+class _Opener:
+    """`open_setup` 的替身：記下被呼叫幾次、有沒有關掉；`error` 有值時開的時候就丟。"""
+
+    def __init__(self, setup: WeeklyFetchSetup | None = None, error: Exception | None = None):
+        self.setup = setup
+        self.error = error
+        self.opened = 0
+        self.closed = 0
+
+    @contextmanager
+    def __call__(self) -> Iterator[WeeklyFetchSetup]:
+        self.opened += 1
+        if self.error is not None:
+            raise self.error
+        assert self.setup is not None
+        try:
+            yield self.setup
+        finally:
+            self.closed += 1
+
+
+def _setup(source: FakePaperSource, journals: JournalsConfig) -> WeeklyFetchSetup:
+    return WeeklyFetchSetup(
+        source=source,
+        store=FakeObjectStore(),
+        journals=journals,
+        exclusion_rules=RULES,
+        quota=QUOTA,
+    )
+
+
+def _open_and_run(database: Database, opener: _Opener, weekly_run_id: uuid.UUID) -> Any:
+    return open_and_run_weekly_update(SYSTEM, database, opener, weekly_run_id, clock=lambda: NOW)
+
+
+def test_open_and_run_fetches_with_the_opened_setup_then_closes_it(
+    weekly_db: TestDatabase, database: TrackingDatabase
+) -> None:
+    run_id = _start(database)
+    source = FakePaperSource({ISSN_L: _cassette_book()}, clock=lambda: NOW)
+    opener = _Opener(_setup(source, _journals(IO)))
+
+    result = _open_and_run(database, opener, run_id)
+
+    assert result.fetch_finished
+    assert (opener.opened, opener.closed) == (1, 1)
+    assert len(source.requests) == 3
+    assert len(_staged(weekly_db, run_id)) == 200
+
+
+def test_setup_failure_touches_the_run_and_raises_the_original_error(
+    weekly_db: TestDatabase, database: TrackingDatabase
+) -> None:
+    run_id = _start(database)
+    before = _backdate(weekly_db, run_id)
+    opener = _Opener(error=_SetupBrokenError("secret-value-in-message"))
+
+    with capture_logs() as logs, pytest.raises(_SetupBrokenError):
+        _open_and_run(database, opener, run_id)
+
+    assert opener.opened == 1
+    # 建 adapter 失敗也更新 updated_at：sweep 照 2 小時的時限補排，不會每 15 分鐘就補排一次。
+    assert _run_row(weekly_db, run_id)[2] > before
+    assert _progress(database, run_id) == {}
+    [error] = [log for log in logs if log["log_level"] == "error"]
+    assert error["event"] == "每週更新準備抓取失敗"
+    assert (error["weekly_run_id"], error["error"]) == (str(run_id), "_SetupBrokenError")
+    assert "secret-value-in-message" not in str(logs)
+
+
+def test_finished_or_skipped_run_does_not_open_the_setup(
+    weekly_db: TestDatabase, database: TrackingDatabase
+) -> None:
+    run_id = _start(database)
+    _run(
+        database,
+        FakePaperSource({ISSN_L: _cassette_book()}),
+        FakeObjectStore(),
+        run_id,
+        journals=_journals(IO),
+    )
+    before = _backdate(weekly_db, run_id)
+    opener = _Opener(error=AssertionError("已經抓完時不該開 adapter"))
+
+    finished = _open_and_run(database, opener, run_id)
+
+    assert finished.fetch_finished
+    assert (finished.pages, finished.journals) == (0, ())
+    # 已經抓完：只更新 updated_at，不讀設定、不建 adapter。
+    assert _run_row(weekly_db, run_id)[2] > before
+
+    _owner(weekly_db, "UPDATE weekly_run SET status = 'published' WHERE id = %s", run_id)
+    for weekly_run_id in (run_id, uuid.uuid7()):
+        assert _open_and_run(database, opener, weekly_run_id).skipped
+    assert opener.opened == 0
+
+
+def test_member_cannot_open_and_run_and_nothing_is_opened(database: TrackingDatabase) -> None:
+    opener = _Opener(error=AssertionError("不該開"))
+
+    with pytest.raises(PermissionDeniedError):
+        open_and_run_weekly_update(MEMBER, database, opener, uuid.uuid7())
+
+    assert database.opened == 0
+    assert opener.opened == 0
+
+
+# --- 失敗後更新 updated_at 也失敗（對抗式審查第 6 條） ------------------------------------------
+
+
+def _break_touch(monkeypatch: pytest.MonkeyPatch) -> None:
+    def broken(_connection: Connection, _weekly_run_id: uuid.UUID) -> None:
+        raise psycopg.OperationalError("connection to server at 10.9.8.7 failed: secret-host")
+
+    monkeypatch.setattr(weekly_update_module, "update_weekly_run_touched", broken)
+
+
+def _touch_warning(logs: list[MutableMapping[str, Any]], run_id: uuid.UUID) -> None:
+    [warning] = [log for log in logs if log["event"] == "每週更新失敗後更新 updated_at 也失敗"]
+    assert warning["log_level"] == "warning"
+    assert (warning["weekly_run_id"], warning["error"]) == (str(run_id), "OperationalError")
+    assert "secret-host" not in str(logs)
+
+
+def test_touch_failure_after_a_fetch_failure_keeps_the_original_error(
+    database: TrackingDatabase, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_id = _start(database)
+    source = FakePaperSource({ISSN_L: _cassette_book()})
+    source.fail_once(ISSN_L, 2)
+    _break_touch(monkeypatch)
+
+    with capture_logs() as logs, pytest.raises(JournalFetchError) as caught:
+        _run(database, source, FakeObjectStore(), run_id, journals=_journals(IO))
+
+    # 往上丟的是原本的抓取錯誤，不是更新 updated_at 時的 OperationalError。
+    assert caught.value.journal_key == "io"
+    _touch_warning(logs, run_id)
+    assert [log["event"] for log in logs if log["log_level"] == "error"] == [
+        "每週更新抓取失敗，進度已保存"
+    ]
+    # 第 1 頁的進度照樣保存（那個交易本身沒有被拿掉）。
+    assert _progress(database, run_id)["io"].pages == 1
+
+
+def test_touch_failure_after_a_setup_failure_keeps_the_original_error(
+    database: TrackingDatabase, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_id = _start(database)
+    _break_touch(monkeypatch)
+
+    with capture_logs() as logs, pytest.raises(_SetupBrokenError):
+        _open_and_run(database, _Opener(error=_SetupBrokenError("x")), run_id)
+
+    _touch_warning(logs, run_id)

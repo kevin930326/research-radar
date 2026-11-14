@@ -12,7 +12,12 @@ from typing import Any
 import pytest
 import stamina
 from botocore.awsrequest import AWSResponse
-from botocore.exceptions import ClientError, EndpointConnectionError
+from botocore.exceptions import (
+    ClientError,
+    EndpointConnectionError,
+    ProxyConnectionError,
+    SSLError,
+)
 from moto import mock_aws
 from structlog.testing import capture_logs
 
@@ -348,3 +353,44 @@ def test_satisfies_the_object_store_port(client: Any) -> None:
 
     store.put(KEY, b"x", content_type=RAW_CONTENT_TYPE)
     assert store.get(KEY) == b"x"
+
+
+# --- 其他 botocore 錯誤（對抗式審查第 2 條）--------------------------------------------------
+
+
+def _access(store: S3ObjectStore, operation: str) -> None:
+    if operation == "GetObject":
+        store.get(KEY)
+    else:
+        store.put(KEY, b"data", content_type=RAW_CONTENT_TYPE)
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        SSLError(endpoint_url=f"https://{HOST}", error="certificate verify failed"),
+        ProxyConnectionError(proxy_url=f"http://proxy.{HOST}:3128", error="refused"),
+    ],
+    ids=["SSLError", "ProxyConnectionError"],
+)
+@pytest.mark.parametrize("operation", ["PutObject", "GetObject"])
+def test_other_botocore_errors_raise_without_the_host_and_are_not_retried(
+    client: Any, failure: Exception, operation: str
+) -> None:
+    # 不在可重試清單裡的 botocore 錯誤：不重試，換成不含網址的例外，例外鏈也斷開。
+    store = S3ObjectStore(client, BUCKET, attempts=3)
+    store.put(KEY, b"data", content_type=RAW_CONTENT_TYPE)
+    seen = _fail_first(client, operation, [failure] * 5)
+
+    with capture_logs() as logs, pytest.raises(ObjectStoreUnavailableError) as caught:
+        _access(store, operation)
+
+    assert len(seen) == 1
+    assert HOST in str(failure)
+    assert caught.value.error_type == type(failure).__name__
+    assert type(failure).__name__ in str(caught.value)
+    assert "不重試" in str(caught.value)
+    assert HOST not in str(caught.value)
+    assert caught.value.__cause__ is None
+    assert caught.value.__suppress_context__
+    assert HOST not in str(logs)

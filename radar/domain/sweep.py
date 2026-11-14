@@ -64,8 +64,10 @@ class SweepEntry:
 
 # `upload_item` 等之後的狀態表由各自的 Story 加進來。
 SWEEP_REGISTRY: tuple[SweepEntry, ...] = (
-    # 每週更新（Story 1.8、ADR-0025）：`updated_at` 每抓完一頁、額度停下時都更新，活著的工作
-    # 不會被當成卡住；一頁最壞的時間（OpenAlex 5 次重試＋100 次物件存取的重試）在一小時內。
+    # 每週更新（Story 1.8、ADR-0025）：`updated_at` 每抓完一頁、額度停下、失敗時都更新，活著的
+    # 工作通常不會被當成卡住（一頁平常幾秒）。最壞時（物件存取每次都照 `Retry-After` 等到上限、
+    # 重試用完）一頁可能超過 2 小時，sweep 會多排一筆；但佇列鎖讓它等前一筆做完、接著看到已保存
+    # 的進度，不會兩個同時抓（ADR-0025 理由 4）。
     # 1.11 做 `failed` 之前，重試用完的那一筆每 2 小時被補排一次（額度停下的也是）。
     SweepEntry(
         "weekly_run", "status", "fetching", "updated_at", RUN_WEEKLY_UPDATE, timedelta(hours=2)

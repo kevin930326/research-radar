@@ -550,3 +550,6 @@
 - **每頁的回呼（`on_page`）**：抓取每存好一頁就呼叫一次的函式，每週更新用它在同一個交易裡寫暫存列與進度。
 - **`.env.radar`**：只給容器（api、worker）讀的秘密檔，名稱清單在 `.env.radar.example`；檔不存在時容器照樣起得來（`required: false`），真的檔不進 git（ADR-0024）。
 - **env_file**：compose 裡「啟動容器時把某個檔裡的 `名稱=值` 變成容器環境變數」的設定。
+- **`BotoCoreError`**：boto3（AWS 的 Python 套件）在「沒拿到對方回應」時丟的錯誤總類，例如連不上、SSL 憑證驗證失敗、代理伺服器連不上；和「對方回了錯誤」的 `ClientError` 不同，訊息常帶端點網址，所以物件儲存的 adapter 一律換成不帶網址的例外。
+- **開抓取的函式（`open_setup`）**：worker 交給每週更新 service 的函式，呼叫時才讀領域設定、建 OpenAlex 與物件儲存的 adapter；service 先確認這一筆真的要抓才呼叫，像確認有客人才開爐子。
+- **佇列的事件表（`procrastinate_events`）**：佇列自己記的每個工作「何時排入、開始、成功、失敗」；測試用它比較兩筆工作的執行時段有沒有重疊。

@@ -9,6 +9,9 @@
 - 交給 stamina 的例外換成不含網址的 `_RetryableStoreError`（訊息只有錯誤類別、錯誤碼、狀態碼），
   所以重試日誌不帶主機（D12(c)）。次數用完時：`ClientError` 照舊丟原本的例外（訊息本來就不含
   主機）；連線類的錯誤丟 `ObjectStoreUnavailableError`（訊息只有原本的錯誤類別）。
+- `ClientError` 以外的 botocore 錯誤（`BotoCoreError`，例如 `SSLError`、`ProxyConnectionError`），
+  不論可不可重試，最後一律換成不含網址的 `ObjectStoreUnavailableError`（`from None`）：這些錯誤的
+  訊息常帶端點網址（R2 的帳號 ID），工作失敗的 traceback 會印出來。
 - 等待與次數的預設值和 `Settings` 的 `object_store_*` 一致；正式程式由 `bootstrap.py` 從設定傳入。
 - 讀不到的鍵丟 `ObjectNotFoundError`。
 """
@@ -20,6 +23,7 @@ import boto3
 import stamina
 from botocore.config import Config
 from botocore.exceptions import (
+    BotoCoreError,
     ClientError,
     ConnectionClosedError,
     ConnectTimeoutError,
@@ -56,10 +60,17 @@ _TRANSIENT_ERRORS = (
 
 
 class ObjectStoreUnavailableError(Exception):
-    """連線類的錯誤（連不上、逾時、讀到一半斷掉）重試用完。訊息只有原本的錯誤類別，不含網址。"""
+    """連線類的錯誤（連不上、逾時、讀到一半斷掉）重試用完，或其他不重試的 botocore 錯誤
+    （例如 `SSLError`）。訊息只有原本的錯誤類別，不含網址。
+    """
 
-    def __init__(self, error_type: str) -> None:
-        super().__init__(f"物件儲存連線失敗（{error_type}），重試用完")
+    def __init__(self, error_type: str, *, retried: bool = True) -> None:
+        message = (
+            f"物件儲存連線失敗（{error_type}），重試用完"
+            if retried
+            else f"物件儲存存取失敗（{error_type}），不重試"
+        )
+        super().__init__(message)
         self.error_type = error_type
 
 
@@ -193,16 +204,19 @@ class S3ObjectStore:
 
         Raises:
             ClientError: 不重試的錯誤回應，或可重試的錯誤回應次數用完（原本的例外）。
-            ObjectStoreUnavailableError: 連線類的錯誤次數用完。
+            ObjectStoreUnavailableError: 連線類的錯誤次數用完，或其他不重試的 botocore 錯誤
+                （`BotoCoreError`）；都不帶原本的例外（訊息可能含端點網址）。
         """
 
         def once() -> T:
             try:
                 return operation()
             except Exception as exc:
-                if not is_retryable(exc):
-                    raise
-                raise _RetryableStoreError(exc) from None
+                if is_retryable(exc):
+                    raise _RetryableStoreError(exc) from None
+                if isinstance(exc, BotoCoreError):
+                    raise ObjectStoreUnavailableError(type(exc).__name__, retried=False) from None
+                raise
 
         try:
             for attempt in stamina.retry_context(

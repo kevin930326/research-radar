@@ -193,6 +193,16 @@ deferred:
   - `[low]` `[reject]` （Verification gap）0006 降版在有 weekly_update 暫存列時沒有測試 — 只在開發時降版會碰到、日常不會；修法是新增一個測試，不只是直接修正（審查者建議 defer，但不符合 defer 的條件）。
   - `[medium]` `[defer]` （Verification gap，其他）繞圈後續跑來回擺盪、計數一直變大 — 同 deferred 那一組（1.11）。
 
+### 2026-11-14 — 對抗式審查（替代 Codex）修正
+- 來源：Codex 額度用完，改由 Opus subagent 對抗式審查 3ba61ae（高 0、中 1、低 5），處理方式照 triage；6 條都修，驗收條件不變。
+  - `[medium]` `[patch]` 第 1 條：worker 在進 service 前就建 adapter，缺金鑰或設定壞掉時不更新 `updated_at` — 新增 `open_and_run_weekly_update`（`services/weekly_update.py`）：先讀狀態，確認是 `fetching` 且還沒抓完才呼叫 `open_setup` 讀領域設定、建 adapter；建不起來時記錯誤日誌（只帶錯誤類別）、更新 `updated_at` 再往上丟；已經抓完的不呼叫。`tasks.py` 的 `run_weekly_update_job` 改呼叫它（Boundaries 寫的「在 `run_weekly_update_job` 裡建 adapter、呼叫 `run_weekly_update`」改成經這個函式；`run_weekly_update` 簽名不變）。ADR-0025 決定 6 補上。測試：`tests/integration/test_weekly_update_task.py`（照正式的 `register_tasks` 與 bootstrap：缺 OpenAlex 金鑰、缺物件儲存設定、`journals.yaml` 壞掉；已抓完的不讀設定不建 adapter）、`test_weekly_update.py` 的 `test_open_and_run_*`、`test_setup_failure_*`、`test_finished_or_skipped_run_does_not_open_the_setup`、`test_member_cannot_open_and_run_and_nothing_is_opened`。
+  - `[low]` `[patch]` 第 2 條：`ClientError` 以外的 `BotoCoreError` 不論可不可重試，一律換成不帶網址的 `ObjectStoreUnavailableError`（`from None`；不重試的訊息寫「不重試」）。測試：`test_other_botocore_errors_raise_without_the_host_and_are_not_retried`（SSLError、ProxyConnectionError × put、get）。
+  - `[low]` `[patch]` 第 3 條：`radar/domain/sweep.py` 的註解改成和 ADR-0025 理由 4 一致（最壞可能超過 2 小時，佇列鎖讓多排的排隊）。Design Notes 同一句依規則不改，以 ADR-0025 理由 4 為準。
+  - `[low]` `[patch]` 第 4 條：ADR-0024 理由 1 改寫（env_file 會把 `.env.radar` 每一行都放進容器、範本只是建議清單、不要放 `RADAR_MIGRATION_DATABASE_URL`），`.env.radar.example` 檔頭加同樣的警告；「啟動時拒絕」的防呆不做，ADR 取捨寫明留給 Story 11.4。
+  - `[low]` `[patch]` 第 5 條：新測試 `test_weekly_update_runs_never_overlap_with_two_worker_slots`（`test_job_queue.py`，正式的 worker 子行程、並行 2、替身 source 每頁停 0.3 秒；第一筆執行中再排第二筆，用佇列的事件表確認第二筆在第一筆成功之後才開始）。拿掉 `RUN_WEEKLY_UPDATE` 的 `lock` 時這個測試會失敗（手動驗過）。
+  - `[low]` `[patch]` 第 6 條：失敗後更新 `updated_at` 改經 `_touch_after_failure`：這一步也失敗時只記一筆警告（只帶錯誤類別），往上丟原本的例外。測試：`test_touch_failure_after_a_fetch_failure_keeps_the_original_error`、`test_touch_failure_after_a_setup_failure_keeps_the_original_error`（改回直接 `_touch` 時兩個都會失敗，手動驗過）。
+- 驗證：ruff、ruff format、mypy、lint-imports（19 kept）全過；radar-ci 上 `uv run pytest -q` 1225 passed、1 skipped、2 xfailed（都是既有的）。既有測試沒有改（只在既有檔案尾端新增測試與 import）。
+
 ## Design Notes
 
 - **為什麼兩個工作**：cron 排入的工作沒有參數，sweep 補排卻只帶 `weekly_run_id`（架構測試要求登記的工作參數正好是 `<表>_id`）。照 AD-14「先寫狀態列並完成交易，再排入」：`weekly_update` 只負責寫狀態列與排入，`run_weekly_update` 負責推進（1.9 在同一個工作接著套用）。

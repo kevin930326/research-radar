@@ -44,7 +44,7 @@
 3. **每本期刊每頁一個交易的進度 `weekly_run_journal`。** 一列記一本期刊的 `next_cursor`、`finished_at`、頁數與計數（`fetched`、`fetched_by_year`、`staged`、`excluded`、`out_of_scope`、`unparseable`）。每頁：先存原始資料（AD-25 的順序）→ 在交易外解析、收錄過濾、排除規則 → 一個交易 upsert 暫存列並更新進度。送出的 cursor 是 NULL（第一頁）時計數歸零再加，所以從頭重抓會重算、續跑不會重複加。
 4. **`batch_id`＝`weekly_run.id`。** 暫存列 `kind='weekly_update'`；同一批裡同一篇重抓時，只在新的抓取時間 ≥ 舊的時覆寫（`upsert_staged_papers`）。`ingest_staging.kind` 的 CHECK 改成 `('reparse', 'weekly_update')`。
 5. **收錄過濾在暫存前。** 純函式 `collection_skip_reason` 依序檢查：類型不是 `article`／`review`、沒有 DOI、不是這本期刊、沒有出版年、出版年早於起始年。不在範圍內的只算進 `out_of_scope`，不進暫存表；出版年比今年晚照收。`Editorial Board` 這類 `paratext` 因此被類型擋下，不另加排除規則。
-6. **失敗與續跑。** `fetch_journal` 在 source 失敗或 cursor 繞圈時丟 `JournalFetchError`，帶 `resume_cursor`（要重抓的那一頁送出的 cursor）；物件儲存、資料庫與暫存時的錯誤不包裝，原樣往上丟。`run_weekly_update` 遇到任何例外都記錯誤日誌（只帶期刊代號與原因或錯誤類別，不帶 cursor 值）、更新 `updated_at` 後往上丟，交給工作層重試或 sweep 補排；因為那一頁的交易沒寫，下次從保存的 `next_cursor`（和 `resume_cursor` 是同一頁）接著抓。額度停下不算失敗：更新 `updated_at`、記警告、結束這次工作。
+6. **失敗與續跑。** `fetch_journal` 在 source 失敗或 cursor 繞圈時丟 `JournalFetchError`，帶 `resume_cursor`（要重抓的那一頁送出的 cursor）；物件儲存、資料庫與暫存時的錯誤不包裝，原樣往上丟。`run_weekly_update` 遇到任何例外都記錯誤日誌（只帶期刊代號與原因或錯誤類別，不帶 cursor 值）、更新 `updated_at` 後往上丟，交給工作層重試或 sweep 補排；因為那一頁的交易沒寫，下次從保存的 `next_cursor`（和 `resume_cursor` 是同一頁）接著抓。額度停下不算失敗：更新 `updated_at`、記警告、結束這次工作。worker 的 `run_weekly_update` 工作經 `open_and_run_weekly_update`：先讀狀態，確認是 `fetching` 且還沒抓完，才讀領域設定、建 OpenAlex 與物件儲存的 adapter；建不起來（缺金鑰、設定壞掉）時同樣記錯誤日誌、更新 `updated_at` 後往上丟，已經抓完的那一筆被補排時不讀設定、不建 adapter。失敗後更新 `updated_at` 這一步本身也失敗時（例如資料庫正連不上），只記一筆警告（只帶錯誤類別），往上丟的仍是原本的例外。
 7. **sweep 時限 2 小時。** `SWEEP_REGISTRY` 加 `weekly_run`／`status='fetching'`／`updated_at`／`run_weekly_update`／2 小時。
 
 ## 理由

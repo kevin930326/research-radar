@@ -7,8 +7,11 @@ AD-14、AD-19、AD-25、ADR-0004、ADR-0014、ADR-0025）。
   （`fetch_journal`），再解析＋收錄過濾＋排除規則，同一個交易把結果 upsert 進
   `ingest_staging`（`batch_id`＝`weekly_run.id`）並記下下一頁的 cursor 與篇數。
   中途失敗時進度已保存，下次從那一頁接著抓。
-- `weekly_run.updated_at` 每頁、額度停下、失敗、已經抓完又被排入時都更新，sweep 照 2 小時的時限
-  補排（ADR-0025）。
+- `open_and_run_weekly_update`（worker 用）：先讀狀態，確認是 `fetching` 且還沒抓完，才呼叫
+  傳入的函式讀領域設定、建 OpenAlex 與物件儲存的 adapter，再照 `run_weekly_update` 抓；
+  建不起來（缺金鑰、設定壞掉）時也更新 `updated_at` 再往上丟。
+- `weekly_run.updated_at` 每頁、額度停下、失敗（含建 adapter 失敗）、已經抓完又被排入時都更新，
+  sweep 照 2 小時的時限補排（ADR-0025）。
 
 套用、快照、`weekly-update` 心跳屬 Story 1.9；`failed` 屬 1.11。這裡不寫 `paper` 等論文表，
 也不在開著的交易裡呼叫 source 或物件儲存。
@@ -17,6 +20,7 @@ AD-14、AD-19、AD-25、ADR-0004、ADR-0014、ADR-0025）。
 import uuid
 from collections import Counter
 from collections.abc import Callable
+from contextlib import AbstractContextManager, ExitStack
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from functools import partial
@@ -33,7 +37,7 @@ from radar.domain.parsers.openalex import parse_openalex_work
 from radar.domain.permissions import Action, require
 from radar.domain.staging import StagingItem, StagingKind
 from radar.domain.viewer import SystemViewer, Viewer
-from radar.domain.weekly_run import PageCounts, WeeklyRunStatus
+from radar.domain.weekly_run import JournalProgress, PageCounts, WeeklyRunStatus
 from radar.ports import ObjectStore, PaperSource
 from radar.repo.db import Database
 from radar.repo.ingest_staging import upsert_staged_papers
@@ -87,6 +91,21 @@ class WeeklyFetchResult:
     journals: tuple[str, ...] = ()
     pages: int = 0
     counts: PageCounts = field(default_factory=PageCounts)
+
+
+@dataclass(frozen=True)
+class WeeklyFetchSetup:
+    """抓取要用的 adapter 與設定（`open_and_run_weekly_update` 確認要抓之後才開）。"""
+
+    source: PaperSource
+    store: ObjectStore
+    journals: JournalsConfig
+    exclusion_rules: ExclusionRulesConfig
+    quota: OpenAlexQuota
+
+
+# 開抓取要用的東西：讀領域設定、建 adapter；離開 `with` 時關掉。缺金鑰、設定壞掉時丟錯。
+type OpenFetchSetup = Callable[[], AbstractContextManager[WeeklyFetchSetup]]
 
 
 def weekly_update(actor: Viewer, database: Database, enqueue: Enqueue) -> WeeklyUpdateStart:
@@ -153,7 +172,7 @@ def run_weekly_update(
        （不算失敗、不往下抓）。
     4. 全部期刊都抓完：短交易寫 `fetch_finished_at`。
     5. 抓取途中任何例外：記錯誤日誌（只帶期刊代號與原因或錯誤類別）、短交易更新
-       `updated_at`，再原樣往上丟。
+       `updated_at`（這一步也失敗時只記一筆警告），再原樣往上丟原本的例外。
 
     Raises:
         PermissionDeniedError: `actor` 不是系統工作（不碰資料庫與 source）。
@@ -162,6 +181,84 @@ def run_weekly_update(
         Exception: 物件儲存、資料庫或解析暫存時的其他錯誤，同樣原樣往上丟，續跑方式一樣。
     """
     require(actor, Action.INGEST_PAPERS, None)
+    done, progress = _read_run(database, weekly_run_id)
+    if done is not None:
+        return done
+    return _fetch_journals(
+        actor,
+        database,
+        source,
+        store,
+        weekly_run_id,
+        progress,
+        journals=journals,
+        exclusion_rules=exclusion_rules,
+        quota=quota,
+        parse=parse,
+        clock=clock,
+    )
+
+
+def open_and_run_weekly_update(
+    actor: Viewer,
+    database: Database,
+    open_setup: OpenFetchSetup,
+    weekly_run_id: uuid.UUID,
+    *,
+    parse: Parse = parse_openalex_work,
+    clock: Callable[[], datetime] = _utc_now,
+) -> WeeklyFetchResult:
+    """先讀狀態，確認要抓才 `open_setup()` 開 adapter 與設定，再照 `run_weekly_update` 抓。
+
+    不存在、不是 `fetching`、已經抓完時，和 `run_weekly_update` 一樣（略過；或只更新
+    `updated_at`），而且不呼叫 `open_setup`：sweep 補排已經抓完的那一筆時不讀設定、不建 adapter。
+    `open_setup` 丟錯（缺 OpenAlex 金鑰、物件儲存設定不齊、領域設定壞掉）時：記錯誤日誌（只帶
+    錯誤類別）、短交易更新 `updated_at`，再原樣往上丟；sweep 照 2 小時的時限補排，不會每 15 分鐘
+    就補排一次。
+
+    Raises:
+        PermissionDeniedError: `actor` 不是系統工作（不碰資料庫、不呼叫 `open_setup`）。
+        Exception: `open_setup` 的錯誤，以及 `run_weekly_update` 會丟的錯誤，原樣往上丟。
+    """
+    require(actor, Action.INGEST_PAPERS, None)
+    done, progress = _read_run(database, weekly_run_id)
+    if done is not None:
+        return done
+    with ExitStack() as stack:
+        try:
+            setup = stack.enter_context(open_setup())
+        except Exception as exc:
+            # 只帶錯誤類別：例外訊息可能帶設定值或網址。
+            log.error(
+                "每週更新準備抓取失敗",
+                weekly_run_id=str(weekly_run_id),
+                error=type(exc).__name__,
+            )
+            _touch_after_failure(database, weekly_run_id)
+            raise
+        return _fetch_journals(
+            actor,
+            database,
+            setup.source,
+            setup.store,
+            weekly_run_id,
+            progress,
+            journals=setup.journals,
+            exclusion_rules=setup.exclusion_rules,
+            quota=setup.quota,
+            parse=parse,
+            clock=clock,
+        )
+
+
+def _read_run(
+    database: Database, weekly_run_id: uuid.UUID
+) -> tuple[WeeklyFetchResult | None, dict[str, JournalProgress]]:
+    """短交易讀 `weekly_run` 與每本期刊的進度。
+
+    回（結果, 進度）：不存在或不是 `fetching` 時結果是 `skipped`；已經抓完時先更新 `updated_at`，
+    結果是 `fetch_finished`；要接著抓時結果是 None。
+    """
     viewer = SystemViewer()
     with database.transaction() as connection:
         run = get_weekly_run(viewer, connection, weekly_run_id)
@@ -172,13 +269,30 @@ def run_weekly_update(
             weekly_run_id=str(weekly_run_id),
             status=None if run is None else run.status.value,
         )
-        return WeeklyFetchResult(weekly_run_id=weekly_run_id, skipped=True)
+        return WeeklyFetchResult(weekly_run_id=weekly_run_id, skipped=True), {}
     if run.fetch_finished_at is not None:
         # 更新 updated_at：sweep 2 小時後才再補排，不是每 15 分鐘（1.9 之前抓完仍是 fetching）。
         _touch(database, weekly_run_id)
         log.info("每週更新已經抓完，不再抓", weekly_run_id=str(weekly_run_id))
-        return WeeklyFetchResult(weekly_run_id=weekly_run_id, fetch_finished=True)
+        return WeeklyFetchResult(weekly_run_id=weekly_run_id, fetch_finished=True), {}
+    return None, progress
 
+
+def _fetch_journals(
+    actor: Viewer,
+    database: Database,
+    source: PaperSource,
+    store: ObjectStore,
+    weekly_run_id: uuid.UUID,
+    progress: dict[str, JournalProgress],
+    *,
+    journals: JournalsConfig,
+    exclusion_rules: ExclusionRulesConfig,
+    quota: OpenAlexQuota,
+    parse: Parse,
+    clock: Callable[[], datetime],
+) -> WeeklyFetchResult:
+    """`run_weekly_update` 的第 2～5 步：依設定的順序逐本抓還沒抓完的期刊。"""
     tally = _Tally()
     fetched_journals: list[str] = []
     for journal in journals.journals:
@@ -226,7 +340,7 @@ def run_weekly_update(
                     error=type(exc).__name__,
                 )
             # 失敗也更新 updated_at：sweep 照 2 小時的時限補排，不會每 15 分鐘就補排一次。
-            _touch(database, weekly_run_id)
+            _touch_after_failure(database, weekly_run_id)
             raise
         if result.stopped_for_quota:
             _touch(database, weekly_run_id)
@@ -267,6 +381,20 @@ def _touch(database: Database, weekly_run_id: uuid.UUID) -> None:
     """短交易更新 `weekly_run.updated_at`（sweep 判斷卡住用的時間欄）。"""
     with database.transaction() as connection:
         update_weekly_run_touched(connection, weekly_run_id)
+
+
+def _touch_after_failure(database: Database, weekly_run_id: uuid.UUID) -> None:
+    """失敗之後更新 `updated_at`；這一步也失敗（例如資料庫正連不上）時只記一筆警告（只帶錯誤
+    類別），不丟錯：呼叫端接著丟的是原本的例外，不會被這裡的錯誤蓋掉。
+    """
+    try:
+        _touch(database, weekly_run_id)
+    except Exception as exc:
+        log.warning(
+            "每週更新失敗後更新 updated_at 也失敗",
+            weekly_run_id=str(weekly_run_id),
+            error=type(exc).__name__,
+        )
 
 
 @dataclass

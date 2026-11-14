@@ -5,6 +5,8 @@
 """
 
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 
 import procrastinate
 
@@ -16,7 +18,11 @@ from radar.domain.sweep import SWEEP_REGISTRY
 from radar.domain.viewer import SystemViewer
 from radar.entrypoints.bootstrap import WorkerParts, build_object_store, build_paper_source
 from radar.services.sweep import sweep
-from radar.services.weekly_update import run_weekly_update, weekly_update
+from radar.services.weekly_update import (
+    WeeklyFetchSetup,
+    open_and_run_weekly_update,
+    weekly_update,
+)
 
 
 def register_tasks(app: procrastinate.App, parts: WorkerParts, settings: Settings) -> None:
@@ -37,16 +43,20 @@ def register_tasks(app: procrastinate.App, parts: WorkerParts, settings: Setting
         weekly_update(SystemViewer(), parts.database, parts.enqueue)
 
     def run_weekly_update_job(weekly_run_id: uuid.UUID) -> None:
+        # service 先讀狀態，確認要抓才呼叫 open_setup：已經抓完、不是 fetching 時不讀設定、不建
+        # adapter；建不起來（缺金鑰、設定壞掉）時 service 也會更新 updated_at（ADR-0025）。
+        open_and_run_weekly_update(SystemViewer(), parts.database, open_setup, weekly_run_id)
+
+    @contextmanager
+    def open_setup() -> Iterator[WeeklyFetchSetup]:
         # 執行時才讀領域設定、建 OpenAlex 與物件儲存的 adapter：改 config/journals.yaml 不用重開
         # worker，沒有抓取工作時也不佔記憶體。
         domain_config = load_domain_config()
+        store = build_object_store(settings)
         with build_paper_source(settings, domain_config.openalex) as source:
-            run_weekly_update(
-                SystemViewer(),
-                parts.database,
-                source,
-                build_object_store(settings),
-                weekly_run_id,
+            yield WeeklyFetchSetup(
+                source=source,
+                store=store,
                 journals=domain_config.journals,
                 exclusion_rules=domain_config.exclusion_rules,
                 quota=domain_config.openalex.quota,
