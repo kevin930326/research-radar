@@ -292,3 +292,32 @@ def test_smoke_migrates_before_waiting_for_ready() -> None:
     # 擁有者的連線字串只交給執行 radar migrate 的那個一次性容器。
     assert "-e RADAR_MIGRATION_DATABASE_URL=" in text
     assert "MIGRATION_DATABASE_URL=postgresql://radar_owner@db:5432/radar" in text
+
+
+# ---------------------------------------------------------------------------
+# Story 1.4：worker 的容器層冒煙
+# ---------------------------------------------------------------------------
+
+
+def test_smoke_runs_worker_enqueue_and_graceful_stop() -> None:
+    text = SMOKE_PATH.read_text(encoding="utf-8")
+
+    assert re.search(r"^compose up .*--wait db api worker$", text, re.MULTILINE)
+    migrate = text.index("api radar migrate")
+    enqueue = text.index("compose exec -T worker radar enqueue sweep ||")
+    waited = re.search(r"^wait_for_sweep$", text, re.MULTILINE)
+    stop = text.index("compose stop worker")
+    assert waited is not None
+    assert migrate < enqueue < waited.start() < stop
+    # 等到工作在佇列裡變成 succeeded；failed 直接失敗。
+    start = text.index("wait_for_sweep() {")
+    definition = text[start : text.index("\n}\n", start)]
+    assert '[[ "${status}" != succeeded ]] || return 0' in definition
+    assert '[[ "${status}" != failed ]] || fail' in definition
+    # 記憶體上限、退出碼、「正常關機」、失敗時印日誌、收尾刪映像。
+    assert "WORKER_MEMORY_LIMIT_BYTES=$((400 * 1024 * 1024))" in text
+    after_stop = text[stop:]
+    assert '[[ "${exit_code}" == 0 ]] || fail "worker' in after_stop
+    assert '[[ "${worker_logs}" == *正常關機* ]] || fail' in after_stop
+    assert "compose logs --no-color worker >&2" in text
+    assert 'docker image rm "${COMPOSE_IMAGE}" "${WORKER_IMAGE}"' in text

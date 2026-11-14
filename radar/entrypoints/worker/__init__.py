@@ -1,1 +1,1 @@
-"""背景工作入口。真正的佇列（Procrastinate）在 Story 1.4 接上。"""
+"""背景工作入口：Procrastinate 的 worker（ADR-0004、ADR-0019）。"""

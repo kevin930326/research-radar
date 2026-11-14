@@ -6,10 +6,13 @@ from radar.config import (
     ConfigError,
     database_pool_size,
     env_name,
+    heartbeat_urls,
     load_migration_settings,
     load_settings,
+    worker_connection_split,
 )
-from radar.domain.settings import MigrationSettings, Settings
+from radar.domain.jobs import scheduled_jobs
+from radar.domain.settings import MigrationSettings, Settings, heartbeat_url_field
 
 DB_URL = "postgresql://radar:s3cret-PASSWORD@db:5432/radar"
 
@@ -222,3 +225,144 @@ def test_malformed_migration_url_rejected_without_echo(url: str) -> None:
 
 def test_app_settings_do_not_carry_migration_url() -> None:
     assert "migration_database_url" not in Settings.model_fields
+
+
+# ---------------------------------------------------------------------------
+# worker 的連線分配與心跳網址（Story 1.4、ADR-0019）
+# ---------------------------------------------------------------------------
+
+
+def test_worker_defaults() -> None:
+    settings = load_settings({"DATABASE_URL": DB_URL})
+
+    assert settings.worker_concurrency == 2
+    assert settings.worker_restart_interval == 10
+    assert settings.worker_stalled_seconds == 60
+    assert settings.job_max_retries == 3
+    assert settings.job_retry_wait == 30
+    assert settings.heartbeat_url_sweep is None
+    assert settings.heartbeat_timeout == 5
+    assert settings.heartbeat_attempts == 3
+
+
+def test_heartbeat_retry_wait_settings() -> None:
+    defaults = load_settings({"DATABASE_URL": DB_URL})
+    custom = load_settings(
+        {
+            "DATABASE_URL": DB_URL,
+            "RADAR_HEARTBEAT_RETRY_WAIT_INITIAL": "0.5",
+            "RADAR_HEARTBEAT_RETRY_WAIT_MAX": "20",
+            "RADAR_HEARTBEAT_RETRY_AFTER_MAX": "120",
+        }
+    )
+
+    assert (
+        defaults.heartbeat_retry_wait_initial,
+        defaults.heartbeat_retry_wait_max,
+        defaults.heartbeat_retry_after_max,
+    ) == (1.0, 10.0, 30)
+    assert (
+        custom.heartbeat_retry_wait_initial,
+        custom.heartbeat_retry_wait_max,
+        custom.heartbeat_retry_after_max,
+    ) == (0.5, 20.0, 120)
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("RADAR_HEARTBEAT_RETRY_WAIT_INITIAL", "0"),
+        ("RADAR_HEARTBEAT_RETRY_WAIT_MAX", "301"),
+        ("RADAR_HEARTBEAT_RETRY_AFTER_MAX", "-1"),
+        ("RADAR_HEARTBEAT_RETRY_AFTER_MAX", "601"),
+    ],
+)
+def test_heartbeat_retry_wait_out_of_range_is_config_error(name: str, value: str) -> None:
+    with pytest.raises(ConfigError) as caught:
+        load_settings({"DATABASE_URL": DB_URL, name: value})
+
+    assert name in str(caught.value)
+
+
+def test_worker_connection_split_default_is_2_1_3() -> None:
+    split = worker_connection_split(load_settings({"DATABASE_URL": DB_URL}))
+
+    assert (split.queue_pool, split.listen, split.app_pool) == (2, 1, 3)
+    assert split.total == DATABASE_POOL_BUDGET["worker"]
+
+
+@pytest.mark.parametrize(
+    ("budget", "expected"),
+    [("3", (1, 1, 1)), ("4", (1, 1, 2)), ("5", (2, 1, 2)), ("10", (2, 1, 7))],
+)
+def test_worker_connection_split_override(budget: str, expected: tuple[int, int, int]) -> None:
+    settings = load_settings({"DATABASE_URL": DB_URL, "RADAR_WORKER_DATABASE_POOL_SIZE": budget})
+
+    split = worker_connection_split(settings)
+
+    assert (split.queue_pool, split.listen, split.app_pool) == expected
+    assert split.total == int(budget)
+
+
+@pytest.mark.parametrize("budget", ["1", "2"])
+def test_worker_connection_budget_below_three_is_config_error(budget: str) -> None:
+    settings = load_settings({"DATABASE_URL": DB_URL, "RADAR_WORKER_DATABASE_POOL_SIZE": budget})
+
+    with pytest.raises(ConfigError) as caught:
+        worker_connection_split(settings)
+
+    assert "RADAR_WORKER_DATABASE_POOL_SIZE" in str(caught.value)
+
+
+HEARTBEAT_URL = "https://hc-ping.example/s3cret-TOKEN"
+
+
+def test_heartbeat_urls_by_schedule() -> None:
+    settings = load_settings({"DATABASE_URL": DB_URL, "RADAR_HEARTBEAT_URL_SWEEP": HEARTBEAT_URL})
+
+    assert heartbeat_urls(settings) == {"sweep": HEARTBEAT_URL}
+    assert "s3cret-TOKEN" not in repr(settings)
+
+
+def test_heartbeat_urls_skip_unset_schedules() -> None:
+    assert heartbeat_urls(load_settings({"DATABASE_URL": DB_URL})) == {}
+
+
+def test_every_schedule_has_a_heartbeat_setting() -> None:
+    for job in scheduled_jobs():
+        assert heartbeat_url_field(job.check) in Settings.model_fields, job.check
+    assert heartbeat_url_field("weekly-update") == "heartbeat_url_weekly_update"
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "ftp://hc-ping.example/s3cret-TOKEN",
+        "hc-ping.example/s3cret-TOKEN",
+        "https:///s3cret-TOKEN",
+        "https://s3cret-TOKEN@ho℀st/x",
+    ],
+)
+def test_bad_heartbeat_url_rejected_without_echo(url: str) -> None:
+    with pytest.raises(ConfigError) as caught:
+        load_settings({"DATABASE_URL": DB_URL, "RADAR_HEARTBEAT_URL_SWEEP": url})
+
+    assert "RADAR_HEARTBEAT_URL_SWEEP" in str(caught.value)
+    assert "s3cret-TOKEN" not in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    ("variable", "value"),
+    [
+        ("RADAR_WORKER_CONCURRENCY", "0"),
+        ("RADAR_WORKER_STALLED_SECONDS", "10"),
+        ("RADAR_WORKER_RESTART_INTERVAL", "0"),
+        ("RADAR_JOB_MAX_RETRIES", "-1"),
+        ("RADAR_HEARTBEAT_ATTEMPTS", "0"),
+    ],
+)
+def test_worker_settings_ranges(variable: str, value: str) -> None:
+    with pytest.raises(ConfigError) as caught:
+        load_settings({"DATABASE_URL": DB_URL, variable: value})
+
+    assert variable in str(caught.value)

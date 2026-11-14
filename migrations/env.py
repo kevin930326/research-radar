@@ -10,6 +10,7 @@
 from alembic import context
 from sqlalchemy import Connection
 
+from radar.repo.migrations import include_name
 from radar.repo.models import Base
 
 config = context.config
@@ -20,12 +21,14 @@ def run_with_connection(connection: Connection) -> None:
     """全部遷移在同一個交易裡：任何一步失敗就整個退回，連 alembic_version 都不留。
 
     `compare_server_default=True`：`alembic check` 也比對欄位預設值（Alembic 預設不比）。
+    `include_name`：佇列（Procrastinate）的表不比對，它們不在模型裡（ADR-0019）。
     """
     context.configure(
         connection=connection,
         target_metadata=target_metadata,
         compare_type=True,
         compare_server_default=True,
+        include_name=include_name,
     )
     with context.begin_transaction():
         context.run_migrations()
