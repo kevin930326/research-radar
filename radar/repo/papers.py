@@ -1,7 +1,12 @@
-"""`paper` 與 `external_id` 兩張表：表的定義與唯一的寫入者（AD-4、AD-6、ADR-0014、ADR-0020）。
+"""`paper`、`external_id`、`paper_abstract`、`paper_keyword` 四張表：表的定義與唯一的寫入者
+（AD-4、AD-6、AD-7、AD-31、ADR-0014、ADR-0016、ADR-0020、ADR-0022）。
 
 - 論文只能經 `upsert_by_external_id` 建立（只收 `ParsedPaper`）；沒有識別碼的手填書目之後經
   `create_manual`（還沒有呼叫端，不建）。
+- 摘要和論文欄位一起在 `upsert_by_external_id` 裡寫（同一個「舊的不蓋掉新的」保護）；同一篇
+  最多一筆 `is_current`，由這裡依 `ABSTRACT_SOURCE_PRIORITY` 決定。
+- 關鍵字由 `update_paper_keywords` 整批覆寫（每週套用與 `reparse` 在不是 STALE 時呼叫）。
+  這個模組只寫 `paper_keyword`、不讀它（讀的查詢只放之後的 `repo/keyword_stats.py`，AD-31）。
 - `lab_visible` 只由這個模組寫：追蹤範圍內的論文、引用擴展（之後加上傳批次勾了分享）設為真，
   設為真之後不改回去。
 - 寫入一律用 `text()` SQL（架構測試掃字串裡的 `INSERT INTO` 等，確認一張表一個寫入者）。
@@ -9,7 +14,7 @@
 """
 
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from datetime import datetime
 
 import structlog
@@ -20,6 +25,7 @@ from sqlalchemy import (
     Connection,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     Table,
     Text,
@@ -27,10 +33,15 @@ from sqlalchemy import (
     Uuid,
     text,
 )
+from sqlalchemy.dialects.postgresql import ARRAY
 
 from radar.domain.identifiers import ExternalId, IdentifierScheme
 from radar.domain.papers import (
+    ABSTRACT_SOURCE_PRIORITY,
+    AbstractSource,
+    KeywordSource,
     PaperOrigin,
+    ParsedKeyword,
     ParsedPaper,
     StoredPaper,
     UpsertOutcome,
@@ -45,7 +56,9 @@ from radar.repo.visibility import visible_papers
 
 log = structlog.get_logger(__name__)
 
-# --- 表的定義（`alembic check` 拿來和資料庫比對；遷移 0003 建表） ---------------------------
+# --- 表的定義（`alembic check` 拿來和資料庫比對；遷移 0003 建表、0005 加欄位與兩張表） -------
+
+_EMPTY_TEXT_ARRAY = text("'{}'::text[]")
 
 paper_table = Table(
     "paper",
@@ -62,6 +75,18 @@ paper_table = Table(
     Column("openalex_fetched_at", DateTime(timezone=True)),
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
     Column("updated_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
+    # 以下由遷移 0005 加（Story 1.7）。
+    Column("work_type", Text),
+    Column("is_retracted", Boolean, nullable=False, server_default=text("false")),
+    Column("volume", Text),
+    Column("issue", Text),
+    Column("first_page", Text),
+    Column("last_page", Text),
+    Column("authors", ARRAY(Text), nullable=False, server_default=_EMPTY_TEXT_ARRAY),
+    Column("referenced_works", ARRAY(Text), nullable=False, server_default=_EMPTY_TEXT_ARRAY),
+    Column("cited_by_count", Integer),
+    # 目前這份資料的指紋（AD-25，`domain/fingerprints.py`）。
+    Column("source_hash", Text),
     CheckConstraint(
         "origin IN ('tracked', 'expansion', 'import', 'manual')",
         name="origin",
@@ -71,6 +96,12 @@ paper_table = Table(
         name="excluded_reason_not_empty",
     ),
     CheckConstraint("NOT in_scope OR lab_visible", name="in_scope_implies_lab_visible"),
+    CheckConstraint(
+        "cited_by_count IS NULL OR cited_by_count >= 0", name="cited_by_count_not_negative"
+    ),
+    CheckConstraint(
+        "source_hash IS NULL OR source_hash ~ '^[0-9a-f]{64}$'", name="source_hash_format"
+    ),
 )
 
 external_id_table = Table(
@@ -86,13 +117,64 @@ external_id_table = Table(
     CheckConstraint("value_norm <> ''", name="value_norm_not_empty"),
 )
 
+# 一篇論文可以有多個來源的摘要，最多一筆 `is_current`（部分唯一索引保證）。外鍵的索引由
+# 唯一約束（開頭是 paper_id）提供。
+paper_abstract_table = Table(
+    "paper_abstract",
+    Base.metadata,
+    Column("id", Uuid, primary_key=True, server_default=text("uuidv7()")),
+    Column("paper_id", Uuid, ForeignKey("paper.id"), nullable=False),
+    Column("source", Text, nullable=False),
+    Column("content", Text, nullable=False),
+    Column("is_current", Boolean, nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
+    UniqueConstraint("paper_id", "source"),
+    Index(
+        "uq_paper_abstract_current",
+        "paper_id",
+        unique=True,
+        postgresql_where=text("is_current"),
+    ),
+    CheckConstraint(
+        "source IN ('openalex', 'semantic_scholar', 'uploaded_pdf')",
+        name="source",
+    ),
+    CheckConstraint("content <> ''", name="content_not_empty"),
+    CheckConstraint(
+        "NOT (is_current AND source = 'uploaded_pdf')", name="uploaded_pdf_not_current"
+    ),
+)
+
+# （論文, 來源, key）唯一；來源只有 `KeywordSource` 那一份清單（測試比對 CHECK 的值）。
+paper_keyword_table = Table(
+    "paper_keyword",
+    Base.metadata,
+    Column("id", Uuid, primary_key=True, server_default=text("uuidv7()")),
+    Column("paper_id", Uuid, ForeignKey("paper.id"), nullable=False),
+    Column("source", Text, nullable=False),
+    Column("key", Text, nullable=False),
+    Column("display_name", Text, nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
+    UniqueConstraint("paper_id", "source", "key"),
+    CheckConstraint("source IN ('openalex')", name="source"),
+    CheckConstraint(
+        "key ~ '^[a-z0-9]+(?:-[a-z0-9]+)*$' AND char_length(key) <= 200", name="key_format"
+    ),
+    CheckConstraint("display_name <> ''", name="display_name_not_empty"),
+)
+
 # `upsert_by_external_id` 收的 origin；`manual` 只能經之後的 `create_manual`。
 UPSERT_ORIGINS = frozenset({PaperOrigin.TRACKED, PaperOrigin.EXPANSION, PaperOrigin.IMPORT})
 
 _PAPER_COLUMNS = (
     "id, origin, title, publication_year, journal_issn_l, in_scope, excluded_reason,"
-    " openalex_fetched_at, created_at, updated_at"
+    " openalex_fetched_at, created_at, updated_at, authors, volume, issue, first_page,"
+    " last_page, work_type, is_retracted, referenced_works, cited_by_count, source_hash"
 )
+
+# 每個資料來源寫的是哪一種摘要來源（沒有摘要時刪掉的就是這一列）。
+_ABSTRACT_SOURCE_OF = {"openalex": AbstractSource.OPENALEX}
 
 
 # --- 讀取 ---------------------------------------------------------------------------------
@@ -122,6 +204,43 @@ def get_paper(viewer: Viewer, connection: Connection, paper_id: uuid.UUID) -> St
         openalex_fetched_at=row["openalex_fetched_at"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
+        authors=tuple(row["authors"]),
+        volume=row["volume"],
+        issue=row["issue"],
+        first_page=row["first_page"],
+        last_page=row["last_page"],
+        work_type=row["work_type"],
+        is_retracted=row["is_retracted"],
+        referenced_works=tuple(row["referenced_works"]),
+        cited_by_count=row["cited_by_count"],
+        source_hash=row["source_hash"],
+    )
+
+
+def find_known_external_ids(
+    viewer: Viewer, connection: Connection, ids: Iterable[ExternalId]
+) -> frozenset[ExternalId]:
+    """`ids` 裡已經掛在 `viewer` 看得到的論文上的那些識別碼。"""
+    visible = visible_papers(viewer, alias="paper")
+    wanted = sorted(set(ids), key=lambda external_id: (external_id.scheme, external_id.value_norm))
+    if not wanted:
+        return frozenset()
+    rows = connection.execute(
+        text(
+            "SELECT external_id.scheme, external_id.value_norm FROM external_id"
+            " JOIN paper ON paper.id = external_id.paper_id"
+            " JOIN unnest(CAST(:schemes AS text[]), CAST(:values AS text[]))"
+            " AS wanted(scheme, value_norm)"
+            " ON wanted.scheme = external_id.scheme AND wanted.value_norm = external_id.value_norm"
+            f" WHERE {visible}"
+        ),
+        {
+            "schemes": [external_id.scheme.value for external_id in wanted],
+            "values": [external_id.value_norm for external_id in wanted],
+        },
+    )
+    return frozenset(
+        ExternalId(IdentifierScheme(scheme), value_norm) for scheme, value_norm in rows
     )
 
 
@@ -157,6 +276,10 @@ def upsert_by_external_id(
     `in_scope` 由 `is_in_scope` 算；`lab_visible`＝原本的值 OR `in_scope` OR `origin` 是
     `expansion`；`origin` 只在新增時寫；`excluded_reason` 由呼叫端明確決定、整欄覆寫。
 
+    CREATED／UPDATED 時一併寫摘要（`_write_abstract`）：有摘要就「有就更新、沒有才新增」這個
+    來源的那一列，沒有摘要就刪掉這個來源的那一列，接著重新決定這篇的 `is_current`。
+    STALE 時論文、識別碼、摘要都不寫。關鍵字不在這裡寫（`update_paper_keywords`）。
+
     交易隔離層級要是 READ COMMITTED（PostgreSQL 預設）：第 3 步「退回再重查」靠每個語句重新拿
     快照才讀得到並行交易剛 commit 的論文；改成 REPEATABLE READ／SERIALIZABLE 會失效。
 
@@ -185,6 +308,16 @@ def upsert_by_external_id(
         "excluded_reason": excluded_reason,
         "shares_with_lab": in_scope or origin is PaperOrigin.EXPANSION,
         "fetched_at": paper.fetched_at,
+        "work_type": paper.work_type,
+        "is_retracted": paper.is_retracted,
+        "volume": paper.volume,
+        "issue": paper.issue,
+        "first_page": paper.first_page,
+        "last_page": paper.last_page,
+        "authors": list(paper.authors),
+        "referenced_works": list(paper.referenced_works),
+        "cited_by_count": paper.cited_by_count,
+        "source_hash": paper.source_hash,
     }
 
     owners = _find_owners(connection, ids)
@@ -192,13 +325,17 @@ def upsert_by_external_id(
     if target is None:
         created = _insert_new(connection, ids, values, origin)
         if created is not None:
+            _write_abstract(connection, created.paper_id, paper)
             return created
         # 並行的另一個交易剛建好同一篇（已經 commit，所以現在讀得到）。
         owners = _find_owners(connection, ids)
         target = _first_owner(ids, owners)
         if target is None:
             raise RuntimeError("識別碼認領失敗，卻找不到擁有它的論文")
-    return _update_existing(connection, target, ids, owners, values, paper.fetched_at)
+    result = _update_existing(connection, target, ids, owners, values, paper.fetched_at)
+    if result.outcome is UpsertOutcome.UPDATED:
+        _write_abstract(connection, result.paper_id, paper)
+    return result
 
 
 def _first_owner(
@@ -275,9 +412,14 @@ def _insert_new(
             paper_id: uuid.UUID = connection.execute(
                 text(
                     "INSERT INTO paper (origin, title, publication_year, journal_issn_l,"
-                    " in_scope, excluded_reason, lab_visible, openalex_fetched_at)"
+                    " in_scope, excluded_reason, lab_visible, openalex_fetched_at,"
+                    " work_type, is_retracted, volume, issue, first_page, last_page,"
+                    " authors, referenced_works, cited_by_count, source_hash)"
                     " VALUES (:origin, :title, :publication_year, :journal_issn_l, :in_scope,"
-                    " :excluded_reason, :shares_with_lab, :fetched_at)"
+                    " :excluded_reason, :shares_with_lab, :fetched_at,"
+                    " :work_type, :is_retracted, :volume, :issue, :first_page, :last_page,"
+                    " CAST(:authors AS text[]), CAST(:referenced_works AS text[]),"
+                    " :cited_by_count, :source_hash)"
                     " RETURNING id"
                 ),
                 {**values, "origin": origin.value},
@@ -318,6 +460,16 @@ def _update_existing(
             " excluded_reason = :excluded_reason,"
             " lab_visible = lab_visible OR :shares_with_lab,"
             " openalex_fetched_at = :fetched_at,"
+            " work_type = :work_type,"
+            " is_retracted = :is_retracted,"
+            " volume = :volume,"
+            " issue = :issue,"
+            " first_page = :first_page,"
+            " last_page = :last_page,"
+            " authors = CAST(:authors AS text[]),"
+            " referenced_works = CAST(:referenced_works AS text[]),"
+            " cited_by_count = :cited_by_count,"
+            " source_hash = :source_hash,"
             " updated_at = now()"
             " WHERE id = :id"
         ),
@@ -335,6 +487,109 @@ def _update_existing(
             _warn_conflict(paper_id, external_id, owner)
             conflicts.append(external_id)
     return UpsertResult(paper_id, UpsertOutcome.UPDATED, tuple(conflicts))
+
+
+def _write_abstract(connection: Connection, paper_id: uuid.UUID, paper: ParsedPaper) -> None:
+    """寫這篇論文、這個來源的摘要，再重新決定 `is_current`。
+
+    - 有摘要：這個來源（`paper.abstract_source`）的那一列「有就更新、沒有才新增」。
+    - 沒有摘要：刪掉這個資料來源對應的那一列（例如 OpenAlex 的資料 → `openalex` 那一列）。
+      原始資料都還在，需要時可以 reparse 找回（ADR-0022）。
+    - 接著依 `ABSTRACT_SOURCE_PRIORITY` 選出目前的那一筆：先把其他列的 `is_current` 清掉、
+      再設這一筆（部分唯一索引不允許同時有兩筆）；`uploaded_pdf` 永遠不是目前的。
+    """
+    if paper.abstract is not None and paper.abstract_source is not None:
+        connection.execute(
+            text(
+                "INSERT INTO paper_abstract (paper_id, source, content, is_current)"
+                " VALUES (:paper_id, :source, :content, false)"
+                " ON CONFLICT (paper_id, source) DO UPDATE"
+                " SET content = EXCLUDED.content, updated_at = now()"
+                " WHERE paper_abstract.content IS DISTINCT FROM EXCLUDED.content"
+            ),
+            {
+                "paper_id": paper_id,
+                "source": paper.abstract_source.value,
+                "content": paper.abstract,
+            },
+        )
+    else:
+        connection.execute(
+            text("DELETE FROM paper_abstract WHERE paper_id = :paper_id AND source = :source"),
+            {"paper_id": paper_id, "source": _ABSTRACT_SOURCE_OF[paper.source].value},
+        )
+    _choose_current_abstract(connection, paper_id)
+
+
+def _choose_current_abstract(connection: Connection, paper_id: uuid.UUID) -> None:
+    priority = [source.value for source in ABSTRACT_SOURCE_PRIORITY]
+    current: uuid.UUID | None = connection.execute(
+        text(
+            "SELECT id FROM paper_abstract"
+            " WHERE paper_id = :paper_id AND source = ANY(CAST(:priority AS text[]))"
+            " ORDER BY array_position(CAST(:priority AS text[]), source)"
+            " LIMIT 1"
+        ),
+        {"paper_id": paper_id, "priority": priority},
+    ).scalar_one_or_none()
+    connection.execute(
+        text(
+            "UPDATE paper_abstract SET is_current = false, updated_at = now()"
+            " WHERE paper_id = :paper_id AND is_current"
+            " AND id IS DISTINCT FROM CAST(:current AS uuid)"
+        ),
+        {"paper_id": paper_id, "current": current},
+    )
+    if current is not None:
+        connection.execute(
+            text(
+                "UPDATE paper_abstract SET is_current = true, updated_at = now()"
+                " WHERE id = :id AND NOT is_current"
+            ),
+            {"id": current},
+        )
+
+
+def update_paper_keywords(
+    connection: Connection,
+    paper_id: uuid.UUID,
+    source: KeywordSource,
+    keywords: Sequence[ParsedKeyword],
+) -> None:
+    """整批覆寫這篇論文、這個來源的關鍵字：先刪掉、再新增（ADR-0014 決定第 5 項、ADR-0016）。
+
+    在呼叫端開好的交易裡做，不 commit。每週套用與 `reparse` 在寫入結果不是 STALE 時呼叫；
+    單篇查詢不寫 OpenAlex 的關鍵字。
+
+    Raises:
+        ValueError: `source` 不是 `KeywordSource`、`keywords` 有不是 `ParsedKeyword` 的、
+            或同一個 key 出現兩次（不碰資料庫）。
+    """
+    source = KeywordSource(source)
+    if not all(isinstance(keyword, ParsedKeyword) for keyword in keywords):
+        raise ValueError("keywords 只能放 ParsedKeyword")
+    keys = [keyword.key for keyword in keywords]
+    if len(set(keys)) != len(keys):
+        raise ValueError("同一個關鍵字 key 只能出現一次")
+    connection.execute(
+        text("DELETE FROM paper_keyword WHERE paper_id = :paper_id AND source = :source"),
+        {"paper_id": paper_id, "source": source.value},
+    )
+    if not keywords:
+        return
+    connection.execute(
+        text(
+            "INSERT INTO paper_keyword (paper_id, source, key, display_name)"
+            " SELECT :paper_id, :source, key, display_name"
+            " FROM unnest(CAST(:keys AS text[]), CAST(:names AS text[])) AS k(key, display_name)"
+        ),
+        {
+            "paper_id": paper_id,
+            "source": source.value,
+            "keys": keys,
+            "names": [keyword.display_name for keyword in keywords],
+        },
+    )
 
 
 def _warn_conflict(paper_id: uuid.UUID, external_id: ExternalId, owner: uuid.UUID) -> None:

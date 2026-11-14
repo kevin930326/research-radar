@@ -57,6 +57,15 @@ def build_readiness_probes(
     )
 
 
+def build_database(settings: Settings, *, pool_size: int) -> Database:
+    """應用程式角色（`DATABASE_URL`）的資料庫連線池，最多 `pool_size` 條。不連線。"""
+    return Database(
+        settings.database_url.get_secret_value(),
+        connect_timeout=settings.database_connect_timeout,
+        pool_size=pool_size,
+    )
+
+
 def build_migration_runner(
     settings: MigrationSettings, *, migrations_dir: Path = DEFAULT_MIGRATIONS_DIR
 ) -> Callable[[], frozenset[str]]:

@@ -1,0 +1,28 @@
+# 排除規則（AD-18 領域設定；api、worker、CLI 啟動時由 radar/config.py 驗證，錯了就不啟動）。
+# 符合的論文會在 paper.excluded_reason 記下代碼、不刪除，也不算進統計（PRD FR-8）。
+#
+# - reason：寫進 excluded_reason 的代碼，小寫英文開頭、只用小寫英文、數字、底線。
+# - title_equals：標題「完全等於」其中一個字串就符合（字串清單）。
+# - title_starts_with：標題「以其中一個字串開頭」就符合（字串清單）。
+#   兩個至少要寫一個；每個字串不能是空白。
+# - 比對前標題與字串都做同一個正規化：NFKC、彎引號換成 '、不分大小寫、連續空白縮成一個、
+#   去頭尾空白。依檔案順序，第一條符合的勝出；rules 可以是空清單（rules: []）。
+#
+# 來源：PRD FR-8 與 OQ-02 寫明的四種非研究文章（Editor's Comments、Research Spotlights、
+# About Our Authors、Erratum）。其他候選（例如 Editorial Board、Corrigendum）等 Kevin 決定。
+# 文章類型不是 article／review 的（例如 paratext）由第一次匯入的收錄過濾擋（Story 1.8）。
+#
+# 規則增減只改這個檔，之後跑 `radar reparse` 生效（不用改程式）。
+rules:
+  - reason: editors_comments
+    title_starts_with:
+      - Editor's Comments
+  - reason: research_spotlights
+    title_starts_with:
+      - Research Spotlights
+  - reason: about_our_authors
+    title_starts_with:
+      - About Our Authors
+  - reason: erratum
+    title_starts_with:
+      - Erratum

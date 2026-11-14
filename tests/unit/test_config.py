@@ -421,3 +421,77 @@ def test_object_store_endpoint_url_must_be_http_with_host(value: str) -> None:
     assert "RADAR_OBJECT_STORE_ENDPOINT_URL" in problem
     assert value not in str(caught.value)
     assert "storage.example" not in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "https://fake-user:FAKE-PASSWORD-0000@storage.example",
+        "https://fake-user@storage.example",
+        "https://:FAKE-PASSWORD-0000@storage.example",
+    ],
+)
+def test_object_store_endpoint_url_rejects_credentials(value: str) -> None:
+    with pytest.raises(ConfigError) as caught:
+        load_settings({"DATABASE_URL": DB_URL, "RADAR_OBJECT_STORE_ENDPOINT_URL": value})
+
+    [problem] = caught.value.problems
+    assert "RADAR_OBJECT_STORE_ENDPOINT_URL" in problem
+    assert "FAKE-PASSWORD-0000" not in str(caught.value)
+    assert "fake-user" not in str(caught.value)
+    assert "storage.example" not in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "http://storage.example:99999",
+        "http://storage.example:abc",
+        "https://storage.example:-1/bucket",
+    ],
+)
+def test_object_store_endpoint_url_rejects_bad_port(value: str) -> None:
+    with pytest.raises(ConfigError) as caught:
+        load_settings({"DATABASE_URL": DB_URL, "RADAR_OBJECT_STORE_ENDPOINT_URL": value})
+
+    [problem] = caught.value.problems
+    assert "RADAR_OBJECT_STORE_ENDPOINT_URL" in problem
+    assert "連接埠" in problem
+    assert value not in str(caught.value)
+    assert "storage.example" not in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "https://storage.example/?X-Amz-Signature=FAKE-SIG-0000",
+        "https://storage.example:9000/bucket?token=FAKE-SIG-0000",
+        "https://storage.example#FAKE-SIG-0000",
+        "https://storage.example/bucket?a=FAKE-SIG-0000#FAKE-SIG-0000",
+    ],
+)
+def test_object_store_endpoint_url_rejects_query_and_fragment(value: str) -> None:
+    with pytest.raises(ConfigError) as caught:
+        load_settings({"DATABASE_URL": DB_URL, "RADAR_OBJECT_STORE_ENDPOINT_URL": value})
+
+    [problem] = caught.value.problems
+    assert "RADAR_OBJECT_STORE_ENDPOINT_URL" in problem
+    assert "FAKE-SIG-0000" not in str(caught.value)
+    assert "storage.example" not in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "http://[::1]:9000",
+        "https://abc123.r2.cloudflarestorage.com",
+        "http://localhost:9000",
+        "http://rustfs:9000",
+        "http://127.0.0.1:9000",
+        "http://host:9000/bucket",
+    ],
+)
+def test_object_store_endpoint_url_accepts_valid(value: str) -> None:
+    settings = load_settings({"DATABASE_URL": DB_URL, "RADAR_OBJECT_STORE_ENDPOINT_URL": value})
+
+    assert settings.object_store_endpoint_url == value

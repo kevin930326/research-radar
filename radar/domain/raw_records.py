@@ -96,6 +96,28 @@ class RawRecord:
         return hashlib.sha256(self.content).hexdigest()
 
 
+_SHA256_HEX = re.compile(r"[0-9a-f]{64}")
+
+
+@dataclass(frozen=True)
+class RawFetchRef:
+    """`raw_fetch` 的一列（重新解析用）：哪一篇、內容的 SHA-256、抓取時間。
+
+    原始內容本身在物件儲存的 `raw/<來源>/<sha256>.json.gz`。
+    """
+
+    external_key: str
+    sha256: str
+    fetched_at: datetime
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.external_key, str) or not self.external_key:
+            raise ValueError("external_key 要是非空字串")
+        if not isinstance(self.sha256, str) or not _SHA256_HEX.fullmatch(self.sha256):
+            raise ValueError("sha256 要是 64 位小寫十六進位")
+        _require_aware(self.fetched_at, "fetched_at")
+
+
 @dataclass(frozen=True)
 class ApiCall:
     """一次 HTTP 嘗試的紀錄。連線錯誤（沒有回應）時 `http_status` 是 None、`cost_usd` 是 0。

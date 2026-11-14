@@ -135,12 +135,24 @@ class Settings(BaseModel):
         try:
             parts = urlsplit(value)
             scheme, hostname = parts.scheme, parts.hostname
+            has_userinfo = parts.username is not None or parts.password is not None
         except Exception:
             raise ValueError("網址無法解析") from None
         if scheme not in OBJECT_STORE_URL_SCHEMES:
             raise ValueError("開頭必須是 https:// 或 http://")
         if not hostname:
             raise ValueError("缺少主機名稱")
+        if has_userinfo:
+            # 帳密走 RADAR_OBJECT_STORE_ACCESS_KEY_ID／SECRET_ACCESS_KEY（SecretStr），
+            # 放在網址裡會跟著網址出現在錯誤訊息與日誌。
+            raise ValueError("網址不能含帳號或密碼")
+        try:
+            _ = parts.port
+        except Exception:
+            raise ValueError("連接埠必須是 1–65535 的數字") from None
+        if parts.query or parts.fragment:
+            # S3 端點用不到查詢參數與 #片段；這兩段可能帶簽章之類的值，訊息不帶出來。
+            raise ValueError("網址不能含查詢參數（?）或片段（#）")
         return value
 
     @field_validator("database_url")

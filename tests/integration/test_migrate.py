@@ -17,7 +17,7 @@ from radar.repo.migrations import MigrationScripts, read_schema_state, upgrade_t
 from tests.database import MIGRATIONS_DIR, ROOT, TestDatabase, migrate
 
 BIN = Path(sys.executable).parent
-HEAD = "0004"
+HEAD = "0005"
 
 
 def _run(
