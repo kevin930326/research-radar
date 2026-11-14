@@ -979,6 +979,17 @@ def test_sweep_waiting_on_row_lock_rechecks_after_the_other_transaction_commits(
         "連線 A 連上資料庫",
     )
     sweep_b = _DaemonCall(sweep_on_connection_b, name="連線 B 的 sweep")
+    # A 的某一步逾時後，做那一步的執行緒可能還在用 connection_a；記下來，清理時就不跨執行緒去關它。
+    a_stuck = False
+
+    def on_a[T](seconds: float, func: Callable[[], T], what: str) -> T:
+        nonlocal a_stuck
+        try:
+            return _within(seconds, func, what)
+        except TimeoutError:
+            a_stuck = True
+            raise
+
     try:
 
         def lock_and_hand_over_on_a() -> int:
@@ -995,7 +1006,7 @@ def test_sweep_waiting_on_row_lock_rechecks_after_the_other_transaction_commits(
             assert taken == (stalled,)
             return connection_a.info.backend_pid
 
-        a_pid = _within(WAIT_SECONDS + 5, lock_and_hand_over_on_a, "連線 A 鎖住並交出工作")
+        a_pid = on_a(WAIT_SECONDS + 5, lock_and_hand_over_on_a, "連線 A 鎖住並交出工作")
 
         sweep_b.start()
 
@@ -1019,13 +1030,16 @@ def test_sweep_waiting_on_row_lock_rechecks_after_the_other_transaction_commits(
         assert sweep_b.running(), "B 沒有等鎖就結束了，沒有製造出交錯"
         assert candidates == [stalled]
 
-        _within(WAIT_SECONDS + 5, connection_a.commit, "連線 A 提交")
+        on_a(WAIT_SECONDS + 5, connection_a.commit, "連線 A 提交")
         retried = sweep_b.result(timeout=WAIT_SECONDS)
     finally:
-        # 不管成功或失敗都放掉 A 的鎖（關連線也限時，卡住就不管它）；B 還沒結束就結束它的連線，
-        # 最多再等 5 秒，之後不管它（daemon 執行緒不會擋住 pytest 結束）。
-        with contextlib.suppress(TimeoutError):
-            _within(5, connection_a.close, "關閉連線 A")
+        # 放掉 A 的鎖：A 每一步都準時結束時才關連線（關連線也限時，卡住就不管它）。A 有一步逾時，
+        # 原執行緒可能還拿著這條連線，另開執行緒去關會和它搶，所以不碰它；鎖改由資料庫端放掉
+        # （A 的查詢期限、交易閒置期限，以及 fixture 拆除時的 DROP DATABASE … WITH (FORCE)）。
+        # B 還沒結束就結束它的連線，最多再等 5 秒，之後不管它（daemon 執行緒不會擋住 pytest 結束）。
+        if not a_stuck:
+            with contextlib.suppress(TimeoutError):
+                _within(5, connection_a.close, "關閉連線 A")
         sweep_b.join(timeout=5)
         if sweep_b.running():
             _terminate_backends(migrated_fresh, APP_ROLE)
