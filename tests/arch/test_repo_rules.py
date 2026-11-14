@@ -42,6 +42,8 @@ _MIGRATIONS_REASON = (
 )
 INFRASTRUCTURE_EXCEPTIONS: dict[str, str] = {
     "radar.repo.db.Database": "連線池與交易函式本身，不讀業務資料",
+    "radar.repo.db.SessionLock": "持有 advisory lock 的連線與它的交易函式，不讀業務資料",
+    "radar.repo.db.AdvisoryLockLostError": "持鎖的連線斷了或鎖不在時丟的例外，不讀業務資料",
     "radar.repo.models.Base": "SQLAlchemy 模型的共同起點（Base.metadata 給 alembic check）",
     "radar.repo.migrations.include_name": _MIGRATIONS_REASON,
     "radar.repo.migrations.create_migration_engine": _MIGRATIONS_REASON,

@@ -6,7 +6,8 @@
 
 和每週更新、和另一個 reparse 互斥（ADR-0026 取捨）：整段持有原始資料與論文的寫入鎖
 （`INGEST_WRITE_LOCK_KEY` 的獨佔 session 級 advisory lock），拿不到、或拿到後發現有 `fetching`
-的 `weekly_run`，就拒絕執行、不寫任何東西。
+的 `weekly_run`，就拒絕執行、不寫任何東西。持有鎖的期間每個交易都開在持有鎖的同一條連線上、
+第一句確認鎖還在；那條連線斷了（鎖跟著消失）就中止整次作業，不換一條連線繼續寫。
 """
 
 import hashlib
@@ -30,7 +31,7 @@ from radar.domain.staging import StagingItem, StagingKind
 from radar.domain.storage_keys import ObjectNotFoundError, raw_object_key
 from radar.domain.viewer import SystemViewer, Viewer
 from radar.ports import ObjectStore
-from radar.repo.db import INGEST_WRITE_LOCK_KEY, Database
+from radar.repo.db import INGEST_WRITE_LOCK_KEY, Database, SessionLock
 from radar.repo.ingest_staging import (
     create_staged_papers,
     delete_staged_papers,
@@ -126,6 +127,9 @@ def reparse_papers(
     0. 試拿寫入鎖（`database.session_lock(INGEST_WRITE_LOCK_KEY)`，專用連線、不等），拿不到就丟
        `ReparseBusyError`（什麼都不寫）。拿到後下面每一步都在持有鎖的期間做，結束時（含例外）
        解鎖；每週更新在開始抓取與套用時試拿同一把鍵的共用鎖，所以 reparse 跑的時候不會開始。
+       下面每個交易都用 `lock.transaction()`：開在持有鎖的同一條連線上，第一句確認鎖還在。
+       持鎖的連線中途斷了（例如資料庫重啟），鎖就跟著消失、別的作業可能已經拿到，所以下一個
+       交易丟 `AdvisoryLockLostError`、整次作業中止；已經 commit 的只有暫存列（下次一開始清掉）。
     1. 短交易：有 `fetching` 的 `weekly_run` 就丟 `WeeklyUpdateInProgressError`（什麼都不寫）；
        沒有才刪掉上一次沒做完留下的 `kind='reparse'` 暫存列；產生新的 `batch_id`。
        這一步在拿到鎖之後：鎖擋住「之後才開始」的每週更新，這裡擋住「已經開始」的。
@@ -143,15 +147,16 @@ def reparse_papers(
         ValueError: `batch_size` 不是正整數。
         ReparseBusyError: 另一個 reparse 或每週更新正在寫入（不寫任何東西、不碰物件儲存）。
         WeeklyUpdateInProgressError: 每週更新正在進行（不寫任何東西、不碰物件儲存）。
+        AdvisoryLockLostError: 持鎖的連線中途斷了（那個交易沒有 commit，論文不變）。
     """
     require(actor, Action.INGEST_PAPERS, None)
     if not isinstance(batch_size, int) or isinstance(batch_size, bool) or batch_size < 1:
         raise ValueError("batch_size 要是正整數")
-    with database.session_lock(INGEST_WRITE_LOCK_KEY) as acquired:
-        if not acquired:
+    with database.session_lock(INGEST_WRITE_LOCK_KEY) as lock:
+        if lock is None:
             raise ReparseBusyError
         return _reparse_locked(
-            database,
+            lock,
             store,
             scope=scope,
             exclusion_rules=exclusion_rules,
@@ -161,7 +166,7 @@ def reparse_papers(
 
 
 def _reparse_locked(
-    database: Database,
+    lock: SessionLock,
     store: ObjectStore,
     *,
     scope: ScopeSettings,
@@ -169,11 +174,11 @@ def _reparse_locked(
     batch_size: int,
     parse: Parse,
 ) -> ReparseResult:
-    """`reparse_papers` 的第 1～3 步（呼叫端已經持有寫入鎖）。"""
+    """`reparse_papers` 的第 1～3 步（呼叫端已經持有寫入鎖；交易都開在 `lock` 的連線上）。"""
     viewer = SystemViewer()
     counts = _Counts()
 
-    with database.transaction() as connection:
+    with lock.transaction() as connection:
         fetching = find_fetching_weekly_run(viewer, connection)
         if fetching is not None:
             raise WeeklyUpdateInProgressError(fetching.id)
@@ -182,7 +187,7 @@ def _reparse_locked(
 
     after: str | None = None
     while True:
-        with database.transaction() as connection:
+        with lock.transaction() as connection:
             refs = list_latest_raw_fetches(
                 viewer, connection, RawSource.OPENALEX, after_external_key=after, limit=batch_size
             )
@@ -201,14 +206,14 @@ def _reparse_locked(
             if item is not None:
                 items.append(item)
         if items:
-            with database.transaction() as connection:
+            with lock.transaction() as connection:
                 counts.staged += create_staged_papers(
                     connection, batch_id=batch_id, kind=StagingKind.REPARSE, items=items
                 )
         if len(refs) < batch_size:
             break
 
-    _apply(database, viewer, batch_id, scope, batch_size, counts)
+    _apply(lock, viewer, batch_id, scope, batch_size, counts)
 
     result = ReparseResult(
         raw_keys=counts.raw_keys,
@@ -273,7 +278,7 @@ def _stage_one(
 
 
 def _apply(
-    database: Database,
+    lock: SessionLock,
     viewer: SystemViewer,
     batch_id: uuid.UUID,
     scope: ScopeSettings,
@@ -285,7 +290,7 @@ def _apply(
     讀到的暫存列數和放進去的不一樣（例如另一個 reparse 同時在跑、一開始把這一批刪掉）就丟錯，
     整個交易退回，不會只寫一半。
     """
-    with database.transaction() as connection:
+    with lock.transaction() as connection:
         after_id: uuid.UUID | None = None
         applied = 0
         while True:
