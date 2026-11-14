@@ -4,6 +4,9 @@
 .env
 .env.*
 !.env.example
+# 容器讀的 RADAR_* 秘密（ADR-0024）；只有說明用的範例進 repo
+.env.radar
+!.env.radar.example
 *.pem
 *.key
 secrets/

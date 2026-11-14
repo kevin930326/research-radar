@@ -37,17 +37,27 @@ _ID_PARAMETER = re.compile(r"[a-z][a-z0-9_]*_id")
 
 @dataclass(frozen=True)
 class JobSpec:
-    """一個背景工作。`schedule` 是 cron 用的排程名稱（也是心跳的檢查名稱），沒有排程的是 None。"""
+    """一個背景工作。`schedule` 是 cron 用的排程名稱（也是心跳的檢查名稱），沒有排程的是 None。
+
+    `lock`：排入時帶的佇列鎖（帶同一把鎖的工作同時只跑一個），沒有是 None。`pdf` 佇列的工作
+    不能另設，一律用 `PDF_LOCK`（由 `adapters/jobs.defer_job` 帶上）。
+    """
 
     name: str
     queue: Queue
     schedule: str | None = None
+    lock: str | None = None
 
     def __post_init__(self) -> None:
         if not _JOB_NAME.fullmatch(self.name):
             raise ValueError(f"工作名稱只能是小寫英文、數字與底線：{self.name!r}")
         if self.schedule is not None and not _SCHEDULE_NAME.fullmatch(self.schedule):
             raise ValueError(f"排程名稱只能是小寫英文、數字與連字號：{self.schedule!r}")
+        if self.lock is not None:
+            if not isinstance(self.lock, str) or not self.lock:
+                raise ValueError(f"鎖的名稱要是非空字串：{self.lock!r}")
+            if self.queue is Queue.PDF:
+                raise ValueError(f"pdf 佇列的工作一律用 {PDF_LOCK!r} 這把鎖，不能另設：{self.name}")
 
     @property
     def check(self) -> str:
@@ -64,7 +74,14 @@ class JobSpec:
 # 把卡住的狀態列與卡住的工作重新排入（ADR-0004 決定第 9 點）。
 SWEEP = JobSpec("sweep", Queue.MAINTENANCE, schedule="sweep")
 
-JOBS: tuple[JobSpec, ...] = (SWEEP,)
+# 每週更新（ADR-0004 決定第 2、5 點、ADR-0025）：cron 排入的 `weekly_update` 寫（或找到）那筆
+# `fetching` 的 `weekly_run`、交易結束後排入 `run_weekly_update(weekly_run_id)`；後者逐本、逐頁
+# 推進。`run_weekly_update` 帶 `weekly_update` 這把鎖，同時只跑一個（手動再排、sweep 補排時，
+# 第二個等第一個做完，接著只會看到已抓完的進度）。
+WEEKLY_UPDATE = JobSpec("weekly_update", Queue.INGEST, schedule="weekly-update")
+RUN_WEEKLY_UPDATE = JobSpec("run_weekly_update", Queue.INGEST, lock="weekly_update")
+
+JOBS: tuple[JobSpec, ...] = (SWEEP, WEEKLY_UPDATE, RUN_WEEKLY_UPDATE)
 
 # 排入一個工作：（工作, 參數）→ True＝新排入；False＝同一件事已經在排隊，沒有再排一筆。
 # 參數只有 ID（名稱 `*_id`、值是 UUID）。

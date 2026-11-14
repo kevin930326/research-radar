@@ -93,10 +93,22 @@ def test_seconds_parser() -> None:
     assert _seconds("1m30s") == 90
 
 
-def test_no_env_file_or_interpolation() -> None:
-    raw = COMPOSE_PATH.read_text(encoding="utf-8")
+# D1（ADR-0024）：只有 api、worker 各讀一個只放 RADAR_* 秘密的 `.env.radar`，
+# 檔案不存在也照樣起得來。
+ENV_RADAR = [{"path": ".env.radar", "required": False}]
 
-    assert all("env_file" not in service for service in _services().values())
+
+def test_only_api_and_worker_read_optional_env_radar_and_no_interpolation() -> None:
+    raw = COMPOSE_PATH.read_text(encoding="utf-8")
+    services = _services()
+
+    assert {name for name, service in services.items() if "env_file" in service} == {
+        "api",
+        "worker",
+    }
+    for name in ("api", "worker"):
+        assert services[name]["env_file"] == ENV_RADAR, name
+    # 仍然不做變數替換（compose 會讀 .env 做 ${...} 替換，但這裡完全不用）。
     assert "${" not in raw
     assert not re.search(r"\$[A-Za-z_]", raw)
 
@@ -112,6 +124,34 @@ def test_database_uses_no_password() -> None:
 
     assert "POSTGRES_PASSWORD" not in raw
     assert _services()["db"]["environment"]["POSTGRES_HOST_AUTH_METHOD"] == "trust"
+
+
+def test_env_radar_example_lists_only_radar_secrets_without_values() -> None:
+    example = ROOT / ".env.radar.example"
+    entries = dict(
+        line.split("=", 1)
+        for line in example.read_text(encoding="utf-8").splitlines()
+        if line and not line.startswith("#")
+    )
+    radar_fields = {env_name(field) for field in Settings.model_fields}
+
+    assert entries, "要列出容器需要的秘密名稱"
+    assert set(entries) <= radar_fields
+    assert all(name.startswith("RADAR_") for name in entries)
+    assert all(value == "" for value in entries.values())
+    assert "DATABASE_URL" not in entries
+    assert "RADAR_MIGRATION_DATABASE_URL" not in entries
+    for name in (
+        "RADAR_OPENALEX_API_KEY",
+        "RADAR_OBJECT_STORE_ENDPOINT_URL",
+        "RADAR_OBJECT_STORE_REGION",
+        "RADAR_OBJECT_STORE_BUCKET",
+        "RADAR_OBJECT_STORE_ACCESS_KEY_ID",
+        "RADAR_OBJECT_STORE_SECRET_ACCESS_KEY",
+        "RADAR_HEARTBEAT_URL_SWEEP",
+        "RADAR_HEARTBEAT_URL_WEEKLY_UPDATE",
+    ):
+        assert name in entries, name
 
 
 def test_image_excludes_env_files() -> None:

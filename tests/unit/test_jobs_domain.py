@@ -7,7 +7,10 @@ import pytest
 
 from radar.domain.jobs import (
     JOBS,
+    PDF_LOCK,
+    RUN_WEEKLY_UPDATE,
     SWEEP,
+    WEEKLY_UPDATE,
     JobSpec,
     Queue,
     UnknownJobError,
@@ -41,7 +44,38 @@ def test_sweep_is_scheduled_on_maintenance() -> None:
     assert find_scheduled_job("sweep") is SWEEP
     assert find_job("sweep") is SWEEP
     assert SWEEP.check == "sweep"
-    assert scheduled_jobs() == [SWEEP]
+    assert SWEEP.lock is None
+    assert scheduled_jobs() == [SWEEP, WEEKLY_UPDATE]
+
+
+def test_weekly_update_jobs() -> None:
+    # 排程名稱用連字號（crontab、心跳、radar enqueue），工作名稱用底線。
+    assert WEEKLY_UPDATE in JOBS
+    assert RUN_WEEKLY_UPDATE in JOBS
+    assert (WEEKLY_UPDATE.name, WEEKLY_UPDATE.queue, WEEKLY_UPDATE.check) == (
+        "weekly_update",
+        Queue.INGEST,
+        "weekly-update",
+    )
+    assert WEEKLY_UPDATE.lock is None
+    assert find_scheduled_job("weekly-update") is WEEKLY_UPDATE
+    # 推進一筆 weekly_run 的工作沒有排程，帶 weekly_update 這把鎖（同時只跑一個）。
+    assert (RUN_WEEKLY_UPDATE.name, RUN_WEEKLY_UPDATE.queue) == ("run_weekly_update", Queue.INGEST)
+    assert RUN_WEEKLY_UPDATE.schedule is None
+    assert RUN_WEEKLY_UPDATE.lock == "weekly_update"
+    assert find_job("run_weekly_update") is RUN_WEEKLY_UPDATE
+
+
+@pytest.mark.parametrize("lock", ["", 1])
+def test_job_spec_lock_must_be_non_empty_string(lock: object) -> None:
+    with pytest.raises(ValueError, match="鎖"):
+        JobSpec("probe", Queue.INGEST, lock=lock)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("lock", ["other", PDF_LOCK])
+def test_pdf_jobs_cannot_set_their_own_lock(lock: str) -> None:
+    with pytest.raises(ValueError, match="pdf"):
+        JobSpec("identify_upload", Queue.PDF, lock=lock)
 
 
 def test_unknown_schedule_lists_available() -> None:
@@ -49,7 +83,7 @@ def test_unknown_schedule_lists_available() -> None:
         find_scheduled_job("nope")
 
     assert caught.value.name == "nope"
-    assert caught.value.available == ["sweep"]
+    assert caught.value.available == ["sweep", "weekly-update"]
 
 
 def test_unknown_job_name() -> None:
@@ -138,5 +172,14 @@ def test_sweep_entry_table_must_start_with_letter() -> None:
     assert is_id_parameter(_entry(table="upload_item2").id_parameter)
 
 
-def test_registry_is_empty_until_status_tables_exist() -> None:
-    assert SWEEP_REGISTRY == ()
+def test_registry_has_weekly_run() -> None:
+    [entry] = SWEEP_REGISTRY
+    assert (entry.table, entry.status_column, entry.start_status, entry.time_column) == (
+        "weekly_run",
+        "status",
+        "fetching",
+        "updated_at",
+    )
+    assert entry.job is RUN_WEEKLY_UPDATE
+    assert entry.stuck_after == timedelta(hours=2)
+    assert entry.id_parameter == "weekly_run_id"

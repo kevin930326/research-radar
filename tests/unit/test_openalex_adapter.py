@@ -545,6 +545,140 @@ def test_successful_page_is_returned_even_when_quota_is_used_up() -> None:
     assert page.calls[0].remaining_usd == Decimal(0)
 
 
+# --- 重試同一頁時用「最新回報＋之後的本地費用」判斷額度（D12(b)）--------------------------------
+
+
+def _five_attempts() -> OpenAlexConfig:
+    retry = {
+        "attempts": 5,
+        "wait_initial_seconds": 1,
+        "wait_max_seconds": 30,
+        "wait_jitter_seconds": 1,
+        "retry_after_max_seconds": 120,
+    }
+    return _config(retry=retry)
+
+
+def test_costs_after_the_latest_report_stop_retrying_the_same_page() -> None:
+    # 第 1 次 503 回報上限 1、剩 0.2001（已用 0.7999）；之後的逾時沒有標頭、照預設單價各 0.0001。
+    # 第 2 次失敗後已用 0.8000，到 0.8（daily_budget_usd × stop_at_ratio）：丟 QuotaReachedError，
+    # 不送第 3 次（以前只看當次回應，會一直重試到次數用完）。
+    seen: list[httpx2.Request] = []
+    responses: list[httpx2.Response | Exception] = [
+        httpx2.Response(503, headers=_quota_headers("0.2001")),
+        httpx2.ReadTimeout("讀取逾時"),
+        httpx2.ReadTimeout("讀取逾時"),
+        _ok(),
+    ]
+
+    with pytest.raises(QuotaReachedError) as caught:
+        _source(_sequence(responses, seen), config=_five_attempts()).fetch_journal_page(QUERY, None)
+
+    assert len(seen) == 2
+    assert [(call.http_status, call.cost_usd) for call in caught.value.calls] == [
+        (503, Decimal(0)),
+        (None, Decimal("0.0001")),
+    ]
+    assert FAKE_KEY not in str(caught.value)
+
+
+def test_two_unreported_costs_add_up_before_stopping() -> None:
+    # 回報已用 0.79985：第一次逾時後 0.79995 還沒到，照常重試；第二次逾時後 0.80005，停下。
+    seen: list[httpx2.Request] = []
+    responses: list[httpx2.Response | Exception] = [
+        httpx2.Response(503, headers=_quota_headers("0.20015")),
+        httpx2.ReadTimeout("讀取逾時"),
+        httpx2.ReadTimeout("讀取逾時"),
+        _ok(),
+    ]
+
+    with pytest.raises(QuotaReachedError) as caught:
+        _source(_sequence(responses, seen), config=_five_attempts()).fetch_journal_page(QUERY, None)
+
+    assert len(seen) == 3
+    assert [call.http_status for call in caught.value.calls] == [503, None, None]
+
+
+def test_connect_errors_cost_nothing_and_do_not_add_up() -> None:
+    # 連線都沒建立（確定沒送出）記 0 元：回報已用 0.7999 之後再怎麼連不上都不會到 0.8。
+    seen: list[httpx2.Request] = []
+    responses: list[httpx2.Response | Exception] = [
+        httpx2.Response(503, headers=_quota_headers("0.2001")),
+        httpx2.ConnectError("連不上"),
+        httpx2.ConnectError("連不上"),
+        _ok(),
+    ]
+
+    page = _source(_sequence(responses, seen), config=_five_attempts()).fetch_journal_page(
+        QUERY, None
+    )
+
+    assert len(seen) == 4
+    assert len(page.records) == 1
+
+
+def test_a_new_report_replaces_the_earlier_one() -> None:
+    # 後來的回報（已用 0.5）取代前一次（0.7999）：之後的 0.0001 加在 0.5 上，不會停。
+    seen: list[httpx2.Request] = []
+    responses: list[httpx2.Response | Exception] = [
+        httpx2.Response(503, headers=_quota_headers("0.2001")),
+        httpx2.Response(503, headers=_quota_headers("0.5")),
+        httpx2.ReadTimeout("讀取逾時"),
+        _ok(),
+    ]
+
+    page = _source(_sequence(responses, seen), config=_five_attempts()).fetch_journal_page(
+        QUERY, None
+    )
+
+    assert len(seen) == 4
+    assert [call.http_status for call in page.calls] == [503, 503, None, 200]
+
+
+def test_report_from_the_previous_utc_day_is_not_used() -> None:
+    # 23:59:59（UTC）回報已用 0.7999；午夜後的逾時花 0.0001。OpenAlex 已經在 UTC 午夜重置，
+    # 前一天的回報不能拿來加：照常重試，拿到這一頁。
+    times = iter(
+        [
+            datetime(2026, 11, 13, 23, 59, 59, tzinfo=UTC),
+            datetime(2026, 11, 14, 0, 0, 1, tzinfo=UTC),
+            datetime(2026, 11, 14, 0, 0, 2, tzinfo=UTC),
+        ]
+    )
+    seen: list[httpx2.Request] = []
+    responses: list[httpx2.Response | Exception] = [
+        httpx2.Response(503, headers=_quota_headers("0.2001")),
+        httpx2.ReadTimeout("讀取逾時"),
+        _ok(headers={"x-ratelimit-cost-usd": "0.0001"}),
+    ]
+
+    page = _source(
+        _sequence(responses, seen), config=_five_attempts(), clock=lambda: next(times)
+    ).fetch_journal_page(QUERY, None)
+
+    assert len(seen) == 3
+    assert len(page.records) == 1
+
+
+def test_the_latest_report_carries_over_to_the_next_page() -> None:
+    # 同一個 adapter 物件：第 1 頁成功時回報已用 0.7999；第 2 頁第一次就逾時（0.0001）→ 0.8000，
+    # 不再重試這一頁。
+    seen: list[httpx2.Request] = []
+    responses: list[httpx2.Response | Exception] = [
+        _ok(headers=_quota_headers("0.2001", cost="0.0001")),
+        httpx2.ReadTimeout("讀取逾時"),
+        _ok(),
+    ]
+    source = _source(_sequence(responses, seen), config=_five_attempts())
+
+    first = source.fetch_journal_page(QUERY, None)
+    with pytest.raises(QuotaReachedError) as caught:
+        source.fetch_journal_page(QUERY, first.next_cursor)
+
+    assert len(seen) == 2
+    assert [call.http_status for call in caught.value.calls] == [None]
+
+
 @pytest.mark.parametrize("status", [400, 401, 403, 404, 302])
 def test_other_statuses_are_not_retried(status: int) -> None:
     seen: list[httpx2.Request] = []

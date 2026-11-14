@@ -17,7 +17,7 @@ import re
 from dataclasses import dataclass
 from datetime import timedelta
 
-from radar.domain.jobs import JobSpec
+from radar.domain.jobs import RUN_WEEKLY_UPDATE, JobSpec
 
 # 表名與欄名直接組進 SQL，所以只收小寫識別字（PostgreSQL 的名稱上限 63 個字元）；
 # 開頭要是英文字母，`<表名>_id` 才會是合法的工作參數名稱。
@@ -62,5 +62,12 @@ class SweepEntry:
         return f"{self.table}_id"
 
 
-# 目前還沒有狀態表（`weekly_run`、`upload_item` 等由各自的 Story 建立並加進來）。
-SWEEP_REGISTRY: tuple[SweepEntry, ...] = ()
+# `upload_item` 等之後的狀態表由各自的 Story 加進來。
+SWEEP_REGISTRY: tuple[SweepEntry, ...] = (
+    # 每週更新（Story 1.8、ADR-0025）：`updated_at` 每抓完一頁、額度停下時都更新，活著的工作
+    # 不會被當成卡住；一頁最壞的時間（OpenAlex 5 次重試＋100 次物件存取的重試）在一小時內。
+    # 1.11 做 `failed` 之前，重試用完的那一筆每 2 小時被補排一次（額度停下的也是）。
+    SweepEntry(
+        "weekly_run", "status", "fetching", "updated_at", RUN_WEEKLY_UPDATE, timedelta(hours=2)
+    ),
+)

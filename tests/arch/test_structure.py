@@ -40,6 +40,7 @@ REQUIRED_FILES = [
     "Dockerfile",
     ".dockerignore",
     ".env.example",
+    ".env.radar.example",
 ]
 
 
@@ -69,6 +70,14 @@ def test_env_is_ignored_and_only_example_is_tracked() -> None:
     assert ".env" in lines
     assert ".env.*" in lines
     assert "!.env.example" in lines
+
+
+def test_env_radar_is_ignored_and_its_example_is_tracked() -> None:
+    # D1（ADR-0024）：容器讀的秘密檔不進 git，說明用的範例進 repo。
+    lines = (ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
+    assert ".env.radar" in lines
+    assert "!.env.radar.example" in lines
+    assert lines.index("!.env.radar.example") > lines.index(".env.*")
 
 
 def test_env_example_lists_every_setting_without_values() -> None:

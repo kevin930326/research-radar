@@ -4,14 +4,19 @@
 （架構測試檢查兩邊一致）。
 """
 
+import uuid
+
 import procrastinate
 
 from radar.adapters.jobs import register_job
-from radar.domain.jobs import SWEEP
+from radar.config import load_domain_config
+from radar.domain.jobs import RUN_WEEKLY_UPDATE, SWEEP, WEEKLY_UPDATE
 from radar.domain.settings import Settings
 from radar.domain.sweep import SWEEP_REGISTRY
-from radar.entrypoints.bootstrap import WorkerParts
+from radar.domain.viewer import SystemViewer
+from radar.entrypoints.bootstrap import WorkerParts, build_object_store, build_paper_source
 from radar.services.sweep import sweep
+from radar.services.weekly_update import run_weekly_update, weekly_update
 
 
 def register_tasks(app: procrastinate.App, parts: WorkerParts, settings: Settings) -> None:
@@ -27,4 +32,26 @@ def register_tasks(app: procrastinate.App, parts: WorkerParts, settings: Setting
             parts.send_heartbeat,
         )
 
+    def weekly_update_job() -> None:
+        # 心跳在發佈快照之後才送（Story 1.9），這裡不送。
+        weekly_update(SystemViewer(), parts.database, parts.enqueue)
+
+    def run_weekly_update_job(weekly_run_id: uuid.UUID) -> None:
+        # 執行時才讀領域設定、建 OpenAlex 與物件儲存的 adapter：改 config/journals.yaml 不用重開
+        # worker，沒有抓取工作時也不佔記憶體。
+        domain_config = load_domain_config()
+        with build_paper_source(settings, domain_config.openalex) as source:
+            run_weekly_update(
+                SystemViewer(),
+                parts.database,
+                source,
+                build_object_store(settings),
+                weekly_run_id,
+                journals=domain_config.journals,
+                exclusion_rules=domain_config.exclusion_rules,
+                quota=domain_config.openalex.quota,
+            )
+
     register_job(app, SWEEP, sweep_job, **retry)
+    register_job(app, WEEKLY_UPDATE, weekly_update_job, **retry)
+    register_job(app, RUN_WEEKLY_UPDATE, run_weekly_update_job, **retry)
