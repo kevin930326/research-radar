@@ -34,6 +34,7 @@ from radar.services.import_report import get_import_report
 from radar.services.jobs import enqueue_scheduled_job
 from radar.services.migrations import migrate_database
 from radar.services.reparse import (
+    AdvisoryLockLostError,
     ReparseBusyError,
     WeeklyUpdateInProgressError,
     reparse_papers,
@@ -134,6 +135,8 @@ def reparse() -> None:
     排除規則改了、或解析多了欄位時跑這個。解析結果先放暫存表、最後一個交易套用；
     不新增論文、不建立快照。每週更新正在抓取、或另一個 reparse 正在跑時拒絕執行、不寫任何東西，
     退出碼 1。
+    持有寫入鎖的連線中途斷了（例如資料庫重啟）時中止、退出碼 1，印出原因與「直接重跑即可」
+    （已經 commit 的不受影響）。
     設定錯誤或執行失敗退出碼 1，只印錯誤類別，不印連線字串。
     """
     configure_logging()
@@ -160,6 +163,10 @@ def reparse() -> None:
     except ReparseBusyError as exc:
         log.error("另一個 reparse 或每週更新正在寫入，沒有重新解析")
         _fail(str(exc), [])
+    except AdvisoryLockLostError as exc:
+        # 訊息與原因只帶錯誤類別，不帶連線字串（radar/repo/db.py）。
+        log.error("寫入鎖不見了，重新解析中止", reason=exc.reason)
+        _fail(f"{exc}；直接重跑 radar reparse 即可", [])
     except ConfigError as exc:
         # build_object_store 缺設定時丟的；訊息只列環境變數名稱。
         log.error("設定錯誤，無法重新解析", problems=exc.problems)

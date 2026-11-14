@@ -585,3 +585,8 @@
 - **SQL 註解**：SQL 裡不會被執行的說明文字，`--` 到行尾，或 `/* … */` 夾住的一段；架構測試判斷查詢形狀前先把它去掉，免得寫在註解裡的字騙過檢查。
 - **型別轉換（cast）**：把值換成另一種型別，例如 `CAST(:year AS integer)` 或 `:year::int` 都是「把參數當整數」，意思和直接寫 `:year` 一樣。
 - **`UNION`**：SQL 裡把兩個 `SELECT` 的結果接在一起；架構測試把它前後當成兩個查詢分開看。
+- **`pg_backend_pid()`**：PostgreSQL 函式，回傳目前這條連線在資料庫端的編號（PID）；用它在 `pg_locks`、`pg_stat_activity` 裡認出「我自己這條連線」。
+- **`SessionLock`**：`Database.session_lock` 拿到寫入鎖時交出的東西，包著「鎖＋持有它的那一條連線」；reparse 每個交易都經過它的 `transaction()` 開在同一條連線上，第一句先確認鎖還在。
+- **`search_path`**：沒寫 schema 名稱時，PostgreSQL 依序去哪些 schema 找表和函式，像找檔案時依序翻的資料夾清單。
+- **`pg_stat_activity`**：PostgreSQL 內建的「目前每條連線在做什麼」清單，一條連線一列，`state` 欄寫它的狀態。
+- **`idle` 與 `idle in transaction`（`pg_stat_activity` 的連線狀態）**：`idle` 是連線閒著、沒有開著的交易；`idle in transaction` 是交易開了還沒結束、只是暫時沒在跑 SQL，這時它拿著的列鎖不會放；測試用它確認讀物件儲存時沒有開著的交易。

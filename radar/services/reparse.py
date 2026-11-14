@@ -32,6 +32,9 @@ from radar.domain.storage_keys import ObjectNotFoundError, raw_object_key
 from radar.domain.viewer import SystemViewer, Viewer
 from radar.ports import ObjectStore
 from radar.repo.db import INGEST_WRITE_LOCK_KEY, Database, SessionLock
+
+# 入口不能直接 import radar.repo；reparse 會丟這個例外，從這裡轉出去給 `radar reparse` 攔。
+from radar.repo.db import AdvisoryLockLostError as AdvisoryLockLostError
 from radar.repo.ingest_staging import (
     create_staged_papers,
     delete_staged_papers,
