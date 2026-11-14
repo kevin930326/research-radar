@@ -14,6 +14,9 @@
    - `zh_summary`、輸出是 `ZhSummaryOutput`：`normalize_zh_summary` 得出四欄。
    - `classify`、輸出是 `ClassificationOutput`：`normalize_classification` 對照**現在的分類表**
      （`taxonomy`）得出標籤與丟掉的計數；沒給分類表是程式的錯（`ValueError`）。
+   - `extract_model`、輸出是 `ResearchModelOutput`：`validate_research_model` 對照**現在的情境值
+     清單**（`context_values`）與送出的輸入（`llm_input`）得出表頭的內容、構面與假設；沒給清單或
+     輸入是程式的錯（`ValueError`）。
    拒收一律不寫內容（資料庫的 CHECK 也擋）。
 4. `derivation_run` 還是 `running` 時，同一個交易改成 `succeeded`（被 sweep 改成 `failed` 的維持
    `failed`；原因是 `llm_result_pending` 的改成 `llm_run_expired`：已經寫了表頭，不再接續）。
@@ -31,22 +34,26 @@ from radar.domain.ai_outputs import (
     ClassificationContent,
     DerivationRun,
     GatewayConfig,
+    LlmInput,
     LlmTask,
     NewAiResult,
     NoLlmInputError,
     OutputLang,
     PaperLlmSource,
+    ResearchModelContent,
     ResultStatus,
     RunStatus,
     ZhSummaryContent,
     build_llm_input,
 )
+from radar.domain.context_values import ContextValues
 from radar.domain.errors import ErrorCode
 from radar.domain.fingerprints import input_sha256
-from radar.domain.llm_schemas import ClassificationOutput, ZhSummaryOutput
+from radar.domain.llm_schemas import ClassificationOutput, ResearchModelOutput, ZhSummaryOutput
 from radar.domain.permissions import Action, require
 from radar.domain.taxonomy import Taxonomy
 from radar.domain.validators.classification import normalize_classification
+from radar.domain.validators.research_model import validate_research_model
 from radar.domain.validators.zh_summary import normalize_zh_summary
 from radar.domain.viewer import SystemViewer, Viewer
 from radar.repo.ai_outputs import create_ai_result, update_ai_results_superseded
@@ -78,6 +85,8 @@ def record_llm_result(
     context_values_version: str | None = None,
     output: BaseModel | str | None = None,
     taxonomy: Taxonomy | None = None,
+    context_values: ContextValues | None = None,
+    llm_input: LlmInput | None = None,
 ) -> ResultStatus:
     """把一次模型呼叫的結果寫成一列表頭，回寫成的狀態（見模組說明的順序）。
 
@@ -85,13 +94,18 @@ def record_llm_result(
     `output` 是閘門驗證過的輸出（Pydantic 模型；沒有 schema 時是文字），內容欄位從它得出。
     `taxonomy_version`／`context_values_version` 是**現在**的分類表與情境值清單版本（重算目前輸入
     的指紋用）。`taxonomy` 是寫入的行程載入的分類表（只給 `classify`）：有給時「現在的分類表版本」
-    就是它的版本，標籤也對照它正規化（ADR-0033）。
+    就是它的版本，標籤也對照它正規化（ADR-0033）。`context_values` 是寫入的行程載入的情境值清單
+    （只給 `extract_model`）：有給時「現在的情境值清單版本」就是它的版本，研究模型的內容也對照它
+    得出；`llm_input` 是送出的輸入（原文欄位要出現在它裡面，ADR-0034）。
 
     Raises:
         PermissionDeniedError: `actor` 不是系統工作（不碰資料庫）。
         ResultTargetNotFoundError: 論文或 `derivation_run` 不存在，或 run 不是這篇論文的。
-        ValueError: 這個工作沒有表頭表；`taxonomy` 和 `taxonomy_version` 的版本不一樣、不是
-            `classify` 卻給了 `taxonomy`，或 `classify` 的輸出要寫標籤卻沒給 `taxonomy`。
+        ValueError: 這個工作沒有表頭表；`taxonomy`／`context_values` 和另外給的版本不一樣、給錯
+            工作；`classify` 的輸出要寫標籤卻沒給 `taxonomy`；`extract_model` 的輸出要寫內容卻沒給
+            `context_values` 或 `llm_input`。
+        OutputRejectedError: `extract_model` 的輸出沒通過驗證（閘門沒帶 `ResearchModelValidator`
+            時才會發生；程式的錯，整個交易退回）。
         PromptIntegrityError, PromptFormatError: 讀不出目前的 prompt 版本。
     """
     require(actor, Action.RUN_AI_JOBS, None)
@@ -99,6 +113,13 @@ def record_llm_result(
         if taxonomy_version is not None and taxonomy_version != taxonomy.version_label:
             raise ValueError("taxonomy_version 和分類表的版本不一樣")
         taxonomy_version = taxonomy.version_label
+    if context_values is not None:
+        if (
+            context_values_version is not None
+            and context_values_version != context_values.version_label
+        ):
+            raise ValueError("context_values_version 和情境值清單的版本不一樣")
+        context_values_version = context_values.version_label
     viewer = SystemViewer()
     with database.transaction() as connection:
         source = find_paper_llm_source(viewer, connection, paper_id, for_update=True)
@@ -110,9 +131,14 @@ def record_llm_result(
             raise ValueError(f"{task.value} 沒有表頭表")
         if taxonomy is not None and task is not LlmTask.CLASSIFY:
             raise ValueError("只有 classify 能給分類表")
+        if context_values is not None and task is not LlmTask.EXTRACT_MODEL:
+            raise ValueError("只有 extract_model 能給情境值清單")
         # 先做出內容（不碰資料庫）：做不出來就整個交易退回、不切換 active。
         zh_summary = _zh_summary_content(task, reject_reason, output)
         classification = _classification_content(task, reject_reason, output, taxonomy)
+        research_model = _research_model_content(
+            task, reject_reason, output, context_values, llm_input
+        )
 
         if reject_reason is not None:
             status = ResultStatus.REJECTED
@@ -141,6 +167,7 @@ def record_llm_result(
                 reject_reason=reject_reason,
                 zh_summary=zh_summary,
                 classification=classification,
+                research_model=research_model,
             ),
         )
         if run.status is RunStatus.RUNNING:
@@ -179,6 +206,29 @@ def _classification_content(
     if taxonomy is None:
         raise ValueError("classify 的輸出要對照分類表寫標籤，沒給分類表")
     return normalize_classification(output, taxonomy)
+
+
+def _research_model_content(
+    task: LlmTask,
+    reject_reason: ErrorCode | None,
+    output: BaseModel | str | None,
+    context_values: ContextValues | None,
+    llm_input: LlmInput | None,
+) -> ResearchModelContent | None:
+    """要和表頭一起寫的研究模型內容：只有不是拒收、`extract_model`、輸出是 `ResearchModelOutput`
+    時有。
+
+    Raises:
+        ValueError: 要寫內容卻沒給情境值清單或送出的輸入。
+        OutputRejectedError: 輸出沒通過驗證（閘門應該已經擋下）。
+    """
+    if reject_reason is not None or task is not LlmTask.EXTRACT_MODEL:
+        return None
+    if not isinstance(output, ResearchModelOutput):
+        return None
+    if context_values is None or llm_input is None:
+        raise ValueError("extract_model 的輸出要對照情境值清單與送出的輸入寫內容，沒給")
+    return validate_research_model(output, llm_input, context_values)
 
 
 def _still_current(

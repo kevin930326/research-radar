@@ -8,6 +8,10 @@
 - `run_lock_key`：取得執行資格時 advisory lock 的鍵（64 位元有號整數）。
 - `taxonomy_content_sha256`：分類表會進 prompt 的內容的雜湊，登記在 `domain/taxonomy_hashes.py`，
   內容改了卻沒升版就對不上（Story 2.5、ADR-0033）。
+- `context_values_content_sha256`：情境值清單會影響結果的內容的雜湊，登記在
+  `domain/context_values_hashes.py`（Story 2.6、ADR-0034）。
+- `hypothesis_sentence_sha256`：假設原句（正規化後）的雜湊，存在 `hypothesis.sentence_sha256`，
+  「不同原句」數得出來（FR-3 擷取規則 3、Story 2.6）。
 
 ## source_hash
 
@@ -27,6 +31,7 @@ from typing import TYPE_CHECKING, Final
 
 if TYPE_CHECKING:
     from radar.domain.ai_outputs import LlmInputBlock, LlmTask, RunKey
+    from radar.domain.context_values import ContextValues
     from radar.domain.papers import ParsedPaper
     from radar.domain.taxonomy import Taxonomy
 
@@ -179,3 +184,46 @@ def taxonomy_content_sha256(taxonomy: Taxonomy) -> str:
             "method": sorted([item.key, item.definition] for item in taxonomy.methods),
         }
     )
+
+
+# --- 情境值清單與假設原句（Story 2.6、ADR-0034） ----------------------------------------------
+
+# 算法版本：改了算進雜湊的欄位或序列化方式時加一（登記的雜湊要全部重算、重新登記）。
+CONTEXT_VALUES_CONTENT_VERSION: Final = 1
+HYPOTHESIS_SENTENCE_VERSION: Final = 1
+
+
+def context_values_content_sha256(values: ContextValues) -> str:
+    """情境值清單內容的雜湊（64 位小寫十六進位 SHA-256）。
+
+    算每個欄位依 `key` 排序後的（`key`, 定義, `terms`）：`key` 與定義會進 prompt，`terms` 決定
+    國家、產業的值存不存得下來（FR-3 擷取規則 4），三樣都會影響結果。顯示名稱、項目順序與 `terms`
+    的順序不算（`terms` 排序後才算）。
+    """
+    payload: dict[str, object] = {"v": CONTEXT_VALUES_CONTENT_VERSION}
+    for name, items in (
+        ("country", values.countries),
+        ("industry", values.industries),
+        ("research_design", values.research_designs),
+        ("unit_of_analysis", values.units_of_analysis),
+    ):
+        payload[name] = sorted(
+            [item.key, item.definition, None if item.terms is None else sorted(item.terms)]
+            for item in items
+        )
+    return _canonical_sha256(payload)
+
+
+def hypothesis_sentence_sha256(normalized_sentence: str) -> str:
+    """假設原句的雜湊（64 位小寫十六進位 SHA-256）。
+
+    `normalized_sentence` 是 `domain/validators/research_model.py` 比對原句時用的正規化結果
+    （檢查用副本、不分大小寫、彎引號換直引號、去掉頭尾的空白與 `.,;:`），所以只差標點或大小寫的
+    兩句雜湊相同。
+
+    Raises:
+        ValueError: `normalized_sentence` 是空的。
+    """
+    if not isinstance(normalized_sentence, str) or not normalized_sentence:
+        raise ValueError("hypothesis_sentence_sha256 要收正規化後、不是空的原句")
+    return _canonical_sha256({"v": HYPOTHESIS_SENTENCE_VERSION, "sentence": normalized_sentence})

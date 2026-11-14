@@ -1,0 +1,183 @@
+version: 1
+
+# 研究情境的值清單（PRD FR-3、FR-21、ADR-0012 第 6 點、ADR-0034）：研究模型擷取（`extract_model`）
+# 的國家、產業、研究設計、分析單位只能填這裡的 `key`；清單外的存空值並計數，不算拒收。
+# FR-21 的「本資料庫中未出現的情境」也拿這份清單比對。只經 `radar/config.py` 的
+# `load_context_values` 讀。
+#
+# **草案**：清單內容是 2.6 實作時先擬的，50 篇金標準標註開始前要 Kevin 定版。
+#
+# - `key`：小寫英文加底線，寫進 `research_model` 表頭，寫出去之後不改名。
+# - `name`：顯示名稱（畫面用）。只改 `name` 或項目順序不算改內容：清單與 prompt 都不必升版
+#   （prompt 只列 `key` 與定義，測試依 `key` 比對、不看順序）。
+# - `definition`：給模型看的定義，寫死在 `prompts/extract_model/v<N>.md` 的清單裡（一行一項）。
+# - `terms`（只有國家與產業有，而且一定要有）：輸入（標題或摘要）裡要寫出其中一個，模型填的值才
+#   存得下來；都沒寫出就存空值並計數（FR-3 擷取規則 4：不推測）。比對不分大小寫、前後不能接英文
+#   字母或數字，字尾可以多一個 s 或 es（bank → banks），y 結尾的也可以寫成 ies（factory →
+#   factories）。不要放會和一般英文字撞在一起的寫法（例如 US 不分大小寫就是 us，改用 U.S.、
+#   United States；IT services 不分大小寫就是 it services），也不要放會出現在別的國家、產業或
+#   樣本描述裡的字（American 會出現在 Latin American；Korea 會出現在 North Korea；university
+#   常是「大學生樣本」而不是教育業；shipping 常是電商的運費）。
+#
+# 改內容（增刪 `key`、改 `definition` 或 `terms`、把項目搬到另一欄）一定要：
+#   1. `version` 加一，並在 `radar/domain/context_values_hashes.py` 登記新版本的內容雜湊（只增不改）；
+#   2. 新增 `prompts/extract_model/v<N+1>.md`（清單一起改）並登記 prompt 雜湊。
+# 沒升版或沒登記，讀設定時就 ConfigError。升版會讓全部有摘要的論文重新擷取（版本算進輸入指紋），
+# 改之前先問 Kevin（ADR-0015 取捨）。
+
+countries:
+  - key: tw
+    name: 台灣
+    definition: 台灣（Taiwan）。
+    terms: [Taiwan, Taiwanese]
+  - key: cn
+    name: 中國
+    definition: 中國大陸（China）。
+    terms: [China, Chinese, mainland China]
+  - key: hk
+    name: 香港
+    definition: 香港（Hong Kong）。
+    terms: [Hong Kong]
+  - key: jp
+    name: 日本
+    definition: 日本（Japan）。
+    terms: [Japan, Japanese]
+  - key: kr
+    name: 南韓
+    definition: 南韓（South Korea）。
+    terms: [South Korea, South Korean, Republic of Korea]
+  - key: sg
+    name: 新加坡
+    definition: 新加坡（Singapore）。
+    terms: [Singapore, Singaporean]
+  - key: in
+    name: 印度
+    definition: 印度（India）。
+    terms: [India, Indian]
+  - key: us
+    name: 美國
+    definition: 美國（United States）。
+    terms: [United States, U.S., U.S.A., USA]
+  - key: ca
+    name: 加拿大
+    definition: 加拿大（Canada）。
+    terms: [Canada, Canadian]
+  - key: uk
+    name: 英國
+    definition: 英國（United Kingdom）。
+    terms: [United Kingdom, U.K., Britain, British, England]
+  - key: de
+    name: 德國
+    definition: 德國（Germany）。
+    terms: [Germany, German]
+  - key: nl
+    name: 荷蘭
+    definition: 荷蘭（Netherlands）。
+    terms: [Netherlands, Dutch]
+  - key: au
+    name: 澳洲
+    definition: 澳洲（Australia）。
+    terms: [Australia, Australian]
+
+industries:
+  - key: manufacturing
+    name: 製造業
+    definition: 製造業，包含工廠、生產與製造商。
+    terms: [manufacturing, manufacturer, factory]
+  - key: retail
+    name: 零售業
+    definition: 實體或線上零售、零售商。
+    terms: [retail, retailer, retailing]
+  - key: financial_services
+    name: 金融業
+    definition: 銀行、保險、證券與其他金融服務。
+    terms: [bank, banking, financial services, insurance, insurer]
+  - key: healthcare
+    name: 醫療照護
+    definition: 醫院、診所與其他醫療照護服務。
+    terms: [healthcare, health care, hospital, clinic]
+  - key: education
+    name: 教育
+    definition: 學校、大學與其他教育機構。
+    terms: [education, educational institution]
+  - key: public_sector
+    name: 公部門
+    definition: 政府機關與公共部門。
+    terms: [government, public sector]
+  - key: software_it
+    name: 軟體與資訊服務
+    definition: 軟體公司、資訊服務與 IT 委外服務業。
+    terms: [software industry, software company, IT service provider, IT outsourcing]
+  - key: telecommunications
+    name: 電信業
+    definition: 電信業者與通訊服務。
+    terms: [telecommunications, telecom]
+  - key: logistics
+    name: 物流與運輸
+    definition: 物流、倉儲、貨運與運輸業。
+    terms: [logistics, transportation industry, freight]
+  - key: hospitality_tourism
+    name: 旅宿與觀光
+    definition: 旅館、餐飲、旅遊與觀光業。
+    terms: [hotel, hospitality, tourism, restaurant]
+
+research_designs:
+  - key: survey
+    name: 問卷調查
+    definition: 以問卷收集資料。
+  - key: experiment
+    name: 實驗
+    definition: 實驗室、線上或田野實驗：操弄變數、比較不同組別。
+  - key: case_study
+    name: 個案研究
+    definition: 以一個或少數個案深入研究，常搭配訪談與文件資料。
+  - key: interview
+    name: 訪談
+    definition: 以訪談為主要資料的質性研究（不是個案研究）。
+  - key: secondary_data
+    name: 次級資料分析
+    definition: 分析既有的次級資料、交易或行為紀錄、網路資料。
+  - key: design_science
+    name: 設計科學
+    definition: 設計並評估一個資訊系統人造物（設計科學研究）。
+  - key: analytical_model
+    name: 分析模型
+    definition: 以數學或經濟模型推導結論。
+  - key: simulation
+    name: 模擬
+    definition: 以電腦模擬（例如代理人模擬）得出結論。
+  - key: literature_review
+    name: 文獻回顧
+    definition: 文獻回顧、系統性回顧或書目計量分析。
+  - key: meta_analysis
+    name: 後設分析
+    definition: 綜合多篇研究結果的統計分析（後設分析）。
+  - key: mixed_methods
+    name: 混合方法
+    definition: 同時用量化與質性兩種以上的方法。
+
+units_of_analysis:
+  - key: individual
+    name: 個人
+    definition: 個人，例如使用者、消費者、員工。
+  - key: team
+    name: 團隊
+    definition: 團隊或工作小組。
+  - key: organization
+    name: 組織
+    definition: 企業或其他組織。
+  - key: inter_organizational
+    name: 組織之間
+    definition: 兩個以上組織之間的關係，例如買賣雙方、供應鏈夥伴。
+  - key: industry
+    name: 產業
+    definition: 整個產業或市場。
+  - key: country
+    name: 國家
+    definition: 國家或地區。
+  - key: platform
+    name: 平台
+    definition: 數位平台或線上社群。
+  - key: product
+    name: 產品
+    definition: 產品、服務或應用程式。

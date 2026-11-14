@@ -6,9 +6,9 @@ LLM 工作的 prompt 檔（AD-8、ADR-0009 第 3 步、ADR-0030）。目前的�
 |---|---|---|---|
 | `zh_summary` | v1 | `ZhSummaryOutput` | 中文重點四欄（Story 2.4、ADR-0032）；內容的驗證在 `radar/domain/validators/zh_summary.py` |
 | `classify` | v1 | `ClassificationOutput` | 主題與方法分類（Story 2.5、ADR-0033）；分類清單寫死在模板裡，要和 `config/taxonomy.yaml` 一字不差（`tests/unit/test_classify_prompt.py`）；清單外的標籤由 `radar/domain/validators/classification.py` 丟掉並計數 |
+| `extract_model` | v1 | `ResearchModelOutput` | 研究模型擷取（Story 2.6、ADR-0034）；情境值清單寫死在模板裡，要和 `config/context_values.yaml` 一字不差（`tests/unit/test_extract_model_prompt.py`）；內容的驗證在 `radar/domain/validators/research_model.py` |
 
-`extract_model` 由 2.6 加。prompt 的範例一律用自己編的假論文（不取自評估的測試組，
-不放 DOI）。
+prompt 的範例一律用自己編的假論文（不取自評估的測試組，不放 DOI、網址）。
 
 ## 檔案位置
 
@@ -41,7 +41,7 @@ output_schema: FakeResearchQuestion
 ## 雜湊登記（`radar/domain/prompt_hashes.py`）
 
 ```python
-CURRENT_PROMPT_VERSIONS: dict[str, int] = {"zh_summary": 1, "classify": 1}
+CURRENT_PROMPT_VERSIONS: dict[str, int] = {"zh_summary": 1, "classify": 1, "extract_model": 1}
 
 PROMPT_FILE_HASHES: dict[str, dict[int, tuple[str, str | None]]] = {
     "zh_summary": {1: ("<整個檔的 SHA-256>", "<凍結 schema 的 SHA-256 或 None>")},
@@ -76,3 +76,8 @@ PROMPT_FILE_HASHES: dict[str, dict[int, tuple[str, str | None]]] = {
   順序。分類表的 `key`、定義或欄位改了，要同時升分類表版本（登記
   `radar/domain/taxonomy_hashes.py`）與 prompt 版本（新增 `classify/v<N+1>.md`）；只改顯示名稱或
   順序兩邊都不必升版（AD-18、ADR-0033）。
+- **`extract_model` 的情境值清單**：`## 國家`、`## 產業`、`## 研究設計`、`## 分析單位` 之下每項一行
+  `- <key>：<definition>`（不寫顯示名稱）；`tests/unit/test_extract_model_prompt.py` 依 `key` 和
+  `config/context_values.yaml` 比對定義，不看順序。清單的 `key`、定義、`terms` 或欄位改了，要同時升
+  清單版本（登記 `radar/domain/context_values_hashes.py`）與 prompt 版本（新增
+  `extract_model/v<N+1>.md`）；只改顯示名稱或順序兩邊都不必升版（AD-18、ADR-0034）。

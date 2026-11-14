@@ -1,15 +1,18 @@
-"""三張 AI 表頭表 `zh_summary`、`classification`、`research_model`（與掛在分類底下的
-`classification_label`）：表的定義與唯一的讀寫者（AD-7、ADR-0015、ADR-0030）。
+"""三張 AI 表頭表 `zh_summary`、`classification`、`research_model`（與掛在底下的細項
+`classification_label`、`construct_mention`、`hypothesis`）：表的定義與唯一的讀寫者（AD-7、
+ADR-0015、ADR-0030）。
 
 - 2.2 建表頭欄位（`paper_id`、`run_id`、`input_kind`、`input_sha256`、`abstract_id`、`lang`、
   `status`、`reject_reason`、`created_at`）；2.4 在 `zh_summary` 加四個內容欄位（遷移 0011，
   `rejected` 沒有內容、有值時不是空白，CHECK 擋）；2.5 在 `classification` 加
   `dropped_label_count`、新增 `classification_label`（遷移 0012，一列一個標籤）；`rejected` 沒有計數
   由 CHECK 擋，`rejected` 底下沒有標籤、標籤不 UPDATE 則由 `NewAiResult`／`create_ai_result` 保證
-  （程式，不是資料庫）；研究模型的內容由 2.6 加。
+  （程式，不是資料庫）；2.6 在 `research_model` 加論文層級的內容欄位與三個計數、新增
+  `construct_mention`、`hypothesis`（遷移 0013；構面本身在 `repo/constructs.py`，寫研究模型時經
+  `upsert_constructs` 新增）；`rejected` 沒有內容與計數由 CHECK 擋。
 - 同一篇論文、同一種語言最多一筆 `active`（部分唯一索引）。內容不 UPDATE：重跑就新增一列，
   舊的 `active` 標成 `superseded`（只改 `status`）。
-- 結果只經 `services/ai_results.py` 寫入；`repo` 裡除了這個模組，其他查詢不直接讀這三張表
+- 結果只經 `services/ai_results.py` 寫入；`repo` 裡除了這個模組，其他查詢不直接讀表頭與細項表
   （`tests/arch/test_ai_table_reads.py`；之後的有效值 view 在遷移裡）。
 - 寫入 SQL 每張表各寫一份字面值（架構測試掃字串確認一張表一個寫入者，表名不能是變數）。
 - `abstract_id` 不設外鍵（ADR-0030）：`paper_abstract` 在來源拿掉摘要時會被刪掉，外鍵會讓每週
@@ -22,6 +25,7 @@ from types import MappingProxyType
 from typing import Any, Final
 
 from sqlalchemy import (
+    Boolean,
     CheckConstraint,
     Column,
     Connection,
@@ -29,6 +33,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    Numeric,
     Table,
     Text,
     TextClause,
@@ -43,10 +48,12 @@ from radar.domain.ai_outputs import (
     LlmTask,
     NewAiResult,
     OutputLang,
+    ResearchModelContent,
     ResultStatus,
     RunKey,
 )
 from radar.domain.viewer import SystemViewer
+from radar.repo.constructs import upsert_constructs
 from radar.repo.models import Base
 from radar.repo.visibility import visible_to_system_only
 
@@ -145,15 +152,156 @@ classification_label_table = Table(
     CheckConstraint("key ~ '^[a-z][a-z0-9_]*$'", name="key_format"),
     CheckConstraint("field = 'topic' OR key <> 'unclassified'", name="unclassified_only_topic"),
 )
-research_model_table = _header_table("research_model")
+# 研究模型（Story 2.6、ADR-0034）：論文層級的擷取結果放在表頭（ADR-0012 第 5 點、ADR-0015
+# 決定第 5 點），構面與假設在 construct_mention、hypothesis。2.2 留下的表頭（沒有內容）與 rejected
+# 的內容、計數都是 NULL。情境欄位是情境值清單的 key。
+RESEARCH_MODEL_CONTEXT_COLUMNS: Final = (
+    "country",
+    "industry",
+    "research_design",
+    "unit_of_analysis",
+)
+RESEARCH_MODEL_TEXT_COLUMNS: Final = ("limitations", "future_research")
+RESEARCH_MODEL_COUNT_COLUMNS: Final = (
+    "dropped_context_value_count",
+    "unsupported_context_value_count",
+    "corrected_support_count",
+)
+_RESEARCH_MODEL_CONTENT_COLUMNS: Final = (
+    "is_review_or_meta_analysis",
+    *RESEARCH_MODEL_CONTEXT_COLUMNS,
+    "sample_size",
+    *RESEARCH_MODEL_TEXT_COLUMNS,
+    *RESEARCH_MODEL_COUNT_COLUMNS,
+)
+research_model_table = _header_table(
+    "research_model",
+    Column("is_review_or_meta_analysis", Boolean),
+    *(Column(column, Text) for column in RESEARCH_MODEL_CONTEXT_COLUMNS),
+    Column("sample_size", Integer),
+    *(Column(column, Text) for column in RESEARCH_MODEL_TEXT_COLUMNS),
+    *(Column(column, Integer) for column in RESEARCH_MODEL_COUNT_COLUMNS),
+    CheckConstraint(
+        " AND ".join(
+            f"({column} IS NULL OR {column} ~ '^[a-z][a-z0-9_]*$')"
+            for column in RESEARCH_MODEL_CONTEXT_COLUMNS
+        ),
+        name="context_key_format",
+    ),
+    CheckConstraint("sample_size IS NULL OR sample_size >= 1", name="sample_size_positive"),
+    CheckConstraint(
+        "(limitations IS NULL OR limitations ~ '[^[:space:]]')"
+        " AND (future_research IS NULL OR future_research ~ '[^[:space:]]')",
+        name="content_not_blank",
+    ),
+    CheckConstraint(
+        " AND ".join(
+            f"({column} IS NULL OR {column} >= 0)" for column in RESEARCH_MODEL_COUNT_COLUMNS
+        ),
+        name="counts_not_negative",
+    ),
+    CheckConstraint(
+        "status <> 'rejected' OR ("
+        + " AND ".join(f"{column} IS NULL" for column in _RESEARCH_MODEL_CONTENT_COLUMNS)
+        + ")",
+        name="rejected_has_no_content",
+    ),
+)
+# 一篇論文提到的一個構面；指向原本的構面（不因合併而改，ADR-0012 第 5 點）。細項不帶自己的狀態。
+construct_mention_table = Table(
+    "construct_mention",
+    Base.metadata,
+    Column("id", Uuid, primary_key=True, server_default=text("uuidv7()")),
+    Column("research_model_id", Uuid, ForeignKey("research_model.id"), nullable=False),
+    Column("construct_id", Uuid, ForeignKey("construct.id"), nullable=False),
+    Column("name_en", Text, nullable=False),
+    Column("label_zh", Text, nullable=False),
+    Column("definition", Text),
+    Column("scale_source", Text),
+    Column("item_location", Text),
+    Column("item_count", Integer),
+    Column("cronbach_alpha", Numeric),
+    Column("composite_reliability", Numeric),
+    Column("ave", Numeric),
+    # 同一次擷取、同一個構面只有一列；也當 research_model_id 外鍵的索引。
+    UniqueConstraint("research_model_id", "construct_id"),
+    Index("ix_construct_mention_construct_id", "construct_id"),
+    CheckConstraint(
+        "name_en ~ '[^[:space:]]' AND label_zh ~ '[^[:space:]]'"
+        " AND (definition IS NULL OR definition ~ '[^[:space:]]')"
+        " AND (scale_source IS NULL OR scale_source ~ '[^[:space:]]')"
+        " AND (item_location IS NULL OR item_location ~ '[^[:space:]]')",
+        name="text_not_blank",
+    ),
+    CheckConstraint("item_count IS NULL OR item_count >= 1", name="item_count_positive"),
+    CheckConstraint(
+        "(cronbach_alpha IS NULL OR cronbach_alpha BETWEEN 0 AND 1)"
+        " AND (composite_reliability IS NULL OR composite_reliability BETWEEN 0 AND 1)"
+        " AND (ave IS NULL OR ave BETWEEN 0 AND 1)",
+        name="reliability_range",
+    ),
+)
+# 一條關係；因與果指向原本的構面。`sentence_sha256` 是正規化後原句的雜湊（「不同原句」用）。
+hypothesis_table = Table(
+    "hypothesis",
+    Base.metadata,
+    Column("id", Uuid, primary_key=True, server_default=text("uuidv7()")),
+    Column("research_model_id", Uuid, ForeignKey("research_model.id"), nullable=False),
+    Column("ordinal", Integer, nullable=False),
+    Column("sentence", Text, nullable=False),
+    Column("sentence_sha256", Text, nullable=False),
+    Column("cause_construct_id", Uuid, ForeignKey("construct.id"), nullable=False),
+    Column("effect_construct_id", Uuid, ForeignKey("construct.id"), nullable=False),
+    Column("evidence_type", Text, nullable=False),
+    Column("support", Text, nullable=False),
+    Column("beta", Numeric),
+    Column("p_value", Numeric),
+    Column("sample_size", Integer),
+    Column("effect_type", Text),
+    # 也當 research_model_id 外鍵的索引。
+    UniqueConstraint("research_model_id", "ordinal"),
+    # 同一次擷取、同一句、同一條關係只有一列（FR-3 擷取規則 3）；自動產生的名字超過 63 字，給短名。
+    UniqueConstraint(
+        "research_model_id",
+        "sentence_sha256",
+        "cause_construct_id",
+        "effect_construct_id",
+        name="uq_hypothesis_sentence_relation",
+    ),
+    Index("ix_hypothesis_cause_construct_id", "cause_construct_id"),
+    Index("ix_hypothesis_effect_construct_id", "effect_construct_id"),
+    CheckConstraint("ordinal >= 1", name="ordinal_positive"),
+    CheckConstraint(
+        "sentence ~ '[^[:space:]]' AND (effect_type IS NULL OR effect_type ~ '[^[:space:]]')",
+        name="text_not_blank",
+    ),
+    CheckConstraint("sentence_sha256 ~ '^[0-9a-f]{64}$'", name="sentence_sha256_format"),
+    CheckConstraint(
+        "evidence_type IN ('empirical_test', 'analytical', 'simulation', 'qualitative',"
+        " 'conceptual')",
+        name="evidence_type",
+    ),
+    CheckConstraint(
+        "support IN ('supported', 'not_supported', 'partially_supported', 'not_stated',"
+        " 'not_determined')",
+        name="support",
+    ),
+    # FR-3 擷取規則 1、2：只有實證檢定判定支持與否，其他證據類型一律 not_determined。
+    CheckConstraint(
+        "(evidence_type = 'empirical_test') = (support <> 'not_determined')",
+        name="support_matches_evidence_type",
+    ),
+    CheckConstraint("cause_construct_id <> effect_construct_id", name="cause_differs_from_effect"),
+    # beta 是有限數（numeric 收得下 NaN 與正負無限大；NaN 比任何數都大）。
+    CheckConstraint(
+        "beta IS NULL OR (beta > '-Infinity'::numeric AND beta < 'Infinity'::numeric)",
+        name="beta_finite",
+    ),
+    CheckConstraint("p_value IS NULL OR p_value BETWEEN 0 AND 1", name="p_value_range"),
+    CheckConstraint("sample_size IS NULL OR sample_size >= 1", name="sample_size_positive"),
+)
 
 # --- SQL（每張表各一份字面值） -------------------------------------------------------------
-
-_INSERT_COLUMNS = (
-    " (paper_id, run_id, input_kind, input_sha256, abstract_id, lang, status, reject_reason)"
-    " VALUES (:paper_id, :run_id, :input_kind, :input_sha256, :abstract_id, :lang, :status,"
-    " :reject_reason) RETURNING id"
-)
 
 _INSERT: Final[Mapping[LlmTask, TextClause]] = MappingProxyType(
     {
@@ -169,8 +317,37 @@ _INSERT: Final[Mapping[LlmTask, TextClause]] = MappingProxyType(
             " VALUES (:paper_id, :run_id, :input_kind, :input_sha256, :abstract_id, :lang, :status,"
             " :reject_reason, :dropped_label_count) RETURNING id"
         ),
-        LlmTask.EXTRACT_MODEL: text("INSERT INTO research_model" + _INSERT_COLUMNS),
+        LlmTask.EXTRACT_MODEL: text(
+            "INSERT INTO research_model (paper_id, run_id, input_kind, input_sha256, abstract_id,"
+            " lang, status, reject_reason, is_review_or_meta_analysis, country, industry,"
+            " research_design, unit_of_analysis, sample_size, limitations, future_research,"
+            " dropped_context_value_count, unsupported_context_value_count,"
+            " corrected_support_count)"
+            " VALUES (:paper_id, :run_id, :input_kind, :input_sha256, :abstract_id, :lang, :status,"
+            " :reject_reason, :is_review_or_meta_analysis, :country, :industry, :research_design,"
+            " :unit_of_analysis, :sample_size, :limitations, :future_research,"
+            " :dropped_context_value_count, :unsupported_context_value_count,"
+            " :corrected_support_count) RETURNING id"
+        ),
     }
+)
+
+_INSERT_CONSTRUCT_MENTION: Final = text(
+    "INSERT INTO construct_mention (research_model_id, construct_id, name_en, label_zh,"
+    " definition, scale_source, item_location, item_count, cronbach_alpha,"
+    " composite_reliability, ave)"
+    " VALUES (:research_model_id, :construct_id, :name_en, :label_zh, :definition,"
+    " :scale_source, :item_location, :item_count, :cronbach_alpha, :composite_reliability,"
+    " :ave)"
+)
+
+_INSERT_HYPOTHESIS: Final = text(
+    "INSERT INTO hypothesis (research_model_id, ordinal, sentence, sentence_sha256,"
+    " cause_construct_id, effect_construct_id, evidence_type, support, beta, p_value,"
+    " sample_size, effect_type)"
+    " VALUES (:research_model_id, :ordinal, :sentence, :sentence_sha256, :cause_construct_id,"
+    " :effect_construct_id, :evidence_type, :support, :beta, :p_value, :sample_size,"
+    " :effect_type)"
 )
 
 _INSERT_CLASSIFICATION_LABEL: Final = text(
@@ -259,13 +436,15 @@ def find_blocking_ai_result(
 
 
 def create_ai_result(connection: Connection, task: LlmTask, result: NewAiResult) -> uuid.UUID:
-    """新增一列表頭（`zh_summary` 連同四欄內容；`classify` 連同計數，寫完表頭再寫標籤），回它的
-    id。`active` 之前要先 `update_ai_results_superseded`（部分唯一索引擋第二筆 `active`）。在呼叫端
-    開好的交易裡做，不 commit。
+    """新增一列表頭（`zh_summary` 連同四欄內容；`classify` 連同計數，寫完表頭再寫標籤；
+    `extract_model` 連同論文層級的欄位與計數，寫完表頭再經 `upsert_constructs` 確保構面存在、寫
+    `construct_mention` 與 `hypothesis`），回它的 id。`active` 之前要先
+    `update_ai_results_superseded`（部分唯一索引擋第二筆 `active`）。在呼叫端開好的交易裡做，
+    不 commit。
 
     Raises:
         ValueError: 這個工作沒有表頭表，或帶了不屬於這個工作的內容（不是 `zh_summary` 卻帶中文
-            重點、不是 `classify` 卻帶分類）。
+            重點、不是 `classify` 卻帶分類、不是 `extract_model` 卻帶研究模型）。
     """
     task = _check_task(task)
     params: dict[str, object] = {
@@ -290,10 +469,72 @@ def create_ai_result(connection: Connection, task: LlmTask, result: NewAiResult)
         )
     elif classification is not None:
         raise ValueError(f"{task.value} 的表頭不收分類的內容")
+    research_model = result.research_model
+    if task is LlmTask.EXTRACT_MODEL:
+        params.update(_research_model_header_params(research_model))
+    elif research_model is not None:
+        raise ValueError(f"{task.value} 的表頭不收研究模型的內容")
     header_id = uuid.UUID(str(connection.execute(_INSERT[task], params).scalar_one()))
     if classification is not None:
         _create_classification_labels(connection, header_id, classification)
+    if research_model is not None:
+        _create_research_model_details(connection, header_id, research_model)
     return header_id
+
+
+def _research_model_header_params(content: ResearchModelContent | None) -> dict[str, object]:
+    """研究模型表頭的內容欄位（沒有內容時全是 NULL）。"""
+    if content is None:
+        return dict.fromkeys(_RESEARCH_MODEL_CONTENT_COLUMNS)
+    return {column: getattr(content, column) for column in _RESEARCH_MODEL_CONTENT_COLUMNS}
+
+
+def _create_research_model_details(
+    connection: Connection, research_model_id: uuid.UUID, content: ResearchModelContent
+) -> None:
+    """確保構面存在（新構面的 canonical 指向自己），再寫這列表頭的構面與假設。"""
+    construct_ids = upsert_constructs(connection, content.normalized_names())
+    if content.constructs:
+        connection.execute(
+            _INSERT_CONSTRUCT_MENTION,
+            [
+                {
+                    "research_model_id": research_model_id,
+                    "construct_id": construct_ids[mention.normalized_name],
+                    "name_en": mention.name_en,
+                    "label_zh": mention.label_zh,
+                    "definition": mention.definition,
+                    "scale_source": mention.scale_source,
+                    "item_location": mention.item_location,
+                    "item_count": mention.item_count,
+                    "cronbach_alpha": mention.cronbach_alpha,
+                    "composite_reliability": mention.composite_reliability,
+                    "ave": mention.ave,
+                }
+                for mention in content.constructs
+            ],
+        )
+    if content.hypotheses:
+        connection.execute(
+            _INSERT_HYPOTHESIS,
+            [
+                {
+                    "research_model_id": research_model_id,
+                    "ordinal": hypothesis.ordinal,
+                    "sentence": hypothesis.sentence,
+                    "sentence_sha256": hypothesis.sentence_sha256,
+                    "cause_construct_id": construct_ids[hypothesis.cause],
+                    "effect_construct_id": construct_ids[hypothesis.effect],
+                    "evidence_type": hypothesis.evidence_type.value,
+                    "support": hypothesis.support.value,
+                    "beta": hypothesis.beta,
+                    "p_value": hypothesis.p_value,
+                    "sample_size": hypothesis.sample_size,
+                    "effect_type": hypothesis.effect_type,
+                }
+                for hypothesis in content.hypotheses
+            ],
+        )
 
 
 def _create_classification_labels(
