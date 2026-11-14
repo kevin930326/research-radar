@@ -190,8 +190,10 @@ def _is_job_state_raise(error: procrastinate_exceptions.ConnectorException) -> b
 # - 還掛在查出來時那個 worker 底下，或 worker 列已經被刪掉（worker_id 變成 NULL）；
 # - 掛的 worker 不是活著的（找不到 `seconds_since_heartbeat` 秒內報到過的那一列）。
 # 健康的 worker 接手時 worker_id 會換成它自己、attempts 也不同，所以舊的候選清單動不到它。
-# 兩輪 sweep 同時處理同一筆時，後到的會等前一個交易結束，再對最新的那一版重新核對
-# （READ COMMITTED 下 FOR UPDATE 的行為），所以只有一個改得到它。
+# 兩輪 sweep 同時處理同一筆時，後到的會等前一個交易結束再重新核對（READ COMMITTED 下
+# FOR UPDATE 的行為）：工作列自己的欄位（status、attempts、worker_id）用最新的那一版，
+# 所以只有一個改得到它；但 NOT EXISTS 的心跳核對讀的仍是這個敘述開始時的
+# procrastinate_workers 快照。這個時間差和「用心跳判斷失聯」本來就有的時間差同類，不另外處理。
 # Procrastinate 的函式名稱（retry_job_v2、finish_job_v1）跟著 3.11.0 的凍結 SQL；
 # 升版時凍結 SQL 的 arch 測試與比對函式名稱的單元測試會失敗，提醒回來核對。
 _LOCK_IF_STILL_STALLED: LiteralString = """

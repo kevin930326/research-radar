@@ -185,6 +185,13 @@ deferred:
   - `[medium]` `[patch]` 心跳收到 429 時丟掉 `Retry-After`，重試間隔用 stamina 預設值 — 已修：`parse_retry_after()` 解析秒數或 HTTP 日期（看不懂回 None）；`HttpHeartbeat` 改用 stamina 的退避判斷函式，有 `Retry-After` 就照它等、上限 `RADAR_HEARTBEAT_RETRY_AFTER_MAX`（預設 30 秒），沒有就指數退避 `RADAR_HEARTBEAT_RETRY_WAIT_INITIAL`（預設 1）～`RADAR_HEARTBEAT_RETRY_WAIT_MAX`（預設 10），次數仍是 `RADAR_HEARTBEAT_ATTEMPTS`；設定只在 `radar/config.py` 讀，`bootstrap.py` 傳入；`.env.example` 補上。單元測試關掉 stamina 測試模式、攔下 `time.sleep` 記秒數：`Retry-After: 7` 等 7 秒、一天被壓到 30 秒、沒標頭依序 2／3／3 秒、看不懂的標頭走一般退避；另測解析函式、設定範圍與接線、建構子預設值和設定一致。
   - `[low]` `[patch]` 補排只直接呼叫 `sweep()`，CLI＋正式 worker 的案例只測空登記清單 — 已修：新增整合測試，子行程跑正式的 `worker main()`，只把 `radar.entrypoints.worker.tasks.SWEEP_REGISTRY` 換成測試狀態表 `probe_item` 並登記它要排入的工作（沿用既有 `SLOW_WORKER_SCRIPT` 的組裝方式，正式程式沒有加測試開關）；經 `radar enqueue sweep`（CLI）→ 正式登記的 sweep → worker 執行，斷言補排的工作名稱 `identify_probe`、佇列 `pdf`、鎖、參數 `probe_item_id` 等於卡住那一列的 ID、排隊鎖，以及補排的工作也被 worker 執行、收到同一個 ID，`sweep 完成` 的日誌是 1／1／0。
 
+### 2026-11-14 — 對抗式審查（Codex 額度用完的替代）
+- 審查對象：commit `738d5fb`（Codex 審查的修正）
+- verdicts: 2 findings — high 0, medium 0, low 2；2 條都修
+- findings:
+  - `[low]` `[patch]` `radar/adapters/jobs/__init__.py` 的註解與 ADR-0019 決定第 6 點說後到的 sweep「對最新的那一版重新核對」不精確：EvalPlanQual 重新核對時，工作列自己的欄位（status、attempts、worker_id）用最新版，`NOT EXISTS` 的心跳核對讀的仍是敘述開始時的 `procrastinate_workers` 快照（審查者已在 scratch db 重現） — 已修（只改文字，不改程式）：註解與決定第 6 點改成分開說兩者；ADR-0019 取捨新增一條「核對 worker 心跳用的是敘述開始時的快照」，寫明這個時間差和「用心跳判斷失聯」本來就有的時間差同類，不另外處理。
+  - `[low]` `[patch]` 核對條件沒有個別被測到：兩個「舊候選清單」測試裡 attempts 和 worker_id 同時改變，拿掉 `NOT EXISTS` 或 worker_id 條件測試照樣通過 — 已修：比照 `test_stalled_job_finished_meanwhile_is_skipped`，查出候選之後、核對之前一次只改一個條件，新增三個整合測試：(a) 該 worker 的 `last_heartbeat` 更新成現在 → 回 0、工作仍是 doing、attempts 0；(b) 刪掉該 worker 列（worker_id 變 NULL）→ 照常重排成 todo、attempts 1；(c) 另外補的：工作換到另一個也失聯的 worker 名下（attempts 不變）→ 回 0、仍是 doing。逐一暫時改掉對應條件確認測試會失敗：拿掉 `NOT EXISTS` 只有 (a) 失敗；拿掉 `worker_id IS NULL` 的放行只有 (b) 失敗；把 worker_id 相等的核對換成恆真只有 (c) 失敗；還原後全部通過。
+
 ## Design Notes
 
 - **為什麼凍結 SQL 而不是在遷移裡讀套件的 schema.sql**：套件升版時 schema.sql 會變，舊遷移在新資料庫上會建出新版結構，接著升版用的遷移又會撞到已存在的物件。凍結成檔，升版時 arch 測試失敗，提醒加一個套用 Procrastinate `sql/migrations/` 新檔的遷移並更新凍結的版本。

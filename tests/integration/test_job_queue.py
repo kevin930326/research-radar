@@ -664,6 +664,101 @@ def test_stalled_job_finished_meanwhile_is_skipped(
     assert _statuses(migrated_fresh) == {finished: ("succeeded", 0), other: ("todo", 1)}
 
 
+def _retry_with_change_after_candidates(
+    database: TestDatabase, monkeypatch: pytest.MonkeyPatch, job_id: int, change: str
+) -> int:
+    """查出候選之後、核對之前，用管理者連線對這筆工作的 worker 做 `change`（參數是工作 ID）。
+
+    一次只改一個核對條件，確認每個條件各自擋得住（不靠 attempts 一起變）。
+    """
+    stalled_query = procrastinate_sql.queries["select_stalled_jobs_by_heartbeat"]
+    job_app = create_job_app(database.app_url, max_connections=2, connect_timeout=5)
+    with job_app.opened() as app:
+        connector = app.connector.get_sync_connector()
+        real_query_all = connector.execute_query_all
+
+        def change_after_select(**kwargs: Any) -> list[dict[str, Any]]:
+            rows = real_query_all(**kwargs)
+            if kwargs["query"] == stalled_query:
+                assert [row["id"] for row in rows] == [job_id]
+                with psycopg.connect(database.admin_url, autocommit=True) as admin:
+                    admin.execute(change, (job_id,))
+            return rows
+
+        monkeypatch.setattr(connector, "execute_query_all", change_after_select)
+        return retry_stalled_jobs(app, seconds_since_heartbeat=60, max_retries=3)
+
+
+def _job_worker(database: TestDatabase, job_id: int) -> object:
+    with psycopg.connect(database.admin_url, autocommit=True) as admin:
+        row = admin.execute(
+            "SELECT worker_id FROM procrastinate_jobs WHERE id = %s", (job_id,)
+        ).fetchone()
+    assert row is not None
+    return row[0]
+
+
+def test_candidate_whose_worker_reported_in_again_is_skipped(
+    migrated_fresh: TestDatabase, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 只動心跳：worker 在查出候選之後又報到了（attempts、worker_id 都沒變）→ 不可以重排。
+    job = _insert_job(migrated_fresh, status="doing", queueing_lock=None)
+    worker = _job_worker(migrated_fresh, job)
+
+    retried = _retry_with_change_after_candidates(
+        migrated_fresh,
+        monkeypatch,
+        job,
+        "UPDATE procrastinate_workers SET last_heartbeat = now()"
+        " WHERE id = (SELECT worker_id FROM procrastinate_jobs WHERE id = %s)",
+    )
+
+    assert retried == 0
+    assert _statuses(migrated_fresh) == {job: ("doing", 0)}
+    assert _job_worker(migrated_fresh, job) == worker
+
+
+def test_candidate_whose_worker_row_was_deleted_is_still_retried(
+    migrated_fresh: TestDatabase, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 失聯的 worker 列在查出候選之後被清掉（例如新的 worker 啟動時清理）：worker_id 變 NULL，
+    # 工作沒有人在做，照常重排。
+    job = _insert_job(migrated_fresh, status="doing", queueing_lock=None)
+
+    retried = _retry_with_change_after_candidates(
+        migrated_fresh,
+        monkeypatch,
+        job,
+        "DELETE FROM procrastinate_workers"
+        " WHERE id = (SELECT worker_id FROM procrastinate_jobs WHERE id = %s)",
+    )
+
+    assert retried == 1
+    assert _statuses(migrated_fresh) == {job: ("todo", 1)}
+    assert _job_worker(migrated_fresh, job) is None
+
+
+def test_candidate_now_held_by_another_worker_is_skipped(
+    migrated_fresh: TestDatabase, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 只動 worker_id：工作在查出候選之後換到另一個 worker 名下（attempts 沒變）→ 不是候選上那一筆
+    # 的狀態了，不動它。另一個 worker 也是失聯的，所以只有 worker_id 這個條件擋得住。
+    job = _insert_job(migrated_fresh, status="doing", queueing_lock=None)
+
+    retried = _retry_with_change_after_candidates(
+        migrated_fresh,
+        monkeypatch,
+        job,
+        "WITH other AS ("
+        " INSERT INTO procrastinate_workers (last_heartbeat)"
+        " VALUES (now() - interval '1 hour') RETURNING id)"
+        " UPDATE procrastinate_jobs SET worker_id = (SELECT id FROM other) WHERE id = %s",
+    )
+
+    assert retried == 0
+    assert _statuses(migrated_fresh) == {job: ("doing", 0)}
+
+
 def test_second_sweep_with_stale_candidates_leaves_job_taken_by_healthy_worker(
     migrated_fresh: TestDatabase, monkeypatch: pytest.MonkeyPatch
 ) -> None:
