@@ -121,13 +121,22 @@ def openalex_spellings(draw: st.DrawFn) -> tuple[str, str]:
     )
 
 
+# 單獨的代理字元（U+D800–U+DFFF）：Python 的 str 收得下、卻編不成 UTF-8。`st.text()` 預設不產生，
+# 所以另外混進來（`st.text(alphabet=one_of(...))` 幾乎抽不到，改用 lists 再接起來）。
+SURROGATES = st.characters(min_codepoint=0xD800, max_codepoint=0xDFFF, categories=["Cs"])
+ANY_TEXT = st.lists(st.one_of(st.characters(), SURROGATES), max_size=40).map("".join)
+
+
 def _arbitrary(
     prefixes: tuple[str, ...], spellings: st.SearchStrategy[tuple[str, str]]
 ) -> st.SearchStrategy[str]:
-    """任意文字、已知前綴接任意文字、合法寫法：都拿來試冪等與「只會丟 InvalidIdentifierError」。"""
+    """任意文字（含代理字元）、已知前綴接任意文字、合法寫法：
+    都拿來試冪等與「只會丟 InvalidIdentifierError」。
+    """
     return st.one_of(
         st.text(),
-        st.builds(lambda prefix, rest: prefix + rest, st.sampled_from(prefixes), st.text()),
+        ANY_TEXT,
+        st.builds(lambda prefix, rest: prefix + rest, st.sampled_from(prefixes), ANY_TEXT),
         spellings.map(lambda pair: pair[1]),
     )
 
@@ -157,6 +166,7 @@ def _check_idempotent(normalize: Callable[[str], str], value: str, shape: re.Pat
 @example("https://doi.org/10.1/%2541")
 @example("https://doi.org/10.1/a%3Fb?x=1")
 @example("doi:10.1/%41")
+@example("https://doi.org/10.1/\ud800")
 def test_doi_normalize_is_idempotent(value: str) -> None:
     _check_idempotent(normalize_doi, value, DOI_SHAPE)
 
@@ -224,6 +234,11 @@ def test_doi_examples(value: str, expected: str) -> None:
         "doi:doi:10.1/abc",
         "10.１/abc",  # 全形數字不算
         "10.1/" + "a" * MAX_IDENTIFIER_LENGTH,
+        # 單獨的代理字元：網址形式在 percent-decoding 前編碼就失敗，其他寫法是不可印出的字元。
+        "https://doi.org/10.1/\ud800",
+        "https://doi.org/10.1/a%2F\udfff",
+        "doi:10.1/\ud800",
+        "10.1/\udc00",
     ],
 )
 def test_doi_rejects_unreadable(value: str) -> None:
@@ -233,6 +248,7 @@ def test_doi_rejects_unreadable(value: str) -> None:
 
 @PROPERTY
 @given(ARBITRARY_DOI)
+@example("https://doi.org/10.1/\ud800")
 def test_doi_raises_only_invalid_identifier_error(value: str) -> None:
     # 只吞文件寫明的例外；其他例外讓測試失敗。
     with contextlib.suppress(InvalidIdentifierError):
@@ -266,7 +282,17 @@ def test_issn_raises_only_invalid_identifier_error(value: str) -> None:
 
 @pytest.mark.parametrize(
     "value",
-    ["", "0276-778", "0276-77830", "0276_7783", "ISSN", "ISSN0276-7783", "X276-7783", "0276-778Y"],
+    [
+        "",
+        "0276-778",
+        "0276-77830",
+        "0276_7783",
+        "ISSN",
+        "ISSN0276-7783",
+        "X276-7783",
+        "0276-778Y",
+        "0276-778\ud800",
+    ],
 )
 def test_issn_rejects_unreadable(value: str) -> None:
     with pytest.raises(InvalidIdentifierError):
@@ -319,6 +345,7 @@ def test_openalex_raises_only_invalid_identifier_error(value: str) -> None:
         "https://openalex.org/",
         "https://openalex.org/WORKS/W1",
         "https://example.org/W1",
+        "W1\ud800",
     ],
 )
 def test_openalex_rejects_unreadable(value: str) -> None:

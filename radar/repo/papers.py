@@ -35,9 +35,11 @@ from radar.domain.papers import (
     StoredPaper,
     UpsertOutcome,
     UpsertResult,
+    check_storable_text,
 )
 from radar.domain.scope import ScopeSettings, is_in_scope
 from radar.domain.viewer import Viewer
+from radar.repo.db import Database
 from radar.repo.models import Base
 from radar.repo.visibility import visible_papers
 
@@ -139,34 +141,39 @@ def upsert_by_external_id(
     1. 依優先序（DOI、再 OpenAlex ID）找既有的論文。
     2. 有：`SELECT ... FOR UPDATE` 鎖住它，比 `openalex_fetched_at`：要寫的比較舊就什麼都不寫、
        回 `stale`；一樣新或比較新才寫，並把還沒有主人的識別碼掛上來。
-    3. 沒有：新增論文，再用 `ON CONFLICT DO NOTHING` 依優先序認領識別碼。任何一個認領不到
-       （開始找的時候都沒有主人，所以只可能是並行的另一個交易剛建好同一篇；會等那個交易結束
-       才知道），就刪掉自己剛掛上的識別碼與剛新增、還沒 commit 的論文，改走第 2 步：結果和兩個
-       交易依序執行時一樣。
+    3. 沒有：在保存點裡新增論文，再用 `ON CONFLICT DO NOTHING` 依優先序認領識別碼。任何一個
+       認領不到（開始找的時候都沒有主人，所以只可能是並行的另一個交易剛建好同一篇；會等那個交易
+       結束才知道），就退回保存點：剛新增的論文與剛認領的識別碼一起放掉，再改走第 2 步。結果和
+       兩個交易依序執行時一樣。
     4. 識別碼已經屬於另一篇論文時不搬、不合併：放在結果的 `conflicts`，並記警告日誌。
        判成 `stale` 時不掛任何識別碼，也不回報衝突。
+
+    鎖的順序（ADR-0020）：先鎖論文、再佔識別碼，識別碼依優先序佔；第 3 步改走第 2 步之前先退回
+    保存點，手上不留任何識別碼，才去等論文的鎖。所以每個交易只寫一篇時，不論幾個交易同時寫、
+    識別碼怎麼重疊，都不會互相等成死結。一個交易寫很多篇（每週套用、`reparse`）時，跨論文的
+    順序固定不了，和其他交易（含只寫一篇的）仍可能死結；PostgreSQL 會中止其中一個交易，
+    那個交易要整個重跑。
 
     `in_scope` 由 `is_in_scope` 算；`lab_visible`＝原本的值 OR `in_scope` OR `origin` 是
     `expansion`；`origin` 只在新增時寫；`excluded_reason` 由呼叫端明確決定、整欄覆寫。
 
-    交易隔離層級要是 READ COMMITTED（PostgreSQL 預設）：第 3 步「刪掉再重查」靠每個語句重新拿
+    交易隔離層級要是 READ COMMITTED（PostgreSQL 預設）：第 3 步「退回再重查」靠每個語句重新拿
     快照才讀得到並行交易剛 commit 的論文；改成 REPEATABLE READ／SERIALIZABLE 會失效。
-    兩個大批次用不同順序寫到重疊的論文時仍可能死結，PostgreSQL 會中止其中一個交易，要整個重跑。
 
     Raises:
         TypeError: `paper` 不是 `ParsedPaper`（不碰資料庫）。
         ValueError: `origin` 不是 `tracked`／`expansion`／`import`，或 `excluded_reason`
-            是空字串（不碰資料庫）。
+            是空字串、含 NUL 字元或無法編成 UTF-8（不碰資料庫）。
     """
     if not isinstance(paper, ParsedPaper):
         raise TypeError(f"只收 ParsedPaper（現在是 {type(paper).__name__}）")
     origin = PaperOrigin(origin)
     if origin not in UPSERT_ORIGINS:
         raise ValueError(f"upsert_by_external_id 不收 origin={origin}")
-    if excluded_reason is not None and (
-        not isinstance(excluded_reason, str) or excluded_reason == ""
-    ):
-        raise ValueError("excluded_reason 要是 None 或非空字串")
+    if excluded_reason is not None:
+        if not isinstance(excluded_reason, str) or excluded_reason == "":
+            raise ValueError("excluded_reason 要是 None 或非空字串")
+        check_storable_text(excluded_reason, "excluded_reason")
 
     ids = paper.external_ids()
     in_scope = is_in_scope(paper.journal_issn_l, paper.publication_year, scope)
@@ -248,34 +255,38 @@ def _owner_of(connection: Connection, external_id: ExternalId) -> uuid.UUID:
     return owner
 
 
+class _IdentifierTakenError(Exception):
+    """新增時有識別碼認領不到：用來退回保存點（只在這個模組裡丟、接）。"""
+
+
 def _insert_new(
     connection: Connection,
     ids: Sequence[ExternalId],
     values: Mapping[str, object],
     origin: PaperOrigin,
 ) -> UpsertResult | None:
-    """新增論文並依優先序認領識別碼；任何一個認領不到就刪掉剛掛上的識別碼與剛新增的論文，
-    回 None。
-    """
-    paper_id: uuid.UUID = connection.execute(
-        text(
-            "INSERT INTO paper (origin, title, publication_year, journal_issn_l, in_scope,"
-            " excluded_reason, lab_visible, openalex_fetched_at)"
-            " VALUES (:origin, :title, :publication_year, :journal_issn_l, :in_scope,"
-            " :excluded_reason, :shares_with_lab, :fetched_at)"
-            " RETURNING id"
-        ),
-        {**values, "origin": origin.value},
-    ).scalar_one()
+    """在保存點裡新增論文並依優先序認領識別碼；任何一個認領不到就退回保存點、回 None。
 
-    for external_id in ids:
-        if not _claim(connection, paper_id, external_id):
-            # 這些列還沒 commit，別的交易看不到，可以直接刪；交給「已存在」那條路處理。
-            connection.execute(
-                text("DELETE FROM external_id WHERE paper_id = :id"), {"id": paper_id}
-            )
-            connection.execute(text("DELETE FROM paper WHERE id = :id"), {"id": paper_id})
-            return None
+    退回保存點會放掉剛新增的論文與剛認領的識別碼（都還沒 commit，別人看不到），正在等這些
+    識別碼的交易也會立刻繼續；呼叫端接著才去等既有論文的鎖，手上不留任何識別碼（ADR-0020）。
+    """
+    try:
+        with Database.savepoint(connection):
+            paper_id: uuid.UUID = connection.execute(
+                text(
+                    "INSERT INTO paper (origin, title, publication_year, journal_issn_l,"
+                    " in_scope, excluded_reason, lab_visible, openalex_fetched_at)"
+                    " VALUES (:origin, :title, :publication_year, :journal_issn_l, :in_scope,"
+                    " :excluded_reason, :shares_with_lab, :fetched_at)"
+                    " RETURNING id"
+                ),
+                {**values, "origin": origin.value},
+            ).scalar_one()
+            for external_id in ids:
+                if not _claim(connection, paper_id, external_id):
+                    raise _IdentifierTakenError
+    except _IdentifierTakenError:
+        return None
     return UpsertResult(paper_id, UpsertOutcome.CREATED)
 
 

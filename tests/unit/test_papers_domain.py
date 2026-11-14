@@ -8,7 +8,13 @@ import pytest
 from pydantic import ValidationError
 
 from radar.domain.identifiers import ExternalId, IdentifierScheme
-from radar.domain.papers import PaperOrigin, ParsedPaper, UpsertOutcome, UpsertResult
+from radar.domain.papers import (
+    PaperOrigin,
+    ParsedPaper,
+    UpsertOutcome,
+    UpsertResult,
+    check_storable_text,
+)
 from radar.domain.scope import ScopeSettings
 from radar.repo.papers import upsert_by_external_id
 
@@ -75,6 +81,13 @@ def test_external_ids_in_priority_order() -> None:
         {"publication_year": True},
         {"publication_year": "2020"},
         {"title": "A\x00study"},
+        # 單獨的代理字元：Python 收得下、PostgreSQL 存不下（psycopg 寫入時才丟錯）。
+        {"title": "A study \ud800"},
+        {"title": "\udfff"},
+        {"doi": "10.1/\ud800"},
+        {"doi": "https://doi.org/10.1/\ud800"},
+        {"openalex_id": "W1\ud800"},
+        {"journal_issn_l": "0276-778\ud800"},
     ],
 )
 def test_invalid_input_is_rejected(overrides: dict[str, object]) -> None:
@@ -145,3 +158,29 @@ def test_upsert_rejects_empty_excluded_reason() -> None:
             excluded_reason="",
             scope=SCOPE,
         )
+
+
+@pytest.mark.parametrize("reason", ["edit\x00orial", "editorial \ud800"])
+def test_upsert_rejects_unstorable_excluded_reason(reason: str) -> None:
+    with pytest.raises(ValueError, match="excluded_reason"):
+        upsert_by_external_id(
+            UntouchableConnection(),  # type: ignore[arg-type]
+            _paper(),
+            origin=PaperOrigin.TRACKED,
+            excluded_reason=reason,
+            scope=SCOPE,
+        )
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["A study", "論文標題", "emoji \U0001f4da", "\ufffd"],
+)
+def test_storable_text_accepts_normal_unicode(value: str) -> None:
+    check_storable_text(value, "標題")
+
+
+@pytest.mark.parametrize("value", ["\x00", "a\ud800b", "\udc00"])
+def test_storable_text_rejects_nul_and_surrogates(value: str) -> None:
+    with pytest.raises(ValueError, match="標題"):
+        check_storable_text(value, "標題")

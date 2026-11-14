@@ -14,7 +14,7 @@ from radar.domain.permissions import (
     require,
 )
 from radar.domain.viewer import MemberViewer, PublicViewer, SystemViewer, Viewer
-from radar.repo.visibility import visible_papers
+from radar.repo.visibility import visible_papers, visible_to_system_only
 
 OWNER_ID = uuid.UUID("018f0000-0000-7000-8000-0000000000a1")
 OTHER_ID = uuid.UUID("018f0000-0000-7000-8000-0000000000b2")
@@ -133,3 +133,13 @@ def test_alias_must_be_lowercase_identifier(alias: str) -> None:
 def test_unknown_viewer_is_rejected() -> None:
     with pytest.raises(TypeError):
         visible_papers(object())  # type: ignore[arg-type]
+
+
+def test_system_only_condition() -> None:
+    assert visible_to_system_only(SYSTEM) == "TRUE"
+
+
+@pytest.mark.parametrize("viewer", [MEMBER, ADMIN, PUBLIC, object()])
+def test_system_only_rejects_everyone_else(viewer: object) -> None:
+    with pytest.raises(TypeError, match="SystemViewer"):
+        visible_to_system_only(viewer)  # type: ignore[arg-type]

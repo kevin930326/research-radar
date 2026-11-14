@@ -2,7 +2,8 @@
 
 1. `radar.repo` 的公開函式名稱用登記的前綴；讀取類的第一個參數是沒有預設值的 `viewer`，
    型別是 Viewer 或其中幾種；公開類別只能是基礎設施例外。
-2. `lab_visible` 只出現在 `radar/repo/visibility.py` 與 `radar/repo/papers.py`。
+2. `lab_visible` 只出現在 `radar/repo/visibility.py` 與 `radar/repo/papers.py`；可見條件只從
+   `repo/visibility.py` 來：其他 repo 模組不自己判斷讀者身分，讀取函式把 `viewer` 交給它的函式。
 3. 一張表一個寫入者：`radar/repo` 字串裡的寫入 SQL，每張表只對到一個模組；不用 SQLAlchemy 的
    `insert`／`update`／`delete`（用了就掃不到）。
 4. `.commit(`／`.rollback(`／`.begin(`／`.begin_nested(` 只在 `repo/db.py` 與 `repo/migrations.py`；
@@ -52,9 +53,13 @@ INFRASTRUCTURE_EXCEPTIONS: dict[str, str] = {
 
 
 def _repo_modules() -> list[types.ModuleType]:
+    """`radar.repo` 根套件本身（`__init__.py` 也可能定義函式）與底下每個模組。"""
     return [
-        importlib.import_module(info.name)
-        for info in pkgutil.walk_packages(radar.repo.__path__, prefix="radar.repo.")
+        radar.repo,
+        *(
+            importlib.import_module(info.name)
+            for info in pkgutil.walk_packages(radar.repo.__path__, prefix="radar.repo.")
+        ),
     ]
 
 
@@ -69,6 +74,51 @@ def _sources(directory: Path) -> dict[str, str]:
 
 def _module_name(relative: str) -> str:
     return relative.removesuffix(".py").removesuffix("/__init__").replace("/", ".")
+
+
+# --- import 的解析（規則 2、5 共用） -------------------------------------------------------
+
+
+def _resolve_from(module: str, node: ast.ImportFrom, *, is_package: bool) -> str:
+    """`from X import ...` 的 X 的完整模組路徑；相對 import 依 `module` 所在的套件解析。"""
+    if node.level == 0:
+        return node.module or ""
+    package = module if is_package else module.rpartition(".")[0]
+    parts = package.split(".")
+    base = ".".join(parts[: len(parts) - (node.level - 1)])
+    return f"{base}.{node.module}" if node.module else base
+
+
+def _imported_names(module: str, tree: ast.Module, *, is_package: bool) -> dict[str, str]:
+    """import 綁定的本地名稱 → 完整路徑（模組，或 `模組.名稱`）。"""
+    names: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.asname:
+                    names[alias.asname] = alias.name
+                else:  # `import a.b.c` 綁定的是 `a`
+                    root = alias.name.split(".")[0]
+                    names[root] = root
+        elif isinstance(node, ast.ImportFrom):
+            source = _resolve_from(module, node, is_package=is_package)
+            for alias in node.names:
+                names[alias.asname or alias.name] = f"{source}.{alias.name}"
+    return names
+
+
+def _full_name(expression: ast.AST, names: Mapping[str, str]) -> str | None:
+    """`a.b.c` 這種名稱鏈換成完整路徑（開頭的名稱依 import 換掉，沒 import 的照原樣）；
+    不是名稱鏈時回 None。
+    """
+    parts: list[str] = []
+    while isinstance(expression, ast.Attribute):
+        parts.append(expression.attr)
+        expression = expression.value
+    if not isinstance(expression, ast.Name):
+        return None
+    parts.append(names.get(expression.id, expression.id))
+    return ".".join(reversed(parts))
 
 
 # --- 1. 命名與 viewer ----------------------------------------------------------------------
@@ -184,6 +234,26 @@ class Helper:
 """
 
 
+def test_repo_modules_include_root_package() -> None:
+    assert _repo_modules()[0] is radar.repo
+
+
+def test_naming_check_covers_root_package(monkeypatch: pytest.MonkeyPatch) -> None:
+    # 直接定義在 `radar/repo/__init__.py` 的函式也要被檢查。
+    def fetch_everything(connection: object) -> None: ...
+
+    fetch_everything.__module__ = "radar.repo"
+    monkeypatch.setattr(radar.repo, "fetch_everything", fetch_everything, raising=False)
+
+    problems = [
+        problem
+        for module in _repo_modules()
+        for problem in naming_problems(module, INFRASTRUCTURE_EXCEPTIONS)
+    ]
+
+    assert problems == ["radar.repo.fetch_everything：名稱沒有用登記的前綴"]
+
+
 def test_naming_check_catches_each_mistake() -> None:
     module = types.ModuleType("radar.repo.fake_probe")
     exec(compile(FAKE_REPO_MODULE, "fake_probe.py", "exec"), module.__dict__)
@@ -235,6 +305,196 @@ def test_lab_visible_check_catches_other_file(tmp_path: Path) -> None:
     assert lab_visible_offenders(tmp_path / "radar", tmp_path, LAB_VISIBLE_FILES) == [
         "radar/services/leak.py"
     ]
+
+
+# 可見條件只從 visibility.py 來（AD-4）：其他 repo 模組不自己判斷讀者身分（不在型別註記以外的
+# 地方用到讀者身分的類別，例如 isinstance、match；不讀 viewer 的屬性、不看 type(viewer)），
+# 讀取函式要把自己的 viewer 交給 visibility.py 的函式。
+VISIBILITY_MODULE = "radar.repo.visibility"
+VIEWER_MODULE = "radar.domain.viewer"
+VIEWER_CLASS_NAMES = frozenset({"MemberViewer", "PublicViewer", "SystemViewer", "Viewer"})
+
+
+def _annotation_nodes(tree: ast.Module) -> set[int]:
+    """型別註記裡的每個節點（`viewer: SystemViewer` 這種寫法不算判斷身分）。"""
+    annotations: list[ast.AST] = []
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            arguments = node.args
+            every = [
+                *arguments.posonlyargs,
+                *arguments.args,
+                *arguments.kwonlyargs,
+                *(argument for argument in (arguments.vararg, arguments.kwarg) if argument),
+            ]
+            annotations += [argument.annotation for argument in every if argument.annotation]
+            if node.returns is not None:
+                annotations.append(node.returns)
+        elif isinstance(node, ast.AnnAssign):
+            annotations.append(node.annotation)
+    return {id(inner) for annotation in annotations for inner in ast.walk(annotation)}
+
+
+def _is_viewer_class(full: str | None) -> bool:
+    if full is None:
+        return False
+    module, _, name = full.rpartition(".")
+    return name in VIEWER_CLASS_NAMES and module in ("", VIEWER_MODULE)
+
+
+def visibility_problems(module: str, source: str, *, is_package: bool = False) -> list[str]:
+    """repo 模組（visibility.py 以外）自己判斷讀者身分的地方，
+    以及沒有把 viewer 交給 visibility.py 的讀取函式。
+    """
+    if module == VISIBILITY_MODULE:
+        return []
+    tree = ast.parse(source)
+    names = _imported_names(module, tree, is_package=is_package)
+    annotations = _annotation_nodes(tree)
+
+    judged = [
+        (node.lineno, ast.unparse(node))
+        for node in ast.walk(tree)
+        if isinstance(node, ast.expr)
+        and id(node) not in annotations
+        and _judges_viewer(node, names)
+    ]
+    problems = [
+        f"{module}:{line}：自己判斷讀者身分（{code}），改用 radar.repo.visibility"
+        for line, code in sorted(judged)
+    ]
+
+    for node in tree.body:
+        if not (
+            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name.startswith(READ_PREFIXES)
+        ):
+            continue
+        arguments = [*node.args.posonlyargs, *node.args.args]
+        if not arguments or arguments[0].arg != "viewer":
+            continue  # 命名規則另外抓
+        if not any(_passes_viewer_to_visibility(call, names) for call in ast.walk(node)):
+            problems.append(
+                f"{module}.{node.name}：讀取函式要把 viewer 交給 radar.repo.visibility 的函式"
+            )
+    return problems
+
+
+def _judges_viewer(node: ast.AST, names: Mapping[str, str]) -> bool:
+    """用到讀者身分的類別、讀 `viewer` 的屬性、或 `type(viewer)`。"""
+    if isinstance(node, (ast.Name, ast.Attribute)) and _is_viewer_class(_full_name(node, names)):
+        return True
+    if isinstance(node, ast.Attribute):
+        return isinstance(node.value, ast.Name) and node.value.id == "viewer"
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "type"
+        and any(isinstance(arg, ast.Name) and arg.id == "viewer" for arg in node.args)
+    )
+
+
+def _passes_viewer_to_visibility(node: ast.AST, names: Mapping[str, str]) -> bool:
+    if not isinstance(node, ast.Call):
+        return False
+    full = _full_name(node.func, names)
+    if full is None or full.rpartition(".")[0] != VISIBILITY_MODULE:
+        return False
+    values = [*node.args, *(keyword.value for keyword in node.keywords)]
+    return any(isinstance(value, ast.Name) and value.id == "viewer" for value in values)
+
+
+def test_read_functions_get_visibility_from_visibility_module() -> None:
+    problems = [
+        problem
+        for relative, source in _sources(RADAR / "repo").items()
+        for problem in visibility_problems(
+            _module_name(relative), source, is_package=relative.endswith("__init__.py")
+        )
+    ]
+    assert problems == []
+
+
+def test_visibility_check_catches_condition_rewritten_in_papers() -> None:
+    # 拿真的 papers.py，把 get_paper 的條件改成自己判斷：一定要被抓到。
+    real = _repo_sources()["radar.repo.papers"]
+    rewritten = real.replace(
+        'condition = visible_papers(viewer, alias="paper")',
+        'condition = "TRUE" if isinstance(viewer, SystemViewer) else \'"paper".lab_visible\'',
+    )
+    assert rewritten != real
+
+    problems = visibility_problems("radar.repo.papers", rewritten)
+
+    assert len(problems) == 2, problems
+    assert "自己判斷讀者身分（SystemViewer）" in problems[0]
+    assert problems[1] == (
+        "radar.repo.papers.get_paper：讀取函式要把 viewer 交給 radar.repo.visibility 的函式"
+    )
+
+
+FAKE_SELF_JUDGING_REPO = """
+import radar.domain.viewer as v
+from sqlalchemy import text
+from radar.domain.viewer import MemberViewer, SystemViewer, Viewer
+from .visibility import visible_papers
+
+
+def get_by_isinstance(viewer: Viewer, connection: object) -> object:
+    return "TRUE" if isinstance(viewer, SystemViewer) else "lab_visible"
+
+
+def list_by_match(viewer: Viewer, connection: object) -> object:
+    match viewer:
+        case MemberViewer():
+            return visible_papers(viewer)
+    return "TRUE"
+
+
+def count_by_attribute(viewer: Viewer, connection: object) -> object:
+    return "x" if viewer.is_admin else visible_papers(viewer)
+
+
+def find_by_module_alias(viewer: Viewer, connection: object) -> object:
+    return "FALSE" if isinstance(viewer, v.PublicViewer) else visible_papers(viewer)
+
+
+def search_with_someone_else(viewer: Viewer, connection: object) -> object:
+    return visible_papers(SystemViewer())
+
+
+def visible_by_type(viewer: Viewer, connection: object) -> object:
+    return type(viewer).__name__ + visible_papers(viewer=viewer)
+
+
+def get_ok(viewer: v.MemberViewer | SystemViewer, connection: object) -> object:
+    reader: Viewer = viewer  # 型別註記裡的身分類別不算判斷
+    return text(f"SELECT 1 FROM paper p WHERE {visible_papers(viewer, alias='p')}"), reader
+"""
+
+
+def test_visibility_check_catches_each_mistake() -> None:
+    problems = visibility_problems("radar.repo.fake", FAKE_SELF_JUDGING_REPO)
+
+    assert problems == [
+        "radar.repo.fake:9：自己判斷讀者身分（SystemViewer），改用 radar.repo.visibility",
+        "radar.repo.fake:14：自己判斷讀者身分（MemberViewer），改用 radar.repo.visibility",
+        "radar.repo.fake:20：自己判斷讀者身分（viewer.is_admin），改用 radar.repo.visibility",
+        "radar.repo.fake:24：自己判斷讀者身分（v.PublicViewer），改用 radar.repo.visibility",
+        "radar.repo.fake:28：自己判斷讀者身分（SystemViewer），改用 radar.repo.visibility",
+        "radar.repo.fake:32：自己判斷讀者身分（type(viewer)），改用 radar.repo.visibility",
+        "radar.repo.fake.get_by_isinstance：讀取函式要把 viewer 交給 radar.repo.visibility 的函式",
+        "radar.repo.fake.search_with_someone_else：讀取函式要把 viewer 交給"
+        " radar.repo.visibility 的函式",
+    ]
+
+
+def test_visibility_module_itself_is_exempt() -> None:
+    source = (ROOT / "radar" / "repo" / "visibility.py").read_text(encoding="utf-8")
+
+    assert visibility_problems(VISIBILITY_MODULE, source) == []
+    # 同一份原始碼放在別的模組就違規：證明豁免只因為它是 visibility.py。
+    assert visibility_problems("radar.repo.other", source) != []
 
 
 # --- 3. 一張表一個寫入者 ----------------------------------------------------------------------
@@ -293,26 +553,41 @@ def written_tables(source: str) -> set[str]:
     return tables
 
 
+def _is_sqlalchemy(module: str) -> bool:
+    return module == "sqlalchemy" or module.startswith("sqlalchemy.")
+
+
 def _sqlalchemy_writer_uses(source: str) -> list[str]:
     tree = ast.parse(source)
-    module_aliases = {"sqlalchemy"}
+    # 綁到 sqlalchemy、它的子模組或其中名稱的本地名稱（`import sqlalchemy.sql` 綁的是 `sqlalchemy`；
+    # `from sqlalchemy.sql import expression as sql` 綁的是 `sql`）。
+    bound = {"sqlalchemy"}
     uses: list[str] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
-            module_aliases |= {
-                alias.asname or alias.name for alias in node.names if alias.name == "sqlalchemy"
-            }
-        elif isinstance(node, ast.ImportFrom) and (node.module or "").startswith("sqlalchemy"):
-            uses += [
-                f"from {node.module} import {alias.name}"
+            bound |= {
+                alias.asname or alias.name.split(".")[0]
                 for alias in node.names
-                if alias.name in _SQLALCHEMY_WRITERS
-            ]
+                if _is_sqlalchemy(alias.name)
+            }
+        elif (
+            isinstance(node, ast.ImportFrom)
+            and node.level == 0
+            and _is_sqlalchemy(node.module or "")
+        ):
+            for alias in node.names:
+                if alias.name in _SQLALCHEMY_WRITERS:
+                    uses.append(f"from {node.module} import {alias.name}")
+                else:
+                    bound.add(alias.asname or alias.name)
     for node in ast.walk(tree):
         if not (isinstance(node, ast.Attribute) and node.attr in _SQLALCHEMY_WRITERS):
             continue
-        if isinstance(node.value, ast.Name) and node.value.id in module_aliases:
-            uses.append(f"{node.value.id}.{node.attr}")
+        root: ast.AST = node.value
+        while isinstance(root, ast.Attribute):
+            root = root.value
+        if isinstance(root, ast.Name) and root.id in bound:
+            uses.append(ast.unparse(node))
     for node in ast.walk(tree):
         # `paper_table.insert()` 這類 Table 的寫入方法（不帶參數的呼叫）。
         if (
@@ -368,6 +643,14 @@ def test_writer_check_catches_each_mistake() -> None:
         "radar.repo.d": "from sqlalchemy import insert",
         "radar.repo.e": "import sqlalchemy as sa\nX = sa.delete",
         "radar.repo.f": "def f(table):\n    return table.update()",
+        # 子模組的別名、經子模組的完整路徑、子模組直接 import 成別名。
+        "radar.repo.h": (
+            "from sqlalchemy.sql import expression as sql\n"
+            "def f(paper_table):\n    return sql.update(paper_table)"
+        ),
+        "radar.repo.i": "import sqlalchemy.sql\nX = sqlalchemy.sql.expression.insert",
+        "radar.repo.j": "import sqlalchemy.sql.dml as dml\nX = dml.delete",
+        "radar.repo.k": "from sqlalchemy import sql\nX = sql.expression.update",
         # docstring 與 ON CONFLICT ... DO UPDATE SET 不算。
         "radar.repo.g": (
             '"""這裡會 INSERT INTO paper。"""\n'
@@ -382,6 +665,11 @@ def test_writer_check_catches_each_mistake() -> None:
         "radar.repo.d：不要用 SQLAlchemy 的寫入（from sqlalchemy import insert），改用 text() SQL",
         "radar.repo.e：不要用 SQLAlchemy 的寫入（sa.delete），改用 text() SQL",
         "radar.repo.f：不要用 SQLAlchemy 的寫入（.update()），改用 text() SQL",
+        "radar.repo.h：不要用 SQLAlchemy 的寫入（sql.update），改用 text() SQL",
+        "radar.repo.i：不要用 SQLAlchemy 的寫入（sqlalchemy.sql.expression.insert），"
+        "改用 text() SQL",
+        "radar.repo.j：不要用 SQLAlchemy 的寫入（dml.delete），改用 text() SQL",
+        "radar.repo.k：不要用 SQLAlchemy 的寫入（sql.expression.update），改用 text() SQL",
         "paper：有兩個以上的寫入者（radar.repo.a、radar.repo.b）",
     ]
 
@@ -456,25 +744,12 @@ def _is_repo_module(name: str) -> bool:
     return name == "radar.repo" or name.startswith("radar.repo.")
 
 
-def actor_problems(module: str, source: str) -> list[str]:
+def actor_problems(module: str, source: str, *, is_package: bool = False) -> list[str]:
     """services 模組裡，用到（直接或經私有函式）寫入類 repo 函式、
-    第一個參數卻不是 `actor` 的公開函式。
+    第一個參數卻不是 `actor` 的公開函式。相對 import 先解析成完整模組路徑。
     """
     tree = ast.parse(source)
-    write_names: set[str] = set()  # 直接 import 進來的寫入類 repo 函式（本地名稱）
-    repo_aliases: set[str] = set()  # 代表 repo 模組的本地名稱
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and _is_repo_module(node.module or ""):
-            for alias in node.names:
-                local = alias.asname or alias.name
-                if node.module == "radar.repo" or not alias.name.startswith(WRITE_PREFIXES):
-                    repo_aliases.add(local)  # `from radar.repo import papers`（或讀取函式，無害）
-                else:
-                    write_names.add(local)
-        elif isinstance(node, ast.Import):
-            repo_aliases |= {
-                alias.asname for alias in node.names if alias.asname and _is_repo_module(alias.name)
-            }
+    names = _imported_names(module, tree, is_package=is_package)
 
     functions = {
         node.name: node
@@ -482,15 +757,18 @@ def actor_problems(module: str, source: str) -> list[str]:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
     }
 
+    def is_repo_writer(node: ast.AST) -> bool:
+        full = _full_name(node, names)
+        if full is None:
+            return False
+        owner, _, name = full.rpartition(".")
+        return _is_repo_module(owner) and name.startswith(WRITE_PREFIXES)
+
     def writes_directly(function: ast.AST) -> bool:
-        for node in ast.walk(function):
-            if isinstance(node, ast.Name) and node.id in write_names:
-                return True
-            if isinstance(node, ast.Attribute) and node.attr.startswith(WRITE_PREFIXES):
-                owner = ast.unparse(node.value)
-                if owner in repo_aliases or _is_repo_module(owner):
-                    return True
-        return False
+        return any(
+            isinstance(node, (ast.Name, ast.Attribute)) and is_repo_writer(node)
+            for node in ast.walk(function)
+        )
 
     def writes(name: str, seen: set[str]) -> bool:
         seen.add(name)
@@ -518,7 +796,9 @@ def test_services_that_write_take_actor_first() -> None:
     problems = [
         problem
         for relative, source in _sources(RADAR / "services").items()
-        for problem in actor_problems(_module_name(relative), source)
+        for problem in actor_problems(
+            _module_name(relative), source, is_package=relative.endswith("__init__.py")
+        )
     ]
     assert problems == []
 
@@ -566,4 +846,67 @@ def test_actor_check_catches_each_mistake() -> None:
         "radar.services.fake.via_helper：用到寫入類 repo 函式，第一個參數要叫 actor",
         "radar.services.fake.via_module_alias：用到寫入類 repo 函式，第一個參數要叫 actor",
         "radar.services.fake.via_full_path：用到寫入類 repo 函式，第一個參數要叫 actor",
+    ]
+
+
+FAKE_SERVICES_RELATIVE = """
+from .. import repo
+from ..repo import papers as repo_papers
+from ..repo.papers import upsert_by_external_id
+from ..repo.papers import get_paper
+from . import helpers
+from radar import repo as absolute_repo
+
+
+def via_relative_function(database, paper):
+    upsert_by_external_id(database, paper)
+
+
+def via_relative_module(database):
+    repo_papers.create_manual(database)
+
+
+def via_relative_package(database):
+    repo.papers.delete_paper(database)
+
+
+def via_absolute_package(database):
+    absolute_repo.papers.update_paper(database)
+
+
+def not_repo(database):
+    helpers.update_cache(database)
+
+
+def relative_ok(actor, database, paper):
+    upsert_by_external_id(database, paper)
+
+
+def relative_read_only(viewer, connection, paper_id):
+    return get_paper(viewer, connection, paper_id)
+"""
+
+
+def test_actor_check_resolves_relative_imports() -> None:
+    problems = actor_problems("radar.services.fake", FAKE_SERVICES_RELATIVE)
+
+    assert problems == [
+        "radar.services.fake.via_relative_function：用到寫入類 repo 函式，第一個參數要叫 actor",
+        "radar.services.fake.via_relative_module：用到寫入類 repo 函式，第一個參數要叫 actor",
+        "radar.services.fake.via_relative_package：用到寫入類 repo 函式，第一個參數要叫 actor",
+        "radar.services.fake.via_absolute_package：用到寫入類 repo 函式，第一個參數要叫 actor",
+    ]
+
+
+def test_relative_imports_resolve_from_package_init() -> None:
+    # `__init__.py` 的相對 import 以套件本身為起點：`radar/services/__init__.py` 裡的
+    # `from ..repo.papers` 是 `radar.repo.papers`；`radar/services/sub/__init__.py` 裡的同一句
+    # 是 `radar.services.repo.papers`（不是 repo）。
+    source = "from ..repo.papers import upsert_by_external_id\n" + (
+        "def f(database):\n    upsert_by_external_id(database)\n"
+    )
+
+    assert actor_problems("radar.services.sub", source, is_package=True) == []
+    assert actor_problems("radar.services", source, is_package=True) == [
+        "radar.services.f：用到寫入類 repo 函式，第一個參數要叫 actor"
     ]

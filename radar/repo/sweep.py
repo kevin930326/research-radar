@@ -6,6 +6,7 @@ from sqlalchemy import Connection, text
 
 from radar.domain.sweep import SweepEntry
 from radar.domain.viewer import SystemViewer
+from radar.repo.visibility import visible_to_system_only
 
 
 def find_stuck_ids(
@@ -20,19 +21,18 @@ def find_stuck_ids(
     Raises:
         TypeError: `viewer` 不是 `SystemViewer`。
     """
-    if not isinstance(viewer, SystemViewer):
-        raise TypeError(f"find_stuck_ids 只給 SystemViewer（現在是 {type(viewer).__name__}）")
+    visible = visible_to_system_only(viewer)  # 不是 SystemViewer 就在碰連線之前丟錯
     quote = connection.dialect.identifier_preparer.quote
     table, status, time = (
         quote(entry.table),
         quote(entry.status_column),
         quote(entry.time_column),
     )
-    # 只有識別字組進字串（已驗證並加引號）；值一律走參數。
+    # 只有識別字與 visibility.py 回的條件組進字串（識別字已驗證並加引號）；值一律走參數。
     rows = connection.execute(
         text(
             f"SELECT id FROM {table}"
-            f" WHERE {status} = :start_status AND {time} < now() - :stuck_after"
+            f" WHERE {visible} AND {status} = :start_status AND {time} < now() - :stuck_after"
             f" ORDER BY {time}, id LIMIT :limit"
         ),
         {"start_status": entry.start_status, "stuck_after": entry.stuck_after, "limit": limit},

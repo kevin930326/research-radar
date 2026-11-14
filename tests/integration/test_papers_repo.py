@@ -18,6 +18,7 @@ from radar.domain.identifiers import ExternalId, IdentifierScheme
 from radar.domain.papers import PaperOrigin, ParsedPaper, UpsertOutcome, UpsertResult
 from radar.domain.scope import ScopeSettings
 from radar.domain.viewer import MemberViewer, PublicViewer, SystemViewer
+from radar.repo import papers as papers_module
 from radar.repo.db import Database
 from radar.repo.papers import get_paper, upsert_by_external_id
 from tests.database import APP_ROLE, TestDatabase, connect_admin, migrate
@@ -257,6 +258,129 @@ def test_concurrent_inserts_sharing_only_openalex_id_end_with_one_paper(
         ("doi", "10.1/b", first.paper_id),
         ("openalex", "W9", first.paper_id),
     ]
+
+
+def test_concurrent_older_write_waits_for_lock_then_is_stale(
+    papers_db: TestDatabase, database: Database
+) -> None:
+    # 「先鎖再比」：交易一寫比較新的資料、還沒 commit；交易二寫比較舊的資料，要等交易一放開
+    # 論文的鎖，才讀到交易一寫的抓取時間、判成 stale。沒有 FOR UPDATE 的話，交易二會先讀到
+    # commit 前的舊時間、判定可以寫，等到鎖之後把較新的資料蓋掉。
+    original = _upsert(database, _paper(fetched_at=T1 - timedelta(days=7), title="Original"))
+
+    newer, older = _upsert_concurrently(
+        papers_db,
+        database,
+        _paper(fetched_at=T2, title="Newer"),
+        _paper(fetched_at=T1, title="Older"),
+    )
+
+    assert newer == UpsertResult(original.paper_id, UpsertOutcome.UPDATED)
+    assert older == UpsertResult(original.paper_id, UpsertOutcome.STALE)
+    row = _paper_row(papers_db, original.paper_id)
+    assert row["title"] == "Newer"
+    assert row["openalex_fetched_at"] == T2
+
+
+def test_withdrawn_insert_releases_identifiers_before_waiting_for_paper_lock(
+    papers_db: TestDatabase, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """三個連線交錯，重現「撤回新增」的死結推演（ADR-0020「鎖的順序」）：
+
+    1. A 新增 (10.1/a, W9)，還沒 commit。
+    2. B 寫 (10.1/b, W9)：找不到既有的論文 → 新增、認領到 10.1/b、在 W9 等 A。
+    3. A commit。B 認領 W9 失敗、撤回自己的新增，正要去鎖 A 那篇論文時（測試在這裡讓 B 停住）……
+    4. C 寫 (10.1/b, W9)：經 W9 找到 A 那篇、先鎖住它，再認領 10.1/b。
+
+    撤回時如果還佔著 10.1/b（舊做法：在交易裡 DELETE，刪掉的列要等整個交易結束才放），C 會等 B，
+    B 放行後又等 C 的論文鎖，互等成死結。現在 B 撤回是退回保存點，10.1/b 當下就放掉：C 不必等 B
+    就能做完並 commit；B 放行後等 C 結束，再更新同一篇。
+    """
+    database = Database(papers_db.app_url, connect_timeout=5, pool_size=3)
+    a_written = threading.Event()
+    release_a = threading.Event()
+    b_paused = threading.Event()
+    release_b = threading.Event()
+    results: dict[str, UpsertResult] = {}
+    errors: list[tuple[str, BaseException]] = []
+    original_update_existing = papers_module._update_existing
+
+    def pause_b_before_paper_lock(*args: Any, **kwargs: Any) -> UpsertResult:
+        # B 撤回新增、重查完，要去鎖既有論文之前停住，讓 C 先拿到論文的鎖。
+        if threading.current_thread().name == "B":
+            b_paused.set()
+            assert release_b.wait(30)
+        return original_update_existing(*args, **kwargs)
+
+    monkeypatch.setattr(papers_module, "_update_existing", pause_b_before_paper_lock)
+
+    def run(name: str, paper: ParsedPaper, before_commit: threading.Event | None = None) -> None:
+        try:
+            with database.transaction() as connection:
+                results[name] = upsert_by_external_id(
+                    connection,
+                    paper,
+                    origin=PaperOrigin.TRACKED,
+                    excluded_reason=None,
+                    scope=SCOPE,
+                )
+                if before_commit is not None:
+                    a_written.set()
+                    assert before_commit.wait(30)
+        except BaseException as exc:
+            errors.append((name, exc))
+        finally:
+            # 出錯時也放行主執行緒，讓它看到 errors 而不是空等。
+            if name == "A":
+                a_written.set()
+            if name == "B":
+                b_paused.set()
+
+    thread_a = threading.Thread(
+        target=run, name="A", args=("A", _paper(doi="10.1/a", openalex_id="W9"), release_a)
+    )
+    thread_b = threading.Thread(
+        target=run, name="B", args=("B", _paper(doi="10.1/b", openalex_id="W9", title="B"))
+    )
+    thread_c = threading.Thread(
+        target=run, name="C", args=("C", _paper(doi="10.1/b", openalex_id="W9", title="C"))
+    )
+    threads = [thread_a, thread_b, thread_c]
+    try:
+        thread_a.start()
+        assert a_written.wait(30)
+        thread_b.start()
+        _wait_until_a_backend_waits_on_a_lock(papers_db)  # B 在 W9 等 A
+        release_a.set()
+        assert b_paused.wait(30)
+        assert errors == []
+        assert "B" not in results  # B 確實停在撤回之後、鎖論文之前
+
+        thread_c.start()
+        thread_c.join(15)
+        # C 不必等 B：B 撤回時已經放掉 10.1/b。舊做法下 C 會卡在 10.1/b 等 B（到語句逾時）。
+        assert not thread_c.is_alive()
+        assert errors == []
+        assert results["C"] == UpsertResult(results["A"].paper_id, UpsertOutcome.UPDATED)
+    finally:
+        release_a.set()
+        release_b.set()
+        for thread in threads:
+            if thread.ident is not None:
+                thread.join(30)
+
+    assert errors == []
+    paper_id = results["A"].paper_id
+    assert results["A"].outcome is UpsertOutcome.CREATED
+    assert results["B"] == UpsertResult(paper_id, UpsertOutcome.UPDATED)
+    assert _rows(papers_db, "SELECT count(*) FROM paper") == [(1,)]
+    assert sorted(_rows(papers_db, "SELECT scheme, value_norm, paper_id FROM external_id")) == [
+        ("doi", "10.1/a", paper_id),
+        ("doi", "10.1/b", paper_id),
+        ("openalex", "W9", paper_id),
+    ]
+    # B 在 C commit 之後才寫，所以留下的是 B 的標題。
+    assert _paper_row(papers_db, paper_id)["title"] == "B"
 
 
 def _wait_until_a_backend_waits_on_a_lock(db: TestDatabase) -> None:

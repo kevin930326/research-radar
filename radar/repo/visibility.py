@@ -1,6 +1,7 @@
-"""可見條件：誰看得到哪些論文，全專案只寫在這裡（AD-4、ADR-0002）。
+"""可見條件：誰看得到哪些資料，全專案只寫在這裡（AD-4、ADR-0002）。
 
-其他查詢把這裡回的條件接進自己的 WHERE，不自己判斷。
+其他查詢把這裡回的條件接進自己的 WHERE，不自己判斷讀者身分（架構測試守著：repo 的讀取函式
+要把 `viewer` 交給這裡的函式，其他模組不准用 isinstance、match 或屬性判斷 viewer）。
 """
 
 import re
@@ -37,3 +38,16 @@ def visible_papers(viewer: Viewer, *, alias: str = "paper") -> str:
             return "FALSE"
         case _:
             raise TypeError(f"不認得的讀者身分：{type(viewer).__name__}")
+
+
+def visible_to_system_only(viewer: Viewer) -> str:
+    """只給沒有特定使用者的工作讀的資料（例如 sweep 讀的狀態表）的 SQL 條件。
+
+    `SystemViewer` 看得到全部（回 `TRUE`）；其他身分不組查詢、直接丟錯。
+
+    Raises:
+        TypeError: `viewer` 不是 `SystemViewer`。
+    """
+    if not isinstance(viewer, SystemViewer):
+        raise TypeError(f"只給 SystemViewer（現在是 {type(viewer).__name__}）")
+    return "TRUE"

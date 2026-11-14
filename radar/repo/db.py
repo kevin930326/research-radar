@@ -40,6 +40,20 @@ class Database:
         with self._engine.begin() as connection:
             yield connection
 
+    @staticmethod
+    @contextmanager
+    def savepoint(connection: Connection) -> Iterator[None]:
+        """在呼叫端開好的交易裡開一個保存點（`SAVEPOINT`）。
+
+        區塊正常結束就釋放保存點（改動留在交易裡）；丟出例外就退回到保存點、例外照樣往上丟，
+        外面的交易繼續可用。退回時，保存點裡新增的列連同它們佔住的唯一值一起放掉：正在等這些值的
+        其他交易會立刻繼續，不必等整個交易結束（`repo/papers.py` 靠這點固定鎖的順序，ADR-0020）。
+
+        不開新交易、不 commit；交易仍由 `transaction()` 開關。
+        """
+        with connection.begin_nested():
+            yield
+
     def ping(self) -> bool:
         """連得上並能執行 `SELECT 1` 回 True；連不上或查詢逾時回 False，不丟例外。
 

@@ -158,9 +158,21 @@ deferred: []
   - `[low]` `[reject]` AD-27 檢查抓不到類別方法與 `import *` — 目前沒有寫入類 services；加這些分支是額外複雜度，`import *` 由 ruff（F403）擋。
   - `[low]` `[patch]` 部分索引被當成涵蓋外鍵 — 子查詢加 `indpred IS NULL`，並加違規案例。
 
+### 2026-11-14 — Codex 審查（PR #42）
+- verdicts: 8 findings — medium 7, low 1；全部 patch。
+- findings:
+  - `[medium]` `[patch]` 撤回新增的路徑可能死結（`radar/repo/papers.py`）— 推演成立，並用三個連線的整合測試重現：舊做法在交易裡 DELETE 自己剛認領的識別碼，那一列要等交易結束才放掉；C 先鎖住論文再等 B 的識別碼、B 撤回後等 C 的論文鎖，PostgreSQL 回報 `deadlock detected`。修法：新增改在保存點（新的 `Database.savepoint`，`begin_nested` 仍只在 `repo/db.py`）裡做，認領不到就退回保存點，識別碼當下放掉，才去鎖既有論文；鎖的順序固定為「先論文、再依優先序佔識別碼」。沒有採用 advisory lock：實測預設設定下一個交易拿 21,000 把就 `out of shared memory`，第一次匯入約兩萬個識別碼會失敗（ADR-0020 選項 A）。新增整合測試 `test_withdrawn_insert_releases_identifiers_before_waiting_for_paper_lock`（monkeypatch 讓 B 停在撤回之後、鎖論文之前，斷言 C 不必等 B 就做完）；換回舊做法時這個測試失敗（C 等到語句逾時），另外手動把 B 放行則重現死結。ADR-0020 的保證範圍改成「每個交易只寫一篇時不會死結；一個交易寫很多篇時，和其他交易（含只寫一篇的）仍可能死結」，原本「單篇寫入不會和批次互鎖」的說法也不對，一併改正。
+  - `[medium]` `[patch]` 標題接受編不成 UTF-8 的字串（`radar/domain/papers.py`）— 新增 `check_storable_text`（NUL 與編不成 UTF-8 都擋），標題與 `excluded_reason` 都用它；識別碼欄位經正規化函式本來就只收可印出的字元。補拒絕案例（標題、DOI、OpenAlex ID、ISSN-L、`excluded_reason`）。
+  - `[medium]` `[patch]` `_repo_modules()` 漏掉 `radar.repo` 根套件 — 補上；新增根套件違規函式的測試（monkeypatch 一個沒有登記前綴的函式到 `radar.repo`，完整檢查要抓到）。
+  - `[medium]` `[patch]` actor 檢查沒解析相對 import — 先把 import 解析成完整模組路徑（含 `from .. import repo`、`from radar import repo`、`__init__.py` 的套件起點）；補相對 import 的違規案例。
+  - `[medium]` `[patch]` 可見條件測試沒驗證讀取查詢真的用 `visibility.py`（AD-4）— 新增結構檢查：`visibility.py` 以外的 repo 模組不在型別註記以外用到讀者身分的類別、不讀 `viewer` 的屬性、不看 `type(viewer)`；讀取函式要把自己的 `viewer` 交給 `visibility.py` 的函式。違規案例拿真的 `papers.py` 把 `get_paper` 的條件改成自己判斷，另有一組假模組逐項驗證。`sweep` 的「只給 SystemViewer」原本在 `repo/sweep.py` 用 isinstance 判斷，移到 `visibility.py` 的 `visible_to_system_only`（行為與錯誤訊息的 `SystemViewer` 不變）。
+  - `[medium]` `[patch]` SQLAlchemy 寫入掃描漏掉子模組別名 — 追蹤所有綁到 sqlalchemy、它的子模組或其中名稱的本地名稱，名稱鏈開頭是這些名稱時就算；補四個違規案例（`sql.update`、`sqlalchemy.sql.expression.insert`、`dml.delete`、`sql.expression.update`）。
+  - `[medium]` `[patch]` 沒有測試驗證「先鎖再比抓取時間」— 新增 `test_concurrent_older_write_waits_for_lock_then_is_stale`；暫時拿掉 `FOR UPDATE` 時這個測試失敗（較舊的寫入回 `updated`、蓋掉較新的），還原後通過。
+  - `[low]` `[patch]` DOI 網址解碼只抓 `UnicodeDecodeError` — 改抓 `UnicodeError`，統一丟 `InvalidIdentifierError`；補邊界案例與 `@example`，性質測試的任意文字改成會混入單獨的代理字元。
+
 ## Design Notes
 
-- **為什麼「先新增、認領不到再刪」而不是 advisory lock**：第一次匯入的套用在一個交易裡寫約一萬篇，每篇一把 advisory lock 會超過共用鎖表（約 6,400 格）。`INSERT … ON CONFLICT DO NOTHING` 遇到另一個交易還沒 commit 的同一識別碼會等它結束，結束後就知道誰贏；輸的一方刪掉自己還沒 commit 的那列，別人看不到。識別碼依固定優先序認領，不會互相等成死結。
+- **為什麼「先新增、認領不到再撤回」而不是 advisory lock**：第一次匯入的套用在一個交易裡寫約一萬篇，每個識別碼一把 advisory lock 會超過共用鎖表（實測 21,000 把就 `out of shared memory`）。`INSERT … ON CONFLICT DO NOTHING` 遇到另一個交易還沒 commit 的同一識別碼會等它結束，結束後就知道誰贏；輸的一方退回保存點，自己還沒 commit 的論文與識別碼當下作廢，別人看不到。「先鎖論文、再依優先序佔識別碼，撤回時不留識別碼」讓只寫一篇的交易之間不會死結；一個交易寫很多篇時仍可能死結（ADR-0020 取捨，Codex 審查 PR #42 後修正）。
 - **每個來源一欄抓取時間**：目前只有 OpenAlex，所以是 `openalex_fetched_at`；第二個來源（例如 Crossref）加入時另加一欄，比較只和同一個來源比。
 - **衝突不合併**：DOI 和 OpenAlex ID 指向不同論文時，合併是管理者的動作（之後的 Story），寫入函式只回報，不讓整批匯入失敗。
 - **ParsedPaper 只有 1.5 需要的欄位**：作者、卷期頁碼、摘要、關鍵字等由 1.7 加；`excluded_reason` 由呼叫端明確傳（沒有預設值），1.7／1.8 決定由誰算。

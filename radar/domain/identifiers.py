@@ -51,7 +51,8 @@ def normalize_doi(value: str) -> str:
 
     1. 去頭尾空白。
     2. 去掉 `doi:` 前綴；或去掉 `https://doi.org/` 這類網址前綴（`http(s)://` 可省略），
-       網址形式先切掉第一個沒有編碼的 `?` 或 `#` 之後的部分，再做 percent-decoding（`%2F` → `/`）。
+       網址形式先切掉第一個沒有編碼的 `?` 或 `#` 之後的部分，再做 percent-decoding（`%2F` → `/`）；
+       解出來不是 UTF-8、或原字串含編不成 UTF-8 的字元（單獨的代理字元）都算看不懂。
     3. 只把 ASCII 字母轉小寫（DOI 不分大小寫；非 ASCII 字元照原樣）。
     4. 結果要是 `10.<數字>(.<數字>)*/<至少一個字元>`、全部可印出、不含空白、最長
        `MAX_IDENTIFIER_LENGTH` 個字元。
@@ -67,7 +68,9 @@ def normalize_doi(value: str) -> str:
         try:
             path = _URL_QUERY_OR_FRAGMENT.split(text[url.end() :], maxsplit=1)[0]
             text = unquote_to_bytes(path).decode("utf-8")
-        except UnicodeDecodeError:
+        except UnicodeError:
+            # 解出來不是 UTF-8（UnicodeDecodeError），或原字串本身就編不成 UTF-8、例如單獨的
+            # 代理字元（unquote_to_bytes 先編碼時丟 UnicodeEncodeError）：都算看不懂。
             raise InvalidIdentifierError("DOI", value) from None
     text = text.translate(_ASCII_LOWER)
     if (

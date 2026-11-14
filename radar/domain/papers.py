@@ -28,6 +28,23 @@ from radar.domain.identifiers import (
 )
 
 
+def check_storable_text(value: str, field: str) -> None:
+    """確認 PostgreSQL 的 text 存得下 `value`：不含 NUL 字元、能編成 UTF-8。
+
+    存不下的字串（例如單獨的代理字元 `\\ud800`）要到寫入時才由 psycopg 丟錯，會讓整批交易
+    失敗，所以在驗證時就擋。識別碼欄位不必另外檢查：正規化函式只收得下可印出的字元。
+
+    Raises:
+        ValueError: 含 NUL 字元，或無法編成 UTF-8。
+    """
+    if "\x00" in value:
+        raise ValueError(f"「{field}」不能含 NUL 字元")
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        raise ValueError(f"「{field}」含無法編成 UTF-8 的字元（例如單獨的代理字元）") from None
+
+
 class PaperOrigin(StrEnum):
     """論文怎麼進資料庫的（`paper.origin`）。只在新增時寫，之後不改。"""
 
@@ -81,9 +98,7 @@ class ParsedPaper(BaseModel):
         stripped = value.strip()
         if not stripped:
             raise ValueError("標題去掉空白後不能是空的")
-        if "\x00" in stripped:
-            # PostgreSQL 的 text 不能存 NUL，寫入時會讓整批交易失敗。
-            raise ValueError("標題不能含 NUL 字元")
+        check_storable_text(stripped, "標題")
         return stripped
 
     @model_validator(mode="after")
