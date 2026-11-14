@@ -574,6 +574,79 @@ def test_missing_old_fingerprint_counts_as_a_change(
     assert changed_at is not None
 
 
+def test_source_changed_at_is_the_statement_time_not_the_transaction_start(
+    papers_db: TestDatabase, database: Database
+) -> None:
+    # Codex C3：同一個交易裡先停一下再寫，記下的變動時間要是那一句執行的時間（clock_timestamp），
+    # 不是交易開始的時間（now()）。
+    created = _upsert(database, _paper())
+
+    with database.transaction() as connection:
+        started = connection.exec_driver_sql("SELECT now()").scalar_one()
+        connection.exec_driver_sql("SELECT pg_sleep(0.3)")
+        result = upsert_by_external_id(
+            connection,
+            _paper(fetched_at=T2, volume="7"),
+            origin=PaperOrigin.TRACKED,
+            excluded_reason=None,
+            scope=SCOPE,
+        )
+        same_transaction_now = connection.exec_driver_sql("SELECT now()").scalar_one()
+
+    assert result.source_changed is True
+    _hash, changed_at = _changed_at(papers_db, created.paper_id)
+    assert same_transaction_now == started
+    assert changed_at - started >= timedelta(seconds=0.3)
+
+
+def test_source_changed_at_is_taken_after_waiting_for_the_paper_lock(
+    papers_db: TestDatabase, database: Database
+) -> None:
+    # Codex C3：較新的單篇寫入先開交易，等每週套用持有的論文列鎖；套用在最後發佈快照
+    # （as_of＝clock_timestamp()）後 commit。它拿到鎖之後才寫的 source_changed_at 要晚於那個
+    # as_of，用「前後兩次快照的 as_of」篩選時才不會漏掉。
+    created = _upsert(database, _paper())
+    results: dict[str, Any] = {}
+    errors: list[BaseException] = []
+
+    def writer() -> None:
+        try:
+            with database.transaction() as connection:
+                results["started"] = connection.exec_driver_sql("SELECT now()").scalar_one()
+                results["upsert"] = upsert_by_external_id(
+                    connection,
+                    _paper(fetched_at=T2, volume="8"),
+                    origin=PaperOrigin.IMPORT,
+                    excluded_reason=None,
+                    scope=SCOPE,
+                )
+        except BaseException as exc:
+            errors.append(exc)
+
+    with papers_db.connect(APP_ROLE, autocommit=False) as apply_connection:
+        # 每週套用的交易：鎖著這篇論文。
+        apply_connection.execute(
+            "SELECT id FROM paper WHERE id = %s FOR UPDATE", (created.paper_id,)
+        )
+        thread = threading.Thread(target=writer)
+        thread.start()
+        try:
+            _wait_until_a_backend_waits_on_a_lock(papers_db)
+            # 寫入已經開了交易、正在等鎖；套用這時才發佈快照、commit。
+            row = apply_connection.execute("SELECT clock_timestamp()").fetchone()
+            assert row is not None
+            as_of = row[0]
+            apply_connection.commit()
+        finally:
+            thread.join(30)
+    assert not thread.is_alive()
+
+    assert errors == []
+    assert results["upsert"].source_changed is True
+    _hash, changed_at = _changed_at(papers_db, created.paper_id)
+    assert results["started"] < as_of < changed_at
+
+
 def test_stale_write_is_not_a_change(papers_db: TestDatabase, database: Database) -> None:
     created = _upsert(database, _paper(fetched_at=T2))
 

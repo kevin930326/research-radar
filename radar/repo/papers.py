@@ -290,8 +290,9 @@ def upsert_by_external_id(
     來源的那一列，沒有摘要就刪掉這個來源的那一列，接著重新決定這篇的 `is_current`。
     STALE 時論文、識別碼、摘要都不寫。關鍵字不在這裡寫（`update_paper_keywords`）。
 
-    UPDATED 時比對舊的 `source_hash`：變了（含原本是 NULL）就寫 `source_changed_at = now()`、
-    結果的 `source_changed` 為真（每週更新與 `reparse` 都經這裡，所以都會記；ADR-0028）。
+    UPDATED 時比對舊的 `source_hash`：變了（含原本是 NULL）就寫 `source_changed_at`（拿到論文
+    列鎖之後的 `clock_timestamp()`）、結果的 `source_changed` 為真（每週更新與 `reparse` 都經
+    這裡，所以都會記；ADR-0028）。
     CREATED 時 `source_changed_at` 留 NULL、`source_changed` 為假。
 
     交易隔離層級要是 READ COMMITTED（PostgreSQL 預設）：第 3 步「退回再重查」靠每個語句重新拿
@@ -458,8 +459,13 @@ def _update_existing(
     否則更新並掛上還沒有主人的識別碼。
 
     鎖論文時一起讀舊的 `source_hash`：要寫的不同（含舊的是 NULL）就把 `source_changed_at` 設成
-    `now()`、結果的 `source_changed` 為真；相同就保留原值（ADR-0028）。被引用次數、關鍵字不在
-    指紋裡，只改它們不算變動。
+    `clock_timestamp()`、結果的 `source_changed` 為真；相同就保留原值（ADR-0028）。被引用次數、
+    關鍵字不在指紋裡，只改它們不算變動。
+
+    用 `clock_timestamp()`（這一句執行的時間）不用 `now()`（交易開始的時間）：這一句在拿到論文的
+    列鎖之後才執行。等著每週套用放鎖的寫入，記下的時間會晚於那次快照的 `as_of`（也是
+    `clock_timestamp()`，在同一個套用交易的最後），不會因為交易開得早而落在快照之前被漏掉
+    （Story 1.11 Codex C3）。
     """
     stored, stored_hash = connection.execute(
         text("SELECT openalex_fetched_at, source_hash FROM paper WHERE id = :id FOR UPDATE"),
@@ -489,7 +495,7 @@ def _update_existing(
             " referenced_works = CAST(:referenced_works AS text[]),"
             " cited_by_count = :cited_by_count,"
             " source_hash = :source_hash,"
-            " source_changed_at = CASE WHEN :source_changed THEN now()"
+            " source_changed_at = CASE WHEN :source_changed THEN clock_timestamp()"
             " ELSE source_changed_at END,"
             " updated_at = now()"
             " WHERE id = :id"

@@ -13,11 +13,20 @@ AD-14、AD-19、AD-25、ADR-0004、ADR-0014、ADR-0025）。
 - `weekly_run.updated_at` 每頁、額度停下、失敗（含建 adapter 失敗）、已經抓完又被排入、因為
   reparse 正在跑而先不做時都更新，sweep 照 2 小時的時限補排（ADR-0025）。
 
-失敗上限（Story 1.11、ADR-0028）：準備抓取、抓取、準備套用、套用每失敗一次，就在同一個短交易
-更新 `updated_at` 並把 `weekly_run.failure_count` 加一；從建立起累計到 `max_failures`（設定
-`weekly_update_max_failures`）就改成 `failed`、同一個交易刪掉這一批暫存列，記錯誤日誌、不送心跳。
-之後的工作重試、sweep 都看到不是 `fetching` 而略過，下一次 cron 開新的一筆。額度停下、reparse
-正在跑而先不做、略過、已經抓完又被排入都不算失敗。
+失敗上限（Story 1.11、ADR-0028）：準備抓取、抓取、準備套用、套用每失敗一次，就用一個短交易
+更新 `updated_at` 並把 `weekly_run.failure_count` 加一（先保存次數）；從建立起累計到
+`max_failures`（設定 `weekly_update_max_failures`）時，再用另一個交易「收尾」：改成 `failed`、刪掉
+這一批暫存列，記錯誤日誌、不送心跳。收尾沒做成時次數已經存下了：那一筆仍是 `fetching`，但之後的
+工作重試、sweep 補排、下一次 cron 讀到「已到上限」只再試收尾，不抓取也不套用（cron 收尾後開新的
+一筆）。改成 `failed` 之後，工作重試、sweep 都看到不是 `fetching` 而略過。額度停下、reparse 正在跑
+而先不做、略過、已經抓完又被排入都不算失敗。
+
+抓取每頁以這一筆可以寫為條件（Story 1.11 Codex C1）：寫原始資料（`raw_fetch`）的交易、寫暫存列
+與進度的交易，第一句都是 `update_weekly_run_touched_while_fetching`（這一筆仍是 `fetching`、
+還沒到失敗上限才改到，並鎖住這一列到交易結束）。沒改到就整個交易不寫、停下這次抓取（記警告、
+回 `skipped`、不算失敗、不送心跳、不丟錯，工作正常結束）。佇列鎖平常讓同一筆不會有兩個工作
+同時抓，但 sweep 把仍在跑的工作誤判成卡住時可能有；這一道讓「另一個工作已經把它標成 `failed`」
+之後，舊的工作不會再寫進資料庫，reparse 也就不會和它重疊（ADR-0026 補充）。
 
 和 `radar reparse` 互斥（ADR-0026 取捨）：開始抓取或套用前讀狀態的那個交易、以及套用的交易，
 第一件事是試拿 `INGEST_WRITE_LOCK_KEY` 的共用交易級 advisory lock；拿不到代表 reparse 正在跑，
@@ -40,11 +49,12 @@ AD-14、AD-19、AD-25、ADR-0004、ADR-0014、ADR-0025）。
 import time
 import uuid
 from collections import Counter
-from collections.abc import Callable
-from contextlib import AbstractContextManager, ExitStack
+from collections.abc import Callable, Sequence
+from contextlib import AbstractContextManager, ExitStack, suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from functools import partial
+from typing import Any
 
 import structlog
 
@@ -62,6 +72,7 @@ from radar.domain.papers import (
 from radar.domain.parsers import ParseError
 from radar.domain.parsers.openalex import parse_openalex_work
 from radar.domain.permissions import Action, require
+from radar.domain.raw_records import RawRecord
 from radar.domain.scope import ScopeSettings
 from radar.domain.staging import StagingItem, StagingKind
 from radar.domain.viewer import SystemViewer, Viewer
@@ -84,16 +95,19 @@ from radar.repo.papers import (
     update_papers_first_snapshot,
     upsert_by_external_id,
 )
+from radar.repo.raw_fetches import create_raw_fetches
 from radar.repo.snapshots import create_snapshot, update_snapshot_published
 from radar.repo.weekly_runs import (
     create_weekly_run,
     find_fetching_weekly_run,
     get_weekly_run,
     list_weekly_run_journals,
+    update_weekly_run_failed,
     update_weekly_run_failure,
     update_weekly_run_fetch_finished,
     update_weekly_run_published,
     update_weekly_run_touched,
+    update_weekly_run_touched_while_fetching,
     upsert_weekly_run_journal_page,
 )
 from radar.services.ingest import FetchedPage, JournalFetchError, fetch_journal
@@ -122,7 +136,9 @@ class WeeklyUpdateStart:
 class WeeklyFetchResult:
     """`run_weekly_update` 這一次做了什麼。
 
-    - `skipped`：那筆 `weekly_run` 不存在或已經不是 `fetching`，什麼都沒做。
+    - `skipped`：那筆 `weekly_run` 不存在、已經不是 `fetching`，或已到失敗上限（只做了收尾）。
+      一開始就發現時什麼都沒抓；抓到一半才發現（另一個工作把它標成 `failed` 或記到上限）時，
+      那一頁起什麼都沒寫進資料庫，之前暫存好的頁照舊（`journals`、`pages`、`counts` 是這之前的）。
     - `blocked_by_reparse`：`radar reparse` 正在跑（拿不到寫入鎖），這次不抓也不套用；只更新了
       `updated_at`，不算失敗，sweep 之後補排時接著做。
     - `stopped_for_quota`：今天的 OpenAlex 額度用到設定的比例而停下（不算失敗，留到下次）。
@@ -167,8 +183,8 @@ type SendHeartbeat = Callable[[str], None]
 class WeeklyApplyResult:
     """`apply_weekly_update` 這一次做了什麼。
 
-    - `skipped`：那筆 `weekly_run` 不存在、不是 `fetching` 或還沒抓完，什麼都沒做（沒有快照、
-      不送心跳）。
+    - `skipped`：那筆 `weekly_run` 不存在、不是 `fetching`、還沒抓完，或失敗次數已到上限（等著
+      收尾），什麼都沒做（沒有快照、不送心跳）。
     - `blocked_by_reparse`：`radar reparse` 正在跑（拿不到寫入鎖），什麼都沒寫（沒有快照、不送
       心跳），只更新了 `updated_at`；不算失敗，sweep 之後補排時接著套用。
     - `snapshot_id`、`snapshot_number`、`as_of`：這次發佈的快照。
@@ -202,34 +218,50 @@ class WeeklyAdvanceResult:
     apply: WeeklyApplyResult | None
 
 
-def weekly_update(actor: Viewer, database: Database, enqueue: Enqueue) -> WeeklyUpdateStart:
+def weekly_update(
+    actor: Viewer,
+    database: Database,
+    enqueue: Enqueue,
+    *,
+    max_failures: int = DEFAULT_MAX_FAILURES,
+) -> WeeklyUpdateStart:
     """開始（或接著）一次每週更新：寫（或找到）那筆 `fetching` 的 `weekly_run`，交易結束後
     排入 `run_weekly_update(weekly_run_id)`。
 
     已經有一筆 `fetching` 時不新增第二筆（部分唯一索引），排入的是同一個 `weekly_run_id`；
-    那個工作已經在排隊時不重複排（排隊鎖），都不算失敗。
+    那個工作已經在排隊時不重複排（排隊鎖），都不算失敗。找到的那一筆失敗次數已到 `max_failures`
+    （上次收尾沒做成）時，先收尾（改成 `failed`、刪暫存列），再建新的一筆（ADR-0028）。
 
     Raises:
         PermissionDeniedError: `actor` 不是系統工作（不碰資料庫）。
+        ValueError: `max_failures` 不是正整數（不碰資料庫）。
         RuntimeError: 建不了、也找不到 `fetching` 的那一筆（兩步之間那一筆剛好結束，再試一次
             仍然一樣）。
+        Exception: 收尾那個交易的錯誤（已記警告），原樣往上丟；工作層重試時再試收尾。
     """
     require(actor, Action.INGEST_PAPERS, None)
+    check_max_failures(max_failures)
     viewer = SystemViewer()
     weekly_run_id: uuid.UUID | None = None
     created = False
-    for _ in range(2):
+    vanished = 0
+    finished_stale = False
+    while weekly_run_id is None:
         with database.transaction() as connection:
             new_id = create_weekly_run(connection)
-            if new_id is not None:
-                weekly_run_id, created = new_id, True
-                break
-            existing = find_fetching_weekly_run(viewer, connection)
-            if existing is not None:
-                weekly_run_id = existing.id
-                break
-    if weekly_run_id is None:
-        raise RuntimeError("建不了也找不到進行中（fetching）的每週更新")
+            existing = None if new_id is not None else find_fetching_weekly_run(viewer, connection)
+        if new_id is not None:
+            weekly_run_id, created = new_id, True
+        elif existing is None:
+            vanished += 1
+            if vanished == 2:
+                raise RuntimeError("建不了也找不到進行中（fetching）的每週更新")
+        elif existing.failure_count >= max_failures and not finished_stale:
+            # 已到上限、上次沒收尾成功的那一筆：先收尾，下一圈就建得起新的一筆。
+            _finish_failed(database, existing.id, max_failures)
+            finished_stale = True
+        else:
+            weekly_run_id = existing.id
 
     queued = enqueue(RUN_WEEKLY_UPDATE, {"weekly_run_id": weekly_run_id})
     log.info(
@@ -259,29 +291,33 @@ def run_weekly_update(
 
     1. 短交易讀 `weekly_run` 與每本期刊的進度。不存在或不是 `fetching`：記 info、回 `skipped`
        （不碰 source）；拿不到寫入鎖（reparse 正在跑）：更新 `updated_at`、記警告、回
-       `blocked_by_reparse`（不碰 source）；已經有 `fetch_finished_at`：只更新 `updated_at` 就回
-       （不抓）。
+       `blocked_by_reparse`（不碰 source）；失敗次數已到 `max_failures`：只收尾（改成 `failed`、
+       刪暫存列）、回 `skipped`（不碰 source、不算失敗）；已經有 `fetch_finished_at`：只更新
+       `updated_at` 就回（不抓）。
     2. 依 `journals.journals` 的順序：已經抓完的跳過；其餘從進度的 `next_cursor`（None＝第一頁）
        用 `fetch_journal` 抓。每存好一頁：交易外逐篇解析（`ParseError` 或 OpenAlex ID 對不上外部鍵
        ＝`unparseable`）→ 收錄過濾（擋下的＝`out_of_scope`）→ 排除規則 → 再開一個交易
-       upsert 暫存列並記下這一頁的進度（第一頁時計數歸零重算）。
+       upsert 暫存列並記下這一頁的進度（第一頁時計數歸零重算）。寫 `raw_fetch` 與寫暫存的交易
+       第一句都確認這一筆仍是 `fetching`、還沒到失敗上限並鎖住它；不是的話整個交易不寫，停下
+       這次抓取、記警告、回 `skipped`（不算失敗、不丟錯）。
     3. 額度停下：短交易更新 `weekly_run.updated_at`、記警告、回 `stopped_for_quota=True`
        （不算失敗、不往下抓）。
     4. 全部期刊都抓完：短交易寫 `fetch_finished_at`。
     5. 抓取途中任何例外：記錯誤日誌（只帶期刊代號與原因或錯誤類別）、`_record_failure` 一個短
-       交易更新 `updated_at` 並記一次失敗（到 `max_failures` 就改成 `failed`、刪暫存列；這一步
-       也失敗時只記一筆警告），再原樣往上丟原本的例外。
+       交易更新 `updated_at` 並記一次失敗（到 `max_failures` 時另一個交易改成 `failed`、刪暫存列；
+       這兩步失敗時只記一筆警告），再原樣往上丟原本的例外。
 
     Raises:
         PermissionDeniedError: `actor` 不是系統工作（不碰資料庫與 source）。
         ValueError: `max_failures` 不是正整數（不碰資料庫與 source）。
         JournalFetchError: 一本期刊抓到一半失敗。進度已保存：工作層重試或 sweep 補排時，從保存的
             `next_cursor`（和 `resume_cursor` 是同一頁）接著抓。
-        Exception: 物件儲存、資料庫或解析暫存時的其他錯誤，同樣原樣往上丟，續跑方式一樣。
+        Exception: 物件儲存、資料庫或解析暫存時的其他錯誤，同樣原樣往上丟，續跑方式一樣。已到失敗
+            上限而收尾的交易失敗時，那個錯誤（已記警告）也原樣往上丟，不算一次失敗。
     """
     require(actor, Action.INGEST_PAPERS, None)
     check_max_failures(max_failures)
-    done, progress = _read_run(database, weekly_run_id)
+    done, progress = _read_run(database, weekly_run_id, max_failures)
     if done is not None:
         return done
     return _fetch_journals(
@@ -312,9 +348,9 @@ def open_and_run_weekly_update(
 ) -> WeeklyFetchResult:
     """先讀狀態，確認要抓才 `open_setup()` 開 adapter 與設定，再照 `run_weekly_update` 抓。
 
-    不存在、不是 `fetching`、reparse 正在跑、已經抓完時，和 `run_weekly_update` 一樣（略過；
-    或只更新 `updated_at`），而且不呼叫 `open_setup`：sweep 補排已經抓完的那一筆時不讀設定、
-    不建 adapter。
+    不存在、不是 `fetching`、reparse 正在跑、已到失敗上限、已經抓完時，和 `run_weekly_update`
+    一樣（略過、只收尾，或只更新 `updated_at`），而且不呼叫 `open_setup`：sweep 補排已經抓完的
+    那一筆時不讀設定、不建 adapter。
     `open_setup` 丟錯（缺 OpenAlex 金鑰、物件儲存設定不齊、領域設定壞掉）時：記錯誤日誌（只帶
     錯誤類別）、`_record_failure` 更新 `updated_at` 並記一次失敗，再原樣往上丟；sweep 照 2 小時的
     時限補排，不會每 15 分鐘就補排一次。
@@ -326,7 +362,7 @@ def open_and_run_weekly_update(
     """
     require(actor, Action.INGEST_PAPERS, None)
     check_max_failures(max_failures)
-    done, progress = _read_run(database, weekly_run_id)
+    done, progress = _read_run(database, weekly_run_id, max_failures)
     if done is not None:
         return done
     with ExitStack() as stack:
@@ -435,9 +471,9 @@ def apply_weekly_update(
     0. 試拿寫入鎖的共用鎖（`try_shared_transaction_lock`）；拿不到代表 reparse 正在跑：同一個
        交易只更新 `updated_at`，記警告、回 `blocked_by_reparse`，不建快照、不送心跳、不算失敗。
        拿到的共用鎖到交易結束才放，套用的整段 reparse 都開始不了。
-    1. `update_weekly_run_published`：只在 `fetching` 而且已經抓完時改成 `published`；沒改到
-       （不存在、已經套用過、還沒抓完，或並行的另一個套用先做完）就記 info、回 `skipped`，
-       不建快照、不送心跳。
+    1. `update_weekly_run_published`：只在 `fetching`、已經抓完、而且失敗次數還沒到
+       `max_failures` 時改成 `published`；沒改到（不存在、已經套用過、還沒抓完、已到上限等著
+       收尾，或並行的另一個套用先做完）就記 info、回 `skipped`，不建快照、不送心跳。
     2. `create_snapshot`（`building`，編號＝目前最大值＋1）。
     3. 依暫存列的 `id` 每批 `batch_size` 筆讀這一批（`batch_id`＝`weekly_run_id`）；逐筆
        `upsert_by_external_id`（`tracked`、暫存列的 `excluded_reason`），不是 STALE 時整批覆寫
@@ -451,7 +487,8 @@ def apply_weekly_update(
     commit 之後送 `weekly-update` 心跳一次、記 info（篇數、快照編號、秒數）。任何例外：記錯誤日誌
     （只帶 `weekly_run_id` 與錯誤類別）、`_record_failure` 更新 `updated_at` 並記一次失敗，再原樣
     往上丟；交易整個退回，快照、論文、`weekly_run` 狀態與暫存列都是套用前的樣子，重跑一次就好。
-    累計到 `max_failures` 時那一筆改成 `failed`、暫存列刪掉，之後不再套用（ADR-0028）。
+    累計到 `max_failures` 時另一個交易把那一筆改成 `failed`、暫存列刪掉，之後不再套用；這個收尾
+    沒做成時那一筆仍是 `fetching`，但上面第 1 步不會再套用它（ADR-0028）。
 
     Raises:
         PermissionDeniedError: `actor` 不是系統工作（不碰資料庫、不送心跳）。
@@ -470,7 +507,9 @@ def apply_weekly_update(
             if not database.try_shared_transaction_lock(connection, INGEST_WRITE_LOCK_KEY):
                 tally.blocked_by_reparse = True
                 update_weekly_run_touched(connection, weekly_run_id)
-            elif not update_weekly_run_published(connection, weekly_run_id):
+            elif not update_weekly_run_published(
+                connection, weekly_run_id, max_failures=max_failures
+            ):
                 tally.skipped = True
             else:
                 snapshot_id, number = create_snapshot(connection, weekly_run_id)
@@ -596,13 +635,14 @@ class _ApplyTally:
 
 
 def _read_run(
-    database: Database, weekly_run_id: uuid.UUID
+    database: Database, weekly_run_id: uuid.UUID, max_failures: int
 ) -> tuple[WeeklyFetchResult | None, dict[str, JournalProgress]]:
     """短交易讀 `weekly_run` 與每本期刊的進度；是 `fetching` 時在同一個交易試拿寫入鎖的共用鎖。
 
     回（結果, 進度）：不存在或不是 `fetching` 時結果是 `skipped`；拿不到鎖（reparse 正在跑）時
-    同一個交易更新 `updated_at`，結果是 `blocked_by_reparse`；已經抓完時先更新 `updated_at`，
-    結果是 `fetch_finished`；要接著抓時結果是 None。
+    同一個交易更新 `updated_at`，結果是 `blocked_by_reparse`；失敗次數已到 `max_failures`（上次
+    收尾沒做成）時交易結束後 `_finish_failed` 收尾，結果是 `skipped`（收尾失敗時那個錯誤往上丟）；
+    已經抓完時先更新 `updated_at`，結果是 `fetch_finished`；要接著抓時結果是 None。
 
     鎖只在這個交易裡拿、交易結束就放；之後的抓取不必一直拿著：這一筆在這個交易裡確定是
     `fetching`，reparse 拿到獨佔鎖之後會查到它而拒絕，直到套用 commit（ADR-0026 取捨）。
@@ -628,6 +668,16 @@ def _read_run(
             weekly_run_id=str(weekly_run_id),
             status=None if run is None else run.status.value,
         )
+        return WeeklyFetchResult(weekly_run_id=weekly_run_id, skipped=True), {}
+    if run.failure_count >= max_failures:
+        # 次數已經存下、收尾（改 failed＋刪暫存）上次沒做成：只再試收尾，不抓也不套用。
+        log.info(
+            "每週更新已到失敗上限，只做收尾",
+            weekly_run_id=str(weekly_run_id),
+            failures=run.failure_count,
+            max_failures=max_failures,
+        )
+        _finish_failed(database, weekly_run_id, max_failures)
         return WeeklyFetchResult(weekly_run_id=weekly_run_id, skipped=True), {}
     if run.fetch_finished_at is not None:
         # 抓完、還沒套用成功（例如套用失敗）的那一筆仍是 fetching：更新 updated_at，sweep 2 小時後
@@ -670,6 +720,7 @@ def _fetch_journals(
             exclusion_rules=exclusion_rules,
             parse=parse,
             tally=tally,
+            max_failures=max_failures,
         )
         try:
             result = fetch_journal(
@@ -682,7 +733,24 @@ def _fetch_journals(
                 quota=quota,
                 cursor=None if current is None else current.next_cursor,
                 on_page=stage,
+                write_raw=partial(_write_raw, database, weekly_run_id, max_failures),
                 clock=clock,
+            )
+        except _NotWritableError:
+            # 另一個工作已經把這一筆標成 failed（或記到上限）：這一頁什麼都沒寫進資料庫（物件儲存
+            # 裡剛存的原始物件留著，內容定址、之後重抓會重用），停下、不算失敗、不送心跳；正常
+            # 結束，工作層不會重試。
+            log.warning(
+                "每週更新已經不能再寫（不是抓取中或已到失敗上限），停下這次抓取",
+                weekly_run_id=str(weekly_run_id),
+                journal=journal.key,
+            )
+            return WeeklyFetchResult(
+                weekly_run_id=weekly_run_id,
+                skipped=True,
+                journals=tuple(fetched_journals),
+                pages=tally.pages,
+                counts=tally.counts,
             )
         except Exception as exc:
             if isinstance(exc, JournalFetchError):
@@ -701,7 +769,7 @@ def _fetch_journals(
                     error=type(exc).__name__,
                 )
             # 失敗也更新 updated_at：sweep 照 2 小時的時限補排，不會每 15 分鐘就補排一次；
-            # 同一個交易記一次失敗，到上限就標 failed（ADR-0028）。
+            # 同一個交易記一次失敗，到上限再用另一個交易標 failed（ADR-0028）。
             _record_failure(database, weekly_run_id, max_failures)
             raise
         if result.stopped_for_quota:
@@ -753,24 +821,20 @@ def _touch(database: Database, weekly_run_id: uuid.UUID) -> None:
 
 
 def _record_failure(database: Database, weekly_run_id: uuid.UUID, max_failures: int) -> None:
-    """失敗之後一個短交易：更新 `updated_at`、把 `failure_count` 加一（只在 `fetching` 時）；
-    加完到 `max_failures` 就改成 `failed`，同一個交易刪掉這一批暫存列（ADR-0028）。
+    """失敗之後先用一個短交易保存次數：更新 `updated_at`、把 `failure_count` 加一（只在 `fetching`
+    時）。沒到 `max_failures` 記警告「每週更新失敗，已記一次」；到了就 `_finish_failed` 收尾（另一個
+    交易改成 `failed`＋刪暫存列，ADR-0028）。已經不是 `fetching` 時只更新 `updated_at`、不記。
 
-    之後記日誌：沒到上限記警告「每週更新失敗，已記一次」；到上限記錯誤「每週更新重試到上限，
-    標成失敗」（不送心跳）。已經不是 `fetching` 時只更新 `updated_at`、不記。
+    兩個交易分開（Story 1.11 Codex C2）：收尾一直失敗（例如逾時）時次數不會跟著退回，下一次被排入
+    讀到「已到上限」就只再試收尾。
 
-    這個交易本身失敗（例如資料庫正連不上）時只記一筆警告（只帶錯誤類別），不丟錯：呼叫端接著丟
-    的是原本的例外，不會被這裡的錯誤蓋掉。
+    保存次數的交易失敗時只記一筆警告（只帶錯誤類別）；收尾失敗時 `_finish_failed` 已記警告。兩種
+    都不丟錯：呼叫端接著丟的是原本的例外，不會被這裡的錯誤蓋掉。
     """
-    deleted = 0
     try:
         with database.transaction() as connection:
             update_weekly_run_touched(connection, weekly_run_id)
-            failure = update_weekly_run_failure(
-                connection, weekly_run_id, max_failures=max_failures
-            )
-            if failure is not None and failure.failed:
-                deleted = delete_staged_papers(connection, weekly_run_id)
+            failures = update_weekly_run_failure(connection, weekly_run_id)
     except Exception as exc:
         log.warning(
             "每週更新失敗後更新 updated_at 也失敗",
@@ -778,23 +842,81 @@ def _record_failure(database: Database, weekly_run_id: uuid.UUID, max_failures: 
             error=type(exc).__name__,
         )
         return
-    if failure is None:
+    if failures is None:
         return
-    if failure.failed:
-        log.error(
-            "每週更新重試到上限，標成失敗",
-            weekly_run_id=str(weekly_run_id),
-            failures=failure.failures,
-            max_failures=max_failures,
-            staged_deleted=deleted,
-        )
-    else:
+    if failures < max_failures:
         log.warning(
             "每週更新失敗，已記一次",
             weekly_run_id=str(weekly_run_id),
-            failures=failure.failures,
+            failures=failures,
             max_failures=max_failures,
         )
+        return
+    with suppress(Exception):  # 已記警告；次數已存下，之後被排入時再試收尾
+        _finish_failed(database, weekly_run_id, max_failures)
+
+
+def _finish_failed(database: Database, weekly_run_id: uuid.UUID, max_failures: int) -> None:
+    """已到失敗上限的那一筆收尾：一個交易 `update_weekly_run_failed`（仍是 `fetching`、次數已到
+    `max_failures` 才改成 `failed`），改到了就同一個交易 `delete_staged_papers`；commit 後記錯誤
+    「每週更新重試到上限，標成失敗」（不送心跳）。沒改到（已經不是 `fetching`）什麼都不記。
+
+    改成 `failed` 與刪暫存同一個交易：不會留下「已經 `failed`、暫存還在」。
+
+    Raises:
+        Exception: 這個交易的錯誤：先記警告「每週更新已到失敗上限，收尾沒做成，之後再試」（只帶
+            錯誤類別）再原樣往上丟。整個交易退回，那一筆仍是 `fetching`、次數不變。
+    """
+    try:
+        with database.transaction() as connection:
+            failures = update_weekly_run_failed(
+                connection, weekly_run_id, max_failures=max_failures
+            )
+            deleted = 0 if failures is None else delete_staged_papers(connection, weekly_run_id)
+    except Exception as exc:
+        log.warning(
+            "每週更新已到失敗上限，收尾沒做成，之後再試",
+            weekly_run_id=str(weekly_run_id),
+            error=type(exc).__name__,
+        )
+        raise
+    if failures is None:
+        return
+    log.error(
+        "每週更新重試到上限，標成失敗",
+        weekly_run_id=str(weekly_run_id),
+        failures=failures,
+        max_failures=max_failures,
+        staged_deleted=deleted,
+    )
+
+
+class _NotWritableError(Exception):
+    """抓取途中發現這筆 `weekly_run` 不能再寫：已經不是 `fetching`，或失敗次數已到上限。只在這個
+    模組裡丟、在 `_fetch_journals` 接住（丟的時候那個交易已經整個退回）。
+    """
+
+
+def _ensure_writable(connection: Any, weekly_run_id: uuid.UUID, max_failures: int) -> None:
+    """交易的第一句：這一筆仍是 `fetching`、還沒到失敗上限才往下（並鎖住它到交易結束）；不然丟
+    `_NotWritableError`，讓整個交易退回。
+    """
+    if not update_weekly_run_touched_while_fetching(
+        connection, weekly_run_id, max_failures=max_failures
+    ):
+        raise _NotWritableError
+
+
+def _write_raw(
+    database: Database,
+    weekly_run_id: uuid.UUID,
+    max_failures: int,
+    records: Sequence[RawRecord],
+) -> None:
+    """`fetch_journal` 的 `write_raw`：一個交易先確認這一筆還能寫，再寫這一頁的 `raw_fetch` 列。"""
+    with database.transaction() as connection:
+        _ensure_writable(connection, weekly_run_id, max_failures)
+        create_raw_fetches(connection, records)
 
 
 @dataclass
@@ -820,8 +942,11 @@ def _stage_page(
     exclusion_rules: ExclusionRulesConfig,
     parse: Parse,
     tally: _Tally,
+    max_failures: int,
 ) -> None:
-    """一頁：交易外逐篇解析、過濾，再一個交易寫暫存列與這本期刊的進度。"""
+    """一頁：交易外逐篇解析、過濾，再一個交易寫暫存列與這本期刊的進度；那個交易第一句先確認
+    這一筆還能寫（不能寫就丟 `_NotWritableError`、什麼都不寫）。
+    """
     items: list[StagingItem] = []
     by_year: Counter[int] = Counter()
     unparseable = out_of_scope = excluded = 0
@@ -857,6 +982,7 @@ def _stage_page(
         unparseable=unparseable,
     )
     with database.transaction() as connection:
+        _ensure_writable(connection, weekly_run_id, max_failures)
         upsert_staged_papers(
             connection, batch_id=weekly_run_id, kind=StagingKind.WEEKLY_UPDATE, items=items
         )

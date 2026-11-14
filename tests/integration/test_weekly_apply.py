@@ -62,6 +62,7 @@ from radar.services import weekly_update as weekly_update_module
 from radar.services.ingest import JournalFetchError
 from radar.services.weekly_update import (
     WeeklyApplyResult,
+    WeeklyFetchResult,
     WeeklyFetchSetup,
     advance_weekly_update,
     apply_weekly_update,
@@ -1424,29 +1425,266 @@ def test_advance_passes_max_failures_to_the_apply(
     assert heartbeat.sent == []
 
 
-def test_marking_failed_and_deleting_staging_share_one_transaction(
+class _BreakableDelete:
+    """`delete_staged_papers` 的替身：`broken` 為真時丟錯（模擬收尾的交易逾時），否則照常刪。"""
+
+    def __init__(self) -> None:
+        self.broken = True
+        self.calls = 0
+
+    def __call__(self, connection: Connection, batch_id: uuid.UUID) -> int:
+        self.calls += 1
+        if self.broken:
+            raise _ApplyBrokenError("secret-detail-in-message")
+        return delete_staged_papers(connection, batch_id)
+
+
+FINISH_FAILED = "每週更新已到失敗上限，收尾沒做成，之後再試"
+ONLY_FINISH = "每週更新已到失敗上限，只做收尾"
+MARKED_FAILED = "每週更新重試到上限，標成失敗"
+
+
+def test_finishing_failed_retries_until_it_succeeds_without_fetching_or_applying(
     weekly_db: TestDatabase, database: TrackingDatabase, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # 標 failed 之後刪暫存列丟錯：整個交易退回，狀態仍是 fetching、次數沒加、暫存列還在；
-    # 往上丟的仍是原本的抓取錯誤（抓取段不會呼叫 delete_staged_papers）。
+    # Codex C2：失敗次數先在自己的交易存下，再用另一個交易「改 failed＋刪暫存」。收尾一直失敗時
+    # 次數不退回；之後被排入只再試收尾（不抓、不開 adapter、不套用），收尾成功才改成 failed。
     run_id = _start(database)
     source = _BrokenJournalSource(
         {MISQ_ISSN: _misq_book(), ISSN_L: _cassette_book()}, broken_issn=ISSN_L, clock=lambda: NOW
     )
+    opener = _Opener(_setup(source))
+    heartbeat = FakeHeartbeat()
+    delete = _BreakableDelete()
+    monkeypatch.setattr(weekly_update_module, "delete_staged_papers", delete)
 
-    def broken_delete(_connection: Connection, _batch_id: uuid.UUID) -> int:
-        raise _ApplyBrokenError("secret-detail-in-message")
-
-    monkeypatch.setattr(weekly_update_module, "delete_staged_papers", broken_delete)
-
+    # 第 1 次：抓 I&O 失敗、到上限 1；收尾的交易丟錯 → 次數已存下（1），但仍是 fetching、暫存列還在
+    # （改 failed 與刪暫存同一個交易，一起退回）。往上丟的仍是原本的抓取錯誤。
     with capture_logs() as logs, pytest.raises(JournalFetchError):
-        _advance_limited(database, _Opener(_setup(source)), run_id, FakeHeartbeat(), 1)
+        _advance_limited(database, opener, run_id, heartbeat, 1)
 
-    [warning] = _logged(logs, "每週更新失敗後更新 updated_at 也失敗")
-    assert (warning["log_level"], warning["error"]) == ("warning", "_ApplyBrokenError")
-    assert not _logged(logs, "每週更新重試到上限，標成失敗")
-    assert _failures(weekly_db, run_id) == ("fetching", 0)
+    assert _failures(weekly_db, run_id) == ("fetching", 1)
     assert _staged_count(weekly_db, run_id) == 5
+    [warning] = _logged(logs, FINISH_FAILED)
+    assert warning == {
+        "event": FINISH_FAILED,
+        "log_level": "warning",
+        "weekly_run_id": str(run_id),
+        "error": "_ApplyBrokenError",
+    }
+    assert not _logged(logs, MARKED_FAILED)
+    assert not _logged(logs, "每週更新失敗後更新 updated_at 也失敗")
+    assert "secret-detail-in-message" not in str(logs)
+    requests, opened = len(source.requests), opener.opened
+
+    # 第 2 次（工作重試或 sweep 補排）：讀到已到上限，只再試收尾；又失敗 → 那個錯誤往上丟
+    # （工作層會再重試），不抓、不開 adapter、不再加次數。
+    with capture_logs() as logs, pytest.raises(_ApplyBrokenError):
+        _advance_limited(database, opener, run_id, heartbeat, 1)
+
+    assert (len(source.requests), opener.opened) == (requests, opened)
+    assert _failures(weekly_db, run_id) == ("fetching", 1)
+    assert _staged_count(weekly_db, run_id) == 5
+    assert [log["event"] for log in logs] == [ONLY_FINISH, FINISH_FAILED]
+    assert delete.calls == 2
+
+    # 這時就算已經抓完，套用也不做（已到上限的那一筆不能被套用）：沒有快照、暫存列還在。
+    _owner(weekly_db, "UPDATE weekly_run SET fetch_finished_at = now() WHERE id = %s", run_id)
+    skipped = apply_weekly_update(
+        SYSTEM, database, run_id, scope=SCOPE, send_heartbeat=heartbeat, max_failures=1
+    )
+    assert skipped == WeeklyApplyResult(weekly_run_id=run_id, skipped=True)
+    assert _snapshots(weekly_db) == []
+    assert _staged_count(weekly_db, run_id) == 5
+
+    # 第 3 次：收尾成功 → failed、暫存列刪光、錯誤日誌；仍不抓、不套用、不送心跳。
+    delete.broken = False
+    with capture_logs() as logs:
+        done = _advance_limited(database, opener, run_id, heartbeat, 1)
+
+    assert done.fetch == WeeklyFetchResult(weekly_run_id=run_id, skipped=True)
+    assert done.apply is None
+    assert (len(source.requests), opener.opened) == (requests, opened)
+    assert _failures(weekly_db, run_id) == ("failed", 1)
+    assert _staged_count(weekly_db, run_id) == 0
+    [error] = _logged(logs, MARKED_FAILED)
+    assert error == {
+        "event": MARKED_FAILED,
+        "log_level": "error",
+        "weekly_run_id": str(run_id),
+        "failures": 1,
+        "max_failures": 1,
+        "staged_deleted": 5,
+    }
+    assert _snapshots(weekly_db) == []
+    assert heartbeat.sent == []
+
+    # 第 4 次：已經是 failed，照舊略過、不再收尾。
+    with capture_logs() as logs:
+        assert _advance_limited(database, opener, run_id, heartbeat, 1).fetch.skipped
+    assert [log["event"] for log in logs] == ["每週更新不是抓取中，略過"]
+    assert delete.calls == 3
+
+
+def test_next_cron_finishes_a_run_stuck_at_the_limit_then_starts_a_new_one(
+    weekly_db: TestDatabase, database: TrackingDatabase, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 已到上限、收尾一直沒做成的那一筆仍佔著唯一的 fetching：下一次 cron 先收尾，再建新的一筆。
+    stuck = _fetched_run(database)
+    staged = _staged_count(weekly_db, stuck)
+    _owner(weekly_db, "UPDATE weekly_run SET failure_count = 2 WHERE id = %s", stuck)
+    delete = _BreakableDelete()
+    monkeypatch.setattr(weekly_update_module, "delete_staged_papers", delete)
+    queue = FakeJobQueue()
+
+    # 收尾失敗：錯誤往上丟（cron 的工作會重試），什麼都沒排入、沒有新的一筆。
+    with capture_logs() as logs, pytest.raises(_ApplyBrokenError):
+        weekly_update(SYSTEM, database, queue.enqueue, max_failures=2)
+    assert queue.queued == []
+    assert _rows(weekly_db, "SELECT id, status FROM weekly_run") == [(stuck, "fetching")]
+    assert [log["event"] for log in logs] == [FINISH_FAILED]
+
+    # 收尾成功：舊的那一筆 failed、暫存列刪光；建新的一筆並排入它。
+    delete.broken = False
+    with capture_logs() as logs:
+        start = weekly_update(SYSTEM, database, queue.enqueue, max_failures=2)
+
+    assert start.created
+    assert start.weekly_run_id != stuck
+    assert _failures(weekly_db, stuck) == ("failed", 2)
+    assert _staged_count(weekly_db, stuck) == 0
+    assert _failures(weekly_db, start.weekly_run_id) == ("fetching", 0)
+    assert len(queue.queued) == 1
+    [error] = _logged(logs, MARKED_FAILED)
+    assert (error["weekly_run_id"], error["failures"], error["staged_deleted"]) == (
+        str(stuck),
+        2,
+        staged,
+    )
+
+    # 還沒到上限的那一筆照舊：排入同一筆，不收尾。
+    again = weekly_update(SYSTEM, database, queue.enqueue, max_failures=2)
+    assert (again.weekly_run_id, again.created) == (start.weekly_run_id, False)
+    assert delete.calls == 2
+
+
+class _InterruptingSource(FakePaperSource):
+    """MISQ 第 2 頁的請求進來時先呼叫一次 `interrupt`（模擬另一個工作在這時改了那一筆）。"""
+
+    def __init__(self, *args: Any, interrupt: Callable[[], None], **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.interrupt: Callable[[], None] | None = interrupt
+
+    def fetch_journal_page(self, query: JournalQuery, cursor: str | None) -> Any:
+        if query.issn_l == MISQ_ISSN and cursor is not None and self.interrupt is not None:
+            interrupt, self.interrupt = self.interrupt, None
+            interrupt()
+        return super().fetch_journal_page(query, cursor)
+
+
+NOT_WRITABLE = "每週更新已經不能再寫（不是抓取中或已到失敗上限），停下這次抓取"
+
+
+@pytest.mark.parametrize(
+    ("when", "change"),
+    [
+        ("before_raw", "UPDATE weekly_run SET status = 'failed', failure_count = 3 WHERE id = %s"),
+        ("before_raw", "UPDATE weekly_run SET failure_count = 3 WHERE id = %s"),
+        (
+            "before_stage",
+            "UPDATE weekly_run SET status = 'failed', failure_count = 3 WHERE id = %s",
+        ),
+        ("before_stage", "UPDATE weekly_run SET failure_count = 3 WHERE id = %s"),
+    ],
+    ids=["failed-before-raw", "limit-before-raw", "failed-before-stage", "limit-before-stage"],
+)
+def test_fetch_stops_writing_once_the_run_is_failed_or_at_the_limit(
+    weekly_db: TestDatabase,
+    database: TrackingDatabase,
+    monkeypatch: pytest.MonkeyPatch,
+    when: str,
+    change: str,
+) -> None:
+    # Codex C1：抓到一半時另一個工作把同一筆標成 failed（或次數記到上限、還沒收尾）。之後的頁：
+    # 寫原始資料（raw_fetch）與寫暫存＋進度的交易都以「仍是 fetching、還沒到上限」為條件，
+    # 不是就整個交易不寫、停下；不算失敗、不送心跳、不丟錯（工作層不會一直重試）。
+    run_id = _start(database)
+
+    def interrupt() -> None:
+        _owner(weekly_db, change, run_id)
+
+    if when == "before_raw":
+        source = _InterruptingSource(
+            {MISQ_ISSN: _misq_book(), ISSN_L: _cassette_book()},
+            interrupt=interrupt,
+            clock=lambda: NOW,
+        )
+    else:
+        source = FakePaperSource(
+            {MISQ_ISSN: _misq_book(), ISSN_L: _cassette_book()}, clock=lambda: NOW
+        )
+        original = weekly_update_module._write_raw
+        raw_writes: list[int] = []
+
+        def write_then_interrupt(*args: Any) -> None:
+            # 第 2 頁的原始資料照常寫好（那時還是 fetching），接著另一個工作改了那一筆。
+            original(*args)
+            raw_writes.append(1)
+            if len(raw_writes) == 2:
+                interrupt()
+
+        monkeypatch.setattr(weekly_update_module, "_write_raw", write_then_interrupt)
+    store = FakeObjectStore()
+    heartbeat = FakeHeartbeat()
+
+    with capture_logs() as logs:
+        result = advance_weekly_update(
+            SYSTEM,
+            database,
+            _Opener(WeeklyFetchSetup(source, store, JOURNALS, RULES, QUOTA)),
+            lambda: SCOPE,
+            heartbeat,
+            run_id,
+            clock=lambda: NOW,
+            max_failures=3,
+        )
+
+    # 第 1 頁（3 篇）照常；第 2 頁的請求送出去了（API 呼叫照記），但暫存與進度都沒寫，I&O 沒開始。
+    assert result.apply is None
+    assert result.fetch == WeeklyFetchResult(
+        weekly_run_id=run_id,
+        skipped=True,
+        journals=("misq",),
+        pages=1,
+        counts=result.fetch.counts,
+    )
+    assert result.fetch.counts.fetched == 3
+    assert [request.cursor is None for request in source.requests] == [True, False]
+    assert _count(weekly_db, "api_call") == 2
+    # 第 2 頁的原始資料：在改之前就寫好的（before_stage）留著，改了之後才要寫的（before_raw）沒寫。
+    assert _count(weekly_db, "raw_fetch") == (3 if when == "before_raw" else 5)
+    assert _staged_count(weekly_db, run_id) == 3
+    [(pages, finished_at)] = _rows(
+        weekly_db,
+        "SELECT pages, finished_at FROM weekly_run_journal WHERE weekly_run_id = %s",
+        run_id,
+    )
+    assert (pages, finished_at) == (1, None)
+    # 不算一次失敗：次數維持另一個工作改的 3；沒有錯誤日誌、沒有心跳、沒有快照。
+    [(failure_count,)] = _rows(
+        weekly_db, "SELECT failure_count FROM weekly_run WHERE id = %s", run_id
+    )
+    assert failure_count == 3
+    [warning] = _logged(logs, NOT_WRITABLE)
+    assert (warning["log_level"], warning["weekly_run_id"], warning["journal"]) == (
+        "warning",
+        str(run_id),
+        "misq",
+    )
+    assert not [log for log in logs if log["log_level"] == "error"]
+    assert not _logged(logs, "每週更新失敗，已記一次")
+    assert heartbeat.sent == []
+    assert _snapshots(weekly_db) == []
 
 
 def test_quota_stop_is_not_counted_as_a_failure(

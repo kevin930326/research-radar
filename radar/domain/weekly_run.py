@@ -55,14 +55,6 @@ class WeeklyRun:
         _check_count(self.failure_count, "failure_count")
 
 
-@dataclass(frozen=True)
-class WeeklyRunFailure:
-    """記一次失敗之後的結果：累計失敗次數，以及這一次是不是到上限而標成 `failed`。"""
-
-    failures: int
-    failed: bool
-
-
 def _check_count(value: object, name: str) -> None:
     if not isinstance(value, int) or isinstance(value, bool) or value < 0:
         raise ValueError(f"{name} 要是 ≥0 的整數（現在是 {value!r}）")

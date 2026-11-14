@@ -2,7 +2,8 @@
 ADR-0026）。
 
 - `weekly_run`：一次每週更新一列；同時只能有一筆 `fetching`（部分唯一索引）。`failure_count` 是
-  從建立起累計失敗幾次，到上限就改成 `failed`（遷移 0009、ADR-0028）。
+  從建立起累計失敗幾次，到上限就改成 `failed`（遷移 0009、ADR-0028）；加次數與改成 `failed`
+  是兩個交易，到上限、還沒改成 `failed` 的那一筆不再抓取或套用。
 - `weekly_run_journal`：每本期刊抓到哪一頁、過濾前後各幾篇；每暫存完一頁更新一次，和那一頁的
   暫存列在同一個交易（進度不會比暫存多或少）。
 
@@ -37,7 +38,6 @@ from radar.domain.weekly_run import (
     JournalProgress,
     PageCounts,
     WeeklyRun,
-    WeeklyRunFailure,
     WeeklyRunStatus,
     check_max_failures,
 )
@@ -329,36 +329,98 @@ def update_weekly_run_fetch_finished(connection: Connection, weekly_run_id: uuid
     return len(rows.all()) == 1
 
 
-def update_weekly_run_published(connection: Connection, weekly_run_id: uuid.UUID) -> bool:
-    """這筆是 `fetching` 而且已經全部抓完時改成 `published`；回傳有沒有改到。
+def update_weekly_run_touched_while_fetching(
+    connection: Connection, weekly_run_id: uuid.UUID, *, max_failures: int
+) -> bool:
+    """這筆還是 `fetching`、而且 `failure_count` 還沒到 `max_failures` 時，把 `updated_at` 改成現在
+    並拿到這一列的鎖；回傳有沒有改到（沒改到＝不存在、已經不是 `fetching`，或已到失敗上限）。
 
-    套用交易的第一句：它拿到這一列的鎖，並行的第二個套用會等第一個交易結束，再判斷時已經不是
-    `fetching`，就不會改到（互斥，ADR-0026）。和其他寫入在同一個交易，中途失敗時一起退回。
-    在呼叫端開好的交易裡做，不 commit。
+    抓取每頁寫原始資料、暫存列與進度的交易第一句（Story 1.11 Codex C1、ADR-0028）：改到了，這一列
+    就鎖到交易結束，另一個工作要把它標成 `failed` 得等這個交易結束；沒改到，呼叫端整個交易都不寫。
+    另一個交易正改著這一列時先等它結束，再照改完的值判斷（PostgreSQL 的 READ COMMITTED 會重新
+    檢查 WHERE）。在呼叫端開好的交易裡做，不 commit。
+
+    Raises:
+        ValueError: `max_failures` 不是正整數（不碰資料庫）。
     """
+    check_max_failures(max_failures)
     rows = connection.execute(
         text(
-            "UPDATE weekly_run SET status = :published, updated_at = now()"
-            " WHERE id = :id AND status = :fetching AND fetch_finished_at IS NOT NULL"
+            "UPDATE weekly_run SET updated_at = now()"
+            " WHERE id = :id AND status = :fetching AND failure_count < :max_failures"
             " RETURNING id"
         ),
         {
             "id": weekly_run_id,
-            "published": WeeklyRunStatus.PUBLISHED.value,
             "fetching": WeeklyRunStatus.FETCHING.value,
+            "max_failures": max_failures,
         },
     )
     return len(rows.all()) == 1
 
 
-def update_weekly_run_failure(
-    connection: Connection, weekly_run_id: uuid.UUID, *, max_failures: int
-) -> WeeklyRunFailure | None:
-    """記這筆每週更新又失敗一次：只在 `fetching` 時把 `failure_count` 加一；加完到 `max_failures`
-    就在同一句改成 `failed`。回（累計失敗次數, 是否這次標成 `failed`）；不存在或不是 `fetching`
-    （已經 `failed`、已發佈）時什麼都不改、回 None。
+def update_weekly_run_published(
+    connection: Connection, weekly_run_id: uuid.UUID, *, max_failures: int | None = None
+) -> bool:
+    """這筆是 `fetching` 而且已經全部抓完時改成 `published`；回傳有沒有改到。
 
-    不改 `updated_at`（那是 `update_weekly_run_touched` 的事）。在呼叫端開好的交易裡做，不 commit。
+    有給 `max_failures` 時，`failure_count` 已到上限（等著收尾成 `failed`）的也不改（Story 1.11
+    Codex C2、ADR-0028）。
+
+    套用交易的第一句：它拿到這一列的鎖，並行的第二個套用會等第一個交易結束，再判斷時已經不是
+    `fetching`，就不會改到（互斥，ADR-0026）。和其他寫入在同一個交易，中途失敗時一起退回。
+    在呼叫端開好的交易裡做，不 commit。
+
+    Raises:
+        ValueError: 有給 `max_failures` 但不是正整數（不碰資料庫）。
+    """
+    limit = ""
+    params: dict[str, object] = {
+        "id": weekly_run_id,
+        "published": WeeklyRunStatus.PUBLISHED.value,
+        "fetching": WeeklyRunStatus.FETCHING.value,
+    }
+    if max_failures is not None:
+        params["max_failures"] = check_max_failures(max_failures)
+        limit = " AND failure_count < :max_failures"
+    rows = connection.execute(
+        text(
+            "UPDATE weekly_run SET status = :published, updated_at = now()"
+            " WHERE id = :id AND status = :fetching AND fetch_finished_at IS NOT NULL"
+            + limit
+            + " RETURNING id"
+        ),
+        params,
+    )
+    return len(rows.all()) == 1
+
+
+def update_weekly_run_failure(connection: Connection, weekly_run_id: uuid.UUID) -> int | None:
+    """記這筆每週更新又失敗一次：只在 `fetching` 時把 `failure_count` 加一，回傳加完的次數；
+    不存在或不是 `fetching`（已經 `failed`、已發佈）時什麼都不改、回 None。
+
+    只加次數、不改狀態：到上限時改成 `failed` 是另一個交易的事（`update_weekly_run_failed`），
+    收尾失敗時次數也不會跟著退回（Story 1.11 Codex C2、ADR-0028）。不改 `updated_at`（那是
+    `update_weekly_run_touched` 的事）。在呼叫端開好的交易裡做，不 commit。
+    """
+    row = connection.execute(
+        text(
+            "UPDATE weekly_run SET failure_count = failure_count + 1"
+            " WHERE id = :id AND status = :fetching"
+            " RETURNING failure_count"
+        ),
+        {"id": weekly_run_id, "fetching": WeeklyRunStatus.FETCHING.value},
+    ).one_or_none()
+    return None if row is None else int(row[0])
+
+
+def update_weekly_run_failed(
+    connection: Connection, weekly_run_id: uuid.UUID, *, max_failures: int
+) -> int | None:
+    """這筆還是 `fetching`、而且 `failure_count` 已到 `max_failures` 時改成 `failed`（同時更新
+    `updated_at`）；回傳它的累計失敗次數。沒改到（不存在、不是 `fetching`、還沒到上限）回 None。
+
+    收尾的交易用：和刪暫存列在同一個交易（ADR-0028）。在呼叫端開好的交易裡做，不 commit。
 
     Raises:
         ValueError: `max_failures` 不是正整數（不碰資料庫）。
@@ -366,10 +428,9 @@ def update_weekly_run_failure(
     check_max_failures(max_failures)
     row = connection.execute(
         text(
-            "UPDATE weekly_run SET failure_count = failure_count + 1,"
-            " status = CASE WHEN failure_count + 1 >= :max_failures THEN :failed ELSE status END"
-            " WHERE id = :id AND status = :fetching"
-            " RETURNING failure_count, status"
+            "UPDATE weekly_run SET status = :failed, updated_at = now()"
+            " WHERE id = :id AND status = :fetching AND failure_count >= :max_failures"
+            " RETURNING failure_count"
         ),
         {
             "id": weekly_run_id,
@@ -378,7 +439,4 @@ def update_weekly_run_failure(
             "fetching": WeeklyRunStatus.FETCHING.value,
         },
     ).one_or_none()
-    if row is None:
-        return None
-    failures, status = row
-    return WeeklyRunFailure(failures=failures, failed=status == WeeklyRunStatus.FAILED.value)
+    return None if row is None else int(row[0])

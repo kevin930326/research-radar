@@ -53,7 +53,13 @@ def register_tasks(app: procrastinate.App, parts: WorkerParts, settings: Setting
 
     def weekly_update_job() -> None:
         # 心跳在 run_weekly_update 發佈快照、commit 之後才送（ADR-0026），這裡不送。
-        weekly_update(SystemViewer(), parts.database, parts.enqueue)
+        # 找到的 fetching 已到失敗上限（上次收尾沒做成）時先收尾再建新的一筆（ADR-0028）。
+        weekly_update(
+            SystemViewer(),
+            parts.database,
+            parts.enqueue,
+            max_failures=settings.weekly_update_max_failures,
+        )
 
     def run_weekly_update_job(weekly_run_id: uuid.UUID) -> None:
         # service 先讀狀態，確認要抓才呼叫 open_setup：已經抓完、不是 fetching 時不讀設定、不建
