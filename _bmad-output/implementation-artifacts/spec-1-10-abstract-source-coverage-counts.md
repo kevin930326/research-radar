@@ -117,6 +117,8 @@ deferred: []
 
 ## Spec Change Log
 
+- 2026-11-14（審查修正 947796a）：`tests/arch/test_stats_queries.py` 四條規則依對抗式審查改寫（統計模組以外「引用 counted_paper 又彙總」才擋；「全部篇數」只認 FROM 只有 counted_paper〔頂多左接 paper_abstract〕、沒有分類篩選的整列計數；讀 paper 只擋數篇數的形狀；加逗號接法）。上方 Code Map 對 (1) 的舊描述以 ADR-0027 第 9 點與測試檔為準。
+
 ## Review Triage Log
 
 ### 2026-11-14 — Review pass
