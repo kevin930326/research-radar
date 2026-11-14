@@ -66,10 +66,10 @@
 1. **表頭表只建表頭（選項 1A）**：`zh_summary`、`classification`、`research_model` 三張表，`HEADER_TABLES` 是工作代碼到表名的唯一對照；每張表有 `(paper_id, lang) WHERE status = 'active'` 的部分唯一索引。閘門在 2.2 只支援這三個有表頭的工作，`merge_judge`、`qa_answer`、`eval_judge` 呼叫閘門會丟 `ValueError`。
 2. **`eval_run_id` 暫不設外鍵**：Epic 8 的 `eval_run` 還不存在；到時補外鍵的遷移。
 3. **`abstract_id` 不設外鍵**：ingest 換摘要時會刪 `paper_abstract` 的列；表頭只記「當時用的是哪一筆」，刪了也要能留下歷史。
-4. **取得執行資格（選項 2B）**：同一個短交易裡 `pg_advisory_xact_lock(run_lock_key(key))`（阻塞，交易結束自動放）→ 有 `active`、平常流程的 `rejected` 或 `running` 就 `SKIPPED` → 新增 `running`（`ON CONFLICT ... DO NOTHING`，部分唯一索引 `WHERE status = 'running' AND eval_run_id IS NULL` 兜底）→ 立刻 commit。鍵是五個欄位（論文、工作、prompt 版本、模型、`input_sha256`）JSON 的 sha256 前 8 bytes，當成有號 64 位元整數（`domain/fingerprints.run_lock_key`）。評估不問 `should_run`、不受索引限制。鎖等多久由資料庫的 `statement_timeout` 限制。
+4. **取得執行資格（選項 2B）**：同一個短交易裡 `pg_advisory_xact_lock(run_lock_key(key))`（阻塞，交易結束自動放）→ 有 `active`、平常流程的 `rejected` 或 `running` 就 `SKIPPED` → 新增 `running`（`ON CONFLICT ... DO NOTHING`，部分唯一索引 `WHERE status = 'running' AND eval_run_id IS NULL` 兜底）→ 立刻 commit。鍵是五個欄位（論文、工作、prompt 版本、模型、`input_sha256`）JSON 的 sha256 前 8 bytes，當成有號 64 位元整數（`domain/fingerprints.run_lock_key`）。評估不問 `should_run`、不受索引限制，但同一個 `eval_run_id` 已經有 `running` 時也 `SKIPPED`（見決定 14）。鎖等多久由資料庫的 `statement_timeout` 限制。
 5. **`input_sha256` 的內容**：版本號、工作代碼、每個區塊的（文件類型、來源、包好 `<document>` 的文字），加上分類表版本與情境值清單版本；`classify` 一定要帶分類表版本、`extract_model` 一定要帶情境值清單版本、其他工作不得帶。只在 `domain/fingerprints.py` 算（架構測試守）。
 6. **token 估計常數（選項 3B）**：`bytes_per_token: "1"`、`overhead_tokens: 64`。一個 token 至少對應一個位元組，所以位元組數本身就是上限（中文一個字三個位元組，會估得很多）。估的是送出的全部文字：系統提示、文件區塊，有結構化輸出時加上送出的 JSON schema 字串。超過 `max_input_tokens`（100,000）而且工作沒有 `allow_over_input_limit` 就 `TOO_LARGE`，不送。
-7. **prompt 檔（選項 4C，依此更正）**：`prompts/<工作代碼>/v<N>.md`，開頭 `---` 包住的設定區（`effort`、`max_tokens`、`disable_thinking`、`output_schema`，只收這四個鍵、不收重複），之後是模板本文。`radar/domain/prompt_hashes.py` 是唯一一份登記：`CURRENT_PROMPT_VERSIONS`（工作 → 目前版本）與 `PROMPT_FILE_HASHES`（工作 → 版本 → (整個檔的 sha256, 凍結 schema 字串的 sha256)），只能寫字面值（`tests/arch/test_prompt_hashes.py`）；`radar/` 裡只有 policy 與 `services/prompt_loader.py` 讀它。schema 改了（包括 `Field(description=...)`），就算 prompt 檔沒改也對不上，一樣要升版。登記只增不改，改內容一律新增 `v<N+1>.md`。2.2 沒有正式 prompt，兩張表都是空的。「只增不改」由 `tests/arch/test_prompt_registry_history.py` 守：拿 main（優先 `origin/main`）歷史上每一版登記檔比，已登記的（工作, 版本）不能刪、雜湊不能改；同時改模板與雜湊、版本不變也抓得到。淺層 clone 或找不到 main 時測試直接失敗。原本的 `prompts/registry.json` 刪掉。
+7. **prompt 檔（選項 4C，依此更正）**：`prompts/<工作代碼>/v<N>.md`，開頭 `---` 包住的設定區（`effort`、`max_tokens`、`disable_thinking`、`output_schema`，只收這四個鍵、不收重複），之後是模板本文。`radar/domain/prompt_hashes.py` 是唯一一份登記：`CURRENT_PROMPT_VERSIONS`（工作 → 目前版本）與 `PROMPT_FILE_HASHES`（工作 → 版本 → (整個檔的 sha256, 凍結 schema 字串的 sha256)），只能寫字面值（`tests/arch/test_prompt_hashes.py`）；`radar/` 裡只有 policy 與 `services/prompt_loader.py` 讀它。schema 改了（包括 `Field(description=...)`），就算 prompt 檔沒改也對不上，一樣要升版。登記只增不改，改內容一律新增 `v<N+1>.md`。2.2 沒有正式 prompt，兩張表都是空的。「只增不改」由 `tests/arch/test_prompt_registry_history.py` 守：只取 main（優先 `origin/main`）第一父提交那條線上的登記檔（登記正式進入 main 時的快照），已登記的（工作, 版本）雜湊不能改，HEAD 已經拿到的也不能刪；同時改模板與雜湊、版本不變也抓得到。分支內部的中間版本（例如合併前把 v2 從 A 改成 B、再用 merge commit 合併）不算。淺層 clone 或找不到 main 時測試直接失敗。原本的 `prompts/registry.json` 刪掉。
    - 設定區的 `output_schema` 是 `services/prompt_loader.py` 的 `OUTPUT_SCHEMAS` 對照表裡的名稱（每個類別都要 `extra="forbid"`）；閘門寫 `LlmRequest(output_schema=prompt.schema_class)`，`LlmRequest` 執行期再核對類別在 `domain/llm.py` 凍結的登記表裡。
    - 送出的凍結 schema 字串的 sha256 記進 `derivation_run.params.output_schema_sha256`（來歷）：只改欄位說明的 schema 也查得出是哪一份。
 8. **費用**：全部用 `Decimal`；`總輸入 = input + cache_creation + cache_read`，超過 100,000 tokens 整次（輸入與輸出）改用長上下文價；快取讀取 ×0.1；快取寫入回應不分 5 分鐘／1 小時，本專案不設快取，保守按 1 小時的 ×2 算；Batch ×0.5；每次呼叫四捨五入（half-up）到 6 位小數，對應 `numeric(12,6)`。價格與倍率在 `config/models.yaml` 寫成字串，驗證不收浮點數。
@@ -84,7 +84,7 @@
 14. **記帳後出錯從存下的輸出接續（選項 6C，Codex 主審查）**：
     - 記帳時連同輸出一起存進 `llm_call`：`output_text`（模型回的文字，還沒驗證）或 `output_reject_reason`（呼叫當下就拒收：拒答、截斷、格式不對；文字本身存不進 `text` 欄位時記 `llm_output_unstorable`）。兩欄最多一個有值（CHECK）；沒有 usage（例如 HTTP 400）就沒有帳、也沒有存輸出。
     - 記帳之後驗證函式丟非預期例外、或寫結果的交易失敗：run 改 `failed`，有存下輸出的記 `llm_result_pending`，否則 `llm_gateway_error`（同一句 SQL 看 `llm_call` 決定）。sweep 收到已存輸出的逾時 run 也記 `llm_result_pending`（程式在記帳後整個掛掉的情況）。
-    - 取得資格的交易：鎖 → 平常流程先查 running、再查表頭（有就 `SKIPPED`）→ 把同一組鍵（評估還要同一個 `eval_run_id`）最早一筆 `llm_result_pending` 改回 `running`、重設 `updated_at` → 有就讀存下的輸出，跳過呼叫與記帳，照常走 Pydantic → domain 驗證 → `ai_results`；沒有才新增 run。兩個同時接續由 advisory lock 排隊，後到的看到 `running` 回 `SKIPPED`。
+    - 取得資格的交易：鎖 → 查同一個流程的 running（平常流程看 `eval_run_id IS NULL`，評估看同一個 `eval_run_id`）→ 平常流程再查表頭（有就 `SKIPPED`）→ 把同一組鍵（評估還要同一個 `eval_run_id`）最早一筆 `llm_result_pending` 改回 `running`、重設 `updated_at` → 有就讀存下的輸出，跳過呼叫與記帳，照常走 Pydantic → domain 驗證 → `ai_results`；沒有才新增 run。兩個同時接續由 advisory lock 排隊，後到的看到 `running` 回 `SKIPPED`；接續的人已經離開鎖、還在驗證時，同一組鍵的新請求（評估是同一個 `eval_run_id`）也看到 `running` 回 `SKIPPED`，不會新增 run 再付一次錢（Codex 複查）。
     - 接續的 `GatewayResult.resumed` 是真、`cost_usd` 是 None（這一次沒有新記帳）。接續時再出錯，run 又回到 `llm_result_pending`。
     - 原始回應存成 NULL 不影響接續：接續只讀 `output_text`，不看 `raw_response`。
     - 已經寫了表頭的 pending run（sweep 判定逾時後原本的呼叫才寫成 `superseded`），`ai_results` 在同一個交易把原因改成 `llm_run_expired`，之後不再接續（表頭的 `run_id` 唯一，也不能再寫一列）。
@@ -120,6 +120,7 @@
 - **待寫入的 run 只等同一組鍵**：論文的摘要、prompt 版本或模型換了，鍵就不同，舊的 pending run 不會被接續、也不會被清掉，只留作歷史（帳照記）；預算不准（`DEFERRED_BUDGET`）時也不接續，等預算准了才接。
 - **sweep 改看 `updated_at`**：接續時重設，剛接續的 run 不會因為建立得早就馬上被判逾時；代價是「建立多久」不再直接等於「跑了多久」（建立時間仍在 `created_at`）。
 - **sweep 誤判仍在跑的呼叫**：若寫結果拖過 `RADAR_LLM_RUN_STALE_AFTER`，sweep 會把它標成 pending，另一個 worker 可能接續；兩邊之中後寫的會撞上表頭的 `run_id` 唯一約束而丟例外（不會重付、不會寫兩列）。預設 900 秒對短交易留了很大餘裕。
+- **同一個評估裡同一組鍵不能同時跑兩次**：評估查 running 時看同一個 `eval_run_id`，所以 Epic 8 若要在同一個評估裡對同一份輸入重複取樣，得一筆跑完再跑下一筆（或用不同的 `eval_run_id`）。不同評估之間、評估與平常流程之間仍互不限制。
 - **登記歷史比對要等合併後才有東西可比**：main 上目前還沒有 `prompt_hashes.py`，這條守衛在 2.2 合併進 main 之後才開始核對；分支上新增又修改、還沒進 main 的登記不受限制。
 
 ## 名詞

@@ -4,6 +4,8 @@
 2. 舊輸入的結果晚到：存 `superseded`，新的維持 `active`（兩筆同時放行也一樣）；sweep 判定逾時後
    才回來的結果也是 `superseded`，帳照記、run 維持 `failed`。
 3. 評估不擋平常的流程，平常的流程在跑時評估也不受限。
+4. 接續（ADR-0030 決定 14）：一個請求從存下的輸出接續、停在驗證時，同一組鍵（評估是同一個
+   `eval_run_id`）的新請求看到 running 就 `SKIPPED`，不再呼叫模型、不再記帳。
 
 每個測試一個全新、已遷移的資料庫；模型用替身，不連網路。
 """
@@ -18,7 +20,7 @@ from pathlib import Path
 import pytest
 
 from radar.adapters.fake import FakeLlmProvider, fake_completion
-from radar.domain.ai_outputs import GatewayConfig, InputKind, LlmTask, OutputLang
+from radar.domain.ai_outputs import GatewayConfig, InputKind, LlmInput, LlmTask, OutputLang
 from radar.domain.llm import LlmUsage
 from radar.domain.viewer import SystemViewer
 from radar.repo.db import Database
@@ -26,6 +28,7 @@ from radar.services.llm_gateway import (
     GatewayOutcome,
     GatewayResult,
     LlmJob,
+    OutputValidator,
     expire_stale_runs,
     run_llm_job,
 )
@@ -280,3 +283,126 @@ def test_running_eval_does_not_block_normal_run(
 
     assert candidate.outcome is GatewayOutcome.CANDIDATE
     assert _statuses(db) == {normal.run_id: "active", candidate.run_id: "candidate"}
+
+
+# --- 4. 接續中的 run 擋住同一組鍵的新請求 ---------------------------------------------------------
+
+
+def _validating_job(paper_id: uuid.UUID, validate: OutputValidator) -> LlmJob:
+    return LlmJob(
+        paper_id,
+        LlmTask.ZH_SUMMARY,
+        InputKind.ABSTRACT,
+        OutputLang.ZH_HANT,
+        validate_output=validate,
+    )
+
+
+def _broken(_output: object, _input: LlmInput) -> None:
+    raise RuntimeError("測試：驗證函式壞了")
+
+
+def _run_now(
+    database: Database,
+    provider: GatedProvider,
+    config: GatewayConfig,
+    job: LlmJob,
+    eval_run_id: uuid.UUID | None,
+) -> GatewayResult:
+    return run_llm_job(
+        SYSTEM,
+        database,
+        provider,
+        config,
+        job,
+        budget_allows=lambda _task: True,
+        eval_run_id=eval_run_id,
+    )
+
+
+@pytest.mark.parametrize("is_eval", [True, False], ids=["same-eval", "normal"])
+def test_new_request_while_resume_is_validating_is_skipped(
+    db: TestDatabase,
+    database: Database,
+    config: GatewayConfig,
+    paper_id: uuid.UUID,
+    is_eval: bool,
+) -> None:
+    eval_run_id = uuid.uuid4() if is_eval else None
+    first = _gated(gated=False)
+    with pytest.raises(RuntimeError, match="驗證函式壞了"):
+        _run_now(database, first, config, _validating_job(paper_id, _broken), eval_run_id)
+    assert execute(db, "SELECT status, failure_reason FROM derivation_run") == [
+        ("failed", "llm_result_pending")
+    ]
+
+    # 第一個請求接續：把 pending 改回 running、離開鎖之後停在驗證。
+    entered = threading.Event()
+    release = threading.Event()
+
+    def wait_in_validation(_output: object, _input: LlmInput) -> None:
+        entered.set()
+        assert release.wait(WAIT), "等不到 release"
+
+    resumer_provider = _gated(replies=0, gated=False)
+    resumer = Worker(
+        database,
+        resumer_provider,
+        config,
+        _validating_job(paper_id, wait_in_validation),
+        eval_run_id=eval_run_id,
+    )
+    assert entered.wait(WAIT)
+    assert execute(db, "SELECT status FROM derivation_run") == [("running",)]
+
+    # 第二個同一組鍵（評估是同一個 eval_run_id）的請求：看到 running，不呼叫、不記帳。
+    second = _gated(gated=False)
+    skipped = _run_now(database, second, config, _job(paper_id), eval_run_id)
+
+    assert skipped == GatewayResult(GatewayOutcome.SKIPPED)
+    assert second.calls == 0
+    assert execute(db, "SELECT count(*) FROM derivation_run") == [(1,)]
+    assert execute(db, "SELECT count(*) FROM llm_call") == [(1,)]
+
+    release.set()
+    resumed = resumer.join()
+
+    expected = GatewayOutcome.CANDIDATE if is_eval else GatewayOutcome.ACTIVE
+    assert (resumed.outcome, resumed.resumed) == (expected, True)
+    assert first.calls + resumer_provider.calls + second.calls == 1
+    assert execute(db, "SELECT count(*) FROM llm_call") == [(1,)]
+    assert execute(db, "SELECT status FROM derivation_run") == [("succeeded",)]
+
+
+def test_other_eval_is_not_blocked_by_resuming_eval(
+    db: TestDatabase, database: Database, config: GatewayConfig, paper_id: uuid.UUID
+) -> None:
+    # 只擋同一個 eval_run_id：別的評估照常呼叫（評估之間本來就不互相限制）。
+    eval_run_id = uuid.uuid4()
+    with pytest.raises(RuntimeError):
+        _run_now(
+            database, _gated(gated=False), config, _validating_job(paper_id, _broken), eval_run_id
+        )
+    entered = threading.Event()
+    release = threading.Event()
+
+    def wait_in_validation(_output: object, _input: LlmInput) -> None:
+        entered.set()
+        assert release.wait(WAIT), "等不到 release"
+
+    resumer = Worker(
+        database,
+        _gated(replies=0, gated=False),
+        config,
+        _validating_job(paper_id, wait_in_validation),
+        eval_run_id=eval_run_id,
+    )
+    assert entered.wait(WAIT)
+
+    other = _gated(gated=False)
+    result = _run_now(database, other, config, _job(paper_id), uuid.uuid4())
+
+    assert (result.outcome, result.resumed) == (GatewayOutcome.CANDIDATE, False)
+    assert other.calls == 1
+    release.set()
+    assert resumer.join().resumed is True
