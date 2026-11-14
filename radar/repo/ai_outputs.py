@@ -1,9 +1,12 @@
-"""三張 AI 表頭表 `zh_summary`、`classification`、`research_model`：表的定義與唯一的讀寫者
-（AD-7、ADR-0015、ADR-0030）。
+"""三張 AI 表頭表 `zh_summary`、`classification`、`research_model`（與掛在分類底下的
+`classification_label`）：表的定義與唯一的讀寫者（AD-7、ADR-0015、ADR-0030）。
 
 - 2.2 建表頭欄位（`paper_id`、`run_id`、`input_kind`、`input_sha256`、`abstract_id`、`lang`、
   `status`、`reject_reason`、`created_at`）；2.4 在 `zh_summary` 加四個內容欄位（遷移 0011，
-  `rejected` 沒有內容、有值時不是空白，CHECK 擋）；分類與研究模型的內容由 2.5、2.6 加。
+  `rejected` 沒有內容、有值時不是空白，CHECK 擋）；2.5 在 `classification` 加
+  `dropped_label_count`、新增 `classification_label`（遷移 0012，一列一個標籤）；`rejected` 沒有計數
+  由 CHECK 擋，`rejected` 底下沒有標籤、標籤不 UPDATE 則由 `NewAiResult`／`create_ai_result` 保證
+  （程式，不是資料庫）；研究模型的內容由 2.6 加。
 - 同一篇論文、同一種語言最多一筆 `active`（部分唯一索引）。內容不 UPDATE：重跑就新增一列，
   舊的 `active` 標成 `superseded`（只改 `status`）。
 - 結果只經 `services/ai_results.py` 寫入；`repo` 裡除了這個模組，其他查詢不直接讀這三張表
@@ -25,6 +28,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Index,
+    Integer,
     Table,
     Text,
     TextClause,
@@ -35,6 +39,7 @@ from sqlalchemy import (
 
 from radar.domain.ai_outputs import (
     HEADER_TABLES,
+    ClassificationContent,
     LlmTask,
     NewAiResult,
     OutputLang,
@@ -113,7 +118,33 @@ zh_summary_table = _header_table(
         name="content_not_blank",
     ),
 )
-classification_table = _header_table("classification")
+# 分類（Story 2.5、ADR-0033）：表頭只多一欄「丟掉幾個清單外的標籤」，標籤在 classification_label。
+# 2.2 留下的表頭（沒有內容）與 rejected 的計數是 NULL。
+classification_table = _header_table(
+    "classification",
+    Column("dropped_label_count", Integer),
+    CheckConstraint(
+        "dropped_label_count IS NULL OR dropped_label_count >= 0",
+        name="dropped_label_count_not_negative",
+    ),
+    CheckConstraint(
+        "status <> 'rejected' OR dropped_label_count IS NULL", name="rejected_has_no_dropped_count"
+    ),
+)
+# 一列一個標籤；細項不帶自己的狀態，跟著表頭走（ADR-0015）。`unclassified` 只能是主題。
+classification_label_table = Table(
+    "classification_label",
+    Base.metadata,
+    Column("id", Uuid, primary_key=True, server_default=text("uuidv7()")),
+    Column("classification_id", Uuid, ForeignKey("classification.id"), nullable=False),
+    Column("field", Text, nullable=False),
+    Column("key", Text, nullable=False),
+    # 同一列表頭、同一欄的同一個 key 只有一列；也當 classification_id 外鍵的索引。
+    UniqueConstraint("classification_id", "field", "key"),
+    CheckConstraint("field IN ('topic', 'method')", name="field"),
+    CheckConstraint("key ~ '^[a-z][a-z0-9_]*$'", name="key_format"),
+    CheckConstraint("field = 'topic' OR key <> 'unclassified'", name="unclassified_only_topic"),
+)
 research_model_table = _header_table("research_model")
 
 # --- SQL（每張表各一份字面值） -------------------------------------------------------------
@@ -132,9 +163,19 @@ _INSERT: Final[Mapping[LlmTask, TextClause]] = MappingProxyType(
             " VALUES (:paper_id, :run_id, :input_kind, :input_sha256, :abstract_id, :lang, :status,"
             " :reject_reason, :research_question, :method, :theory, :findings) RETURNING id"
         ),
-        LlmTask.CLASSIFY: text("INSERT INTO classification" + _INSERT_COLUMNS),
+        LlmTask.CLASSIFY: text(
+            "INSERT INTO classification (paper_id, run_id, input_kind, input_sha256, abstract_id,"
+            " lang, status, reject_reason, dropped_label_count)"
+            " VALUES (:paper_id, :run_id, :input_kind, :input_sha256, :abstract_id, :lang, :status,"
+            " :reject_reason, :dropped_label_count) RETURNING id"
+        ),
         LlmTask.EXTRACT_MODEL: text("INSERT INTO research_model" + _INSERT_COLUMNS),
     }
+)
+
+_INSERT_CLASSIFICATION_LABEL: Final = text(
+    "INSERT INTO classification_label (classification_id, field, key)"
+    " VALUES (:classification_id, :field, :key)"
 )
 
 _SUPERSEDE_WHERE = (
@@ -218,12 +259,13 @@ def find_blocking_ai_result(
 
 
 def create_ai_result(connection: Connection, task: LlmTask, result: NewAiResult) -> uuid.UUID:
-    """新增一列表頭（`zh_summary` 連同四欄內容），回它的 id。`active` 之前要先
-    `update_ai_results_superseded`（部分唯一索引擋第二筆 `active`）。在呼叫端開好的交易裡做，
-    不 commit。
+    """新增一列表頭（`zh_summary` 連同四欄內容；`classify` 連同計數，寫完表頭再寫標籤），回它的
+    id。`active` 之前要先 `update_ai_results_superseded`（部分唯一索引擋第二筆 `active`）。在呼叫端
+    開好的交易裡做，不 commit。
 
     Raises:
-        ValueError: 這個工作沒有表頭表，或不是 `zh_summary` 卻帶了中文重點的內容。
+        ValueError: 這個工作沒有表頭表，或帶了不屬於這個工作的內容（不是 `zh_summary` 卻帶中文
+            重點、不是 `classify` 卻帶分類）。
     """
     task = _check_task(task)
     params: dict[str, object] = {
@@ -241,8 +283,31 @@ def create_ai_result(connection: Connection, task: LlmTask, result: NewAiResult)
         params.update({column: content.get(column) for column in ZH_SUMMARY_CONTENT_COLUMNS})
     elif result.zh_summary is not None:
         raise ValueError(f"{task.value} 的表頭不收中文重點的內容")
-    value = connection.execute(_INSERT[task], params).scalar_one()
-    return uuid.UUID(str(value))
+    classification = result.classification
+    if task is LlmTask.CLASSIFY:
+        params["dropped_label_count"] = (
+            None if classification is None else classification.dropped_label_count
+        )
+    elif classification is not None:
+        raise ValueError(f"{task.value} 的表頭不收分類的內容")
+    header_id = uuid.UUID(str(connection.execute(_INSERT[task], params).scalar_one()))
+    if classification is not None:
+        _create_classification_labels(connection, header_id, classification)
+    return header_id
+
+
+def _create_classification_labels(
+    connection: Connection, classification_id: uuid.UUID, content: ClassificationContent
+) -> None:
+    """寫這列分類表頭的標籤（一個 key 一列）。`ClassificationContent` 至少有一個主題，所以一定
+    有列。"""
+    connection.execute(
+        _INSERT_CLASSIFICATION_LABEL,
+        [
+            {"classification_id": classification_id, "field": field.value, "key": key}
+            for field, key in content.labels()
+        ],
+    )
 
 
 def update_ai_results_superseded(

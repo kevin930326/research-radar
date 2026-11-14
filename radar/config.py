@@ -21,6 +21,7 @@ from radar.domain.import_report import ImportBaseline
 from radar.domain.jobs import scheduled_jobs
 from radar.domain.pricing import ModelsConfig
 from radar.domain.settings import MigrationSettings, Settings, heartbeat_url_field
+from radar.domain.taxonomy import Taxonomy, taxonomy_registry_problems
 from radar.domain.validators.zh_summary import ZhSummaryRules
 
 type ProcessKind = Literal["api", "worker", "cli"]
@@ -166,6 +167,8 @@ MODELS_FILE = "models.yaml"
 BUDGET_FILE = "budget.yaml"
 # 中文重點的驗證門檻（PRD FR-14、ADR-0032）：跑 `zh_summary` 的工作讀（`load_zh_summary_rules`）。
 ZH_SUMMARY_FILE = "zh_summary.yaml"
+# 主題與方法的分類表（PRD FR-15、FR-36、ADR-0033）：跑 `classify` 的工作讀（`load_taxonomy`）。
+TAXONOMY_FILE = "taxonomy.yaml"
 
 
 def config_dir(environ: Mapping[str, str] | None = None) -> Path:
@@ -271,6 +274,28 @@ def load_zh_summary_rules(environ: Mapping[str, str] | None = None) -> ZhSummary
     if problems or rules is None:
         raise ConfigError(problems)
     return rules
+
+
+def load_taxonomy(environ: Mapping[str, str] | None = None) -> Taxonomy:
+    """讀 `RADAR_CONFIG_DIR` 下的 `taxonomy.yaml`（主題與方法的分類表），驗證格式後再核對內容雜湊
+    和 `domain/taxonomy_hashes.py` 的登記。
+
+    行程啟動時讀一次（AD-18）：同一個行程的分類工作從開始到寫入都用這一個物件當「現在的分類表」。
+    讀法與錯誤格式和 `load_domain_config` 相同（「檔名：欄位路徑：原因」）。
+
+    Raises:
+        ConfigError: 缺檔、不是合法 YAML、鍵寫兩次、缺 `version`、多欄、`key` 寫法不對或重複、
+            用了保留字 `unclassified`；內容改了卻沒升版，或版本沒有登記雜湊。
+    """
+    problems: list[str] = []
+    taxonomy = _load_yaml_model(config_dir(environ), TAXONOMY_FILE, Taxonomy, problems)
+    if taxonomy is not None:
+        problems.extend(
+            f"{TAXONOMY_FILE}：{problem}" for problem in taxonomy_registry_problems(taxonomy)
+        )
+    if problems or taxonomy is None:
+        raise ConfigError(problems)
+    return taxonomy
 
 
 def _load_yaml_model[T: BaseModel](

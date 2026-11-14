@@ -6,6 +6,8 @@
 - `prompt_sha256`／`schema_sha256`：prompt 檔與結構化輸出 schema 的雜湊，登記在
   `domain/prompt_hashes.py`，改了內容卻沒升版就對不上。
 - `run_lock_key`：取得執行資格時 advisory lock 的鍵（64 位元有號整數）。
+- `taxonomy_content_sha256`：分類表會進 prompt 的內容的雜湊，登記在 `domain/taxonomy_hashes.py`，
+  內容改了卻沒升版就對不上（Story 2.5、ADR-0033）。
 
 ## source_hash
 
@@ -26,6 +28,7 @@ from typing import TYPE_CHECKING, Final
 if TYPE_CHECKING:
     from radar.domain.ai_outputs import LlmInputBlock, LlmTask, RunKey
     from radar.domain.papers import ParsedPaper
+    from radar.domain.taxonomy import Taxonomy
 
 # 算法版本：改了算進指紋的欄位或序列化方式時加一（全部論文的指紋都會變）。
 SOURCE_HASH_VERSION = 1
@@ -155,3 +158,24 @@ def run_lock_key(key: RunKey) -> int:
         ).encode("utf-8")
     ).digest()
     return int.from_bytes(digest[:8], "big", signed=True)
+
+
+# --- 分類表（Story 2.5、ADR-0033） ----------------------------------------------------------
+
+# 算法版本：改了算進雜湊的欄位或序列化方式時加一（登記的雜湊要全部重算、重新登記）。
+TAXONOMY_CONTENT_VERSION: Final = 1
+
+
+def taxonomy_content_sha256(taxonomy: Taxonomy) -> str:
+    """分類表內容的雜湊（64 位小寫十六進位 SHA-256）。
+
+    只算會進 prompt 的東西：每個欄位（`topic`／`method`）依 `key` 排序後的（`key`, 定義）。
+    顯示名稱與項目順序不算，所以只改這兩樣不必升版；增刪 `key`、改定義、把項目搬到另一欄都會變。
+    """
+    return _canonical_sha256(
+        {
+            "v": TAXONOMY_CONTENT_VERSION,
+            "topic": sorted([item.key, item.definition] for item in taxonomy.topics),
+            "method": sorted([item.key, item.definition] for item in taxonomy.methods),
+        }
+    )

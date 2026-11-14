@@ -1,0 +1,53 @@
+version: 1
+
+# 主題與方法的分類表（PRD FR-15、FR-36、ADR-0033）：分類（`classify`）只能選這裡的 `key`，
+# 清單外的標籤丟掉並計數；主題一個都不剩時存 `unclassified`（保留字，不能當 `key`）。
+# 清單照 PRD FR-15（沿用 brief 初版），只經 `radar/config.py` 的 `load_taxonomy` 讀。
+#
+# - `key`：小寫英文加底線，寫進 `classification_label`，寫出去之後不改名。
+# - `name`：顯示名稱（畫面用）。只改 `name` 或項目順序不算改內容、不必升分類表版本；但 prompt 的
+#   分類清單照這裡的順序逐字核對，所以改順序時要嘛 prompt 維持原順序，要嘛新增一版 prompt。
+# - `definition`：給模型看的定義，寫死在 `prompts/classify/v<N>.md` 的分類清單裡（一行一項）。
+#
+# 改內容（增刪 `key`、改 `definition`、把項目搬到另一欄）一定要：
+#   1. `version` 加一，並在 `radar/domain/taxonomy_hashes.py` 登記新版本的內容雜湊（只增不改）；
+#   2. 新增 `prompts/classify/v<N+1>.md`（清單一起改）並登記 prompt 雜湊。
+# 沒升版或沒登記，讀設定時就 ConfigError。升版會讓全部論文的分類重跑（版本算進輸入指紋），
+# 改之前先問 Kevin（ADR-0015 取捨）。50 篇金標準標註開始前要定版。
+
+topics:
+  - key: erp
+    name: ERP
+    definition: 企業資源規劃（ERP）與其他企業系統的導入、使用、整合與成效。
+  - key: supply_chain
+    name: 供應鏈
+    definition: 供應鏈管理，以及資訊系統支援的物流、採購、庫存與供應商協同。
+  - key: e_commerce
+    name: 電子商務
+    definition: 電子商務、線上購物、數位平台與線上市集，以及網路上的消費者行為與行銷。
+  - key: it_project_management
+    name: IT 專案管理
+    definition: 資訊系統開發與 IT 專案的規劃、執行、風險、外包與專案成敗。
+  - key: information_economics
+    name: 資訊經濟
+    definition: 資訊科技與資訊商品的經濟分析，例如定價、網路效應、資訊不對稱、IT 投資的價值。
+  - key: ai_data_analytics
+    name: AI／資料分析
+    definition: 人工智慧、機器學習、大數據與商業分析的應用、採用與影響。
+
+methods:
+  - key: survey_sem
+    name: 問卷／SEM
+    definition: 以問卷收集資料，用迴歸或結構方程模型（SEM、PLS）等統計方法檢定假設。
+  - key: interview_case_study
+    name: 訪談／個案
+    definition: 以訪談、個案研究、田野觀察等質性資料為主的研究。
+  - key: experiment
+    name: 實驗
+    definition: 實驗室實驗、線上實驗或田野實驗：操弄變數、比較不同組別。
+  - key: data_analysis_ml
+    name: 資料分析／機器學習
+    definition: 分析次級資料、交易或行為紀錄、網路資料，或用機器學習、計量模型建模。
+  - key: literature_review
+    name: 文獻回顧
+    definition: 文獻回顧、系統性回顧、後設分析或書目計量分析。

@@ -42,6 +42,7 @@ OUTPUT_SCHEMAS: Final[Mapping[str, type[BaseModel]]] = MappingProxyType(
     {
         "FakeResearchQuestion": llm_schemas.FakeResearchQuestion,
         "ZhSummaryOutput": llm_schemas.ZhSummaryOutput,
+        "ClassificationOutput": llm_schemas.ClassificationOutput,
     }
 )
 # prompt 檔最大的位元組數（系統提示不該這麼長；擋下誤放的大檔）。

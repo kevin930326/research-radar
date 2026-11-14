@@ -2,7 +2,8 @@
 
 - 工作代碼只有六個（`LlmTask`）；要加新的工作要改架構文件的 AD-8（架構測試守著）。
 - 會產生「表頭」的工作對應到哪一張表頭表（`HEADER_TABLES`）。2.2 只建表頭欄位；2.4 加了
-  中文重點的四欄內容（`ZhSummaryContent`），分類與研究模型的內容由 2.5、2.6 加；
+  中文重點的四欄內容（`ZhSummaryContent`），2.5 加了分類的標籤（`ClassificationContent`），
+  研究模型的內容由 2.6 加；
   `merge_judge` 的 `merge_judgment` 在 Epic 10（它的對象表還不存在）。
 - 要送給模型的文字一律由 `build_llm_input` 從資料列（`paper.title`、`paper_abstract`）推出，
   來源（`ContentSource`）也由資料列決定；呼叫端只指定論文、工作、`input_kind`，不能自己給文字
@@ -25,6 +26,7 @@ from typing import TYPE_CHECKING, Any, Final, assert_never
 from radar.domain.errors import ErrorCode
 from radar.domain.papers import AbstractSource, check_storable_text
 from radar.domain.policy import CloudPolicy, ContentSource
+from radar.domain.taxonomy import KEY_PATTERN, UNCLASSIFIED, TaxonomyField
 
 if TYPE_CHECKING:
     from radar.domain.pricing import ModelsConfig
@@ -215,14 +217,59 @@ class ZhSummaryContent:
 
 
 @dataclass(frozen=True, slots=True)
+class ClassificationContent:
+    """分類的內容（`classification.dropped_label_count` 與 `classification_label`，Story 2.5、
+    ADR-0033）。
+
+    只由 `domain/validators/classification.normalize_classification` 從驗證過的模型輸出做出來，
+    再經 `services/ai_results.py` 寫入。`topics`、`methods` 是排序過、不重複的 `key`；主題一個都
+    不剩時 `topics` 是 `("unclassified",)`，方法不剩就是空的。`dropped_label_count` 是丟掉的清單外
+    標籤數。
+
+    Raises:
+        ValueError: `topics` 是空的、`key` 寫法不對、沒排序或重複、`unclassified` 和其他主題一起
+            出現或出現在 `methods`、`dropped_label_count` 不是 ≥ 0 的整數。
+    """
+
+    topics: tuple[str, ...]
+    methods: tuple[str, ...]
+    dropped_label_count: int
+
+    def __post_init__(self) -> None:
+        if not self.topics:
+            raise ValueError("topics 至少要有一個（一個都不剩時是 unclassified）")
+        for name, keys in (("topics", self.topics), ("methods", self.methods)):
+            if not isinstance(keys, tuple) or not all(isinstance(key, str) for key in keys):
+                raise ValueError(f"{name} 要是字串的 tuple")
+            if any(KEY_PATTERN.fullmatch(key) is None for key in keys):
+                raise ValueError(f"{name} 的 key 寫法不對")
+            if list(keys) != sorted(set(keys)):
+                raise ValueError(f"{name} 要排序過、不重複")
+        if UNCLASSIFIED in self.methods:
+            raise ValueError(f"{UNCLASSIFIED} 只能出現在 topics")
+        if UNCLASSIFIED in self.topics and len(self.topics) > 1:
+            raise ValueError(f"{UNCLASSIFIED} 只能單獨出現")
+        count = self.dropped_label_count
+        if type(count) is not int or count < 0:
+            raise ValueError("dropped_label_count 要是 ≥ 0 的整數")
+
+    def labels(self) -> tuple[tuple[TaxonomyField, str], ...]:
+        """要寫進 `classification_label` 的（欄位, `key`），主題在前、方法在後。"""
+        return tuple((TaxonomyField.TOPIC, key) for key in self.topics) + tuple(
+            (TaxonomyField.METHOD, key) for key in self.methods
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class NewAiResult:
     """要新增的一列表頭。
 
-    `zh_summary`：中文重點的內容（只有 `zh_summary` 工作、而且不是 `rejected` 時可以有值；
-    分類與研究模型的內容由 2.5、2.6 加）。
+    `zh_summary`：中文重點的內容（只有 `zh_summary` 工作、而且不是 `rejected` 時可以有值）。
+    `classification`：分類的內容（只有 `classify` 工作、而且不是 `rejected` 時可以有值）。
+    研究模型的內容由 2.6 加。
 
     Raises:
-        ValueError: `rejected` 與原因代碼對不上，或 `rejected` 帶了內容。
+        ValueError: `rejected` 與原因代碼對不上、`rejected` 帶了內容，或兩種內容都有。
     """
 
     paper_id: uuid.UUID
@@ -234,12 +281,16 @@ class NewAiResult:
     status: ResultStatus
     reject_reason: ErrorCode | None
     zh_summary: ZhSummaryContent | None = None
+    classification: ClassificationContent | None = None
 
     def __post_init__(self) -> None:
         if (self.status is ResultStatus.REJECTED) != (self.reject_reason is not None):
             raise ValueError("只有 rejected 帶原因代碼，而且 rejected 一定要帶")
-        if self.status is ResultStatus.REJECTED and self.zh_summary is not None:
+        has_content = self.zh_summary is not None or self.classification is not None
+        if self.status is ResultStatus.REJECTED and has_content:
             raise ValueError("rejected 不寫內容")
+        if self.zh_summary is not None and self.classification is not None:
+            raise ValueError("一列表頭只帶一種內容")
 
 
 @dataclass(frozen=True, slots=True)
