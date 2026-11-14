@@ -7,7 +7,10 @@ ADR-0026 取捨）。
    `updated_at`；reparse 結束後接著做到快照 1。
 2. 反向順序：每週更新的套用正拿著共用鎖時，reparse 拿不到鎖而拒絕、什麼都不寫。
 3. 兩個 reparse 同時：第二個拒絕，第一個照常完成。
-4. reparse 成功、失敗、被拒絕之後鎖都放掉了；解鎖失敗時那條連線被作廢，鎖跟著連線結束放掉。
+4. reparse 成功、失敗、被拒絕之後鎖都放掉了；解鎖失敗時那條連線被作廢，鎖跟著連線結束放掉
+   （連線斷掉的，和連線還活著、解鎖丟出一般錯誤的兩種）。
+5. 持鎖的連線中途斷了（Codex 複查 R1）：原本的 reparse 不能換一條連線繼續寫；別的作業拿到鎖之後，
+   它的下一個交易丟 `AdvisoryLockLostError`、什麼都不 commit。
 
 並行用兩條真的連線（不同的 `Database`）與執行緒；用 `threading.Event` 讓一邊停在持有鎖的
 那一段，不靠 sleep 的時序，每次等待都有逾時。論文內容取自錄好的 OpenAlex 回應
@@ -15,6 +18,7 @@ ADR-0026 取捨）。
 """
 
 import threading
+import time
 import uuid
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -23,7 +27,7 @@ from decimal import Decimal
 from typing import Any
 
 import pytest
-from sqlalchemy import Connection
+from sqlalchemy import Connection, text
 from structlog.testing import capture_logs
 
 from radar.adapters.fake import FakeHeartbeat, FakeObjectStore, FakePaperSource
@@ -41,7 +45,7 @@ from radar.domain.scope import ScopeSettings
 from radar.domain.storage_keys import RAW_CONTENT_TYPE, raw_object_key
 from radar.domain.sweep import SWEEP_REGISTRY
 from radar.domain.viewer import SystemViewer
-from radar.repo.db import INGEST_WRITE_LOCK_KEY, Database
+from radar.repo.db import INGEST_WRITE_LOCK_KEY, AdvisoryLockLostError, Database
 from radar.repo.papers import update_papers_first_snapshot, upsert_by_external_id
 from radar.repo.raw_fetches import create_raw_fetches
 from radar.repo.sweep import find_stuck_ids
@@ -217,6 +221,47 @@ def _lock_holders(db: TestDatabase) -> int:
     assert row is not None
     holders: int = row[0]
     return holders
+
+
+def _lock_holder_pid(db: TestDatabase) -> int:
+    """持有 `INGEST_WRITE_LOCK_KEY` 的那一條連線的 PID（只能有一條）。"""
+    with connect_admin(db.name) as admin:
+        [(pid,)] = admin.execute(
+            "SELECT pid FROM pg_locks WHERE locktype = 'advisory' AND granted"
+            " AND database = (SELECT oid FROM pg_database WHERE datname = current_database())"
+            " AND classid::bigint = %s AND objid::bigint = %s AND objsubid = 1",
+            (INGEST_WRITE_LOCK_KEY >> 32, INGEST_WRITE_LOCK_KEY & 0xFFFF_FFFF),
+        ).fetchall()
+    holder: int = pid
+    return holder
+
+
+def _terminate(db: TestDatabase, pid: int) -> None:
+    """從資料庫端切斷那條連線（等它真的結束，最多 5 秒）。"""
+    with connect_admin(db.name) as admin:
+        [(terminated,)] = admin.execute("SELECT pg_terminate_backend(%s, 5000)", (pid,)).fetchall()
+    assert terminated
+
+
+def _backends(db: TestDatabase) -> dict[int, str | None]:
+    """這個資料庫裡 `radar_app` 的連線：PID → 狀態（`idle`、`idle in transaction`…）。"""
+    with connect_admin(db.name) as admin:
+        rows = admin.execute(
+            "SELECT pid, state FROM pg_stat_activity"
+            " WHERE datname = current_database() AND usename = %s",
+            (APP_ROLE,),
+        ).fetchall()
+    return {pid: state for pid, state in rows}
+
+
+def _eventually(check: Callable[[], bool]) -> bool:
+    """`check` 在 `WAIT` 秒內變成真就回 True（關掉的連線在資料庫端是非同步結束的）。"""
+    deadline = time.monotonic() + WAIT
+    while not check():
+        if time.monotonic() > deadline:
+            return False
+        time.sleep(0.05)
+    return True
 
 
 def _free_for_others(db: TestDatabase) -> bool:
@@ -587,6 +632,144 @@ def test_session_lock_discards_the_connection_when_unlock_fails(lock_db: TestDat
         assert again
     with holder.transaction() as connection:
         assert connection.exec_driver_sql("SELECT 1").scalar_one() == 1
+    assert _lock_holders(lock_db) == 0
+
+
+def test_session_lock_discards_a_live_connection_when_unlock_raises(lock_db: TestDatabase) -> None:
+    # 連線還活著、解鎖丟出一般的資料庫錯誤（不是斷線）：程式要自己把連線作廢，否則它帶著鎖
+    # 回到連線池，別人再也拿不到。用一個同名函式讓 pg_advisory_unlock 在資料庫端真的丟錯：
+    # 持鎖的連線把這個 schema 排在 pg_catalog 前面，解鎖那一句就會呼叫到它。
+    with connect_admin(lock_db.name) as admin:
+        admin.execute("CREATE SCHEMA unlock_trap")
+        admin.execute(
+            "CREATE FUNCTION unlock_trap.pg_advisory_unlock(bigint) RETURNS boolean"
+            " LANGUAGE plpgsql AS $$ BEGIN"
+            " RAISE EXCEPTION 'unlock trap' USING ERRCODE = 'data_exception'; END $$"
+        )
+        admin.execute(f"GRANT USAGE ON SCHEMA unlock_trap TO {APP_ROLE}")
+    holder = Database(lock_db.app_url, connect_timeout=5, pool_size=1)
+    with capture_logs() as logs, holder.session_lock(INGEST_WRITE_LOCK_KEY) as lock:
+        assert lock is not None
+        pid = _lock_holder_pid(lock_db)
+        with lock.transaction() as connection:
+            connection.exec_driver_sql("SET search_path TO unlock_trap, pg_catalog, public")
+        # 離開區塊前這條連線還活著、沒有開著的交易。
+        assert _backends(lock_db)[pid] == "idle"
+
+    # 解鎖丟的是資料庫回的一般錯誤，不是斷線：錯誤碼 22000 換成 DataError（權限不足、找不到
+    # 函式這類錯誤是 ProgrammingError），證明真的是上面那個函式丟的。
+    [warning] = [log for log in logs if log["log_level"] == "warning"]
+    assert warning == {
+        "event": "advisory lock 解鎖失敗，關掉這條連線",
+        "log_level": "warning",
+        "error_type": "DataError",
+    }
+    # 原本那條連線被關掉（資料庫端看不到它了），鎖跟著放掉，別的連線拿得到。
+    assert _eventually(lambda: pid not in _backends(lock_db))
+    assert _eventually(lambda: _lock_holders(lock_db) == 0)
+    assert _free_for_others(lock_db)
+    # 池子只有 1 條：再借一次是新的連線（不是帶著 search_path 的那條），鎖拿得到、也解得開。
+    with holder.session_lock(INGEST_WRITE_LOCK_KEY) as again:
+        assert again is not None
+        assert _lock_holder_pid(lock_db) != pid
+    assert _lock_holders(lock_db) == 0
+
+
+def test_session_lock_transaction_checks_the_lock_and_never_reconnects(
+    lock_db: TestDatabase,
+) -> None:
+    holder = Database(lock_db.app_url, connect_timeout=5, pool_size=1)
+
+    # 連線還在、鎖卻不在這條連線上了：交易第一句就發現，區塊不會執行。
+    with capture_logs() as logs, holder.session_lock(INGEST_WRITE_LOCK_KEY) as lock:
+        assert lock is not None
+        with lock.transaction() as connection:
+            unlocked = connection.execute(
+                text("SELECT pg_advisory_unlock(:key)"), {"key": INGEST_WRITE_LOCK_KEY}
+            ).scalar_one()
+            assert unlocked
+        with (
+            pytest.raises(AdvisoryLockLostError, match="鎖已經不在持有它的連線上"),
+            lock.transaction(),
+        ):
+            pytest.fail("鎖不在了，不該進到交易裡")
+    assert [log["event"] for log in logs if log["log_level"] == "warning"] == [
+        "advisory lock 已經不在這條連線上，關掉這條連線"
+    ]
+    assert _lock_holders(lock_db) == 0
+
+    # 持鎖的連線被資料庫端切斷：下一個交易丟錯；之後再開也直接拒絕，不會偷偷重連
+    # （資料庫端看不到這個 Database 的任何新連線）。
+    with capture_logs() as logs, holder.session_lock(INGEST_WRITE_LOCK_KEY) as lock:
+        assert lock is not None
+        _terminate(lock_db, _lock_holder_pid(lock_db))
+        with pytest.raises(AdvisoryLockLostError, match="持有鎖的連線斷了"), lock.transaction():
+            pytest.fail("連線斷了，不該進到交易裡")
+        with pytest.raises(AdvisoryLockLostError, match="持有鎖的連線已經斷了"), lock.transaction():
+            pytest.fail("連線斷了，不該進到交易裡")
+        assert _backends(lock_db) == {}
+    assert [log["event"] for log in logs if log["log_level"] == "warning"] == [
+        "持有 advisory lock 的連線已經斷了，鎖跟著連線放掉"
+    ]
+    assert _backends(lock_db) == {}
+    assert _lock_holders(lock_db) == 0
+    # 壞掉的連線沒有放回池子：再借一次是新的連線，鎖拿得到。
+    with holder.session_lock(INGEST_WRITE_LOCK_KEY) as again:
+        assert again is not None
+    assert _lock_holders(lock_db) == 0
+
+
+# --- 5. 持鎖的連線中途斷了 ---------------------------------------------------------------------
+
+
+def test_reparse_that_lost_its_lock_connection_commits_nothing(
+    lock_db: TestDatabase, database: Database
+) -> None:
+    store = PausingStore()
+    _reparse_input(database, store)
+    before = _paper_tables(lock_db)
+    original = Background(lambda: _reparse(_other_database(lock_db), store))
+    second_store = PausingStore()
+    second_store.objects.update(store.objects)
+    second = Background(lambda: _reparse(_other_database(lock_db), second_store))
+    original.start()
+    try:
+        # 原本的 reparse 停在 GET：拿著鎖，持鎖的連線這時沒有開著的交易。
+        assert store.entered.wait(WAIT)
+        pid = _lock_holder_pid(lock_db)
+        assert _backends(lock_db)[pid] == "idle"
+
+        # 持鎖的連線被切斷（例如資料庫重啟）：鎖跟著消失。
+        _terminate(lock_db, pid)
+        assert _lock_holders(lock_db) == 0
+
+        # 另一個 reparse 開始、拿到鎖，停在它自己的 GET。
+        second.start()
+        assert second_store.entered.wait(WAIT)
+        assert _lock_holder_pid(lock_db) != pid
+
+        # 放行原本的：它的下一個交易（寫暫存列）發現鎖不在了，整次作業中止。
+        with capture_logs() as logs:
+            store.release.set()
+            original.join()
+        assert isinstance(original.error, AdvisoryLockLostError)
+        assert "持有鎖的連線斷了" in str(original.error)
+        # 什麼都沒 commit：沒有暫存列、論文不變；第二個還拿著鎖。
+        assert _count(lock_db, "ingest_staging") == 0
+        assert _paper_tables(lock_db) == before
+        assert _lock_holders(lock_db) == 1
+        events = [log["event"] for log in logs]
+        assert "持有 advisory lock 的連線已經斷了，鎖跟著連線放掉" in events
+        assert "重新解析結束" not in events
+    finally:
+        store.release.set()
+        second_store.release.set()
+    second.join()
+
+    # 第二個照常完成，鎖放掉。
+    assert second.error is None
+    assert second.result == ReparseResult(raw_keys=1, staged=1, updated=1)
+    assert _count(lock_db, "ingest_staging") == 0
     assert _lock_holders(lock_db) == 0
 
 

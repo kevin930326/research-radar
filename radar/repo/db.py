@@ -6,7 +6,7 @@ from typing import Final
 
 import structlog
 from sqlalchemy import Connection, Engine, create_engine, make_url, text
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import DBAPIError, SQLAlchemyError
 from sqlalchemy.pool import QueuePool
 
 log = structlog.get_logger(__name__)
@@ -18,11 +18,86 @@ log = structlog.get_logger(__name__)
 
 # 原始資料與論文的寫入鎖（ADR-0026 取捨「reparse 與每週更新互斥」）：
 # - `radar reparse` 整段持有獨佔的 session 級鎖（`Database.session_lock`）；拿不到就拒絕。
+#   持有期間的交易都開在持有鎖的同一條連線上（`SessionLock.transaction`），每個交易第一句
+#   確認鎖還在；那條連線斷了就不再寫（ADR-0026 補充）。
 # - 每週更新在「開始抓取或套用前讀狀態」與「套用」的交易裡試拿共用的交易級鎖
 #   （`Database.try_shared_transaction_lock`）；拿不到代表 reparse 正在跑，這次先不做。
 # 共用鎖彼此不衝突（兩個套用照舊靠 `weekly_run` 那一列互斥），只和 reparse 的獨佔鎖衝突。
 # 值是 ASCII「RRAW」（Research Radar raw）。
 INGEST_WRITE_LOCK_KEY: Final = 0x5252_4157
+
+# 這條連線（`pg_backend_pid()`）是不是還持有 bigint 鍵的獨佔 session 級 advisory lock。
+# pg_locks 把 bigint 鍵拆成高 32 位元（classid）與低 32 位元（objid），objsubid = 1。
+_HOLDS_SESSION_LOCK_SQL: Final = text(
+    "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype = 'advisory'"
+    " AND pid = pg_backend_pid() AND mode = 'ExclusiveLock' AND granted"
+    " AND classid::bigint = :high AND objid::bigint = :low AND objsubid = 1)"
+)
+
+
+class AdvisoryLockLostError(Exception):
+    """持有 session 級 advisory lock 的連線斷了，或鎖已經不在那條連線上。
+
+    PostgreSQL 在連線結束時放掉它的 session 級鎖，別的作業這時就拿得到同一把鎖，所以原本的作業
+    不能再寫。丟出時那個交易什麼都沒有 commit。訊息只帶原因與錯誤類別，不帶連線字串。
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(f"寫入鎖已經不在了（{reason}），這次作業中止；已經 commit 的交易不受影響")
+        self.reason = reason
+
+
+class SessionLock:
+    """`Database.session_lock` 拿到的鎖，連同持有它的那一條連線。
+
+    持有鎖的期間要讀寫資料庫，一律用 `transaction()`：交易開在同一條實體連線上，所以 commit
+    的那一刻一定還持有鎖。連線池的 `pool_pre_ping` 只管借出連線的那一刻，這條連線借出後一直
+    拿在手上，不會被它換掉。
+    """
+
+    def __init__(self, connection: Connection, key: int) -> None:
+        self._connection = connection
+        self._key = key
+
+    @contextmanager
+    def transaction(self) -> Iterator[Connection]:
+        """在持有鎖的連線上開一個交易：正常結束就 commit，丟出例外就退回。
+
+        交易的第一句確認這條連線（`pg_backend_pid()`）還持有鎖，確認不到就丟
+        `AdvisoryLockLostError`、交易退回。確認和之後的寫入在同一個交易、同一個 session：
+        確認時鎖在，session 級鎖只會在解鎖或連線結束時放掉，連線一結束這個交易也不可能 commit；
+        所以 commit 成功就代表整個交易期間都持有鎖。
+
+        這條連線被 SQLAlchemy 標成已作廢（偵測到斷線）時直接丟 `AdvisoryLockLostError`，
+        不讓它在下一句時自動重連：重連拿到的是新的 session，沒有這把鎖。不開保存點、不巢狀。
+
+        Raises:
+            AdvisoryLockLostError: 連線斷了，或鎖已經不在這條連線上。
+        """
+        connection = self._connection
+        if connection.invalidated or connection.closed:
+            raise AdvisoryLockLostError("持有鎖的連線已經斷了")
+        with connection.begin():
+            reason = self._lost_reason(connection)
+            if reason is not None:
+                raise AdvisoryLockLostError(reason)
+            yield connection
+
+    def _lost_reason(self, connection: Connection) -> str | None:
+        """鎖還在這條連線上回 None；不在或確認時連線斷了，回原因（只帶錯誤類別）。"""
+        try:
+            held = bool(
+                connection.execute(
+                    _HOLDS_SESSION_LOCK_SQL,
+                    {"high": (self._key >> 32) & 0xFFFF_FFFF, "low": self._key & 0xFFFF_FFFF},
+                ).scalar_one()
+            )
+        except DBAPIError as exc:
+            if not exc.connection_invalidated:
+                raise
+            # 例外訊息可能含主機與帳號，只帶類別名稱；在 except 外面丟，不接上原本的例外鏈。
+            return f"持有鎖的連線斷了（{type(exc).__name__}）"
+        return None if held else "鎖已經不在持有它的連線上"
 
 
 class Database:
@@ -69,30 +144,32 @@ class Database:
             yield
 
     @contextmanager
-    def session_lock(self, key: int) -> Iterator[bool]:
+    def session_lock(self, key: int) -> Iterator[SessionLock | None]:
         """借一條專用連線，試拿 `key` 的獨佔 session 級 advisory lock（`pg_try_advisory_lock`，
-        不等）；交出有沒有拿到。
+        不等）；拿到交出 `SessionLock`，拿不到交出 None。
 
-        拿到時整個區塊都持有。離開區塊（正常或例外）時先在同一條連線上 `pg_advisory_unlock`，
-        才把連線還給連線池；解鎖丟錯或回 false 時把這條連線作廢（關掉、不放回池子）：
-        PostgreSQL 在連線結束時一定放掉它持有的 session 級鎖，所以鎖不會跟著連線留在池子裡。
-        行程被殺掉時連線也會斷，鎖一樣放掉。解鎖失敗只記一筆警告，不蓋掉區塊裡的例外。
+        拿到時整個區塊都持有，區塊裡的讀寫用 `SessionLock.transaction()`（同一條連線，不另借）。
+        離開區塊（正常或例外）時先在同一條連線上 `pg_advisory_unlock`，才把連線還給連線池；
+        解鎖丟錯或回 false 時把這條連線作廢（關掉、不放回池子）：PostgreSQL 在連線結束時一定放掉
+        它持有的 session 級鎖，所以鎖不會跟著連線留在池子裡。連線已經斷了（被作廢）時不再解鎖，
+        也不讓它重連。行程被殺掉時連線也會斷，鎖一樣放掉。解鎖失敗只記一筆警告，不蓋掉區塊裡的
+        例外。
 
-        專用連線用 AUTOCOMMIT：持有鎖的期間這條連線沒有開著的交易。它佔連線池一條，
-        區塊裡再開 `transaction()` 要另一條（CLI 的預算是 2 條）。
+        拿鎖與解鎖各在一個很短的交易裡做；session 級鎖不會因為交易結束而放掉。持有鎖的期間
+        這條連線只在 `SessionLock.transaction()` 裡有開著的交易。佔連線池一條。
         """
         with self._engine.connect() as connection:
-            connection.execution_options(isolation_level="AUTOCOMMIT")
-            acquired = bool(
-                connection.execute(
-                    text("SELECT pg_try_advisory_lock(:key)"), {"key": key}
-                ).scalar_one()
-            )
+            with connection.begin():
+                acquired = bool(
+                    connection.execute(
+                        text("SELECT pg_try_advisory_lock(:key)"), {"key": key}
+                    ).scalar_one()
+                )
             if not acquired:
-                yield False
+                yield None
                 return
             try:
-                yield True
+                yield SessionLock(connection, key)
             finally:
                 _unlock_or_discard(connection, key)
 
@@ -149,11 +226,20 @@ class Database:
 
 
 def _unlock_or_discard(connection: Connection, key: int) -> None:
-    """解開 `session_lock` 拿的鎖；解不開（丟錯或回 false）就作廢這條連線，讓連線結束時放掉鎖。"""
+    """解開 `session_lock` 拿的鎖；解不開（丟錯或回 false）就作廢這條連線，讓連線結束時放掉鎖。
+
+    連線已經被作廢（偵測到斷線）時不執行：執行會自動重連，在新的 session 上解一把不存在的鎖。
+    """
+    if connection.invalidated:
+        log.warning("持有 advisory lock 的連線已經斷了，鎖跟著連線放掉")
+        return
     try:
-        released = bool(
-            connection.execute(text("SELECT pg_advisory_unlock(:key)"), {"key": key}).scalar_one()
-        )
+        with connection.begin():
+            released = bool(
+                connection.execute(
+                    text("SELECT pg_advisory_unlock(:key)"), {"key": key}
+                ).scalar_one()
+            )
     except SQLAlchemyError as exc:
         # 例外訊息可能含主機與帳號，只記類別名稱。
         log.warning("advisory lock 解鎖失敗，關掉這條連線", error_type=type(exc).__name__)
