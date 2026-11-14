@@ -37,6 +37,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.postgresql import ARRAY
 
+from radar.domain.ai_outputs import CurrentAbstract, PaperLlmSource
 from radar.domain.identifiers import ExternalId, IdentifierScheme
 from radar.domain.papers import (
     ABSTRACT_SOURCE_PRIORITY,
@@ -225,6 +226,43 @@ def get_paper(viewer: Viewer, connection: Connection, paper_id: uuid.UUID) -> St
         source_hash=row["source_hash"],
         source_changed_at=row["source_changed_at"],
     )
+
+
+def find_paper_llm_source(
+    viewer: Viewer, connection: Connection, paper_id: uuid.UUID, *, for_update: bool
+) -> PaperLlmSource | None:
+    """組 LLM 輸入要用的資料列：論文標題與目前的摘要（`is_current` 的那一筆，沒有時是 None）。
+
+    `for_update` 為真時鎖住論文那一列（`FOR UPDATE OF paper`）：`services/ai_results.py` 寫成
+    `active` 之前先鎖住論文，核對與切換才不會被插隊（ADR-0009 第 8 步）。不存在或 `viewer`
+    看不到都回 None。
+    """
+    visible = visible_papers(viewer, alias="paper")
+    lock = " FOR UPDATE OF paper" if for_update else ""
+    row = (
+        connection.execute(
+            text(
+                "SELECT paper.id, paper.title, a.id AS abstract_id, a.source AS abstract_source,"
+                " a.content AS abstract_content"
+                " FROM paper LEFT JOIN paper_abstract AS a"
+                " ON a.paper_id = paper.id AND a.is_current"
+                f" WHERE {visible} AND paper.id = :id{lock}"
+            ),
+            {"id": paper_id},
+        )
+        .mappings()
+        .one_or_none()
+    )
+    if row is None:
+        return None
+    abstract = None
+    if row["abstract_id"] is not None:
+        abstract = CurrentAbstract(
+            id=row["abstract_id"],
+            source=AbstractSource(row["abstract_source"]),
+            content=row["abstract_content"],
+        )
+    return PaperLlmSource(paper_id=row["id"], title=row["title"], abstract=abstract)
 
 
 def find_known_external_ids(

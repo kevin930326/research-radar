@@ -18,6 +18,7 @@ from radar.domain.domain_config import (
 )
 from radar.domain.import_report import ImportBaseline
 from radar.domain.jobs import scheduled_jobs
+from radar.domain.pricing import ModelsConfig
 from radar.domain.settings import MigrationSettings, Settings, heartbeat_url_field
 
 type ProcessKind = Literal["api", "worker", "cli"]
@@ -157,6 +158,8 @@ EXCLUSION_RULES_FILE = "exclusion_rules.yaml"
 KEYWORD_SOURCES_FILE = "keyword_sources.yaml"
 # OQ-02 的基準篇數：只有 `radar weekly-run report` 讀；不放進 DomainConfig，api、worker 不讀。
 IMPORT_BASELINE_FILE = "import_baseline.yaml"
+# 模型與價格（AD-8、ADR-0009）：只有要呼叫 LLM 的指令與工作讀（`load_models_config`）。
+MODELS_FILE = "models.yaml"
 
 
 def config_dir(environ: Mapping[str, str] | None = None) -> Path:
@@ -215,6 +218,21 @@ def load_import_baseline(environ: Mapping[str, str] | None = None) -> ImportBase
     if problems or baseline is None:
         raise ConfigError(problems)
     return baseline
+
+
+def load_models_config(environ: Mapping[str, str] | None = None) -> ModelsConfig:
+    """讀 `RADAR_CONFIG_DIR` 下的 `models.yaml`（模型、價格、token 估計常數、各工作的模型）並驗證。
+
+    讀法與錯誤格式和 `load_domain_config` 相同（「檔名：欄位路徑：原因」）。
+
+    Raises:
+        ConfigError: 缺檔、不是合法 YAML、鍵寫兩次或內容不對（例如價格寫成數字、模型不在白名單）。
+    """
+    problems: list[str] = []
+    models = _load_yaml_model(config_dir(environ), MODELS_FILE, ModelsConfig, problems)
+    if problems or models is None:
+        raise ConfigError(problems)
+    return models
 
 
 def _load_yaml_model[T: BaseModel](

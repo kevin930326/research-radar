@@ -33,3 +33,10 @@ class ErrorCode(StrEnum):
     LLM_RATE_LIMITED = "llm_rate_limited"
     LLM_SERVER_ERROR = "llm_server_error"
     LLM_CONNECTION_ERROR = "llm_connection_error"
+
+    # LLM 閘門（`radar/services/llm_gateway.py`，Story 2.2）
+    LLM_INPUT_TOO_LARGE = "llm_input_too_large"  # 預估輸入超過 max_input_tokens，不送出
+    LLM_OUTPUT_INVALID = "llm_output_invalid"  # 輸出沒通過 Pydantic（多欄位、缺欄位、型別錯）
+    LLM_OUTPUT_UNSTORABLE = "llm_output_unstorable"  # 輸出的字串存不進資料庫（NUL、單獨的代理字元）
+    LLM_RUN_EXPIRED = "llm_run_expired"  # 互動呼叫超過時限還是 running，由 sweep 改成 failed
+    LLM_GATEWAY_ERROR = "llm_gateway_error"  # 閘門自己出錯（例如寫結果失敗），run 改 failed

@@ -25,6 +25,7 @@ from pydantic import BaseModel
 from pydantic.json_schema import GenerateJsonSchema, JsonSchemaValue, model_json_schema
 from pydantic_core import core_schema
 
+from radar.domain import llm_schemas
 from radar.domain.errors import ErrorCode
 from radar.domain.policy import (
     CloudSafeText,
@@ -48,7 +49,8 @@ type Effort = Literal["low", "medium", "high"]
 EFFORTS: Final[frozenset[str]] = frozenset(get_args(Effort.__value__))
 
 # 可以送出的模型 ID（白名單）。`model` 也會原樣送到雲端，所以不收任意字串（ADR-0029）。
-# 目前還沒有模型設定檔，先放 domain 常數；2.2 的 `config/models.yaml` 之後接手。
+# 每個工作用哪個模型寫在 `config/models.yaml`；讀設定時驗證那裡的模型都在這份白名單裡
+# （`domain/pricing.py` 的 `ModelsConfig`），兩邊對不上設定就讀不進來。
 ALLOWED_MODELS: Final[frozenset[str]] = frozenset({"claude-haiku-5-5"})
 
 # `output_schema` 只收這個模組最上層定義的類別（ADR-0029；寫法由架構測試守著）。
@@ -303,6 +305,73 @@ def _is_schema_class(value: object) -> bool:
         return False
     owner = sys.modules.get(module)
     return owner is not None and vars(owner).get(qualname) is cls
+
+
+def output_schema_named(name: str) -> type[BaseModel]:
+    """prompt 設定區寫的 schema 名稱 → `llm_schemas.py` 最上層的類別。
+
+    只收 `_is_schema_class` 認得的類別，而且一定要 `extra="forbid"`（模型多給的欄位要被擋下）。
+    `output_schema=` 的架構測試只把這個模組當例外，所以「依名稱取類別」只能寫在這裡。
+
+    Raises:
+        TypeError: `name` 不是字串。
+        ValueError: 沒有這個類別、不是 schema 類別，或沒有設 `extra="forbid"`。
+            訊息不帶名稱以外的值。
+    """
+    if type(name) is not str:
+        raise TypeError("output_schema 的名稱必須是字串")
+    if not name.isidentifier():
+        raise ValueError("output_schema 的名稱必須是 llm_schemas.py 裡的類別名稱")
+    candidate = vars(llm_schemas).get(name)
+    if candidate is None or not _is_schema_class(candidate):
+        raise ValueError(f"llm_schemas.py 最上層沒有叫 {name} 的 schema 類別")
+    cls = cast(type[BaseModel], candidate)
+    if cls.model_config.get("extra") != "forbid":
+        raise ValueError(f"schema {name} 要設 extra='forbid'（模型多給的欄位要被擋下）")
+    return cls
+
+
+def output_schema_json(output_schema: type[BaseModel]) -> str:
+    """送出的 JSON schema（排序過的 JSON 字串），給 `fingerprints.schema_sha256` 算雜湊。
+
+    和 `LlmRequest` 建立時凍結的是同一份。
+
+    Raises:
+        TypeError: 不是 `llm_schemas.py` 最上層的類別。
+    """
+    if not _is_schema_class(output_schema):
+        raise TypeError("output_schema 必須是 radar/domain/llm_schemas.py 最上層定義的類別")
+    schema = _schema_json(output_schema)
+    assert schema is not None
+    return schema
+
+
+def build_llm_request(
+    *,
+    model: str,
+    system: CloudSafeText,
+    content: tuple[CloudSafeText, ...],
+    max_tokens: int,
+    effort: Effort | None,
+    disable_thinking: bool,
+    output_schema_name: str | None,
+) -> LlmRequest:
+    """閘門用：依 prompt 設定區的 schema 名稱取類別、建 `LlmRequest`。
+
+    Raises:
+        TypeError, ValueError: 同 `output_schema_named` 與 `LlmRequest`。
+        NotCloudSafeError: 文字不是 `CloudSafeText`。
+    """
+    output_schema = None if output_schema_name is None else output_schema_named(output_schema_name)
+    return LlmRequest(
+        model=model,
+        system=system,
+        content=content,
+        max_tokens=max_tokens,
+        effort=effort,
+        disable_thinking=disable_thinking,
+        output_schema=output_schema,
+    )
 
 
 def _validate_request(request: LlmRequest) -> None:

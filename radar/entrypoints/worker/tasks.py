@@ -7,6 +7,8 @@
 import uuid
 from collections.abc import Iterator
 from contextlib import ExitStack, contextmanager
+from datetime import timedelta
+from functools import partial
 
 import procrastinate
 
@@ -18,6 +20,7 @@ from radar.domain.settings import Settings
 from radar.domain.sweep import SWEEP_REGISTRY
 from radar.domain.viewer import SystemViewer
 from radar.entrypoints.bootstrap import WorkerParts, build_object_store, build_paper_source
+from radar.services.llm_gateway import expire_stale_runs
 from radar.services.sweep import sweep
 from radar.services.weekly_update import (
     WeeklyFetchSetup,
@@ -43,12 +46,19 @@ def register_tasks(app: procrastinate.App, parts: WorkerParts, settings: Setting
     retry = {"max_retries": settings.job_max_retries, "retry_wait": settings.job_retry_wait}
 
     def sweep_job() -> None:
+        # 互動 LLM 呼叫超過 RADAR_LLM_RUN_STALE_AFTER 秒還是 running 的，改成 failed（ADR-0030）。
         sweep(
             parts.database,
             SWEEP_REGISTRY,
             parts.enqueue,
             parts.retry_stalled,
             parts.send_heartbeat,
+            expire_runs=partial(
+                expire_stale_runs,
+                SystemViewer(),
+                parts.database,
+                timedelta(seconds=settings.llm_run_stale_after),
+            ),
         )
 
     def weekly_update_job() -> None:

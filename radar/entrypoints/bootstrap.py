@@ -1,5 +1,6 @@
 """組裝：唯一建立 adapter 與資料庫連線的地方（AD-1）。"""
 
+import importlib.metadata
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -10,8 +11,10 @@ from typing import TYPE_CHECKING
 from radar.adapters.heartbeat import HttpHeartbeat
 from radar.adapters.jobs import JobApp, create_job_app, defer_job, retry_stalled_jobs
 from radar.config import ConfigError, env_name
+from radar.domain.ai_outputs import CallMode, GatewayConfig
 from radar.domain.domain_config import OpenAlexConfig
 from radar.domain.jobs import Enqueue
+from radar.domain.pricing import ModelsConfig
 from radar.domain.schema import SchemaState
 from radar.domain.settings import MigrationSettings, Settings
 from radar.repo.db import Database
@@ -30,6 +33,8 @@ from radar.repo.migrations import MigrationsNotFoundError as MigrationsNotFoundE
 
 # 遷移檔的位置：工作目錄下的 migrations/（映像的 WORKDIR 是 /app，開發時是 repo 根目錄）。
 DEFAULT_MIGRATIONS_DIR = Path("migrations")
+# prompt 檔的位置：工作目錄下的 prompts/（映像裡由 Dockerfile 複製進去）。
+DEFAULT_PROMPTS_DIR = Path("prompts")
 
 
 @dataclass(frozen=True)
@@ -240,4 +245,32 @@ def build_llm_provider(settings: Settings) -> AnthropicLlmProvider:
         retry_wait_max=settings.anthropic_retry_wait_max,
         retry_wait_jitter=settings.anthropic_retry_wait_jitter,
         retry_after_max=settings.anthropic_retry_after_max,
+        deadline=settings.anthropic_deadline,
     )
+
+
+def build_gateway_config(
+    settings: Settings,
+    models: ModelsConfig,
+    *,
+    prompts_root: Path = DEFAULT_PROMPTS_DIR,
+    call_mode: CallMode = CallMode.INTERACTIVE,
+) -> GatewayConfig:
+    """LLM 閘門的設定：模型與價格表（`config/models.yaml`，由呼叫端用 `load_models_config` 讀）、
+    prompt 資料夾、放行設定（`RADAR_PAYWALLED_FULLTEXT_LLM`）、程式版本。不讀檔、不連線。
+    """
+    return GatewayConfig(
+        models=models,
+        prompts_root=prompts_root,
+        cloud_policy=settings.cloud_policy,
+        code_version=code_version(),
+        call_mode=call_mode,
+    )
+
+
+def code_version() -> str:
+    """記進 `derivation_run.code_version` 的程式版本：安裝的 `radar` 套件版本。"""
+    try:
+        return importlib.metadata.version("radar")
+    except importlib.metadata.PackageNotFoundError:
+        return "unknown"

@@ -632,3 +632,17 @@
 - **`llm_schemas.py`（schema 模組）**：`radar/domain/llm_schemas.py`，給 LLM 的結構化輸出格式只能寫在這裡、而且只能寫字面值，像菜單只能印好，不能讓客人現場改字；`LlmRequest.output_schema` 只收這個模組最上層的類別。
 - **prompt loader**：2.2 要做的元件，只從 `prompts/<工作>/v<N>.md` 讀檔、把模板放行成 `prompt_template`；之後一般程式不能自己把文字標成模板。
 - **`<locals>`（函式裡定義的類別）**：Python 給函式內部定義的類別的名字標記；這種類別可以用執行期的資料臨時組出來，所以 schema 一律不收。
+- **`derivation_run`（來歷紀錄）**：每次呼叫模型記一筆「哪篇論文、哪個工作、哪版 prompt、哪個模型、輸入指紋、什麼時候、成功沒」，像實驗紀錄本的一頁（ADR-0030）。
+- **`llm_call`（呼叫帳）**：每次模型呼叫實際用了多少 token、花多少錢（美元，6 位小數）的帳；只能新增、不能改或刪。
+- **`input_sha256`（輸入指紋）**：把送給模型的文字、來源、工作代碼與分類表版本等算成一串固定長度的代碼；內容一樣指紋就一樣，用來判斷「這份輸入跑過沒」。
+- **`run_lock_key`（執行資格鎖的鍵）**：由（論文, 工作, prompt 版本, 模型, 輸入指紋）算出的 64 位元整數，當 advisory lock 的號碼牌；同一份輸入同時只有一個人拿得到。
+- **`should_run`（要不要跑）**：拿到鎖之後再問一次：同一份輸入已經有有效結果、平常流程的拒收結果或正在跑的，就不跑（`SKIPPED`）。
+- **prompt 登記檔（`prompts/registry.json`）**：記每個 prompt 版本檔案的 sha256 與 schema 的 sha256；檔案改了卻沒升版，讀檔時與測試都會對不上而擋下。
+- **升版（prompt）**：prompt 的模板或設定區要改時，不改舊檔，新增 `v<N+1>.md` 並登記；舊結果才說得清是哪版做的。
+- **保守估計（token）**：離線算輸入大約幾個 token 時寧可估多：每個位元組算一個 token 再加固定開銷，中文會被估得比實際多。
+- **`price_tier`（價格級別）**：這次呼叫用的是標準價還是長上下文價；總輸入超過 100,000 tokens 時整次改用長上下文價。
+- **總時限（deadline）**：一次模型呼叫連同所有重試最多等多久（`RADAR_ANTHROPIC_DEADLINE`，預設 180 秒）；和單次請求的逾時（timeout）不同。
+- **逾時判定（`llm_run_expired`）**：sweep 把建立超過 `RADAR_LLM_RUN_STALE_AFTER` 還是 `running` 的互動呼叫改成 `failed`；之後才回來的結果只留作歷史（`superseded`）。
+- **晚到（late result）**：模型還在算的時候輸入被換掉，結果回來時已經不是現在的輸入；這種結果存成 `superseded`，不蓋掉新的。
+- **`GatewayOutcome`（閘門結果）**：`run_llm_job` 回的結果種類，例如 `ACTIVE`（寫成有效）、`SKIPPED`（不用跑）、`BLOCKED`（放行擋下）、`TOO_LARGE`（輸入太大不送）、`TRANSIENT_FAILURE`（暫時性錯誤，下次再跑）。
+- **`GatedProvider`（會等的替身）**：測試用的模型替身，呼叫時先停住，等測試說「放行」才回覆；用來排出並行情境的先後。

@@ -43,7 +43,7 @@ ALLOWED_BY_RULE: dict[Rule, set[str]] = {
     Rule.SYSTEM: {"system"},
 }
 
-# FR-7 權限表（寫入列）＋ `ingest_papers`，照 PRD 的字面寫一次，和程式裡的表對照。
+# FR-7 權限表（寫入列）＋ `ingest_papers`、`run_ai_jobs`，照 PRD 的字面寫一次，和程式裡的表對照。
 EXPECTED_TABLE: dict[Action, Rule] = {
     Action.CORRECT_CLASSIFICATION: Rule.ANY_MEMBER,
     Action.CONFIRM_CONSTRUCT_MERGE: Rule.ANY_MEMBER,
@@ -55,6 +55,7 @@ EXPECTED_TABLE: dict[Action, Rule] = {
     Action.MANAGE_ALLOWLIST: Rule.ADMIN,
     Action.MANAGE_SETTINGS: Rule.ADMIN,
     Action.INGEST_PAPERS: Rule.SYSTEM,
+    Action.RUN_AI_JOBS: Rule.SYSTEM,
 }
 
 

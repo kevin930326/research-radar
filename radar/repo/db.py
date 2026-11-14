@@ -26,6 +26,11 @@ log = structlog.get_logger(__name__)
 # 值是 ASCII「RRAW」（Research Radar raw）。
 INGEST_WRITE_LOCK_KEY: Final = 0x5252_4157
 
+# LLM 閘門取得執行資格的鎖（ADR-0009 第 4 步、ADR-0030）：鍵是 `domain/fingerprints.run_lock_key`
+# 由（對象, 工作, prompt 版本, 模型, input_sha256）算出的 64 位元雜湊，用阻塞的獨佔交易級鎖
+# （`Database.transaction_lock`），交易結束自動放掉。雜湊和上面的固定鍵撞到的機率約 2^-64；
+# 真的撞到也只是多等一下，不會算錯。
+
 # 這條連線（`pg_backend_pid()`）是不是還持有 bigint 鍵的獨佔 session 級 advisory lock。
 # pg_locks 把 bigint 鍵拆成高 32 位元（classid）與低 32 位元（objid），objsubid = 1。
 _HOLDS_SESSION_LOCK_SQL: Final = text(
@@ -186,6 +191,16 @@ class Database:
                 text("SELECT pg_try_advisory_xact_lock_shared(:key)"), {"key": key}
             ).scalar_one()
         )
+
+    @staticmethod
+    def transaction_lock(connection: Connection, key: int) -> None:
+        """在呼叫端開好的交易裡拿 `key` 的獨佔交易級 advisory lock（`pg_advisory_xact_lock`，
+        **會等**到拿到為止）。
+
+        交易結束（commit 或退回）時 PostgreSQL 自動放掉。等待也受連線的 `statement_timeout`
+        限制（預設 `connect_timeout` 秒），所以持有這把鎖的交易要很短。不開新交易、不 commit。
+        """
+        connection.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": key})
 
     def ping(self) -> bool:
         """連得上並能執行 `SELECT 1` 回 True；連不上或查詢逾時回 False，不丟例外。
