@@ -15,7 +15,7 @@
 | | 做法 | 優點 | 缺點 |
 |---|---|---|---|
 | A | api、worker 的 `env_file` 直接讀整個 `.env` | 不用多一個檔 | `.env` 裡的每個變數都進容器，包含擁有者連線字串；之後有人往 `.env` 加東西，也會不知不覺進容器 |
-| B | api、worker 讀另一個檔 `.env.radar`，`required: false`；範本 `.env.radar.example` 只有名稱、值全空 | 進容器的變數只有範本列的那幾個；沒有這個檔時（乾淨的 clone、CI）照樣起得來 | 多一個要自己建的檔；`.env` 與 `.env.radar` 可能有重複的值要各自維護 |
+| B | api、worker 讀另一個檔 `.env.radar`，`required: false`；範本 `.env.radar.example` 只有名稱、值全空 | 和 `.env` 分開；進容器的是 `.env.radar` 的全部內容（範本是建議清單）；沒有這個檔時（乾淨的 clone、CI）照樣起得來 | 多一個要自己建的檔；`.env` 與 `.env.radar` 可能有重複的值要各自維護 |
 | C | Docker secrets（掛成檔案）或正式主機的環境變數 | 秘密不出現在環境變數裡（secrets）；正式主機可以交給系統管理 | 程式要改成從檔案讀；本機開發的 compose 用不太到；正式主機的做法屬於 Story 3.19 |
 
 ## 決定
