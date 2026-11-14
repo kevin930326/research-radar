@@ -10,8 +10,14 @@ AD-14、AD-19、AD-25、ADR-0004、ADR-0014、ADR-0025）。
 - `open_and_run_weekly_update`（worker 用）：先讀狀態，確認是 `fetching` 且還沒抓完，才呼叫
   傳入的函式讀領域設定、建 OpenAlex 與物件儲存的 adapter，再照 `run_weekly_update` 抓；
   建不起來（缺金鑰、設定壞掉）時也更新 `updated_at` 再往上丟。
-- `weekly_run.updated_at` 每頁、額度停下、失敗（含建 adapter 失敗）、已經抓完又被排入時都更新，
-  sweep 照 2 小時的時限補排（ADR-0025）。
+- `weekly_run.updated_at` 每頁、額度停下、失敗（含建 adapter 失敗）、已經抓完又被排入、因為
+  reparse 正在跑而先不做時都更新，sweep 照 2 小時的時限補排（ADR-0025）。
+
+和 `radar reparse` 互斥（ADR-0026 取捨）：開始抓取或套用前讀狀態的那個交易、以及套用的交易，
+第一件事是試拿 `INGEST_WRITE_LOCK_KEY` 的共用交易級 advisory lock；拿不到代表 reparse 正在跑，
+這次不抓也不套用（不碰 source、物件儲存、論文），更新 `updated_at`、記警告、正常結束（不算失敗），
+那筆 `fetching` 留著，sweep 照 2 小時的時限補排後接著做。建立 `weekly_run` 不拿鎖：它不讀寫
+原始資料與論文，而且留下這一列 sweep 才補排得到（cron 一週才排一次）。
 
 套用段（Story 1.9、AD-19、ADR-0011「快照」、ADR-0014「寫入分兩段」、ADR-0026）：
 
@@ -55,7 +61,7 @@ from radar.domain.staging import StagingItem, StagingKind
 from radar.domain.viewer import SystemViewer, Viewer
 from radar.domain.weekly_run import JournalProgress, PageCounts, WeeklyRunStatus
 from radar.ports import ObjectStore, PaperSource
-from radar.repo.db import Database
+from radar.repo.db import INGEST_WRITE_LOCK_KEY, Database
 from radar.repo.ingest_staging import (
     delete_staged_papers,
     list_staged_papers,
@@ -104,6 +110,8 @@ class WeeklyFetchResult:
     """`run_weekly_update` 這一次做了什麼。
 
     - `skipped`：那筆 `weekly_run` 不存在或已經不是 `fetching`，什麼都沒做。
+    - `blocked_by_reparse`：`radar reparse` 正在跑（拿不到寫入鎖），這次不抓也不套用；只更新了
+      `updated_at`，不算失敗，sweep 之後補排時接著做。
     - `stopped_for_quota`：今天的 OpenAlex 額度用到設定的比例而停下（不算失敗，留到下次）。
     - `fetch_finished`：全部期刊都抓完了（這次抓完，或之前已經抓完）。
     - `journals`：這一次輪到抓的期刊代號（還沒抓完的，依設定的順序）；額度在第一個請求前
@@ -113,6 +121,7 @@ class WeeklyFetchResult:
 
     weekly_run_id: uuid.UUID
     skipped: bool = False
+    blocked_by_reparse: bool = False
     stopped_for_quota: bool = False
     fetch_finished: bool = False
     journals: tuple[str, ...] = ()
@@ -147,6 +156,8 @@ class WeeklyApplyResult:
 
     - `skipped`：那筆 `weekly_run` 不存在、不是 `fetching` 或還沒抓完，什麼都沒做（沒有快照、
       不送心跳）。
+    - `blocked_by_reparse`：`radar reparse` 正在跑（拿不到寫入鎖），什麼都沒寫（沒有快照、不送
+      心跳），只更新了 `updated_at`；不算失敗，sweep 之後補排時接著套用。
     - `snapshot_id`、`snapshot_number`、`as_of`：這次發佈的快照。
     - `staged`：讀到的暫存列數；`created`、`updated`：新增、更新的論文篇數；`stale`：資料比論文上的
       舊、什麼都沒寫的篇數；`conflicts`：識別碼已經屬於另一篇論文、沒有掛上去的個數。
@@ -155,6 +166,7 @@ class WeeklyApplyResult:
 
     weekly_run_id: uuid.UUID
     skipped: bool = False
+    blocked_by_reparse: bool = False
     snapshot_id: uuid.UUID | None = None
     snapshot_number: int | None = None
     as_of: datetime | None = None
@@ -229,7 +241,9 @@ def run_weekly_update(
     """推進這一次每週更新的抓取段。
 
     1. 短交易讀 `weekly_run` 與每本期刊的進度。不存在或不是 `fetching`：記 info、回 `skipped`
-       （不碰 source）；已經有 `fetch_finished_at`：只更新 `updated_at` 就回（不抓）。
+       （不碰 source）；拿不到寫入鎖（reparse 正在跑）：更新 `updated_at`、記警告、回
+       `blocked_by_reparse`（不碰 source）；已經有 `fetch_finished_at`：只更新 `updated_at` 就回
+       （不抓）。
     2. 依 `journals.journals` 的順序：已經抓完的跳過；其餘從進度的 `next_cursor`（None＝第一頁）
        用 `fetch_journal` 抓。每存好一頁：交易外逐篇解析（`ParseError` 或 OpenAlex ID 對不上外部鍵
        ＝`unparseable`）→ 收錄過濾（擋下的＝`out_of_scope`）→ 排除規則 → 再開一個交易
@@ -276,8 +290,9 @@ def open_and_run_weekly_update(
 ) -> WeeklyFetchResult:
     """先讀狀態，確認要抓才 `open_setup()` 開 adapter 與設定，再照 `run_weekly_update` 抓。
 
-    不存在、不是 `fetching`、已經抓完時，和 `run_weekly_update` 一樣（略過；或只更新
-    `updated_at`），而且不呼叫 `open_setup`：sweep 補排已經抓完的那一筆時不讀設定、不建 adapter。
+    不存在、不是 `fetching`、reparse 正在跑、已經抓完時，和 `run_weekly_update` 一樣（略過；
+    或只更新 `updated_at`），而且不呼叫 `open_setup`：sweep 補排已經抓完的那一筆時不讀設定、
+    不建 adapter。
     `open_setup` 丟錯（缺 OpenAlex 金鑰、物件儲存設定不齊、領域設定壞掉）時：記錯誤日誌（只帶
     錯誤類別）、短交易更新 `updated_at`，再原樣往上丟；sweep 照 2 小時的時限補排，不會每 15 分鐘
     就補排一次。
@@ -331,7 +346,8 @@ def advance_weekly_update(
     """推進這一次每週更新：先照 `open_and_run_weekly_update` 抓；全部抓完了才 `load_scope()`
     讀追蹤範圍，再 `apply_weekly_update` 套用。
 
-    抓取段略過（不存在、不是 `fetching`）或因額度停下時直接回，`apply` 是 None，不讀範圍。
+    抓取段略過（不存在、不是 `fetching`）、因為 reparse 正在跑而先不做、或因額度停下時直接回，
+    `apply` 是 None，不讀範圍。
     `load_scope` 丟錯時：記錯誤日誌「每週更新準備套用失敗」（只帶錯誤類別）、短交易更新
     `updated_at`，再原樣往上丟（sweep 照 2 小時的時限補排）。
 
@@ -375,6 +391,9 @@ def apply_weekly_update(
 
     交易裡依序：
 
+    0. 試拿寫入鎖的共用鎖（`try_shared_transaction_lock`）；拿不到代表 reparse 正在跑：同一個
+       交易只更新 `updated_at`，記警告、回 `blocked_by_reparse`，不建快照、不送心跳、不算失敗。
+       拿到的共用鎖到交易結束才放，套用的整段 reparse 都開始不了。
     1. `update_weekly_run_published`：只在 `fetching` 而且已經抓完時改成 `published`；沒改到
        （不存在、已經套用過、還沒抓完，或並行的另一個套用先做完）就記 info、回 `skipped`，
        不建快照、不送心跳。
@@ -403,7 +422,10 @@ def apply_weekly_update(
     tally = _ApplyTally()
     try:
         with database.transaction() as connection:
-            if not update_weekly_run_published(connection, weekly_run_id):
+            if not database.try_shared_transaction_lock(connection, INGEST_WRITE_LOCK_KEY):
+                tally.blocked_by_reparse = True
+                update_weekly_run_touched(connection, weekly_run_id)
+            elif not update_weekly_run_published(connection, weekly_run_id):
                 tally.skipped = True
             else:
                 snapshot_id, number = create_snapshot(connection, weekly_run_id)
@@ -445,6 +467,9 @@ def apply_weekly_update(
         _touch_after_failure(database, weekly_run_id)
         raise
 
+    if tally.blocked_by_reparse:
+        _warn_blocked_by_reparse(weekly_run_id)
+        return WeeklyApplyResult(weekly_run_id=weekly_run_id, blocked_by_reparse=True)
     if tally.skipped:
         log.info("每週更新不是抓完待套用，略過套用", weekly_run_id=str(weekly_run_id))
         return WeeklyApplyResult(weekly_run_id=weekly_run_id, skipped=True)
@@ -463,6 +488,10 @@ def apply_weekly_update(
         conflicts=tally.conflicts,
         first_snapshot_assigned=tally.first_snapshot_assigned,
     )
+    if tally.staged == 0:
+        # 每週整本重掃，正常不會 0 篇；0 篇多半是查詢或解析壞了。照樣發佈（行為不變），
+        # 但留一筆警告讓人看得到（1.9 審查第 6 條）。
+        log.warning("這次每週更新沒有任何暫存論文", weekly_run_id=str(weekly_run_id))
     log.info(
         "每週更新已套用並發佈快照",
         weekly_run_id=str(weekly_run_id),
@@ -483,6 +512,7 @@ class _ApplyTally:
     """`apply_weekly_update` 交易裡累計的結果。"""
 
     skipped: bool = False
+    blocked_by_reparse: bool = False
     snapshot_id: uuid.UUID | None = None
     snapshot_number: int | None = None
     as_of: datetime | None = None
@@ -508,15 +538,30 @@ class _ApplyTally:
 def _read_run(
     database: Database, weekly_run_id: uuid.UUID
 ) -> tuple[WeeklyFetchResult | None, dict[str, JournalProgress]]:
-    """短交易讀 `weekly_run` 與每本期刊的進度。
+    """短交易讀 `weekly_run` 與每本期刊的進度；是 `fetching` 時在同一個交易試拿寫入鎖的共用鎖。
 
-    回（結果, 進度）：不存在或不是 `fetching` 時結果是 `skipped`；已經抓完時先更新 `updated_at`，
+    回（結果, 進度）：不存在或不是 `fetching` 時結果是 `skipped`；拿不到鎖（reparse 正在跑）時
+    同一個交易更新 `updated_at`，結果是 `blocked_by_reparse`；已經抓完時先更新 `updated_at`，
     結果是 `fetch_finished`；要接著抓時結果是 None。
+
+    鎖只在這個交易裡拿、交易結束就放；之後的抓取不必一直拿著：這一筆在這個交易裡確定是
+    `fetching`，reparse 拿到獨佔鎖之後會查到它而拒絕，直到套用 commit（ADR-0026 取捨）。
     """
     viewer = SystemViewer()
+    blocked = False
     with database.transaction() as connection:
         run = get_weekly_run(viewer, connection, weekly_run_id)
         progress = list_weekly_run_journals(viewer, connection, weekly_run_id) if run else {}
+        if (
+            run is not None
+            and run.status is WeeklyRunStatus.FETCHING
+            and not database.try_shared_transaction_lock(connection, INGEST_WRITE_LOCK_KEY)
+        ):
+            blocked = True
+            update_weekly_run_touched(connection, weekly_run_id)
+    if blocked:
+        _warn_blocked_by_reparse(weekly_run_id)
+        return WeeklyFetchResult(weekly_run_id=weekly_run_id, blocked_by_reparse=True), {}
     if run is None or run.status is not WeeklyRunStatus.FETCHING:
         log.info(
             "每週更新不是抓取中，略過",
@@ -629,6 +674,13 @@ def _fetch_journals(
         journals=tuple(fetched_journals),
         pages=tally.pages,
         counts=tally.counts,
+    )
+
+
+def _warn_blocked_by_reparse(weekly_run_id: uuid.UUID) -> None:
+    log.warning(
+        "reparse 正在執行，每週更新這次先不做，sweep 補排時接著做",
+        weekly_run_id=str(weekly_run_id),
     )
 
 

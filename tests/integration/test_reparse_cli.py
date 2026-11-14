@@ -8,9 +8,13 @@
 4. 以 `CliRunner` 執行 `radar reparse`：環境變數指到測試資料庫與 moto，
    `bootstrap.build_paper_source` 換成一呼叫就失敗的函式，pytest-socket 只放行本機。
 5. 退出碼 0；每篇的 `referenced_works`／`cited_by_count` 等於錄好的值，摘要與關鍵字也寫好。
+
+另一條：每週更新正在抓取（有 `fetching` 的 `weekly_run`）時 `radar reparse` 拒絕、退出碼 1、
+什麼都不寫。
 """
 
 import shutil
+import uuid
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -30,9 +34,12 @@ from radar.domain.papers import PaperOrigin, ParsedPaper
 from radar.domain.parsers.openalex import parse_openalex_work
 from radar.domain.raw_records import RawRecord, RawSource
 from radar.domain.scope import ScopeSettings
+from radar.domain.staging import StagingItem, StagingKind
 from radar.domain.viewer import SystemViewer
-from radar.repo.db import Database
+from radar.repo.db import INGEST_WRITE_LOCK_KEY, Database
+from radar.repo.ingest_staging import create_staged_papers
 from radar.repo.papers import upsert_by_external_id
+from radar.repo.weekly_runs import create_weekly_run
 from radar.services.ingest import fetch_journal
 from tests.database import APP_ROLE, TestDatabase, migrate
 from tests.openalex_cassette import ISSN_L, cassette_pages, work_bytes
@@ -87,6 +94,18 @@ def _old_parse(content: bytes) -> ParsedPaper:
     return ParsedPaper.model_validate(
         {**parsed.model_dump(), "referenced_works": (), "cited_by_count": None}
     )
+
+
+def _set_env(monkeypatch: pytest.MonkeyPatch, database_url: str) -> None:
+    monkeypatch.setattr(bootstrap, "build_paper_source", _no_paper_source)
+    monkeypatch.setenv("RADAR_CONFIG_DIR", str(ROOT / "config"))
+    monkeypatch.setenv("DATABASE_URL", database_url)
+    monkeypatch.setenv("RADAR_OBJECT_STORE_ENDPOINT_URL", ENDPOINT)
+    monkeypatch.setenv("RADAR_OBJECT_STORE_REGION", REGION)
+    monkeypatch.setenv("RADAR_OBJECT_STORE_BUCKET", BUCKET)
+    monkeypatch.setenv("RADAR_OBJECT_STORE_ACCESS_KEY_ID", ACCESS_KEY)
+    monkeypatch.setenv("RADAR_OBJECT_STORE_SECRET_ACCESS_KEY", SECRET_KEY)
+    monkeypatch.delenv("RADAR_OPENALEX_API_KEY", raising=False)
 
 
 def test_reparse_fills_new_fields_from_stored_raw_data(
@@ -228,3 +247,66 @@ def test_reparse_fills_new_fields_from_stored_raw_data(
     assert restored.exit_code == 0, restored.output
     assert reasons() == baseline
     assert _rows(fresh_database, "SELECT count(*) FROM paper") == [(248,)]
+
+
+def test_reparse_refuses_while_weekly_update_is_fetching(
+    fresh_database: TestDatabase, s3: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 一筆 fetching 的 weekly_run，加上一列上次留下的 reparse 暫存列（正常執行一開始會清掉）。
+    migrate(fresh_database)
+    database = Database(fresh_database.app_url, connect_timeout=5, pool_size=2)
+    work = cassette_pages()[0][0]
+    leftover = StagingItem(
+        external_key=work["id"].rsplit("/", 1)[-1],
+        paper=parse_openalex_work(work_bytes(work), fetched_at=FETCHED_AT),
+        excluded_reason=None,
+    )
+    with database.transaction() as connection:
+        create_staged_papers(
+            connection, batch_id=uuid.uuid7(), kind=StagingKind.REPARSE, items=[leftover]
+        )
+        run_id = create_weekly_run(connection)
+    assert run_id is not None
+    _set_env(monkeypatch, fresh_database.app_url)
+
+    result = runner.invoke(cli.app, ["reparse"])
+
+    assert result.exit_code == 1, result.output
+    assert f"每週更新正在進行（weekly_run {run_id}），等它發佈或失敗後再跑 reparse" in result.stderr
+    assert "重新解析完成" not in result.stdout
+    assert _rows(fresh_database, "SELECT kind, count(*) FROM ingest_staging GROUP BY kind") == [
+        ("reparse", 1)
+    ]
+    assert _rows(fresh_database, "SELECT count(*) FROM paper") == [(0,)]
+    assert _rows(fresh_database, "SELECT status FROM weekly_run") == [("fetching",)]
+
+
+def test_reparse_refuses_while_another_holds_the_write_lock(
+    fresh_database: TestDatabase, s3: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 另一個 reparse（這裡直接拿同一把鎖代表）正在跑：退出碼 1、清楚的訊息、什麼都不寫。
+    migrate(fresh_database)
+    database = Database(fresh_database.app_url, connect_timeout=5, pool_size=2)
+    work = cassette_pages()[0][0]
+    leftover = StagingItem(
+        external_key=work["id"].rsplit("/", 1)[-1],
+        paper=parse_openalex_work(work_bytes(work), fetched_at=FETCHED_AT),
+        excluded_reason=None,
+    )
+    with database.transaction() as connection:
+        create_staged_papers(
+            connection, batch_id=uuid.uuid7(), kind=StagingKind.REPARSE, items=[leftover]
+        )
+    _set_env(monkeypatch, fresh_database.app_url)
+
+    with database.session_lock(INGEST_WRITE_LOCK_KEY) as acquired:
+        assert acquired
+        result = runner.invoke(cli.app, ["reparse"])
+
+    assert result.exit_code == 1, result.output
+    assert "另一個 reparse 或每週更新正在寫入論文，等它結束後再跑 reparse" in result.stderr
+    assert "重新解析完成" not in result.stdout
+    assert _rows(fresh_database, "SELECT kind, count(*) FROM ingest_staging GROUP BY kind") == [
+        ("reparse", 1)
+    ]
+    assert _rows(fresh_database, "SELECT count(*) FROM paper") == [(0,)]

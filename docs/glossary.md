@@ -568,3 +568,10 @@
 - **`CubeDim`**：計數方塊的一列是哪種計數，剛好六種：`total`、`with_abstract`、`pending_classification`、`topic`、`topic_pair`、`method`。
 - **快照前後各讀一次**：計數前後各讀一次「目前已發佈的快照」，兩次相同才表示計數時沒有新快照發佈，快照編號和數字是同一個時間點的；不同就重讀。
 - **`EXISTS` 子查詢**：SQL 裡「在另一張表（或 view）找得到對應的一列」的條件，只問有沒有、不把那張表的欄位拿出來；`PublicViewer` 的可見條件用它接 `counted_paper`。
+- **`format: raw`**：compose 的 env_file 讀法選項，等號後面整段原樣當成值，不做 `$` 變數替換，但引號與行尾註解也會算進值裡（需要 Docker Compose 2.30 以上）。
+- **例外鏈（`__cause__`／`__context__`）**：Python 例外身上記著「我是在處理哪個例外時發生的」的兩條線；`raise ... from None` 只是讓 traceback 不印出來，`__context__` 仍串著原例外，要在 `except` 區塊外面丟，這條線才是空的。
+- **session 級鎖與交易級鎖（advisory lock 的兩種持有方式）**：session 級鎖跟著「連線」，要自己解開或連線結束才放（reparse 整段拿著）；交易級鎖跟著「交易」，commit 或退回就自動放（每週更新在單一交易裡檢查用）。
+- **獨佔鎖與共用鎖（advisory lock 的兩種模式）**：獨佔鎖同時只准一個人拿；共用鎖可以很多人一起拿，但有人拿著共用鎖時獨佔鎖拿不到、反過來也是。像會議室：開會（獨佔）時誰都不能進，大家只是借用桌子（共用）時可以一起用。
+- **try-lock（試拿鎖）**：拿鎖時不排隊等，拿不到就立刻回「沒拿到」，由程式決定要拒絕還是改天再來（`pg_try_advisory_lock` 這一類函式）。
+- **寫入鎖（`INGEST_WRITE_LOCK_KEY`）**：本專案約定的一把 advisory lock，保護原始資料與論文不被 reparse 和每週更新同時改；reparse 拿獨佔、每週更新拿共用。
+- **作廢連線（invalidate）**：把一條資料庫連線直接關掉、不放回連線池；用在解鎖失敗時，讓 PostgreSQL 在連線結束時自動放掉這條連線拿著的鎖。

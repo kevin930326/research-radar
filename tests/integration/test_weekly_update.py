@@ -20,7 +20,7 @@ from typing import Any
 
 import psycopg
 import pytest
-from sqlalchemy import Connection, event
+from sqlalchemy import Connection, event, text
 from structlog.testing import capture_logs
 
 from radar.adapters.fake import FakeObjectStore, FakePaperSource
@@ -585,6 +585,75 @@ def test_interrupted_run_resumes_where_it_stopped(
     assert progress["io"].fetched_by_year == _cassette_years()
     assert (progress["misq"].pages, progress["misq"].fetched) == (2, 5)
     assert _run_row(weekly_db, run_id)[1] is not None
+
+
+def test_progress_write_failure_rolls_back_the_whole_page_with_its_staging(
+    weekly_db: TestDatabase, database: TrackingDatabase, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Codex 補審 C3：這一頁的暫存已寫入、同一交易裡的進度寫入失敗時，整頁一起退回。
+    journals = _journals(MISQ, IO)
+
+    def book() -> FakePaperSource:
+        return FakePaperSource({MISQ_ISSN: _misq_book(), ISSN_L: _cassette_book()})
+
+    # 先一次跑完當作對照（同樣的資料、另一筆每週更新）。
+    reference_run = _start(database)
+    _run(database, book(), FakeObjectStore(), reference_run, journals=journals)
+    expected_staged = _staged(weekly_db, reference_run)
+    expected_progress = _progress(database, reference_run)
+    _owner(weekly_db, "UPDATE weekly_run SET status = 'published' WHERE id = %s", reference_run)
+
+    run_id = _start(database)
+    source = book()
+    real_upsert = upsert_weekly_run_journal_page
+    staged_seen_in_transaction: list[int] = []
+
+    def progress_write_fails_on_io_page_2(
+        connection: Connection, weekly_run_id: uuid.UUID, journal_key: str, **kwargs: Any
+    ) -> None:
+        if journal_key != "io" or kwargs["first_page"] or staged_seen_in_transaction:
+            real_upsert(connection, weekly_run_id, journal_key, **kwargs)
+            return
+        # 同一個交易裡看得到這一頁剛寫的暫存列；進度也真的寫了，然後才失敗。
+        count = connection.execute(
+            text("SELECT count(*) FROM ingest_staging WHERE batch_id = :id"),
+            {"id": weekly_run_id},
+        ).scalar_one()
+        staged_seen_in_transaction.append(count)
+        real_upsert(connection, weekly_run_id, journal_key, **kwargs)
+        raise psycopg.OperationalError("connection to server at 10.9.8.7 failed: secret-host")
+
+    monkeypatch.setattr(
+        weekly_update_module, "upsert_weekly_run_journal_page", progress_write_fails_on_io_page_2
+    )
+
+    with pytest.raises(psycopg.OperationalError):
+        _run(database, source, FakeObjectStore(), run_id, journals=journals)
+
+    io_page_2 = source.requests[-1].cursor
+    assert io_page_2 is not None
+    io_page_1_articles = {_key(work) for work in cassette_pages()[0] if work["type"] == "article"}
+    staged_before_page_2 = {_key(_work(n)) for n in range(1, 6)} | io_page_1_articles
+    # 交易裡寫過第 2 頁的暫存，但退回後只剩第 2 頁之前的。
+    [seen] = staged_seen_in_transaction
+    assert seen > len(staged_before_page_2)
+    assert set(_staged(weekly_db, run_id)) == staged_before_page_2
+    progress = _progress(database, run_id)
+    assert progress["misq"] == expected_progress["misq"]
+    io = progress["io"]
+    assert (io.finished, io.next_cursor, io.pages, io.fetched) == (False, io_page_2, 1, 100)
+    assert io.staged == len(io_page_1_articles)
+    assert sum(io.fetched_by_year.values()) == 100
+
+    # 解除故障後續跑：從第 2 頁接著抓，最後的暫存內容與計數等同一次跑完。
+    monkeypatch.setattr(weekly_update_module, "upsert_weekly_run_journal_page", real_upsert)
+    source.requests.clear()
+    result = _run(database, source, FakeObjectStore(), run_id, journals=journals)
+
+    assert source.requests[0].cursor == io_page_2
+    assert result.fetch_finished
+    assert _staged(weekly_db, run_id) == expected_staged
+    assert _progress(database, run_id) == expected_progress
 
 
 def test_cursor_cycle_keeps_progress_at_the_bad_page(

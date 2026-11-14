@@ -33,7 +33,11 @@ from radar.services.coverage import get_coverage
 from radar.services.import_report import get_import_report
 from radar.services.jobs import enqueue_scheduled_job
 from radar.services.migrations import migrate_database
-from radar.services.reparse import reparse_papers
+from radar.services.reparse import (
+    ReparseBusyError,
+    WeeklyUpdateInProgressError,
+    reparse_papers,
+)
 
 # 例外時不印區域變數：裡面可能有連線字串。
 app = typer.Typer(
@@ -128,7 +132,9 @@ def reparse() -> None:
     """只用已存的原始資料重新解析已經匯入的論文（不連 OpenAlex 或任何外部來源）。
 
     排除規則改了、或解析多了欄位時跑這個。解析結果先放暫存表、最後一個交易套用；
-    不新增論文、不建立快照。設定錯誤或執行失敗退出碼 1，只印錯誤類別，不印連線字串。
+    不新增論文、不建立快照。每週更新正在抓取、或另一個 reparse 正在跑時拒絕執行、不寫任何東西，
+    退出碼 1。
+    設定錯誤或執行失敗退出碼 1，只印錯誤類別，不印連線字串。
     """
     configure_logging()
     try:
@@ -148,6 +154,12 @@ def reparse() -> None:
             scope=domain_config.journals.scope_settings(),
             exclusion_rules=domain_config.exclusion_rules,
         )
+    except WeeklyUpdateInProgressError as exc:
+        log.error("每週更新正在進行，沒有重新解析", weekly_run_id=str(exc.weekly_run_id))
+        _fail(str(exc), [])
+    except ReparseBusyError as exc:
+        log.error("另一個 reparse 或每週更新正在寫入，沒有重新解析")
+        _fail(str(exc), [])
     except ConfigError as exc:
         # build_object_store 缺設定時丟的；訊息只列環境變數名稱。
         log.error("設定錯誤，無法重新解析", problems=exc.problems)
