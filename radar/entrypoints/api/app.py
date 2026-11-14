@@ -1,13 +1,16 @@
-"""FastAPI 應用程式：健康檢查與 request ID 中介層。"""
+"""FastAPI 應用程式：健康檢查、request ID 與安全標頭中介層、成員版前端（頁面殼）。"""
 
 import re
 import time
 import uuid
 from collections.abc import Awaitable, Callable
+from pathlib import Path
 
 import structlog
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse, PlainTextResponse
+
+from radar.entrypoints.api.web import apply_security_headers, mount_web, security_headers
 
 REQUEST_ID_HEADER = "X-Request-ID"
 # 外部帶進來的 request ID 當使用者輸入驗證：只收這個格式，其他一律換新的。
@@ -23,9 +26,14 @@ def resolve_request_id(candidate: str | None) -> str:
     return uuid.uuid4().hex
 
 
-def create_app(readiness_check: Callable[[], bool]) -> FastAPI:
-    """建立應用程式。`readiness_check` 回 True 表示可以接請求（由入口組裝好傳進來）。"""
+def create_app(readiness_check: Callable[[], bool], *, web_dist: Path | None = None) -> FastAPI:
+    """建立應用程式。`readiness_check` 回 True 表示可以接請求（由入口組裝好傳進來）。
+
+    `web_dist` 有給時，在 API 路由之後掛上前端建置結果（`mount_web`）。
+    """
     app = FastAPI(title="Research Radar")
+    # 啟動時就讀一次：安全標頭檔壞掉時 api 不啟動，而不是等第一個請求才出錯。
+    security_headers()
 
     @app.middleware("http")
     async def request_id_middleware(
@@ -47,8 +55,11 @@ def create_app(readiness_check: Callable[[], bool]) -> FastAPI:
                 # 例外已經連同 traceback 記進上面那筆日誌。
                 response = PlainTextResponse("Internal Server Error", status_code=500)
                 response.headers[REQUEST_ID_HEADER] = request_id
+                apply_security_headers(response)
                 return response
             response.headers[REQUEST_ID_HEADER] = request_id
+            # 全站安全標頭（AD-22）：所有回應都帶，含 404 與上面自己組的 500。
+            apply_security_headers(response)
             # 只記路徑，不記查詢字串（可能含使用者輸入）。
             log.info(
                 "請求完成",
@@ -74,4 +85,7 @@ def create_app(readiness_check: Callable[[], bool]) -> FastAPI:
             return JSONResponse({"status": "ready"})
         return JSONResponse({"status": "not_ready"}, status_code=503)
 
+    # 前端的「其餘路徑回頁面殼」一定要排在所有 API 路由後面。
+    if web_dist is not None:
+        mount_web(app, web_dist)
     return app

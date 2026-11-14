@@ -5,8 +5,20 @@
 !radar/
 !migrations/
 !config/
+# 前端：原始碼與 lock 檔放進來，本機的套件、建置結果與測試產物不放（映像裡重新 npm ci 與建置）。
+!web/
+web/node_modules
+web/dist
+web/dist-demo
+web/e2e
+web/test-results
+web/playwright-report
+web/blob-report
 **/__pycache__
 **/*.pyc
 # 保險：即使上面的白名單被改寬，.env 也不會進映像。
 .env
 .env.*
+# 子資料夾裡的也排除（!web/ 會把 web/.env* 帶回來；Vite 會把 VITE_ 開頭的值打包進產物）。
+**/.env
+**/.env.*

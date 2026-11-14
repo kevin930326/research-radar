@@ -1,0 +1,103 @@
+/*
+ * Tailwind 4 的主題：先把內建的顏色、間距、字級、斷點全部清掉（--*: initial），
+ * 再只放 DESIGN.md 的設計代幣（名稱照 DESIGN.md）。Story 3.1 只放這一頁用到的；
+ * 完整對照與「用到預設類別就建置失敗」的檢查在 Story 3.2。只有深色主題。
+ */
+@import "tailwindcss";
+
+@theme {
+  --*: initial;
+
+  /* colors */
+  --color-background: #050609;
+  --color-text-primary: #efeae0;
+  --color-text-secondary: #a8a294;
+  --color-text-tertiary: #8e887b;
+  --color-text-reading: #d5d0c5;
+  --color-accent-gold: #e3b466;
+  --color-hairline: #efeae029;
+  --color-border: #efeae042;
+  --color-danger: #e58b7b;
+
+  /* 字體：中文標題字體還沒選定（DESIGN.md Typography），先用系統襯線字堆疊。 */
+  --font-title-zh: "Songti TC", "Noto Serif TC", "PMingLiU", serif;
+  --font-body: "PingFang TC", "Microsoft JhengHei", "Noto Sans TC", sans-serif;
+  --font-display: "Instrument Serif", serif;
+  --font-mono: "DM Mono", monospace;
+
+  /* typography（字級／行高／字距／字重） */
+  --text-page-title-zh: 40px;
+  --text-page-title-zh--line-height: 1.3;
+  --text-page-title-zh--letter-spacing: 0.04em;
+  --text-page-title-zh--font-weight: 300;
+  --text-section-title-zh: 24px;
+  --text-section-title-zh--line-height: 1.4;
+  --text-section-title-zh--letter-spacing: 0.04em;
+  --text-section-title-zh--font-weight: 300;
+  --text-reading-zh: 17px;
+  --text-reading-zh--line-height: 1.9;
+  --text-reading-zh--letter-spacing: 0.03em;
+  --text-reading-zh--font-weight: 400;
+  --text-body: 16px;
+  --text-body--line-height: 1.9;
+  --text-body--letter-spacing: 0.03em;
+  --text-body--font-weight: 400;
+  --text-button: 15px;
+  --text-button--letter-spacing: 0.08em;
+  --text-button--font-weight: 500;
+  --text-nav: 14px;
+  --text-nav--letter-spacing: 0.04em;
+  --text-nav--font-weight: 400;
+
+  /* spacing */
+  --spacing-1: 4px;
+  --spacing-2: 8px;
+  --spacing-3: 12px;
+  --spacing-4: 16px;
+  --spacing-6: 24px;
+  --spacing-8: 32px;
+  --spacing-12: 48px;
+  --spacing-16: 64px;
+  --spacing-24: 96px;
+  --spacing-gutter-desktop: 96px;
+  --spacing-gutter-tablet: 48px;
+  --spacing-gutter-mobile: 20px;
+  --spacing-reading-width: 760px;
+  --spacing-button-height: 50px;
+  --spacing-tap-target: 44px;
+
+  /* rounded */
+  --radius-none: 0px;
+  --radius-full: 999px;
+
+  /* 斷點：DESIGN.md 只有這四個值（ADR-0010 第 15 點）。 */
+  --breakpoint-tablet: 768px;
+  --breakpoint-split: 900px;
+  --breakpoint-desktop: 1200px;
+  --breakpoint-wide: 1232px;
+}
+
+/* 手機上的頁面標題是 28／1.3（DESIGN.md Typography 規則）。 */
+@media (width < 768px) {
+  :root {
+    --text-page-title-zh: 28px;
+  }
+}
+
+@layer base {
+  html {
+    color-scheme: dark;
+    background-color: var(--color-background);
+  }
+
+  body {
+    margin: 0;
+    background-color: var(--color-background);
+    color: var(--color-text-reading);
+    font-family: var(--font-body);
+    font-size: var(--text-body);
+    line-height: var(--text-body--line-height);
+    letter-spacing: var(--text-body--letter-spacing);
+    -webkit-font-smoothing: antialiased;
+  }
+}

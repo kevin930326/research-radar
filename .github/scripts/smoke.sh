@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # 冒煙測試：用 compose.yaml 把 db、api 與 worker 跑起來，確認 /healthz 回 200、/readyz 在遷移前回 503，
-# 以擁有者角色執行 radar migrate 之後 /readyz 回 200（Story 1.3、AD-15：服務不自己遷移）；
+# 以擁有者角色執行 radar migrate 之後 /readyz 回 200（Story 1.3、AD-15：服務不自己遷移），
+# 再確認 / 回頁面殼且帶 CSP、/api/ 底下找不到的路徑回 404（Story 3.1）；
 # 再在 worker 容器裡執行 radar enqueue sweep，等這個工作在佇列裡變成 succeeded（Story 1.4）。
 #
 # 用法：.github/scripts/smoke.sh <映像> <預期架構 amd64|arm64>
@@ -141,6 +142,17 @@ for path in /healthz /readyz; do
   echo "${path} → ${status}"
   [[ "${status}" == 200 ]] || fail "${path} 回 ${status}，不是 200"
 done
+
+# ----- 成員版前端（Story 3.1、ADR-0029）-----
+# 映像裡有 web/dist：/ 回頁面殼並帶 CSP；/api/ 底下找不到的路徑仍是 404，不回頁面殼。
+root_status=$(http_status "${API_URL}/")
+echo "/ → ${root_status}"
+[[ "${root_status}" == 200 ]] || fail "/ 回 ${root_status}，不是 200（頁面殼）"
+root_headers=$(curl --silent --max-time 5 --dump-header - --output /dev/null "${API_URL}/" || true)
+grep -qi '^content-security-policy:' <<< "${root_headers}" || fail "/ 的回應沒有 Content-Security-Policy"
+api_missing_status=$(http_status "${API_URL}/api/v1/not-found")
+echo "/api/v1/not-found → ${api_missing_status}"
+[[ "${api_missing_status}" == 404 ]] || fail "/api/v1/not-found 回 ${api_missing_status}，不是 404"
 
 API_CONTAINER=$(compose ps --quiet api)
 memory=$(docker inspect --format '{{.HostConfig.Memory}}' "${API_CONTAINER}")

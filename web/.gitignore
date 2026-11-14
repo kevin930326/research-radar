@@ -1,0 +1,7 @@
+# 建置結果與測試產物（根目錄 .gitignore 已忽略 dist/、node_modules/、coverage/）
+dist-demo/
+test-results/
+playwright-report/
+blob-report/
+playwright/.cache/
+.playwright-cli/
