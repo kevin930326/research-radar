@@ -291,6 +291,7 @@ def test_real_exclusion_rules_and_keyword_source() -> None:
         "research_spotlights",
         "about_our_authors",
         "erratum",
+        "corrigendum",
     ]
     assert config.exclusion_rules.rules[0].title_starts_with == ("Editor's Comments",)
     assert config.keyword_sources.active is KeywordSource.OPENALEX

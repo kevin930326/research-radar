@@ -1,4 +1,4 @@
-"""排除規則：正規化、第一條符合的勝出、空清單；真的 `config/exclusion_rules.yaml` 的四條。"""
+"""排除規則：正規化、第一條符合的勝出、空清單；真的 `config/exclusion_rules.yaml` 的五條。"""
 
 from datetime import UTC, datetime
 from pathlib import Path
@@ -26,13 +26,32 @@ def _paper(title: str) -> ParsedPaper:
     )
 
 
-def test_real_config_has_the_four_prd_rules() -> None:
+def test_real_config_has_the_four_prd_rules_and_corrigendum() -> None:
+    # Corrigendum：Kevin 2026-11-14 決定加（D10）。
     assert [rule.reason for rule in RULES.rules] == [
         "editors_comments",
         "research_spotlights",
         "about_our_authors",
         "erratum",
+        "corrigendum",
     ]
+
+
+@pytest.mark.parametrize(
+    ("title", "reason"),
+    [
+        ("Corrigendum to “A study of X”", "corrigendum"),
+        ('Corrigendum to "A study of X"', "corrigendum"),
+        ("CORRIGENDUM: A study of X", "corrigendum"),
+        ("Corrigendum", "corrigendum"),
+        ("Corrigendums and their discontents", None),
+        # Editorial Board 不在排除規則裡（D10），交給收錄過濾的文章類型。
+        ("Editorial Board", None),
+        ("Editorial Board Members", None),
+    ],
+)
+def test_corrigendum_rule_and_editorial_board_not_excluded(title: str, reason: str | None) -> None:
+    assert exclusion_reason(_paper(title), RULES) == reason
 
 
 @pytest.mark.parametrize(
