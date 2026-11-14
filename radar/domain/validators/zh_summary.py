@@ -8,18 +8,20 @@
 **拒收規則**（`validate_zh_summary`），依下面的順序檢查，第一個不過的就是原因代碼：
 
 1. 存不進資料庫（NUL、單獨的代理字元）→ `llm_output_unstorable`。
-2. 夾標記或連結：標籤樣的 `<`、欄位開頭的 `>`（完整的比較式如 `p < .05`、`>50%`、`x<y` 不算）、
-   反引號、粗體、Markdown 連結、網址、裸網域 → `zh_summary_unsafe_text`。
+2. 雙向控制字元、tag 字元、HTML 實體；夾標記或連結：標籤樣的 `<`、欄位開頭的 `>`（完整的比較式
+   如 `p < .05`、`>50%`、`x<y` 不算）、反引號、粗體、Markdown 連結、網址、裸網域（輸入裡有的首字
+   大寫品牌名稱如 `Amazon.com` 除外）→ `zh_summary_unsafe_text`。
 3. 夾「摘要未提及…」這類講摘要本身的句子 → `zh_summary_placeholder_text`。
 4. 任一欄正規化後的字元數超過 `max_chars_per_field` → `zh_summary_field_too_long`。
 5. 不是繁中：沒有漢字、漢字比例低於 `min_cjk_percent`、或含簡體專用字 → `zh_summary_not_zh_hant`。
 6. 逐句翻譯：摘要句數 ≥ `translation_min_abstract_sentences`，而且輸出句數 ≥ 摘要句數
    → `zh_summary_sentence_translation`。
-7. 編造：有輸入（標題＋摘要）沒有的數字（含正負號、指數、百分比）或英文詞，或用了不支援的
-   數字寫法（上標、分數字元、`^`、`×10`）→ `zh_summary_unsupported_content`。
+7. 編造：有輸入（標題＋摘要）沒有的數字（含正負號、指數、萬／億等單位、百分比）或英文詞，或用了
+   不支援的數字寫法（數字後面的上標、分數字元、`^`、`×10`、`፱` 這類數字字元）
+   → `zh_summary_unsupported_content`。
 
 第 2～7 條都在「檢查用副本」（`_check_copy`）上做：HTML 實體解碼、拿掉零寬等格式字元、NFKC、
-各種文字的十進位數字換成 0～9、空白縮成一個。存進資料庫的仍是 `normalize_text` 的結果。
+各種文字的十進位數字換成 0～9、破折號類換成 `-`、空白縮成一個。存進資料庫的仍是 `normalize_text` 的結果。
 
 判準的細節與抓不到的情況寫在 ADR-0032。
 """
@@ -72,10 +74,10 @@ _NOT_WORD: Final = re.compile(r"[\W_]+")
 _ABSTRACT_SUBJECTS: Final = r"(?:摘要|原文|文中)"
 _PAPER_SUBJECTS: Final = r"(?:本文|本研究|研究|作者|文章|論文)"
 _NEGATION: Final = r"(?:中|裡|內)?(?:並|均|皆|也)?(?:未|沒有|沒|無|不)(?:明確|特別)?"
-_META_VERBS: Final = r"(?:提及|提到|說明|描述|指出|交代|報告|載明|詳述|揭露|涉及)"
+_META_VERBS: Final = r"(?:提及|提到|提供|說明|描述|指出|交代|報告|載明|詳述|揭露|涉及)"
 _PLACEHOLDER_ZH: Final = re.compile(
     rf"(?:{_ABSTRACT_SUBJECTS}|{_PAPER_SUBJECTS})?{_NEGATION}"
-    rf"{_META_VERBS}?(?:任何)?(?:相關)?(?:使用|採用)?(?:的)?"
+    rf"{_META_VERBS}?(?:任何)?(?:相關)?(?:所使用|所採用|所用|使用|採用)?(?:的)?"
     r"(?:理論|理論框架|方法|研究方法|研究問題|問題|發現|結果|資訊|資料|內容)?"
     r"|不詳|未知|不明|從缺|不適用"
 )
@@ -90,6 +92,20 @@ def normalize_text(value: str) -> str:
     return _WHITESPACE.sub(" ", unicodedata.normalize("NFC", value)).strip()
 
 
+# 雙向控制字元（強制從右到左等）與 tag 字元：檢查時看不出來、顯示時卻會把字的順序倒過來或藏字，
+# 所以輸出有就直接拒收，不在檢查用副本裡拿掉。
+_BIDI_OR_TAG: Final = re.compile(
+    "[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069\U000e0000-\U000e007f]"
+)
+# HTML 實體（`&lt;`、`&#96;`、`&#x3c;`）：純文字 JSON 不該有，輸出有就直接拒收，存的才等於檢查的。
+_HTML_ENTITY: Final = re.compile(
+    r"&(?:[A-Za-z][A-Za-z0-9]{1,31}|#[0-9]{1,8}|#[xX][0-9A-Fa-f]{1,8});"
+)
+# 長得像負號的字（各種破折號：Unicode 分類 Pd，加上減號 `−`、粗減號 `➖`）在檢查用副本裡一律換成
+# `-`，所以「‒0.35」「—0.35」和「-0.35」一樣是負數。
+_MINUS_LIKE: Final = frozenset({"\u2212", "\u2796"})
+
+
 def _strip_invisible(text: str) -> str:
     """HTML 實體解碼（最多三層，`&amp;lt;` 也解得開）並拿掉零寬空白等格式字元（Unicode Cf）。"""
     for _ in range(3):
@@ -102,20 +118,35 @@ def _strip_invisible(text: str) -> str:
 
 def _check_copy(text: str) -> str:
     """檢查用副本：`_strip_invisible` 之後全形逗號換成頓號、NFKC（全形變體換成半形）、各種文字
-    的十進位數字（例如 `٩`）換成 0～9、連續空白縮成一個、去頭尾。只拿來檢查，不存。"""
+    的十進位數字（例如 `٩`）換成 0～9、各種破折號與減號換成 `-`、連續空白縮成一個、去頭尾。
+    只拿來檢查，不存。"""
     # NFKC 會把全形逗號「，」變成「,」，「120，350 名」就被當成千分位的 120350；先換成頓號。
     folded = unicodedata.normalize("NFKC", _strip_invisible(text).replace("，", "、"))
-    folded = "".join(
-        str(unicodedata.decimal(char)) if char.isdecimal() and not char.isascii() else char
-        for char in folded
-    )
+    folded = "".join(_fold_char(char) for char in folded)
     return _WHITESPACE.sub(" ", folded).strip()
+
+
+def _fold_char(char: str) -> str:
+    if char.isascii():
+        return char
+    if char.isdecimal():
+        return str(unicodedata.decimal(char))
+    if char in _MINUS_LIKE or unicodedata.category(char) == "Pd":
+        return "-"
+    return char
+
+
+# 欄位開頭的「欄位名稱＋冒號」（「理論：未提及」），整欄比對前先拿掉。
+_FIELD_LABEL: Final = re.compile(
+    r"^(?:研究問題|問題|研究方法|方法|理論框架|理論基礎|理論|研究發現|發現|研究結果|結果)\s?:"
+)
 
 
 def is_placeholder(text: str) -> bool:
     """整欄只是「摘要未提及／未提及／無／N/A」這類字（在檢查用副本上拿掉空白與標點、不分大小寫
     後比對）；拿掉之後什麼都不剩（例如只有「—」或零寬空白）也算。"""
-    key = _NOT_WORD.sub("", _check_copy(text)).casefold()
+    copy = _FIELD_LABEL.sub("", _check_copy(text), count=1)
+    key = _NOT_WORD.sub("", copy).casefold()
     return (
         not key
         or _PLACEHOLDER_ZH.fullmatch(key) is not None
@@ -180,7 +211,8 @@ _BARE_DOMAIN: Final = re.compile(
     rf"(?<![A-Za-z0-9.\-])(?:[A-Za-z0-9\-]++\.)+(?:{_TLDS})(?![A-Za-z0-9\-])"
 )
 # 欄位裡夾的「講摘要本身」的句子：
-# - 「摘要」後面 8 個字內接否定詞、再 4 個字內接「提及、說明…」；「未在摘要中…」。
+# - 「摘要」後面 8 個字內接否定詞、再 4 個字內接「提及、說明…」；「未在摘要中…」；「未在原文
+#   （文中）中提及…」（「姓名未在原文中出現」不算）。
 # - 原文、文中、本文、本研究、研究、作者、文章、論文：否定詞要緊接在後面（只能隔「中、並、也、
 #   明確」這類字），接著「提及、說明…」，再接研究要素（樣本數、方法、理論…）或直接斷句。所以
 #   「原文未揭露姓名時仍可推得作者身分」「作者未揭露身分的評論」「本文探討使用者為何不揭露個人
@@ -194,9 +226,10 @@ _RESEARCH_ELEMENTS: Final = (
 )
 _EMBEDDED_PLACEHOLDER: Final = re.compile(
     rf"摘要[^。！？!?；;]{{0,8}}?(?:未|沒有|沒|無|並未|不)[^。！？!?；;]{{0,4}}?{_META_VERBS}"
-    rf"|(?:原文|文中|{_PAPER_SUBJECTS}){_NEGATION}{_META_VERBS}(?:任何|相關|具體)?(?:使用|採用)?(?:的)?"
+    rf"|(?:原文|文中|{_PAPER_SUBJECTS}){_NEGATION}{_META_VERBS}(?:任何|相關|具體)?(?:所使用|所採用|所用|使用|採用)?(?:的)?"
     rf"(?:{_RESEARCH_ELEMENTS}|(?=[、,.。；;！？!?)]|$))"
     r"|(?:未|沒有|沒|並未)(?:在|於)摘要"
+    rf"|(?:未|沒有|沒|並未)(?:在|於)(?:原文|文中)(?:中|裡|內)?{_META_VERBS}"
     r"|(?<![A-Za-z])not\s+(?:mentioned|specified|reported|stated)(?![A-Za-z])"
     r"|(?<![A-Za-z])n/a(?![A-Za-z])",
     re.IGNORECASE,
@@ -209,19 +242,39 @@ SIMPLIFIED_ONLY: Final = frozenset(
 )
 _ENGLISH_WORD: Final = re.compile(r"[A-Za-z]+")
 _ENGLISH_TOKEN: Final = re.compile(r"[A-Za-z]+(?:-[A-Za-z]+)*")
-# 數字（在檢查用副本上找）：正負號（前面不是字母、數字、`.`、`)`；`3-5` 的 `-` 不是負號）、
-# 千分位（1,200）合併、APA 寫法的 .05 是 0.05、指數（1e-3）、百分比（`%`、`percent`、`per cent`）。
-# 值是（Decimal, 是不是百分比），所以 -0.35 ≠ 0.35、0.35 ≠ 0.35%、1e-3 ≠ 1e3。
+# 數字（在檢查用副本上找，破折號類已換成 `-`）：正負號（前面不是字母、數字、`.`、`)`；`3-5` 的
+# `-` 不是負號）、千分位（1,200）合併、APA 寫法的 .05 是 0.05、指數（1e-3）、單位（萬、億、兆、
+# 千、百萬…與 thousand、million、billion，乘進去）、百分比（`%`、`percent`、`per cent`）。值是
+# （Decimal, 是不是百分比），所以 -0.35 ≠ 0.35、0.35 ≠ 0.35%、1e-3 ≠ 1e3、12 萬 ≠ 12 million。
 _NUMBER: Final = re.compile(
-    r"(?P<sign>(?<![0-9A-Za-z.)\]])[-+−–])?"
+    r"(?P<sign>(?<![0-9A-Za-z.)\]])[-+])?"
     r"(?P<mantissa>[0-9]{1,3}(?:,[0-9]{3})+(?:\.[0-9]+)?|[0-9]+(?:\.[0-9]+)?|(?<![0-9])\.[0-9]+)"
-    r"(?P<exponent>[eE][-+−]?[0-9]+)?"
+    r"(?P<exponent>[eE][-+]?[0-9]+)?"
+    r"(?P<scale>\s?(?:[百千]?萬|[百千]?億|兆|千|百(?!分)|(?i:thousand|million|billion)(?![A-Za-z])))?"
     r"(?P<percent>\s?(?:%|(?i:percent|per cent)(?![A-Za-z])))?"
 )
 _NUMBER_CONTEXT: Final = Context(prec=100, Emax=MAX_EMAX, Emin=MIN_EMIN)
-# 不支援、會讓數值意思走樣的寫法（輸出有就拒收）：上標與下標數字、分數字元與分數斜線（NFKC 前
-# 才看得到）；`^`、千分比、`×10` 這種科學記號（NFKC 後）。
-_UNSUPPORTED_NUMBER_RAW: Final = re.compile(r"[²³¹⁰-₟¼-¾⅐-⅟⁄]")
+_SCALES: Final[Mapping[str, int]] = {
+    "萬": 10**4,
+    "百萬": 10**6,
+    "千萬": 10**7,
+    "億": 10**8,
+    "百億": 10**10,
+    "千億": 10**11,
+    "兆": 10**12,
+    "千": 10**3,
+    "百": 10**2,
+    "thousand": 10**3,
+    "million": 10**6,
+    "billion": 10**9,
+}
+# 不支援、會讓數值意思走樣的寫法（輸出有就拒收）：上標與下標數字（但拉丁或希臘字母後面的
+# ¹²³ 可以，`R²`、`χ²`、`η²` 是統計符號，NFKC 後當成 R2 比對）、分數字元與分數斜線（NFKC 前才
+# 看得到）；`^`、千分比、`×10` 這種科學記號（NFKC 後）；不是十進位、也不是漢字的數字字元
+# （例如衣索比亞數字 `፱`，見 `_has_unsupported_number`）。
+_UNSUPPORTED_NUMBER_RAW: Final = re.compile(
+    "(?<![A-Za-z\u0370-\u03ff])[\u00b2\u00b3\u00b9]|[\u2070-\u209f\u00bc-\u00be\u2150-\u215f\u2044]"
+)
 _UNSUPPORTED_NUMBER: Final = re.compile(r"\^|‰|‱|×\s?10(?![0-9.,])")
 # 摘要的句子結尾：一串 `.!?` 後面接空白。開頭不能接在 `.!?` 後面、整串用佔有式量詞，所以一長串
 # 句點後面沒有空白時只掃一次（原本的 `[.!?]+\s+` 會平方級回溯）。
@@ -254,7 +307,7 @@ _ORDINAL_NAMES: Final = "first second third fourth fifth sixth seventh eighth ni
 _ORDINAL_WORDS: Final[Mapping[str, int]] = {
     word: value for value, word in enumerate(_ORDINAL_NAMES.split(), start=1)
 }
-_SCALE_WORDS: Final[Mapping[str, int]] = {"hundred": 100, "thousand": 1000}
+_SCALE_WORDS: Final[Mapping[str, int]] = {"thousand": 10**3, "million": 10**6, "billion": 10**9}
 
 
 def _is_han(char: str) -> bool:
@@ -284,16 +337,24 @@ def _input_texts(llm_input: LlmInput) -> tuple[str, str | None]:
 type _Number = tuple[Decimal, bool]
 
 
-def _numbers(text: str) -> tuple[set[_Number], bool]:
-    """檢查用副本裡的數字 →（數值集合, 有沒有讀不懂的數字，例如指數大到算不出來）。"""
+def _numbers(text: str, *, keep_unscaled: bool = False) -> tuple[set[_Number], bool]:
+    """檢查用副本裡的數字 →（數值集合, 有沒有讀不懂的數字，例如指數大到算不出來）。
+
+    單位（萬、million…）乘進數值；`keep_unscaled`（輸入用）時也留下沒乘的數字，所以摘要寫
+    「12 million」時輸出寫 12 或 1200 萬都對得上，輸出寫「12 萬」只會是 120000。"""
     found: set[_Number] = set()
     unreadable = False
     for match in _NUMBER.finditer(text):
-        sign = "-" if match["sign"] in ("-", "−", "–") else ""
-        exponent = (match["exponent"] or "").replace("−", "-")
+        exponent = match["exponent"] or ""
+        percent = match["percent"] is not None
+        scale_word = (match["scale"] or "").strip().lower()
         try:
-            value = Decimal(sign + match["mantissa"].replace(",", "") + exponent)
-            found.add((value.normalize(_NUMBER_CONTEXT), match["percent"] is not None))
+            value = Decimal((match["sign"] or "") + match["mantissa"].replace(",", "") + exponent)
+            if scale_word:
+                if keep_unscaled:
+                    found.add((value.normalize(_NUMBER_CONTEXT), percent))
+                value = value * _SCALES[scale_word]
+            found.add((value.normalize(_NUMBER_CONTEXT), percent))
         except DecimalException:
             unreadable = True
     return found, unreadable
@@ -305,8 +366,10 @@ def _number_word_kind(word: str) -> tuple[str | None, int]:
         return ("teen" if value >= 10 else "unit"), value
     if word in _TENS_WORDS:
         return "tens", _TENS_WORDS[word]
+    if word == "hundred":
+        return "hundred", 100
     if word in _SCALE_WORDS:
-        return word, _SCALE_WORDS[word]
+        return "big", _SCALE_WORDS[word]
     if word == "and":
         return "and", 0
     return None, 0
@@ -314,12 +377,12 @@ def _number_word_kind(word: str) -> tuple[str | None, int]:
 
 # 英文數字詞組裡，每一種詞後面可以接哪幾種（None＝詞組的開頭）。
 _NUMBER_WORD_FOLLOWS: Final[Mapping[str | None, frozenset[str]]] = {
-    None: frozenset({"unit", "teen", "tens", "hundred", "thousand"}),
-    "unit": frozenset({"hundred", "thousand"}),
-    "teen": frozenset({"hundred", "thousand"}),
-    "tens": frozenset({"unit", "thousand"}),
-    "hundred": frozenset({"unit", "teen", "tens", "thousand", "and"}),
-    "thousand": frozenset({"unit", "teen", "tens", "and"}),
+    None: frozenset({"unit", "teen", "tens", "hundred", "big"}),
+    "unit": frozenset({"hundred", "big"}),
+    "teen": frozenset({"hundred", "big"}),
+    "tens": frozenset({"unit", "big"}),
+    "hundred": frozenset({"unit", "teen", "tens", "big", "and"}),
+    "big": frozenset({"unit", "teen", "tens", "and"}),
     "and": frozenset({"unit", "teen", "tens"}),
 }
 
@@ -327,7 +390,8 @@ _NUMBER_WORD_FOLLOWS: Final[Mapping[str | None, frozenset[str]]] = {
 def _number_word_values(words: list[str]) -> set[_Number]:
     """輸入裡的英文數字詞換成數字：一整個詞組只留它的值，組成的詞不另外算。
     「three hundred」只有 300（沒有 3、100）、「twenty five」只有 25、「two thousand」只有 2000、
-    「three hundred and twenty」只有 320；first～tenth 是 1～10；詞組後面接 `percent`／`per cent`
+    「three hundred and twenty」只有 320、「twelve million」只有 12000000；first～tenth 是 1～10；
+    詞組後面接 `percent`／`per cent`
     時是百分比。"""
     values: set[_Number] = set()
     total = current = 0
@@ -357,7 +421,7 @@ def _number_word_values(words: list[str]) -> set[_Number]:
             continue
         if kind == "hundred":
             current = (current or 1) * value
-        elif kind == "thousand":
+        elif kind == "big":
             total += (current or 1) * value
             current = 0
         elif kind != "and":
@@ -396,7 +460,7 @@ class _InputVocabulary:
             variants |= _variants(word)
         content = [word for word in words if word not in _FUNCTION_WORDS]
         return cls(
-            numbers=frozenset(_numbers(text)[0] | _number_word_values(words)),
+            numbers=frozenset(_numbers(text, keep_unscaled=True)[0] | _number_word_values(words)),
             words=frozenset(variants),
             initials=(
                 "".join(word[0] for word in words),
@@ -465,9 +529,14 @@ def validate_zh_summary(
         raise TypeError("中文重點的驗證只收 ZhSummaryOutput")
     check_output_storable(output.model_dump(mode="json"))
 
+    input_text, abstract = _input_texts(llm_input)
     for name in FIELDS:
         value = getattr(output, name)
-        if value is not None and _has_markup(value):
+        if value is None:
+            continue
+        if _BIDI_OR_TAG.search(value) or _HTML_ENTITY.search(value):
+            raise _reject(ErrorCode.ZH_SUMMARY_UNSAFE_TEXT, f"{name} 含雙向控制字元或 HTML 實體")
+        if _has_markup(value, input_text):
             raise _reject(ErrorCode.ZH_SUMMARY_UNSAFE_TEXT, f"{name} 含標記或連結")
 
     content = normalize_zh_summary(output)
@@ -486,7 +555,6 @@ def validate_zh_summary(
     for name, text in checked.items():
         _check_not_zh_hant(name, text, rules)
 
-    input_text, abstract = _input_texts(llm_input)
     if abstract is not None:
         abstract_sentences = count_abstract_sentences(abstract)
         if (
@@ -500,9 +568,7 @@ def validate_zh_summary(
 
     vocabulary = _InputVocabulary.build(input_text)
     for name, text in checked.items():
-        if _UNSUPPORTED_NUMBER_RAW.search(_strip_invisible(present[name])) or (
-            _UNSUPPORTED_NUMBER.search(text)
-        ):
+        if _has_unsupported_number(present[name], text):
             raise _reject(ErrorCode.ZH_SUMMARY_UNSUPPORTED_CONTENT, f"{name} 有不支援的數字寫法")
         numbers, unreadable = _numbers(text)
         if unreadable or not numbers <= vocabulary.numbers:
@@ -515,10 +581,33 @@ def validate_zh_summary(
     return content
 
 
-def _has_markup(value: str) -> bool:
-    """標記或連結：先把完整的比較式（`p < .05`、`>50%`、`x<y`）換成空白，再找標記與裸網域。"""
+def _has_markup(value: str, input_text: str) -> bool:
+    """標記或連結：先把完整的比較式（`p < .05`、`>50%`、`x<y`）換成空白，再找標記與裸網域。
+    首字大寫、而且輸入（檢查用副本）裡有一模一樣字樣的裸網域（品牌名稱 `Amazon.com`）放行；
+    小寫的（`osf.io`）即使輸入有也擋。"""
     text = _COMPARISON.sub(" ", _check_copy(value))
-    return _UNSAFE.search(text) is not None or _BARE_DOMAIN.search(text) is not None
+    if _UNSAFE.search(text):
+        return True
+    return any(
+        not (domain[0].isupper() and domain in input_text)
+        for domain in (match.group(0) for match in _BARE_DOMAIN.finditer(text))
+    )
+
+
+def _has_unsupported_number(stored: str, checked: str) -> bool:
+    """不支援的數字寫法：`_UNSUPPORTED_NUMBER_RAW`（看沒經 NFKC 的字）、`_UNSUPPORTED_NUMBER`，或
+    檢查用副本裡還有不是 ASCII、不是漢字、卻有數值的字元（`፱`；十進位數字已換成 0～9）。"""
+    if _UNSUPPORTED_NUMBER_RAW.search(_strip_invisible(stored)) or _UNSUPPORTED_NUMBER.search(
+        checked
+    ):
+        return True
+    return any(
+        not char.isascii()
+        and not _is_han(char)
+        and char != "〇"
+        and unicodedata.numeric(char, None) is not None
+        for char in checked
+    )
 
 
 @dataclass(frozen=True)
