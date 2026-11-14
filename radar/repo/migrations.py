@@ -19,6 +19,18 @@ from radar.domain.database_requirements import APP_ROLE, DatabaseFeatures
 from radar.domain.schema import SchemaState, classify_schema
 from radar.repo.db import Database
 
+# 背景工作佇列（Procrastinate）自己的表都以這個前綴開頭。它們由遷移 0002 執行凍結的 SQL 建立，
+# 不在 `Base.metadata` 裡，`alembic check` 不比對（AD-18、ADR-0019）。
+QUEUE_TABLE_PREFIX = "procrastinate_"
+
+
+def include_name(name: str | None, type_: str, _parent_names: object) -> bool:
+    """`alembic check`（autogenerate）要不要比對這個物件：佇列的表不比對，其他都比對。
+
+    表被排除時，它的欄位、索引、約束也跟著不比對。
+    """
+    return not (type_ == "table" and name is not None and name.startswith(QUEUE_TABLE_PREFIX))
+
 
 class MigrationsNotFoundError(Exception):
     """找不到遷移檔的資料夾（裡面要有 `env.py`）。"""

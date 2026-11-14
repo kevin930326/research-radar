@@ -449,3 +449,22 @@
 - **連線數預算**：事先分好每種程式最多能同時佔幾條資料庫連線（api 8、worker 6、每個 CLI 2），加起來不超過託管資料庫可用的 35 條。
 - **pool_pre_ping**：連線池借出連線前先「敲一下門」確認它還活著；資料庫重啟過也不會拿到斷掉的連線。
 - **schema_state（遷移狀態）**：`/readyz` 判斷資料庫版本的結果：`not_migrated`（沒遷移）、`behind`（落後）、`current`（最新）、`ahead`（比程式新，退版時會出現）。
+- **凍結的 SQL**：把套件某一版的建表 SQL 原封不動複製進 repo；套件升版時它不會跟著變，要另外加一個升版用的遷移。
+- **監督迴圈**：包在 worker 外面的一小段程式，像值班的管理員：收到停止訊號就請 worker 收工，worker 起不來時隔一段時間再叫它起來。
+- **排隊鎖（queueing_lock）**：Procrastinate 的功能，同一個名字在排隊中只能有一筆；用來避免同一件事被排兩次。
+- **`radar enqueue`**：把一個排程工作放進佇列的指令；主機的 cron 定時呼叫它，真正的工作由 worker 去做。
+- **sweep**：每 15 分鐘跑一次的維護工作，把卡在半路的資料列與工作重新排入，像巡房的護理師。
+- **sweep 登記清單**：列出「哪張表的哪個狀態停太久算卡住、要重新排哪個工作」的清單；有 `status` 欄的表不是登記在這裡，就要寫明為什麼不用。
+- **`deploy/crontab`**：主機上 cron 的排程表，是本專案唯一寫「什麼時候跑什麼」的地方。
+- **stamina**：一個 Python 重試套件：失敗時等一下再試，等待時間一次比一次長，試到上限就放棄。
+- **httpx2**：一個 Python 送 HTTP 請求的套件；這裡用來送心跳。
+- **MockTransport**：httpx2 的測試用替身，請求不會真的送出去，而是交給測試寫好的函式回應。
+- **InMemoryConnector**：Procrastinate 的測試用替身，佇列放在記憶體裡、不連資料庫，用來檢查「排入時帶了哪些選項」。
+- **SIGKILL**：系統直接殺掉程式的訊號，程式來不及做任何收尾；用來模擬 worker 突然當掉。
+- **attempts（嘗試次數）**：Procrastinate 記錄一個工作已經被執行過幾次；重試一次就加一。
+- **psycopg_pool**：psycopg 的連線池套件；這裡自己用它開 Procrastinate 的連線池，連不上時幾秒內就失敗。
+- **cgroup**：Linux 用來限制、計算一組程式用了多少記憶體的機制；Docker 的 `mem_limit` 就是靠它。
+- **`memory.peak`／`memory.current`**：cgroup 記錄的兩個記憶體數字：從容器建立以來的最高用量、此刻的用量；兩者都含檔案快取。
+- **監聽（LISTEN／NOTIFY）**：PostgreSQL 內建的通知功能：worker 先登記「有新工作請叫我」，排入工作時資料庫就主動通知，不必一直去問；它要占一條獨立的連線。
+- **plpgsql**：PostgreSQL 內建、用來寫資料庫函式的程式語言；Procrastinate 的函式都用它寫，它在函式裡用 RAISE 丟出錯誤。
+- **NOTICE**：PostgreSQL 回給程式的提醒訊息，只是告知、不是錯誤，例如「這個東西已經存在，略過」。

@@ -1,7 +1,10 @@
 """資料庫連線。連線數預算（api 8、worker 6、CLI 2）在 `radar/config.py`，由入口傳進 `pool_size`。"""
 
+from collections.abc import Iterator
+from contextlib import contextmanager
+
 import structlog
-from sqlalchemy import Engine, create_engine, make_url, text
+from sqlalchemy import Connection, Engine, create_engine, make_url, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.pool import QueuePool
 
@@ -27,6 +30,15 @@ class Database:
             pool_pre_ping=True,
             connect_args=_connect_args(url, connect_timeout),
         )
+
+    @contextmanager
+    def transaction(self) -> Iterator[Connection]:
+        """開一個交易：區塊正常結束就 commit，丟出例外就退回（Conventions「交易」）。
+
+        只由入口直接呼叫的那個 services 函式開；`repo` 的函式收這個連線、不自己 commit。
+        """
+        with self._engine.begin() as connection:
+            yield connection
 
     def ping(self) -> bool:
         """連得上並能執行 `SELECT 1` 回 True；連不上或查詢逾時回 False，不丟例外。

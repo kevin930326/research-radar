@@ -25,6 +25,7 @@
 | [0016](0016-keyword-stats-and-burst-detection.md) | 關鍵字統計只有一個來源；爆紅關鍵字當場算，空年從序列拿掉 | 提議（空年的算法、已經結束的爆紅怎麼列、兩個篇數的連結，Kevin 2026-11-13 已確認） | AD-5、AD-31 |
 | [0017](0017-ci-pipeline.md) | CI：固定檢查依序跑、amd64／arm64 原生執行機各自冒煙、冒煙通過且是 push 事件才推 GHCR；測試預設封鎖網路 | 提議 | AD-17、AD-18、AD-29 |
 | [0018](0018-database-migrations-and-roles.md) | 資料庫遷移用 Alembic、所有遷移在一個交易裡；第一個遷移只檢查功能並給應用程式角色預設權限；本機與 CI 也建 `radar_owner`、`radar_app` 兩個角色；`/readyz` 沒遷移或落後回 503、比程式新照常就緒；連線數預算 | 提議 | AD-15、AD-17、AD-18、AD-29 |
+| [0019](0019-worker-and-queue-integration.md) | worker 接上 Procrastinate：佇列的 SQL 凍結成檔由 Alembic 執行；連線池自己開；監督迴圈處理訊號與重開；做完的工作紀錄全留；排程只在 `deploy/crontab` | 提議 | AD-14、AD-15、AD-17、AD-18 |
 
 「提議」表示還沒經過 Kevin 確認；PR 合併後改成「已接受」。
 

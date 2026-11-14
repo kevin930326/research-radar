@@ -1,0 +1,97 @@
+"""worker 的 main() 怎麼組零件：連線數的拆法、心跳網址、卡住工作的重試上限、工作層重試
+（不連資料庫、不跑 Procrastinate worker；環境變數只用測試值）。
+"""
+
+from functools import partial
+from typing import Any
+
+import procrastinate
+import pytest
+
+import radar.entrypoints.worker.main as worker_main
+from radar.adapters.jobs import retry_stalled_jobs
+from radar.domain.jobs import SWEEP
+from radar.domain.settings import Settings
+from radar.entrypoints.bootstrap import build_worker
+from radar.entrypoints.worker.tasks import register_tasks
+
+APP_URL = "postgresql://radar_app@db:5432/radar"
+HEARTBEAT_URL = "https://hc.example.test/ping/abc"
+
+
+class _StopBeforeRunningError(Exception):
+    """組完零件就停，不真的跑 worker。"""
+
+
+def _record_build(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+    recorded: list[dict[str, Any]] = []
+
+    def fake_build(_settings: Settings, **kwargs: Any) -> Any:
+        recorded.append(kwargs)
+        raise _StopBeforeRunningError
+
+    monkeypatch.setattr(worker_main, "build_worker", fake_build)
+    monkeypatch.setenv("DATABASE_URL", APP_URL)
+    for name in ("RADAR_WORKER_DATABASE_POOL_SIZE", "RADAR_HEARTBEAT_URL_SWEEP"):
+        monkeypatch.delenv(name, raising=False)
+    return recorded
+
+
+def test_worker_uses_default_connection_split(monkeypatch: pytest.MonkeyPatch) -> None:
+    recorded = _record_build(monkeypatch)
+
+    with pytest.raises(_StopBeforeRunningError):
+        worker_main.main()
+
+    assert recorded == [{"queue_pool_size": 2, "app_pool_size": 3, "heartbeat_urls": {}}]
+
+
+def test_worker_follows_pool_size_override_and_heartbeat_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recorded = _record_build(monkeypatch)
+    monkeypatch.setenv("RADAR_WORKER_DATABASE_POOL_SIZE", "9")
+    monkeypatch.setenv("RADAR_HEARTBEAT_URL_SWEEP", HEARTBEAT_URL)
+
+    with pytest.raises(_StopBeforeRunningError):
+        worker_main.main()
+
+    assert recorded == [
+        {"queue_pool_size": 2, "app_pool_size": 6, "heartbeat_urls": {"sweep": HEARTBEAT_URL}}
+    ]
+
+
+def test_worker_pool_too_small_is_config_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    recorded = _record_build(monkeypatch)
+    monkeypatch.setenv("RADAR_WORKER_DATABASE_POOL_SIZE", "2")
+
+    assert worker_main.main() == 1
+    assert recorded == []
+
+
+SETTINGS = Settings.model_validate(
+    {
+        "database_url": APP_URL,
+        "worker_stalled_seconds": 90,
+        "job_max_retries": 5,
+        "job_retry_wait": 7,
+    }
+)
+
+
+def test_retry_stalled_uses_stalled_seconds_and_retry_limit() -> None:
+    parts = build_worker(SETTINGS, queue_pool_size=2, app_pool_size=3, heartbeat_urls={})
+
+    retry_stalled = parts.retry_stalled
+    assert isinstance(retry_stalled, partial)
+    assert retry_stalled.func is retry_stalled_jobs
+    assert retry_stalled.keywords == {"seconds_since_heartbeat": 90, "max_retries": 5}
+
+
+def test_sweep_task_retry_strategy_follows_settings() -> None:
+    parts = build_worker(SETTINGS, queue_pool_size=2, app_pool_size=3, heartbeat_urls={})
+    register_tasks(parts.job_app.app, parts, SETTINGS)
+
+    strategy = parts.job_app.app.tasks[SWEEP.name].retry_strategy
+    assert isinstance(strategy, procrastinate.RetryStrategy)
+    assert (strategy.max_attempts, strategy.wait, strategy.linear_wait) == (5, 7, 7)

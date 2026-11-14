@@ -9,10 +9,17 @@ import psycopg
 
 from tests.database import OWNER_ROLE, TestDatabase
 
-# 之後的 Story 加例外時寫在這裡並註明理由（例如 snapshot.number、複合主鍵的 embedding、qa_usage、
-# Procrastinate 自己的表）。
+# 之後的 Story 加例外時寫在這裡並註明理由（例如 snapshot.number、複合主鍵的 embedding、qa_usage）。
+PROCRASTINATE_REASON = (
+    "Procrastinate 自己的表（遷移 0002 執行凍結的 SQL，ADR-0019），主鍵是它定的 bigint 流水號；"
+    "Conventions「主鍵」明列為例外"
+)
 PRIMARY_KEY_EXCEPTIONS: dict[str, str] = {
     "alembic_version": "Alembic 自己的版本表，主鍵是版本號字串",
+    "procrastinate_jobs": PROCRASTINATE_REASON,
+    "procrastinate_workers": PROCRASTINATE_REASON,
+    "procrastinate_events": PROCRASTINATE_REASON,
+    "procrastinate_periodic_defers": PROCRASTINATE_REASON,
 }
 
 TABLES_SQL = """

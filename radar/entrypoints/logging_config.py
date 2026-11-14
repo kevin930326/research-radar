@@ -60,6 +60,12 @@ def configure_logging(level: int = logging.INFO) -> None:
     root.addHandler(handler)
     root.setLevel(level)
 
+    # psycopg 連線池連不上時每次重試都記一筆警告，訊息含主機與連接埠；只留 ERROR 以上。
+    # 連不上時由我們自己的日誌記錯誤類別（例如 worker 的「稍後重開」）。
+    logging.getLogger("psycopg.pool").setLevel(logging.ERROR)
+    # httpx2 每個請求記一筆 INFO，內容是完整網址；網址可能帶秘密（心跳的通行碼、API key），不記。
+    logging.getLogger("httpx2").setLevel(logging.WARNING)
+
     # uvicorn 自己會掛 handler；清掉讓它往上交給 root，統一輸出格式。
     for name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
         uvicorn_logger = logging.getLogger(name)

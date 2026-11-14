@@ -395,3 +395,23 @@ FR-49 的兩個驗收測試各對應第 1、2 道：處理完後儲存空間裡�
 - **上一頁快取**：按上一頁時，瀏覽器直接把離開時的整個畫面拿回來用，不重新載入。
 - **presigned URL（預先簽名的網址）**：儲存服務發的限時通行證網址，拿到的人可以直接上傳或下載一個檔案。
 - **中繼資料**：檔案自己帶的描述資訊（標題、作者等），不是內文。
+
+## 實測紀錄
+
+### 2026-11-14：worker 閒置與同時兩個 `radar enqueue`（Story 1.4）
+
+- 環境：本機 Mac（Apple Silicon），Docker 29.8.2（linuxkit 核心 7.0.14）；Compose 專案 `radar-1-4-mem`，只起 `db` 與 `worker`（`mem_limit 400m`，cgroup 的 `memory.max` 讀到 419430400，也就是 400 MiB）；映像是這個分支 `docker build` 出來的 arm64 映像，Procrastinate 3.11.0、並行數 2。
+- 量法：`radar migrate` 後等 worker 自己接上佇列，閒置 30 秒以上；然後同時跑兩個 `docker compose exec -T worker radar enqueue sweep`（一個排入、一個回「已經在排隊」，worker 執行那一筆到 `succeeded`）。記憶體從主機那一側讀 worker 容器的 cgroup：另開一個特權容器唯讀掛 `/sys/fs/cgroup`，每 50 ms 讀一次 `memory.current` 取最大值，結束後讀 `memory.peak`（容器建立以來的峰值）。兩者都含檔案快取。
+- 結果：
+
+  | 項目 | 數字 |
+  |---|---|
+  | 閒置（`memory.current`） | 約 77.5 MiB（81,260,544 bytes） |
+  | 同時兩個 `radar enqueue` 時，每 50 ms 取樣的最大值 | 約 224 MiB（235,094,016 bytes） |
+  | `memory.peak` | 約 227 MiB（237,662,208 bytes） |
+  | 做完後（`memory.current`） | 約 77 MiB（80,900,096 bytes） |
+
+- 同日審查修正後（相依改成 `psycopg[binary,pool]`、佇列連線字串轉換、卡住工作的重試上限等）用同一個量法重量一次：閒置約 77 MiB（80,883,712 bytes）；取樣最大值約 224 MiB（234,434,560 bytes）；`memory.peak` 約 228 MiB（239,038,464 bytes）；做完後約 77 MiB（80,314,368 bytes）。和第一次只差約 1 MiB，結論不變。
+
+- 峰值主要來自兩個 CLI 行程（各自是一個完整的 Python 行程）；worker 本身閒置時遠低於原本估的 120–180 MB。
+- **沒有量到的部分**：辨認 PDF 的子行程（上限 200 MB）還沒有程式，這次沒有算進去。把這次的峰值直接加 200 MB（以 200 MiB 算）約 427 MiB，會超過上限 400 MiB；但兩個 `radar enqueue` 同時、又剛好在解析大 PDF 的最壞情況，要等做 PDF 的 Story 實測才知道（見上面「取捨」的「記憶體的數字還沒有實測」；ADR-0003 也記了同一份紀錄）。

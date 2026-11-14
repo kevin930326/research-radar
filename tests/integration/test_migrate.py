@@ -17,7 +17,7 @@ from radar.repo.migrations import MigrationScripts, read_schema_state, upgrade_t
 from tests.database import MIGRATIONS_DIR, ROOT, TestDatabase, migrate
 
 BIN = Path(sys.executable).parent
-HEAD = "0001"
+HEAD = "0002"
 
 
 def _run(
@@ -261,13 +261,15 @@ def test_alembic_check_compares_server_defaults(fresh_database: TestDatabase) ->
     assert "modify_default" in differs.stdout + differs.stderr
 
 
-# 測試專用的第二版：0001 已經授權之後才失敗。先回報當下的授權狀態，證明失敗點真的在授權之後。
-FAILING_0002 = """
+# 測試專用、接在目前 head 後面的下一版：0001 已經授權之後才失敗。
+# 先回報當下的授權狀態，證明失敗點真的在授權之後。
+NEXT = f"{int(HEAD) + 1:04d}"
+FAILING_NEXT = f"""
 from alembic import op
 from sqlalchemy import text
 
-revision = "0002"
-down_revision = "0001"
+revision = "{NEXT}"
+down_revision = "{HEAD}"
 branch_labels = None
 depends_on = None
 
@@ -280,7 +282,7 @@ def upgrade() -> None:
             " LIKE '%radar_app=U%'"
         )
     ).scalar_one()
-    raise RuntimeError(f"故意失敗 granted={granted}")
+    raise RuntimeError(f"故意失敗 granted={{granted}}")
 
 
 def downgrade() -> None:
@@ -306,11 +308,11 @@ def _grant_state(database: TestDatabase) -> tuple[object, ...]:
 def test_failure_after_grants_rolls_everything_back(
     fresh_database: TestDatabase, tmp_path: Path
 ) -> None:
-    # 複製正式的遷移檔到暫存資料夾，再接一個故意失敗的 0002；不動正式的 migrations/。
+    # 複製正式的遷移檔到暫存資料夾，再接一個故意失敗的下一版；不動正式的 migrations/。
     scripts_dir = tmp_path / "migrations"
     shutil.copytree(MIGRATIONS_DIR, scripts_dir, ignore=shutil.ignore_patterns("__pycache__"))
-    (scripts_dir / "versions" / "0002_fail_after_grants.py").write_text(
-        FAILING_0002, encoding="utf-8"
+    (scripts_dir / "versions" / f"{NEXT}_fail_after_grants.py").write_text(
+        FAILING_NEXT, encoding="utf-8"
     )
     before = _grant_state(fresh_database)
 

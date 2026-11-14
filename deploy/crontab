@@ -1,0 +1,11 @@
+# Research Radar 的排程表：全部排程的唯一來源（AD-15、ADR-0004 決定第 5 點、ADR-0019）。
+#
+# - 每一行只做一件事：在已經開著的 worker 容器裡執行 `radar enqueue <排程名稱>`，把工作排進佇列。
+#   不在這裡直接跑工作，也不用 Procrastinate 的週期任務。之後搬到 K8s 時，每一行改成一個 CronJob。
+# - 新增排程的 Story：在 radar/domain/jobs.py 的 JOBS 給工作一個排程名稱，在這裡加一行，
+#   並在設定加這個排程的心跳網址（RADAR_HEARTBEAT_URL_<排程名稱>）。架構測試檢查這裡與 JOBS 一一對應。
+# - 有固定時刻的排程（例如每週一 03:00 台北時間）要寫明時區；目前只有每 15 分鐘的 sweep。
+# - 安裝到主機的 crontab 與 compose 專案的實際路徑，寫在部署文件（Story 3.19）；路徑改了整份一起改。
+#
+# 分 時 日 月 週  指令
+*/15 * * * * docker compose --project-directory /opt/research-radar exec -T worker radar enqueue sweep

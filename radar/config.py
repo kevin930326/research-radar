@@ -2,11 +2,13 @@
 
 import os
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Literal
 
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, SecretStr, ValidationError
 
-from radar.domain.settings import MigrationSettings, Settings
+from radar.domain.jobs import scheduled_jobs
+from radar.domain.settings import MigrationSettings, Settings, heartbeat_url_field
 
 type ProcessKind = Literal["api", "worker", "cli"]
 
@@ -79,3 +81,56 @@ def database_pool_size(settings: Settings, process: ProcessKind) -> int:
         "cli": settings.cli_database_pool_size,
     }[process]
     return DATABASE_POOL_BUDGET[process] if override is None else override
+
+
+# worker 的連線怎麼分（ADR-0019）：佇列的連線池最多 2 條、佇列監聽新工作的 1 條，其餘給應用程式的
+# 連線池（sweep 讀狀態表等）。預算 6 條時是 2＋1＋3。
+WORKER_QUEUE_POOL_MAX = 2
+WORKER_LISTEN_CONNECTIONS = 1
+WORKER_MIN_CONNECTIONS = 3
+
+
+@dataclass(frozen=True)
+class WorkerConnections:
+    """worker 的連線數：佇列的連線池、監聽、應用程式的連線池，加總等於 worker 的預算。"""
+
+    queue_pool: int
+    listen: int
+    app_pool: int
+
+    @property
+    def total(self) -> int:
+        return self.queue_pool + self.listen + self.app_pool
+
+
+def worker_connection_split(settings: Settings) -> WorkerConnections:
+    """把 worker 的連線數預算（預設 6，可用 `RADAR_WORKER_DATABASE_POOL_SIZE` 覆寫）拆成三份。
+
+    監聽固定 1 條；佇列的連線池最多 2 條，應用程式的連線池至少 1 條、拿剩下的。
+
+    Raises:
+        ConfigError: 預算少於 3 條（三份各至少要 1 條）。
+    """
+    budget = database_pool_size(settings, "worker")
+    if budget < WORKER_MIN_CONNECTIONS:
+        raise ConfigError(
+            [
+                f"環境變數 {env_name('worker_database_pool_size')} 至少要"
+                f" {WORKER_MIN_CONNECTIONS}（佇列連線池、監聽、應用程式連線池各 1 條）"
+            ]
+        )
+    rest = budget - WORKER_LISTEN_CONNECTIONS
+    queue_pool = min(WORKER_QUEUE_POOL_MAX, rest // 2)
+    return WorkerConnections(
+        queue_pool=queue_pool, listen=WORKER_LISTEN_CONNECTIONS, app_pool=rest - queue_pool
+    )
+
+
+def heartbeat_urls(settings: Settings) -> dict[str, str]:
+    """每個排程的心跳網址（排程名稱 → 網址）；沒設網址的排程不在裡面。"""
+    urls: dict[str, str] = {}
+    for job in scheduled_jobs():
+        value = getattr(settings, heartbeat_url_field(job.check))
+        if isinstance(value, SecretStr):
+            urls[job.check] = value.get_secret_value()
+    return urls
