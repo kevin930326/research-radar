@@ -160,13 +160,20 @@ class PaperSourceError(Exception):
         self.calls = tuple(calls)
 
 
+class QuotaReachedError(PaperSourceError):
+    """重試途中對方回報今天的額度已用到停下的比例（或剩 0）：不再重試。
+
+    不算抓取失敗：呼叫端把 `calls` 寫進 `api_call` 後照「額度停下」處理（ADR-0021）。
+    """
+
+
 @dataclass(frozen=True)
 class ApiUsage:
     """某個時間點之後的 API 用量。
 
     - `local_cost_usd`：本地 `api_call.cost_usd` 的總和（只看得到這個程式的呼叫）。
-    - `reported_used_usd`：最新一筆對方回報的「上限 − 剩餘」（也算到同一把 key 的其他用途）；
-      沒有回報時是 None。
+    - `reported_used_usd`：最新一筆對方回報的「上限 − 剩餘」，加上那一筆之後本地記的
+      `cost_usd`（之後的呼叫可能沒帶額度標頭）；也算到同一把 key 的其他用途。沒有回報時是 None。
     """
 
     local_cost_usd: Decimal

@@ -284,6 +284,50 @@ def test_heartbeat_retry_wait_out_of_range_is_config_error(name: str, value: str
     assert name in str(caught.value)
 
 
+def test_object_store_retry_wait_settings() -> None:
+    # Codex 審查第 6 點：物件儲存的退避起點、上限、抖動與 Retry-After 上限都從設定來。
+    defaults = load_settings({"DATABASE_URL": DB_URL})
+    custom = load_settings(
+        {
+            "DATABASE_URL": DB_URL,
+            "RADAR_OBJECT_STORE_RETRY_WAIT_INITIAL": "2",
+            "RADAR_OBJECT_STORE_RETRY_WAIT_MAX": "40",
+            "RADAR_OBJECT_STORE_RETRY_WAIT_JITTER": "0",
+            "RADAR_OBJECT_STORE_RETRY_AFTER_MAX": "90",
+        }
+    )
+
+    assert (
+        defaults.object_store_retry_wait_initial,
+        defaults.object_store_retry_wait_max,
+        defaults.object_store_retry_wait_jitter,
+        defaults.object_store_retry_after_max,
+    ) == (0.5, 5.0, 0.5, 30)
+    assert (
+        custom.object_store_retry_wait_initial,
+        custom.object_store_retry_wait_max,
+        custom.object_store_retry_wait_jitter,
+        custom.object_store_retry_after_max,
+    ) == (2.0, 40.0, 0.0, 90)
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("RADAR_OBJECT_STORE_RETRY_WAIT_INITIAL", "0"),
+        ("RADAR_OBJECT_STORE_RETRY_WAIT_MAX", "301"),
+        ("RADAR_OBJECT_STORE_RETRY_WAIT_JITTER", "-1"),
+        ("RADAR_OBJECT_STORE_RETRY_AFTER_MAX", "-1"),
+        ("RADAR_OBJECT_STORE_RETRY_AFTER_MAX", "601"),
+    ],
+)
+def test_object_store_retry_wait_out_of_range_is_config_error(name: str, value: str) -> None:
+    with pytest.raises(ConfigError) as caught:
+        load_settings({"DATABASE_URL": DB_URL, name: value})
+
+    assert name in str(caught.value)
+
+
 def test_worker_connection_split_default_is_2_1_3() -> None:
     split = worker_connection_split(load_settings({"DATABASE_URL": DB_URL}))
 

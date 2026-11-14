@@ -3,6 +3,9 @@
 - boto3 client 由 `create_s3_client` 建：端點、區域、金鑰、逾時都明確傳入（不讀 AWS 的環境變數
   與設定檔裡的金鑰），botocore 自己的重試關掉（`total_max_attempts=1`）。
 - 連線錯誤、逾時、5xx、429／SlowDown 由這裡的 stamina 重試，最多 `attempts` 次（含第一次）。
+  錯誤回應帶 `Retry-After` 時照它等，但最多 `retry_after_max` 秒；沒帶就指數退避：從
+  `wait_initial` 秒開始、每次加倍、最多 `wait_max` 秒，再加 0～`wait_jitter` 秒的抖動。
+- 等待與次數的預設值和 `Settings` 的 `object_store_*` 一致；正式程式由 `bootstrap.py` 從設定傳入。
 - 讀不到的鍵丟 `ObjectNotFoundError`。
 """
 
@@ -22,6 +25,7 @@ from botocore.exceptions import (
     ResponseStreamingError,
 )
 
+from radar.adapters.heartbeat import parse_retry_after
 from radar.domain.storage_keys import ObjectNotFoundError
 
 # 這些錯誤碼不論狀態碼都值得再試一次（S3／R2 的節流與暫時性錯誤）。
@@ -96,6 +100,7 @@ class S3ObjectStore:
         wait_initial: float = 0.5,
         wait_max: float = 5.0,
         wait_jitter: float = 0.5,
+        retry_after_max: float = 30.0,
     ) -> None:
         if not bucket:
             raise ValueError("bucket 不能是空的")
@@ -105,6 +110,7 @@ class S3ObjectStore:
         self._wait_initial = wait_initial
         self._wait_max = wait_max
         self._wait_jitter = wait_jitter
+        self._retry_after_max = retry_after_max
 
     def put(self, key: str, data: bytes, *, content_type: str) -> None:
         self._with_retry(
@@ -132,9 +138,21 @@ class S3ObjectStore:
                 raise ObjectNotFoundError(key) from None
             raise
 
+    def _backoff(self, error: Exception) -> bool | float:
+        """stamina 的退避判斷：不重試回 False；照一般退避回 True；照 `Retry-After` 回秒數。
+
+        `Retry-After` 的秒數最多 `retry_after_max`（對方給極大值時不卡住工作）。
+        """
+        if not is_retryable(error):
+            return False
+        retry_after = parse_retry_after(_retry_after_header(error))
+        if retry_after is None:
+            return True
+        return min(retry_after, self._retry_after_max)
+
     def _with_retry[T](self, operation: Callable[[], T]) -> T:
         for attempt in stamina.retry_context(
-            on=is_retryable,
+            on=self._backoff,
             attempts=self._attempts,
             timeout=None,
             wait_initial=self._wait_initial,
@@ -144,3 +162,19 @@ class S3ObjectStore:
             with attempt:
                 return operation()
         raise AssertionError("stamina 用完次數時會丟出最後一個例外，不會走到這裡")
+
+
+def _retry_after_header(error: Exception) -> str | None:
+    """錯誤回應的 `Retry-After` 標頭；不是錯誤回應或沒帶時是 None。
+
+    botocore 通常把標頭名稱轉成小寫，這裡不分大小寫比對。
+    """
+    if not isinstance(error, ClientError):
+        return None
+    headers = error.response.get("ResponseMetadata", {}).get("HTTPHeaders", {})
+    if not isinstance(headers, dict):
+        return None
+    for name, value in headers.items():
+        if str(name).lower() == "retry-after":
+            return str(value)
+    return None

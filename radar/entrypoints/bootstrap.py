@@ -198,4 +198,12 @@ def build_object_store(settings: Settings) -> S3ObjectStore:
         secret_access_key=secret_access_key.get_secret_value(),
         timeout=settings.object_store_timeout,
     )
-    return S3ObjectStore(client, bucket, attempts=settings.object_store_attempts)
+    return S3ObjectStore(
+        client,
+        bucket,
+        attempts=settings.object_store_attempts,
+        wait_initial=settings.object_store_retry_wait_initial,
+        wait_max=settings.object_store_retry_wait_max,
+        wait_jitter=settings.object_store_retry_wait_jitter,
+        retry_after_max=settings.object_store_retry_after_max,
+    )

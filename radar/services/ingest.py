@@ -14,8 +14,10 @@ from radar.domain.domain_config import Journal, OpenAlexQuota
 from radar.domain.permissions import Action, require
 from radar.domain.raw_records import (
     ApiCall,
+    ApiUsage,
     JournalQuery,
     PaperSourceError,
+    QuotaReachedError,
     RawRecord,
     compress_raw,
 )
@@ -73,45 +75,47 @@ def fetch_journal(
 ) -> JournalFetchResult:
     """從 `cursor`（None＝第一頁）起，把這本期刊一頁一頁抓完。每一頁：
 
-    1. 短交易讀今天（UTC）的用量＝max(今天 `cost_usd` 的總和, 最新一筆回報的「上限 − 剩餘」)；
-       到 `daily_budget_usd × stop_at_ratio` 就寫警告、回傳 `stopped_for_quota=True` 與當下的
-       cursor，不丟例外、不再呼叫。
+    1. 短交易讀今天（UTC）的用量＝max(今天 `cost_usd` 的總和, 最新一筆回報的「上限 − 剩餘」
+       ＋那一筆之後的 `cost_usd`)；到 `daily_budget_usd × stop_at_ratio` 就寫警告、回傳
+       `stopped_for_quota=True` 與當下的 cursor，不丟例外、不再呼叫。
     2. 呼叫 source。
     3. 不論成功或 `PaperSourceError`，這次的 `calls` 都用自己的短交易立刻寫進 `api_call`
-       （失敗時寫完再原樣往上丟）。
+       （失敗時寫完再原樣往上丟）。source 在重試途中發現額度已到（`QuotaReachedError`）時，
+       寫完 `calls` 後和第 1 步一樣寫警告、回傳 `stopped_for_quota=True` 與這一頁的 cursor。
     4. 短交易查出哪些內容（sha256）已經存過；其餘的（同頁重複只算一次）壓縮後 put 進物件儲存。
     5. 一個交易寫這一頁的 `raw_fetch` 列（同一個來源、外部鍵、抓取時間已經有了就略過）。
+    6. 下一頁的 cursor 是這一輪已經送過的（例如 A → B → A 繞圈）就丟 `PaperSourceError`，
+       不然費用為零又沒有額度回報時會一直繞下去。
 
     先 put 再寫 `raw_fetch`：中途當掉時下次會再 put 一次同樣的位元組（無害），不會有
     「有列沒物件」。
 
     Raises:
         PermissionDeniedError: `actor` 不是系統工作（不碰資料庫與 source）。
-        PaperSourceError: source 抓取失敗（`api_call` 已經寫好）。
+        PaperSourceError: source 抓取失敗（`api_call` 已經寫好），或 cursor 繞回這一輪送過的。
     """
     require(actor, Action.INGEST_PAPERS, None)
     viewer = SystemViewer()
     query = JournalQuery(issn_l=journal.issn_l, start_year=start_year)
     pages = records = stored = reused = 0
     stopped_for_quota = False
+    sent_cursors: set[str | None] = {cursor}
 
     while True:
-        with database.transaction() as connection:
-            usage = get_api_usage_since(viewer, connection, source.name, start_of_utc_day(clock()))
+        usage = _read_usage(database, viewer, source, clock)
         if usage.used_usd >= quota.stop_at_usd:
-            log.warning(
-                "今天的 API 額度用到設定的比例，先停下",
-                source=source.name.value,
-                journal=journal.key,
-                used_usd=str(usage.used_usd),
-                daily_budget_usd=str(quota.daily_budget_usd),
-                stop_at_ratio=str(quota.stop_at_ratio),
-            )
+            _warn_quota_stop(source, journal, quota, usage)
             stopped_for_quota = True
             break
 
         try:
             page = source.fetch_journal_page(query, cursor)
+        except QuotaReachedError as exc:
+            # 對方在重試途中就說額度到了：照額度停下處理，不算失敗（ADR-0021）。
+            _record_calls(database, exc.calls)
+            _warn_quota_stop(source, journal, quota, _read_usage(database, viewer, source, clock))
+            stopped_for_quota = True
+            break
         except PaperSourceError as exc:
             _record_calls(database, exc.calls)
             raise
@@ -129,6 +133,10 @@ def fetch_journal(
         cursor = page.next_cursor
         if cursor is None:
             break
+        if cursor in sent_cursors:
+            # 訊息不帶 cursor 的值：固定句子就夠，也不會意外帶出任何秘密。
+            raise PaperSourceError("下一頁的 cursor 繞回這一輪已經抓過的頁")
+        sent_cursors.add(cursor)
 
     result = JournalFetchResult(
         journal_key=journal.key,
@@ -151,6 +159,27 @@ def fetch_journal(
         stopped_for_quota=stopped_for_quota,
     )
     return result
+
+
+def _read_usage(
+    database: Database, viewer: SystemViewer, source: PaperSource, clock: Callable[[], datetime]
+) -> ApiUsage:
+    """短交易讀今天（UTC）這個來源的用量。"""
+    with database.transaction() as connection:
+        return get_api_usage_since(viewer, connection, source.name, start_of_utc_day(clock()))
+
+
+def _warn_quota_stop(
+    source: PaperSource, journal: Journal, quota: OpenAlexQuota, usage: ApiUsage
+) -> None:
+    log.warning(
+        "今天的 API 額度用到設定的比例，先停下",
+        source=source.name.value,
+        journal=journal.key,
+        used_usd=str(usage.used_usd),
+        daily_budget_usd=str(quota.daily_budget_usd),
+        stop_at_ratio=str(quota.stop_at_ratio),
+    )
 
 
 def _record_calls(database: Database, calls: Sequence[ApiCall]) -> None:

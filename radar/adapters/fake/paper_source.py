@@ -4,6 +4,9 @@
 - 每次請求記在 `requests`；每頁（含失敗的那次）回一筆 `ApiCall`。
 - `fail_once(issn_l, page_number)`：那本期刊第 N 頁（從 1 起算）的下一次請求丟一次
   `PaperSourceError`（帶那一筆 `ApiCall`），之後照常回傳；用來模擬中斷後續跑。
+- `point_next_cursor(issn_l, page_number, target_page)`：那本期刊第 N 頁的 `next_cursor` 改指向
+  第 `target_page` 頁（都從 1 起算；第 1 頁沒有自己的 cursor，所以目標至少是 2）；用來模擬
+  對方的 cursor 繞圈（例如 * → A → B → A）。
 - 沒列的期刊回一頁空結果。
 """
 
@@ -55,12 +58,21 @@ class FakePaperSource:
         self.limit_usd = limit_usd
         self._clock = clock
         self._failures: set[tuple[str, int]] = set()
+        self._next_page_overrides: dict[tuple[str, int], int] = {}
 
     def fail_once(self, issn_l: str, page_number: int) -> None:
         """那本期刊第 `page_number` 頁（從 1 起算）的下一次請求丟一次 `PaperSourceError`。"""
         if page_number < 1:
             raise ValueError("page_number 從 1 起算")
         self._failures.add((issn_l, page_number))
+
+    def point_next_cursor(self, issn_l: str, page_number: int, target_page: int) -> None:
+        """那本期刊第 `page_number` 頁的 `next_cursor` 改指向第 `target_page` 頁（從 1 起算）。"""
+        if page_number < 1:
+            raise ValueError("page_number 從 1 起算")
+        if target_page < 2:
+            raise ValueError("target_page 至少是 2（第 1 頁沒有自己的 cursor）")
+        self._next_page_overrides[(issn_l, page_number)] = target_page
 
     def fetch_journal_page(self, query: JournalQuery, cursor: str | None) -> SourcePage:
         self.requests.append(FakeRequest(query, cursor))
@@ -90,8 +102,13 @@ class FakePaperSource:
 
         book = self.pages.get(query.issn_l, [])
         records = book[index] if index < len(book) else ()
-        has_next = index + 1 < len(book)
-        next_cursor = f"{CURSOR_PREFIX}:{query.issn_l}:{index + 1}" if has_next else None
+        target = self._next_page_overrides.get((query.issn_l, index + 1))
+        if target is not None:
+            next_cursor: str | None = _cursor(query.issn_l, target - 1)
+        elif index + 1 < len(book):
+            next_cursor = _cursor(query.issn_l, index + 1)
+        else:
+            next_cursor = None
         return SourcePage(records, next_cursor, (call,))
 
     @staticmethod
@@ -103,3 +120,8 @@ class FakePaperSource:
         if prefix != CURSOR_PREFIX or cursor_issn != issn_l or not number.isdigit():
             raise ValueError(f"不是這本期刊的 cursor：{cursor!r}")
         return int(number)
+
+
+def _cursor(issn_l: str, index: int) -> str:
+    """第 `index + 1` 頁（`index` 從 0 起算）的 cursor。"""
+    return f"{CURSOR_PREFIX}:{issn_l}:{index}"

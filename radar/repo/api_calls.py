@@ -61,8 +61,12 @@ api_call_table = Table(
 def get_api_usage_since(
     viewer: SystemViewer, connection: Connection, source: RawSource, since: datetime
 ) -> ApiUsage:
-    """`since`（含）之後這個來源的用量：本地 `cost_usd` 的總和，與最新一筆回報的
-    「上限 − 剩餘」（沒有回報時是 None）。
+    """`since`（含）之後這個來源的用量（ADR-0021）：
+
+    - `local_cost_usd`：本地 `cost_usd` 的總和。
+    - `reported_used_usd`：最新一筆有回報的「上限 − 剩餘」，加上排在它之後（`called_at`、`id`
+      的順序）每一筆的 `cost_usd`：之後的呼叫可能沒帶額度標頭，花費要接著累計，不能停在最後
+      一次回報的數字。那一筆自己的花費已經算在對方回報的數字裡，不重複加。沒有回報時是 None。
 
     Raises:
         TypeError: `viewer` 不是 `SystemViewer`。
@@ -71,13 +75,20 @@ def get_api_usage_since(
     row = (
         connection.execute(
             text(
-                "SELECT"
-                " (SELECT COALESCE(sum(cost_usd), 0) FROM api_call"
-                f"   WHERE {visible} AND source = :source AND called_at >= :since) AS local_cost,"
-                " (SELECT limit_usd - remaining_usd FROM api_call"
+                "WITH latest AS ("
+                "   SELECT id, called_at, limit_usd - remaining_usd AS used FROM api_call"
                 f"   WHERE {visible} AND source = :source AND called_at >= :since"
                 "     AND limit_usd IS NOT NULL AND remaining_usd IS NOT NULL"
-                "   ORDER BY called_at DESC, id DESC LIMIT 1) AS reported_used"
+                "   ORDER BY called_at DESC, id DESC LIMIT 1"
+                " )"
+                " SELECT"
+                " (SELECT COALESCE(sum(cost_usd), 0) FROM api_call"
+                f"   WHERE {visible} AND source = :source AND called_at >= :since) AS local_cost,"
+                " (SELECT latest.used + COALESCE(("
+                "     SELECT sum(later.cost_usd) FROM api_call AS later"
+                f"     WHERE {visible} AND later.source = :source"
+                "       AND (later.called_at, later.id) > (latest.called_at, latest.id)"
+                "   ), 0) FROM latest) AS reported_used"
             ),
             {"source": RawSource(source).value, "since": since},
         )

@@ -21,7 +21,12 @@ from radar.adapters.openalex import (
     slice_results,
 )
 from radar.domain.domain_config import OpenAlexConfig
-from radar.domain.raw_records import JournalQuery, PaperSourceError, RawSource
+from radar.domain.raw_records import (
+    JournalQuery,
+    PaperSourceError,
+    QuotaReachedError,
+    RawSource,
+)
 from radar.entrypoints.logging_config import configure_logging
 from radar.ports import PaperSource
 
@@ -338,6 +343,93 @@ def test_retries_exhausted_raise_with_every_call(capsys: pytest.CaptureFixture[s
     assert "api.openalex.example" not in str(caught.value)
     assert caught.value.__cause__ is None
     assert caught.value.__suppress_context__
+
+
+# --- 重試途中額度到了就停（Codex 審查第 1 點）----------------------------------------------
+
+
+def _quota_headers(remaining: str, limit: str = "1", cost: str = "0") -> dict[str, str]:
+    return {
+        "x-ratelimit-cost-usd": cost,
+        "x-ratelimit-remaining-usd": remaining,
+        "x-ratelimit-limit-usd": limit,
+    }
+
+
+def test_exhausted_quota_on_429_stops_retrying_at_once() -> None:
+    # 第一次 429 就回報 limit=1、remaining=0：再試只會繼續被擋，不送滿 attempts 次。
+    seen: list[httpx2.Request] = []
+    responses: list[httpx2.Response | Exception] = [
+        httpx2.Response(429, headers=_quota_headers("0")) for _ in range(5)
+    ]
+
+    with pytest.raises(QuotaReachedError) as caught:
+        _source(_sequence(responses, seen), config=_config()).fetch_journal_page(QUERY, None)
+
+    assert len(seen) == 1
+    [call] = caught.value.calls
+    assert (call.http_status, call.cost_usd, call.remaining_usd, call.limit_usd) == (
+        429,
+        Decimal(0),
+        Decimal(0),
+        Decimal(1),
+    )
+    assert isinstance(caught.value, PaperSourceError)
+    assert FAKE_KEY not in str(caught.value)
+    assert caught.value.__cause__ is None
+
+
+def test_quota_reached_midway_keeps_every_earlier_call() -> None:
+    # 503（沒有額度標頭）之後的 429 回報已用 0.85，到 0.8 的比例：停下，兩次嘗試都帶著。
+    seen: list[httpx2.Request] = []
+    responses: list[httpx2.Response | Exception] = [
+        httpx2.Response(503),
+        httpx2.Response(429, headers=_quota_headers("0.15", cost="0.0001")),
+        _ok(),
+    ]
+
+    with pytest.raises(QuotaReachedError) as caught:
+        _source(_sequence(responses, seen)).fetch_journal_page(QUERY, None)
+
+    assert len(seen) == 2
+    assert [call.http_status for call in caught.value.calls] == [503, 429]
+
+
+def test_remaining_zero_without_limit_also_stops() -> None:
+    seen: list[httpx2.Request] = []
+    responses: list[httpx2.Response | Exception] = [
+        httpx2.Response(503, headers={"x-ratelimit-remaining-usd": "0"}),
+        _ok(),
+    ]
+
+    with pytest.raises(QuotaReachedError):
+        _source(_sequence(responses, seen)).fetch_journal_page(QUERY, None)
+
+    assert len(seen) == 1
+
+
+def test_reported_usage_below_ratio_keeps_retrying() -> None:
+    # 已用 0.7999 還沒到 0.8：照常重試。
+    seen: list[httpx2.Request] = []
+    responses: list[httpx2.Response | Exception] = [
+        httpx2.Response(429, headers=_quota_headers("0.2001")),
+        _ok(),
+    ]
+
+    page = _source(_sequence(responses, seen)).fetch_journal_page(QUERY, None)
+
+    assert len(seen) == 2
+    assert [call.http_status for call in page.calls] == [429, 200]
+
+
+def test_successful_page_is_returned_even_when_quota_is_used_up() -> None:
+    # 成功的那一頁資料照樣交回；下一頁之前由 services 讀用量停下。
+    page = _source(
+        _sequence([_ok(headers=_quota_headers("0", cost="0.0001"))], [])
+    ).fetch_journal_page(QUERY, None)
+
+    assert len(page.records) == 1
+    assert page.calls[0].remaining_usd == Decimal(0)
 
 
 @pytest.mark.parametrize("status", [400, 401, 403, 404, 302])

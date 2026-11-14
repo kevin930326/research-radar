@@ -145,6 +145,49 @@ def test_object_store_client_has_botocore_retries_off() -> None:
     assert store._attempts == settings.object_store_attempts
 
 
+def test_object_store_retry_waits_follow_settings() -> None:
+    # Codex 審查第 6 點：退避起點、上限、抖動、Retry-After 上限由 bootstrap 從設定傳進 adapter。
+    settings = Settings.model_validate(
+        {
+            "database_url": APP_URL,
+            **OBJECT_STORE_ENV,
+            "object_store_attempts": 4,
+            "object_store_retry_wait_initial": 2,
+            "object_store_retry_wait_max": 40,
+            "object_store_retry_wait_jitter": 0,
+            "object_store_retry_after_max": 90,
+        }
+    )
+
+    store = build_object_store(settings)
+
+    assert (
+        store._attempts,
+        store._wait_initial,
+        store._wait_max,
+        store._wait_jitter,
+        store._retry_after_max,
+    ) == (4, 2.0, 40.0, 0.0, 90)
+
+
+def test_object_store_constructor_defaults_match_settings_defaults() -> None:
+    # 預設值寫在兩處（設定與 adapter 的建構子），要一致。
+    defaults = Settings.model_validate({"database_url": APP_URL})
+    store = S3ObjectStore(object(), "radar-test", attempts=3)
+
+    assert (
+        store._wait_initial,
+        store._wait_max,
+        store._wait_jitter,
+        store._retry_after_max,
+    ) == (
+        defaults.object_store_retry_wait_initial,
+        defaults.object_store_retry_wait_max,
+        defaults.object_store_retry_wait_jitter,
+        defaults.object_store_retry_after_max,
+    )
+
+
 def test_api_process_does_not_load_boto3() -> None:
     # api 為了 build_readiness_probes import bootstrap；OpenAlex 與物件儲存的 adapter 在 build_*
     # 函式裡才 import，api 行程不會載入 boto3（約 11 MB，mem_limit 很緊）。

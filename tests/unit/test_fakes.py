@@ -84,6 +84,26 @@ def test_fail_once_page_number_starts_at_one() -> None:
         FakePaperSource().fail_once(ISSN, 0)
 
 
+def test_point_next_cursor_makes_a_cycle() -> None:
+    # * → A → B → A：第 3 頁的 next_cursor 指回第 2 頁（給 services 的跨頁循環測試用）。
+    source = FakePaperSource({ISSN: [[_record(1)], [_record(2)], [_record(3)]]})
+    source.point_next_cursor(ISSN, 3, 2)
+
+    first = source.fetch_journal_page(QUERY, None)
+    second = source.fetch_journal_page(QUERY, first.next_cursor)
+    third = source.fetch_journal_page(QUERY, second.next_cursor)
+    again = source.fetch_journal_page(QUERY, third.next_cursor)
+
+    assert third.next_cursor == first.next_cursor
+    assert [r.external_key for r in again.records] == ["W2"]
+
+
+@pytest.mark.parametrize(("page_number", "target_page"), [(0, 2), (1, 1)])
+def test_point_next_cursor_rejects_bad_pages(page_number: int, target_page: int) -> None:
+    with pytest.raises(ValueError, match="page"):
+        FakePaperSource().point_next_cursor(ISSN, page_number, target_page)
+
+
 def test_cursor_from_another_journal_is_rejected() -> None:
     source = FakePaperSource({ISSN: [[_record(1)], [_record(2)]]})
     cursor = source.fetch_journal_page(QUERY, None).next_cursor

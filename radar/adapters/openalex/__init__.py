@@ -6,6 +6,8 @@
 - 節流：每秒最多 `requests_per_second` 個請求（含重試）。
 - 409、429、5xx、連線錯誤與逾時由 stamina 指數退避重試；帶 `Retry-After` 時照它等，
   最多 `retry_after_max_seconds`。其他 4xx 不重試。
+- 每次可重試的失敗後先看對方回報的額度：「上限 − 剩餘」到 `quota.stop_at_usd` 或剩 0 就不再
+  重試，丟 `QuotaReachedError`（帶著每次嘗試），由 services 照「額度停下」處理、不算失敗。
 - 每次 HTTP 嘗試都記一筆 `ApiCall`；失敗時 `PaperSourceError` 帶著它們。確定沒送出的
   （ConnectError、ConnectTimeout）記 0 元，其他沒有回應標頭的錯誤照預設單價算。
 - 錯誤訊息只有固定的原因（狀態碼、錯誤類別），不含網址與 key：網址裡有 key，重試時 stamina
@@ -32,6 +34,7 @@ from radar.domain.raw_records import (
     ApiCall,
     JournalQuery,
     PaperSourceError,
+    QuotaReachedError,
     RawRecord,
     RawSource,
     SourcePage,
@@ -112,6 +115,7 @@ class OpenAlexSource:
         """抓這本期刊的一頁；`cursor=None` 是第一頁（送 `cursor=*`）。
 
         Raises:
+            QuotaReachedError: 重試途中對方回報額度已到停下的比例；`calls` 帶著每次嘗試。
             PaperSourceError: 重試用完、不重試的狀態碼或回應看不懂；`calls` 帶著每次嘗試。
         """
         sent_cursor = FIRST_CURSOR if cursor is None else cursor
@@ -141,6 +145,8 @@ class OpenAlexSource:
             raise PaperSourceError(
                 f"嘗試 {len(calls)} 次仍失敗（{exc.reason}）", calls=calls
             ) from None
+        except QuotaReachedError as exc:
+            raise QuotaReachedError(exc.reason, calls=calls) from None
         except PaperSourceError as exc:
             raise PaperSourceError(exc.reason, calls=calls) from None
 
@@ -185,8 +191,12 @@ class OpenAlexSource:
             raise PaperSourceError(type(exc).__name__) from None
 
         status = response.status_code
-        calls.append(self._call(status, response.headers))
+        call = self._call(status, response.headers)
+        calls.append(call)
         if status in RETRY_STATUSES or status >= 500:
+            if self._quota_reached(call):
+                # 額度已經到了，再試只會繼續被擋（還可能再扣錢）：停下，交給 services。
+                raise QuotaReachedError(f"HTTP {status}，對方回報的額度已到停下的比例")
             raise RetryableOpenAlexError(
                 f"HTTP {status}",
                 retry_after=parse_retry_after(response.headers.get("Retry-After")),
@@ -194,6 +204,18 @@ class OpenAlexSource:
         if status != 200:
             raise PaperSourceError(f"HTTP {status}")
         return response
+
+    def _quota_reached(self, call: ApiCall) -> bool:
+        """這次回應回報的額度到了沒：剩 0，或「上限 − 剩餘」到 `quota.stop_at_usd`。
+
+        門檻和 services 讀用量時用的是同一條線（`daily_budget_usd × stop_at_ratio`）。
+        """
+        remaining, limit = call.remaining_usd, call.limit_usd
+        if remaining is None:
+            return False
+        if remaining <= 0:
+            return True
+        return limit is not None and limit - remaining >= self._config.quota.stop_at_usd
 
     def _call(
         self, status: int | None, headers: Mapping[str, str], *, cost: Decimal | None = None

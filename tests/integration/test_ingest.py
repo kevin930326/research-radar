@@ -11,14 +11,19 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from pathlib import Path
 from typing import Any
 
+import httpx2
 import psycopg
 import pytest
+import stamina
 from sqlalchemy import Connection
 from structlog.testing import capture_logs
 
 from radar.adapters.fake import FakeObjectStore, FakePaperSource
+from radar.adapters.openalex import OpenAlexSource
+from radar.config import load_domain_config
 from radar.domain.domain_config import Journal, OpenAlexQuota
 from radar.domain.permissions import PermissionDeniedError
 from radar.domain.raw_records import (
@@ -49,6 +54,7 @@ NOW = datetime(2026, 11, 14, 0, 30, tzinfo=UTC)
 T1 = datetime(2026, 11, 7, 3, 0, tzinfo=UTC)
 T2 = T1 + timedelta(days=7)
 SYSTEM = SystemViewer()
+ROOT = Path(__file__).resolve().parents[2]
 
 
 class TrackingDatabase(Database):
@@ -371,6 +377,100 @@ def test_quota_reached_midway_stops_and_resumes(
     ]
 
 
+def test_costs_after_the_latest_report_keep_adding_up(database: Database) -> None:
+    # Codex 審查第 2 點：最新一次回報已用 0.7999，之後兩次各花 0.0001 卻沒帶額度標頭；
+    # 實際至少 0.8001，要在 0.8 停下（不能停在最後一次回報的 0.7999）。
+    _seed_calls(
+        database,
+        # 回報之前的花費已經算在對方回報的數字裡，不能再加一次。
+        _call(NOW - timedelta(minutes=20), "0.0005"),
+        _call(
+            NOW - timedelta(minutes=10),
+            "0.0001",
+            remaining_usd=Decimal("0.2001"),
+            limit_usd=Decimal(1),
+        ),
+        _call(NOW - timedelta(minutes=5), "0.0001"),
+        _call(NOW, "0.0001", http_status=None),
+    )
+
+    with database.transaction() as connection:
+        usage = get_api_usage_since(SYSTEM, connection, RawSource.OPENALEX, start_of_utc_day(NOW))
+
+    assert usage.reported_used_usd == Decimal("0.8001")
+    assert usage.local_cost_usd == Decimal("0.0008")
+    assert usage.used_usd == Decimal("0.8001")
+    source = FakePaperSource({ISSN: [[_record(1)]]})
+    result = _fetch(database, source, FakeObjectStore(), cursor="kept-cursor")
+    assert result.stopped_for_quota
+    assert result.next_cursor == "kept-cursor"
+    assert source.requests == []
+
+
+def _exhausted_quota_source(seen: list[httpx2.Request]) -> OpenAlexSource:
+    """真的 OpenAlex adapter（MockTransport，不連網路）。
+
+    每次都回 429、回報 limit=1、remaining=0。
+    """
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        seen.append(request)
+        headers = {
+            "x-ratelimit-cost-usd": "0",
+            "x-ratelimit-remaining-usd": "0",
+            "x-ratelimit-limit-usd": "1",
+        }
+        return httpx2.Response(429, headers=headers)
+
+    # 用 repo 的 config/openalex.yaml（重試 5 次），證明不是靠把次數調低才停下。
+    config = load_domain_config({"RADAR_CONFIG_DIR": str(ROOT / "config")}).openalex
+    assert config.retry.attempts == 5
+    return OpenAlexSource(
+        "fake-review-key",
+        config,
+        transport=httpx2.MockTransport(handler),
+        sleep=lambda _seconds: None,
+        clock=lambda: NOW,
+    )
+
+
+def test_quota_exhausted_during_retries_is_a_quota_stop_not_a_failure(
+    ingest_db: TestDatabase, database: Database
+) -> None:
+    # Codex 審查第 1 點：首次 429 就回報額度用完。不送滿 5 次、不丟 PaperSourceError；
+    # 這次呼叫照樣記進 api_call，回傳正常的「額度停下」結果。
+    seen: list[httpx2.Request] = []
+    with (
+        stamina.set_testing(True, attempts=100, cap=True),
+        _exhausted_quota_source(seen) as source,
+        capture_logs() as logs,
+    ):
+        result = fetch_journal(
+            SYSTEM,
+            database,
+            source,
+            FakeObjectStore(),
+            JOURNAL,
+            start_year=2016,
+            quota=QUOTA,
+            cursor="kept-cursor",
+            clock=lambda: NOW,
+        )
+
+    assert len(seen) == 1
+    assert (result.stopped_for_quota, result.next_cursor, result.pages) == (
+        True,
+        "kept-cursor",
+        0,
+    )
+    assert _rows(
+        ingest_db, "SELECT http_status, cost_usd, remaining_usd, limit_usd FROM api_call"
+    ) == [(429, Decimal(0), Decimal(0), Decimal(1))]
+    [warning] = [log for log in logs if log["log_level"] == "warning"]
+    assert warning["used_usd"] == "1.000000"
+    assert "fake-review-key" not in str(logs)
+
+
 # --- 失敗、身分、交易 ---------------------------------------------------------------------
 
 
@@ -388,6 +488,54 @@ def test_fetch_failure_commits_calls_then_reraises(
         503,
     ]
     assert [row[0] for row in _rows(ingest_db, "SELECT external_key FROM raw_fetch")] == ["W1"]
+
+
+class BoundedSource(FakePaperSource):
+    """請求超過 `limit` 次就丟 AssertionError：拿掉循環檢查時測試會失敗，不會卡住。"""
+
+    limit = 10
+
+    def fetch_journal_page(self, query: JournalQuery, cursor: str | None) -> SourcePage:
+        if len(self.requests) >= self.limit:
+            raise AssertionError("請求太多次：cursor 繞圈沒有被擋下")
+        return super().fetch_journal_page(query, cursor)
+
+
+def test_cursor_cycle_across_pages_is_an_error(ingest_db: TestDatabase, database: Database) -> None:
+    # Codex 審查第 5 點：* → A → B → A。費用為零、沒有額度回報，不擋就會一直繞。
+    source = BoundedSource({ISSN: [[_record(1)], [_record(2)], [_record(3)]]}, cost_usd=Decimal(0))
+    source.point_next_cursor(ISSN, 3, 2)
+
+    with pytest.raises(PaperSourceError, match="繞回") as caught:
+        _fetch(database, source, FakeObjectStore())
+
+    cursors = [request.cursor for request in source.requests]
+    assert len(cursors) == 3
+    assert cursors[0] is None
+    assert len(set(cursors)) == 3
+    for cursor in cursors[1:]:
+        assert cursor is not None
+        assert cursor not in str(caught.value)
+    # 已經抓到的三頁照樣存好、每次呼叫都記了。
+    assert sorted(row[0] for row in _rows(ingest_db, "SELECT external_key FROM raw_fetch")) == [
+        "W1",
+        "W2",
+        "W3",
+    ]
+    assert len(_rows(ingest_db, "SELECT id FROM api_call")) == 3
+
+
+def test_cursor_cycle_back_to_the_starting_cursor_is_an_error(database: Database) -> None:
+    # 從給的 cursor（第 2 頁）續跑時，繞回它自己也要擋。
+    source = BoundedSource({ISSN: [[_record(1)], [_record(2)], [_record(3)]]}, cost_usd=Decimal(0))
+    source.point_next_cursor(ISSN, 3, 2)
+    start = source.fetch_journal_page(JournalQuery(ISSN, 2016), None).next_cursor
+    source.requests.clear()
+
+    with pytest.raises(PaperSourceError, match="繞回"):
+        _fetch(database, source, FakeObjectStore(), cursor=start)
+
+    assert len(source.requests) == 2
 
 
 def test_member_cannot_fetch_and_nothing_is_touched(database: TrackingDatabase) -> None:

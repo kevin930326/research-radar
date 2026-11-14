@@ -147,6 +147,25 @@ deferred:
 
 ## Spec Change Log
 
+### 2026-11-14 — Codex 審查修正（PR #43）
+- **用量公式**（Always「`fetch_journal`」第 (1) 步）：原本是 max(今天 `cost_usd` 總和, 今天最新一筆 `limit_usd − remaining_usd`)；改成 max(今天 `cost_usd` 總和, 今天最新一筆 `limit_usd − remaining_usd`＋排在那一筆之後每一筆的 `cost_usd`)。理由：最新回報之後沒帶額度標頭的呼叫會被漏算（例：回報 0.7999 後再花兩次 0.0001，實際 0.8001 卻判 0.7999，不會在 0.8 停下）。ADR-0021 決定第 4 點同步改寫。
+- **重試途中額度到了**（Always「OpenAlex adapter」與第 (3) 步）：新增 `QuotaReachedError`（`PaperSourceError` 的子類別）。adapter 每次可重試的失敗後看回報的額度，剩 0 或「上限 − 剩餘」到 `stop_at_usd` 就不再重試；`fetch_journal` 收到後先寫 `api_call`，再照「額度停下」回傳（不丟例外）。理由：驗收條件「用量到比例時停下、警告、不算失敗」在重試途中也要成立。
+- **跨頁 cursor 繞圈**：`fetch_journal` 記住這一輪送過的 cursor，重複就丟 `PaperSourceError`。原本 Review Triage Log 把「cursor 繞圈」列為 reject（理由是最壞停在額度比例）；Codex 指出費用為零又沒有額度回報時停不下來，改為修正。
+- **物件儲存重試**（Always「物件儲存」）：錯誤回應的 `Retry-After` 交給 stamina（最多 `object_store_retry_after_max` 秒）；退避起點、上限、抖動與 `Retry-After` 上限改成 `Settings` 的 `object_store_retry_*` 欄位，由 bootstrap 傳入。
+- **錄製設定**（Always「測試」）：秘密標頭改成一份清單 `SECRET_HEADERS`，請求過濾、回應過濾與 cassette 掃描共用；回應也濾掉 `x-api-key`、`api-key`、`authorization`、`proxy-authorization`。
+- **既有測試的修改**（都是加強，沒有放寬任何斷言）：`tests/arch/test_cassettes.py` 的 `FORBIDDEN_HEADERS` 改成 import `vcr_settings.SECRET_HEADERS`（原本 3 個標頭，現在 7 個，是原本的超集合）；`tests/vcr_settings.py` 的 `FILTERED_REQUEST_HEADERS`／`REMOVED_RESPONSE_HEADERS` 由共用清單組成（都是原本的超集合）；`tests/integration/test_object_store_s3.py` 的 `_fail_first` 輔助函式多收一個可省略的「回應標頭」，原本的呼叫方式不變。
+
+## Codex 審查修正（2026-11-14，PR #43）
+
+Codex 審查 6 條意見全部修正；每條都補了「拿掉修正就會失敗」的測試（逐條把修正換回原寫法跑過，對應的測試都失敗）。
+
+1. **[中] 重試期間額度用完仍送滿 5 次、最後算失敗**（`radar/adapters/openalex/__init__.py`、`radar/services/ingest.py`、`radar/domain/raw_records.py`）：adapter 的 `_get_once` 在 409／429／5xx 後先用 `_quota_reached` 看這次回應的回報（剩 0，或「上限 − 剩餘」≥ `quota.stop_at_usd`），到了就丟 `QuotaReachedError`（不重試、帶著這次與之前每次的 `ApiCall`）；`fetch_journal` 收到後寫 `api_call`、重讀用量寫警告、回傳 `stopped_for_quota=True` 與這一頁的 cursor。測試：`tests/unit/test_openalex_adapter.py::test_exhausted_quota_on_429_stops_retrying_at_once`、`test_quota_reached_midway_keeps_every_earlier_call`、`test_remaining_zero_without_limit_also_stops`、`test_reported_usage_below_ratio_keeps_retrying`、`test_successful_page_is_returned_even_when_quota_is_used_up`；`tests/integration/test_ingest.py::test_quota_exhausted_during_retries_is_a_quota_stop_not_a_failure`（真的 adapter＋MockTransport＋真的資料庫，用 repo 的 `config/openalex.yaml` 重試 5 次）。
+2. **[中] 最新回報之後沒有標頭的費用沒累計**（`radar/repo/api_calls.py`）：`get_api_usage_since` 的 `reported_used` 改成「最新一筆回報的 `limit − remaining`＋`(called_at, id)` 排在它之後每一筆的 `cost_usd`」，再和當日本地總和取大；ADR-0021 決定第 4 點同步。測試：`tests/integration/test_ingest.py::test_costs_after_the_latest_report_keep_adding_up`（0.7999 後兩次 0.0001 無標頭 → 0.8001、停下；回報之前的花費不重複加）。
+3. **[中] 回應過濾與掃描漏掉 `X-Api-Key` 等標頭**（`tests/vcr_settings.py`、`tests/arch/test_cassettes.py`）：`SECRET_HEADERS` 一份清單，請求過濾（另加 `user-agent`）、回應過濾、cassette 掃描都 import 它。測試：`tests/arch/test_cassettes.py::test_scanner_catches_secret_response_headers`（回應標頭帶 `fake-review-key`，四種標頭）、`test_scrub_response_removes_secret_headers`、`test_filters_and_scanner_share_one_secret_header_list`。
+4. **[中] S3 重試忽略 `Retry-After`**（`radar/adapters/object_store/__init__.py`）：`S3ObjectStore._backoff` 從 `ClientError.response["ResponseMetadata"]["HTTPHeaders"]` 讀 `Retry-After`（不分大小寫，用心跳 adapter 的 `parse_retry_after`），回傳秒數給 stamina，上限 `retry_after_max`；沒帶或看不懂就照一般退避。測試（攔下 `time.sleep`、關掉 stamina 測試模式，不真的等）：`tests/integration/test_object_store_s3.py::test_429_waits_the_seconds_given_by_retry_after`（等 60 秒）、`test_retry_after_is_capped`、`test_without_retry_after_uses_configured_backoff`、`test_unreadable_retry_after_falls_back_to_backoff`、`test_backoff_reads_retry_after_from_the_error_response`。
+5. **[中] 跨頁 cursor 循環**（`radar/services/ingest.py`、`radar/adapters/fake/paper_source.py`）：`fetch_journal` 用 `sent_cursors` 記住這一輪送過的 cursor（含起始的），下一頁的 cursor 已經送過就丟 `PaperSourceError("下一頁的 cursor 繞回這一輪已經抓過的頁")`（固定句子，不含 cursor 與 key）；已抓到的頁照樣存好。`FakePaperSource` 加 `point_next_cursor` 模擬繞圈。測試：`tests/integration/test_ingest.py::test_cursor_cycle_across_pages_is_an_error`（`* → A → B → A`、費用 0、沒有額度回報；替身超過 10 次請求就丟 AssertionError，拿掉修正時會失敗而不是卡住）、`test_cursor_cycle_back_to_the_starting_cursor_is_an_error`；`tests/unit/test_fakes.py::test_point_next_cursor_makes_a_cycle`、`test_point_next_cursor_rejects_bad_pages`。
+6. **[低] 物件儲存的退避寫死、bootstrap 沒傳**（`radar/domain/settings.py`、`radar/entrypoints/bootstrap.py`、`.env.example`）：`Settings` 加 `object_store_retry_wait_initial`（0.5）、`object_store_retry_wait_max`（5）、`object_store_retry_wait_jitter`（0.5）、`object_store_retry_after_max`（30），`build_object_store` 傳入。放 `Settings` 而不是 `config/openalex.yaml`：同一個 adapter 的 `object_store_attempts`／`object_store_timeout` 與心跳的重試等待都在 `Settings`，`openalex.yaml` 只放 OpenAlex 的領域設定。建構子的預設值保留、和 `Settings` 一致（照 `HttpHeartbeat` 的慣例，有測試守著）。測試：`tests/unit/test_bootstrap.py::test_object_store_retry_waits_follow_settings`、`test_object_store_constructor_defaults_match_settings_defaults`；`tests/unit/test_config.py::test_object_store_retry_wait_settings`、`test_object_store_retry_wait_out_of_range_is_config_error`；上面第 4 點的等待測試證明這些參數真的決定等多久。
+
 ## Review Triage Log
 
 ### 2026-11-14 — Review pass

@@ -27,6 +27,8 @@ class PaperSource(Protocol):
         重試在 adapter 裡做完；回傳的 `calls` 是這一頁每次 HTTP 嘗試的紀錄。
 
         Raises:
+            QuotaReachedError: 重試途中對方回報額度已到停下的比例（`PaperSourceError` 的子類別，
+                不算失敗）；`calls` 帶著每次嘗試的紀錄。
             PaperSourceError: 重試用完、不重試的錯誤或回應看不懂；`calls` 帶著每次嘗試的紀錄。
         """
         ...

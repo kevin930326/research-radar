@@ -3,7 +3,8 @@
 掃每個 `.yaml`／`.yml`／`.json`：
 - 請求網址的查詢參數名稱只能是允許清單（`filter`、`per-page`、`cursor`）；
 - 請求標頭名稱只能是允許清單（`accept`、`accept-encoding`、`connection`、`host`）；
-- 請求與回應都不能有 `Authorization`／`Cookie`／`Set-Cookie` 標頭；
+- 請求與回應都不能有秘密標頭（`Authorization`／`Cookie`／`Set-Cookie`／`X-Api-Key`／`Api-Key`
+  等）：清單是 `tests/vcr_settings.py` 的 `SECRET_HEADERS`，和錄製時的過濾共用同一份；
 - 檔案裡任何地方都不能出現 `api_key`、`mailto` 或 email 格式的字串。
 
 至少要掃到一個檔；掃描函式另外拿故意寫錯的假檔證明逐項抓得到。
@@ -16,6 +17,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, urlsplit
 
+import pytest
 import yaml
 
 from tests import vcr_settings
@@ -24,7 +26,8 @@ from tests.conftest import CASSETTES_DIR
 CASSETTE_SUFFIXES = frozenset({".yaml", ".yml", ".json"})
 ALLOWED_QUERY_PARAMETERS = frozenset({"filter", "per-page", "cursor"})
 ALLOWED_REQUEST_HEADERS = frozenset({"accept", "accept-encoding", "connection", "host"})
-FORBIDDEN_HEADERS = frozenset({"authorization", "cookie", "set-cookie"})
+# 和錄製時的請求、回應過濾共用同一份清單（不另外寫一份，免得兩邊漏得不一樣）。
+FORBIDDEN_HEADERS = vcr_settings.SECRET_HEADERS
 FORBIDDEN_TEXT = re.compile(r"api_key|mailto", re.IGNORECASE)
 EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}")
 
@@ -144,6 +147,49 @@ def test_scanner_catches_each_mistake(tmp_path: Path) -> None:
     assert found["user_agent.yaml"] == [
         "user_agent.yaml：第 1 個請求：請求標頭 'user-agent' 不在允許清單"
     ]
+
+
+FAKE_REVIEW_KEY = "fake-review-key"
+
+
+@pytest.mark.parametrize("header", ["X-Api-Key", "Api-Key", "Authorization", "Proxy-Authorization"])
+def test_scanner_catches_secret_response_headers(tmp_path: Path, header: str) -> None:
+    # Codex 審查第 3 點：回應標頭帶 key 也要抓到（不只請求、不只 cookie）。
+    path = _write(tmp_path / "secret.yaml", [_interaction(headers={header: [FAKE_REVIEW_KEY]})])
+
+    assert cassette_problems(path, base=tmp_path) == [
+        f"secret.yaml：第 1 個請求：有 {header.lower()} 標頭"
+    ]
+
+
+def test_scrub_response_removes_secret_headers() -> None:
+    # 錄下回應前就拿掉：錄好的檔裡不會出現假 key。
+    response = {
+        "headers": {
+            "X-Api-Key": [FAKE_REVIEW_KEY],
+            "api-key": [FAKE_REVIEW_KEY],
+            "Authorization": [f"Bearer {FAKE_REVIEW_KEY}"],
+            "Proxy-Authorization": [FAKE_REVIEW_KEY],
+            "x-ratelimit-cost-usd": ["0.0001"],
+        },
+        "body": {"string": b"{}"},
+    }
+
+    scrubbed = vcr_settings.scrub_response(response)
+
+    assert scrubbed["headers"] == {"x-ratelimit-cost-usd": ["0.0001"]}
+    assert FAKE_REVIEW_KEY not in yaml.safe_dump(scrubbed)
+
+
+def test_filters_and_scanner_share_one_secret_header_list() -> None:
+    # 請求過濾、回應過濾、cassette 掃描用同一份清單，加一個標頭三邊一起生效。
+    secrets = vcr_settings.SECRET_HEADERS
+
+    assert secrets >= {"authorization", "cookie", "set-cookie", "x-api-key", "api-key"}
+    assert all(name == name.lower() for name in secrets)
+    assert FORBIDDEN_HEADERS is secrets
+    assert vcr_settings.REMOVED_RESPONSE_HEADERS is secrets
+    assert set(vcr_settings.vcr_config()["filter_headers"]) >= secrets
 
 
 def test_scanner_reports_unreadable_file(tmp_path: Path) -> None:

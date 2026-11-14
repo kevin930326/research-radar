@@ -118,6 +118,13 @@ class Settings(BaseModel):
     # botocore 自己的重試關掉）。
     object_store_timeout: int = Field(default=10, ge=1, le=300)
     object_store_attempts: int = Field(default=3, ge=1, le=10)
+    # 物件儲存重試的等待（秒，Conventions「重試、逾時、速率」）：一般是指數退避，從 initial 開始
+    # 每次加倍、最多 max，再加 0～jitter 秒的抖動；對方回 429／5xx 並帶 Retry-After 時照它等，
+    # 但最多等 retry_after_max，避免對方給極大值時卡住工作。
+    object_store_retry_wait_initial: float = Field(default=0.5, gt=0, le=60)
+    object_store_retry_wait_max: float = Field(default=5.0, gt=0, le=300)
+    object_store_retry_wait_jitter: float = Field(default=0.5, ge=0, le=60)
+    object_store_retry_after_max: int = Field(default=30, ge=0, le=600)
 
     @field_validator("object_store_endpoint_url")
     @classmethod

@@ -1,9 +1,11 @@
 """S3 相容物件儲存的 adapter 對 moto（在行程裡模擬 S3，不連網路）。
 
 put／get 往返、`ContentType`、找不到丟 `ObjectNotFoundError`；可重試的錯誤由 adapter 的
-stamina 重試，而 botocore 自己不重試（每次嘗試只送一個請求）。
+stamina 重試，而 botocore 自己不重試（每次嘗試只送一個請求）；重試前等多久（`Retry-After`、
+退避設定）攔下 `time.sleep` 檢查，不真的等。
 """
 
+import time
 from collections.abc import Iterator
 from typing import Any
 
@@ -55,6 +57,8 @@ class _Raw:
 def _fail_first(client: Any, operation: str, failures: list[Any]) -> list[str]:
     """`operation` 的前幾次請求在送出前換成 `failures` 裡的結果（回應或例外）。
 
+    回應寫成（狀態碼, 錯誤碼）或（狀態碼, 錯誤碼, 回應標頭）。
+
     回傳每次請求的紀錄。
     """
     seen: list[str] = []
@@ -66,9 +70,10 @@ def _fail_first(client: Any, operation: str, failures: list[Any]) -> list[str]:
         failure = failures.pop(0)
         if isinstance(failure, Exception):
             raise failure
-        status, code = failure
+        status, code, *rest = failure
+        headers = rest[0] if rest else {}
         body = f"<Error><Code>{code}</Code><Message>test</Message></Error>".encode()
-        return AWSResponse(request.url, status, {}, _Raw(body))
+        return AWSResponse(request.url, status, headers, _Raw(body))
 
     client.meta.events.register_first(f"before-send.s3.{operation}", handler)
     return seen
@@ -160,6 +165,89 @@ def test_is_retryable_classification() -> None:
     # 時鐘偏差等幾秒也不會好，不重試。
     assert not is_retryable(client_error("RequestTimeTooSkewed", 403))
     assert not is_retryable(ValueError("x"))
+
+
+# --- 重試前等多久（Codex 審查第 4、6 點）------------------------------------------------------
+
+
+@pytest.fixture
+def waits(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[float]]:
+    """關掉 stamina 的測試模式（它會把等待歸零），改成攔下 sleep、只記秒數。"""
+    slept: list[float] = []
+    monkeypatch.setattr(time, "sleep", slept.append)
+    with stamina.set_testing(False):
+        yield slept
+
+
+def _timed_store(client: Any, *, attempts: int = 2, retry_after_max: float = 120) -> S3ObjectStore:
+    return S3ObjectStore(
+        client,
+        BUCKET,
+        attempts=attempts,
+        wait_initial=2.0,
+        wait_max=3.0,
+        wait_jitter=0.0,
+        retry_after_max=retry_after_max,
+    )
+
+
+def test_429_waits_the_seconds_given_by_retry_after(client: Any, waits: list[float]) -> None:
+    store = _timed_store(client)
+    seen = _fail_first(client, "PutObject", [(429, "SlowDown", {"Retry-After": "60"})])
+
+    store.put(KEY, b"data", content_type=RAW_CONTENT_TYPE)
+
+    assert len(seen) == 2
+    assert waits == [60.0]
+
+
+def test_retry_after_is_capped(client: Any, waits: list[float]) -> None:
+    # 對方給極大值（一天）時最多等 retry_after_max 秒，不卡住工作。
+    store = _timed_store(client, retry_after_max=30)
+    seen = _fail_first(client, "GetObject", [(503, "SlowDown", {"Retry-After": "86400"})])
+    client.put_object(Bucket=BUCKET, Key=KEY, Body=b"data")
+
+    assert store.get(KEY) == b"data"
+    assert len(seen) == 2
+    assert waits == [30.0]
+
+
+def test_without_retry_after_uses_configured_backoff(client: Any, waits: list[float]) -> None:
+    # 從 wait_initial（2）開始每次加倍、最多 wait_max（3）；抖動 0；次數照 attempts。
+    store = _timed_store(client, attempts=4)
+    failures: list[Any] = [(503, "SlowDown"), (429, "TooManyRequests"), (500, "InternalError")]
+    seen = _fail_first(client, "PutObject", failures)
+
+    store.put(KEY, b"data", content_type=RAW_CONTENT_TYPE)
+
+    assert len(seen) == 4
+    assert waits == [2.0, 3.0, 3.0]
+
+
+def test_unreadable_retry_after_falls_back_to_backoff(client: Any, waits: list[float]) -> None:
+    store = _timed_store(client)
+    seen = _fail_first(client, "PutObject", [(429, "SlowDown", {"Retry-After": "soon"})])
+
+    store.put(KEY, b"data", content_type=RAW_CONTENT_TYPE)
+
+    assert len(seen) == 2
+    assert waits == [2.0]
+
+
+def test_backoff_reads_retry_after_from_the_error_response() -> None:
+    store = S3ObjectStore(object(), BUCKET, attempts=3, retry_after_max=120)
+
+    def client_error(status: int, headers: dict[str, str]) -> ClientError:
+        metadata = {"HTTPStatusCode": status, "HTTPHeaders": headers}
+        return ClientError(
+            {"Error": {"Code": "SlowDown"}, "ResponseMetadata": metadata}, "PutObject"
+        )
+
+    assert store._backoff(client_error(429, {"retry-after": "60"})) == 60.0
+    assert store._backoff(client_error(503, {"Retry-After": "500"})) == 120
+    assert store._backoff(client_error(503, {})) is True
+    assert store._backoff(ClientError({"Error": {"Code": "AccessDenied"}}, "PutObject")) is False
+    assert store._backoff(ValueError("x")) is False
 
 
 def test_satisfies_the_object_store_port(client: Any) -> None:
