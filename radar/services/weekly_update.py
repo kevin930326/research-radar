@@ -825,8 +825,9 @@ def _cause_type(exc: BaseException) -> str | None:
 
     只讀 `error_type` 這個屬性，而且只收 Python 類別命名慣例的字串（大寫英文字母開頭、
     只有英文字母與數字、最多 64 字，見 `_CLASS_NAME`）：其他例外剛好有同名屬性、內容卻是
-    訊息、網址、小寫的設定值時一律不收，回 None。這是第二道防線；唯一會設這個屬性的
-    `AdapterSetupError` 填的是 `type(exc).__name__`。不讀例外訊息、`__cause__`、`__context__`。
+    訊息、網址、小寫的設定值時一律不收，回 None。這是第二道防線：目前會設這個屬性的
+    `AdapterSetupError`（worker）與 `ObjectStoreUnavailableError`（物件儲存 adapter）填的都是
+    `type(exc).__name__`。不讀例外訊息、`__cause__`、`__context__`。
     """
     value = getattr(exc, "error_type", None)
     if isinstance(value, str) and _CLASS_NAME.fullmatch(value):
