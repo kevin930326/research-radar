@@ -17,7 +17,7 @@ import re
 from dataclasses import dataclass
 from datetime import timedelta
 
-from radar.domain.jobs import JobSpec
+from radar.domain.jobs import RUN_WEEKLY_UPDATE, JobSpec
 
 # 表名與欄名直接組進 SQL，所以只收小寫識別字（PostgreSQL 的名稱上限 63 個字元）；
 # 開頭要是英文字母，`<表名>_id` 才會是合法的工作參數名稱。
@@ -62,5 +62,16 @@ class SweepEntry:
         return f"{self.table}_id"
 
 
-# 目前還沒有狀態表（`weekly_run`、`upload_item` 等由各自的 Story 建立並加進來）。
-SWEEP_REGISTRY: tuple[SweepEntry, ...] = ()
+# `upload_item` 等之後的狀態表由各自的 Story 加進來。
+SWEEP_REGISTRY: tuple[SweepEntry, ...] = (
+    # 每週更新（Story 1.8、ADR-0025）：`updated_at` 每抓完一頁、額度停下、失敗時都更新，活著的
+    # 工作通常不會被當成卡住（一頁平常幾秒）。最壞時（物件存取每次都照 `Retry-After` 等到上限、
+    # 重試用完）一頁可能超過 2 小時，sweep 會多排一筆；但佇列鎖讓它等前一筆做完、接著看到已保存
+    # 的進度，不會兩個同時抓（ADR-0025 理由 4）。
+    # 失敗會累計（跨工作重試、sweep 補排、下一週 cron 接著同一筆）；到上限
+    # （`weekly_update_max_failures`）那一筆改成 `failed`、移出 `fetching`，sweep 不再補排
+    # （Story 1.11、ADR-0028）。額度停下不算失敗，仍是 `fetching`，每 2 小時補排一次接著抓。
+    SweepEntry(
+        "weekly_run", "status", "fetching", "updated_at", RUN_WEEKLY_UPDATE, timedelta(hours=2)
+    ),
+)

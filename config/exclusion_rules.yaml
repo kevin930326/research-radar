@@ -9,7 +9,8 @@
 #   去頭尾空白。依檔案順序，第一條符合的勝出；rules 可以是空清單（rules: []）。
 #
 # 來源：PRD FR-8 與 OQ-02 寫明的四種非研究文章（Editor's Comments、Research Spotlights、
-# About Our Authors、Erratum）。其他候選（例如 Editorial Board、Corrigendum）等 Kevin 決定。
+# About Our Authors、Erratum），加上 Corrigendum（和 Erratum 同一類；Kevin 2026-11-14 決定，D10）。
+# Editorial Board 不放這裡：OpenAlex 類型是 paratext，交給收錄過濾（Kevin 2026-11-14 決定，D10）。
 # 文章類型不是 article／review 的（例如 paratext）由第一次匯入的收錄過濾擋（Story 1.8）。
 #
 # 規則增減只改這個檔，之後跑 `radar reparse` 生效（不用改程式）。
@@ -26,3 +27,6 @@ rules:
   - reason: erratum
     title_starts_with:
       - Erratum
+  - reason: corrigendum
+    title_starts_with:
+      - Corrigendum

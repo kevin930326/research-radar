@@ -5,6 +5,8 @@
   `create_manual`（還沒有呼叫端，不建）。
 - 摘要和論文欄位一起在 `upsert_by_external_id` 裡寫（同一個「舊的不蓋掉新的」保護）；同一篇
   最多一筆 `is_current`，由這裡依 `ABSTRACT_SOURCE_PRIORITY` 決定。
+- `first_snapshot_id` 只由 `update_papers_first_snapshot` 寫（每週更新的套用交易呼叫，AD-19、
+  ADR-0011「快照」第 3 點）；`upsert_by_external_id` 不碰這個欄位。
 - 關鍵字由 `update_paper_keywords` 整批覆寫（每週套用與 `reparse` 在不是 STALE 時呼叫）。
   這個模組只寫 `paper_keyword`、不讀它（讀的查詢只放之後的 `repo/keyword_stats.py`，AD-31）。
 - `lab_visible` 只由這個模組寫：追蹤範圍內的論文、引用擴展（之後加上傳批次勾了分享）設為真，
@@ -56,7 +58,8 @@ from radar.repo.visibility import visible_papers
 
 log = structlog.get_logger(__name__)
 
-# --- 表的定義（`alembic check` 拿來和資料庫比對；遷移 0003 建表、0005 加欄位與兩張表） -------
+# --- 表的定義（`alembic check` 拿來和資料庫比對；遷移 0003 建表、0005 加欄位與兩張表、0007 加
+# `first_snapshot_id`、0009 加 `source_changed_at`） -----------------------------------------
 
 _EMPTY_TEXT_ARRAY = text("'{}'::text[]")
 
@@ -87,6 +90,11 @@ paper_table = Table(
     Column("cited_by_count", Integer),
     # 目前這份資料的指紋（AD-25，`domain/fingerprints.py`）。
     Column("source_hash", Text),
+    # 由遷移 0007 加（Story 1.9）：第一次被算進哪一個快照；只由 `update_papers_first_snapshot` 寫。
+    Column("first_snapshot_id", Uuid, ForeignKey("snapshot.id"), index=True),
+    # 由遷移 0009 加（Story 1.11）：寫入時 `source_hash` 變了的最後時間；NULL＝寫入以來沒變過。
+    # 只由 `_update_existing` 寫（ADR-0028）。
+    Column("source_changed_at", DateTime(timezone=True)),
     CheckConstraint(
         "origin IN ('tracked', 'expansion', 'import', 'manual')",
         name="origin",
@@ -170,7 +178,8 @@ UPSERT_ORIGINS = frozenset({PaperOrigin.TRACKED, PaperOrigin.EXPANSION, PaperOri
 _PAPER_COLUMNS = (
     "id, origin, title, publication_year, journal_issn_l, in_scope, excluded_reason,"
     " openalex_fetched_at, created_at, updated_at, authors, volume, issue, first_page,"
-    " last_page, work_type, is_retracted, referenced_works, cited_by_count, source_hash"
+    " last_page, work_type, is_retracted, referenced_works, cited_by_count, source_hash,"
+    " source_changed_at"
 )
 
 # 每個資料來源寫的是哪一種摘要來源（沒有摘要時刪掉的就是這一列）。
@@ -214,6 +223,7 @@ def get_paper(viewer: Viewer, connection: Connection, paper_id: uuid.UUID) -> St
         referenced_works=tuple(row["referenced_works"]),
         cited_by_count=row["cited_by_count"],
         source_hash=row["source_hash"],
+        source_changed_at=row["source_changed_at"],
     )
 
 
@@ -279,6 +289,11 @@ def upsert_by_external_id(
     CREATED／UPDATED 時一併寫摘要（`_write_abstract`）：有摘要就「有就更新、沒有才新增」這個
     來源的那一列，沒有摘要就刪掉這個來源的那一列，接著重新決定這篇的 `is_current`。
     STALE 時論文、識別碼、摘要都不寫。關鍵字不在這裡寫（`update_paper_keywords`）。
+
+    UPDATED 時比對舊的 `source_hash`：變了（含原本是 NULL）就寫 `source_changed_at`（拿到論文
+    列鎖之後的 `clock_timestamp()`）、結果的 `source_changed` 為真（每週更新與 `reparse` 都經
+    這裡，所以都會記；ADR-0028）。
+    CREATED 時 `source_changed_at` 留 NULL、`source_changed` 為假。
 
     交易隔離層級要是 READ COMMITTED（PostgreSQL 預設）：第 3 步「退回再重查」靠每個語句重新拿
     快照才讀得到並行交易剛 commit 的論文；改成 REPEATABLE READ／SERIALIZABLE 會失效。
@@ -442,13 +457,23 @@ def _update_existing(
 ) -> UpsertResult:
     """先鎖住論文再比抓取時間；比較舊就不寫（`stale`，不掛識別碼、不回報衝突），
     否則更新並掛上還沒有主人的識別碼。
+
+    鎖論文時一起讀舊的 `source_hash`：要寫的不同（含舊的是 NULL）就把 `source_changed_at` 設成
+    `clock_timestamp()`、結果的 `source_changed` 為真；相同就保留原值（ADR-0028）。被引用次數、
+    關鍵字不在指紋裡，只改它們不算變動。
+
+    用 `clock_timestamp()`（這一句執行的時間）不用 `now()`（交易開始的時間）：這一句在拿到論文的
+    列鎖之後才執行。等著每週套用放鎖的寫入，記下的時間會晚於那次快照的 `as_of`（也是
+    `clock_timestamp()`，在同一個套用交易的最後），不會因為交易開得早而落在快照之前被漏掉
+    （Story 1.11 Codex C3）。
     """
-    stored: datetime | None = connection.execute(
-        text("SELECT openalex_fetched_at FROM paper WHERE id = :id FOR UPDATE"),
+    stored, stored_hash = connection.execute(
+        text("SELECT openalex_fetched_at, source_hash FROM paper WHERE id = :id FOR UPDATE"),
         {"id": paper_id},
-    ).scalar_one()
+    ).one()
     if stored is not None and fetched_at < stored:
         return UpsertResult(paper_id, UpsertOutcome.STALE)
+    source_changed = stored_hash != values["source_hash"]
 
     connection.execute(
         text(
@@ -470,10 +495,12 @@ def _update_existing(
             " referenced_works = CAST(:referenced_works AS text[]),"
             " cited_by_count = :cited_by_count,"
             " source_hash = :source_hash,"
+            " source_changed_at = CASE WHEN :source_changed THEN clock_timestamp()"
+            " ELSE source_changed_at END,"
             " updated_at = now()"
             " WHERE id = :id"
         ),
-        {**values, "id": paper_id},
+        {**values, "id": paper_id, "source_changed": source_changed},
     )
 
     conflicts: list[ExternalId] = []
@@ -486,7 +513,9 @@ def _update_existing(
         if owner != paper_id:
             _warn_conflict(paper_id, external_id, owner)
             conflicts.append(external_id)
-    return UpsertResult(paper_id, UpsertOutcome.UPDATED, tuple(conflicts))
+    return UpsertResult(
+        paper_id, UpsertOutcome.UPDATED, tuple(conflicts), source_changed=source_changed
+    )
 
 
 def _write_abstract(connection: Connection, paper_id: uuid.UUID, paper: ParsedPaper) -> None:
@@ -590,6 +619,27 @@ def update_paper_keywords(
             "names": [keyword.display_name for keyword in keywords],
         },
     )
+
+
+def update_papers_first_snapshot(connection: Connection, snapshot_id: uuid.UUID) -> int:
+    """把還沒有著落的追蹤範圍內論文一律指到這個快照；回傳指了幾篇（AD-19、ADR-0011 快照第 3 點）。
+
+    「還沒有著落」：`in_scope` 為真，而 `first_snapshot_id` 是 NULL 或指向狀態不是 `published` 的
+    快照（例如上一次失敗的）。已經指到已發佈快照的論文不動，範圍外的論文不指。
+
+    只有每週更新的套用交易呼叫（架構測試守著）；在呼叫端開好的交易裡做，不 commit。
+    """
+    rows = connection.execute(
+        text(
+            "UPDATE paper SET first_snapshot_id = :snapshot_id, updated_at = now()"
+            " WHERE in_scope"
+            " AND first_snapshot_id IS DISTINCT FROM :snapshot_id"
+            " AND (first_snapshot_id IS NULL OR first_snapshot_id IN"
+            " (SELECT id FROM snapshot WHERE status <> 'published'))"
+        ),
+        {"snapshot_id": snapshot_id},
+    )
+    return rows.rowcount
 
 
 def _warn_conflict(paper_id: uuid.UUID, external_id: ExternalId, owner: uuid.UUID) -> None:

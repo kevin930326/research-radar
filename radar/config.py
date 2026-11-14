@@ -16,6 +16,7 @@ from radar.domain.domain_config import (
     KeywordSourcesConfig,
     OpenAlexConfig,
 )
+from radar.domain.import_report import ImportBaseline
 from radar.domain.jobs import scheduled_jobs
 from radar.domain.settings import MigrationSettings, Settings, heartbeat_url_field
 
@@ -154,6 +155,8 @@ JOURNALS_FILE = "journals.yaml"
 OPENALEX_FILE = "openalex.yaml"
 EXCLUSION_RULES_FILE = "exclusion_rules.yaml"
 KEYWORD_SOURCES_FILE = "keyword_sources.yaml"
+# OQ-02 的基準篇數：只有 `radar weekly-run report` 讀；不放進 DomainConfig，api、worker 不讀。
+IMPORT_BASELINE_FILE = "import_baseline.yaml"
 
 
 def config_dir(environ: Mapping[str, str] | None = None) -> Path:
@@ -197,6 +200,21 @@ def load_domain_config(environ: Mapping[str, str] | None = None) -> DomainConfig
         exclusion_rules=exclusion_rules,
         keyword_sources=keyword_sources,
     )
+
+
+def load_import_baseline(environ: Mapping[str, str] | None = None) -> ImportBaseline:
+    """讀 `RADAR_CONFIG_DIR` 下的 `import_baseline.yaml`（OQ-02 的各期刊各年篇數）並驗證。
+
+    讀法與錯誤格式和 `load_domain_config` 相同（「檔名：欄位路徑：原因」）。
+
+    Raises:
+        ConfigError: 缺檔、不是合法 YAML、鍵寫兩次或內容不對。
+    """
+    problems: list[str] = []
+    baseline = _load_yaml_model(config_dir(environ), IMPORT_BASELINE_FILE, ImportBaseline, problems)
+    if problems or baseline is None:
+        raise ConfigError(problems)
+    return baseline
 
 
 def _load_yaml_model[T: BaseModel](

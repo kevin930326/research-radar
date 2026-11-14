@@ -12,9 +12,10 @@ from radar.domain.papers import ParsedPaper
 
 
 class StagingKind(StrEnum):
-    """哪一種工作放的暫存列（`ingest_staging.kind`）。Story 1.8 加 `weekly_update`。"""
+    """哪一種工作放的暫存列（`ingest_staging.kind`）。"""
 
     REPARSE = "reparse"
+    WEEKLY_UPDATE = "weekly_update"
 
 
 @dataclass(frozen=True)

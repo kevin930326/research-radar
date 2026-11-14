@@ -30,6 +30,11 @@
 | [0021](0021-openalex-fetch-and-raw-storage.md) | OpenAlex 只篩期刊與年份、原始資料從回應原文切出每一篇的位元組；用量取本地加總與 OpenAlex 回報的較大者；去重看 `raw_fetch`、先存物件再寫列；領域設定 `config/*.yaml` 啟動時驗證 | 已接受（Kevin 2026-11-14） | AD-2、AD-18、AD-25、AD-29 |
 | [0022](0022-parsing-and-reparse.md) | OpenAlex 的解析是純函式、看不懂整篇略過；指紋 `source_hash` 的欄位與序列化；摘要在寫入函式裡寫、來源不再提供就刪、優先順序先寫成常數；排除規則的格式與正規化；`radar reparse` 只更新已匯入的論文、先放暫存表再一個交易套用 | 已接受（Kevin 2026-11-14） | AD-5、AD-7、AD-25、AD-31 |
 | [0023](0023-compose-file-at-repo-root.md) | 本機開發的 compose 檔放在 repo 根目錄 `compose.yaml`（`docker compose up` 不用加 `-f`）；`deploy/` 放 crontab、正式主機的 compose 等部署用的檔案 | 已接受（Kevin 2026-11-14） | AD-17 |
+| [0024](0024-secrets-into-containers.md) | 秘密進容器：api、worker 讀選填的 `.env.radar`（範本只有名稱、值全空），不讀整個 `.env`；正式主機的做法留到 3.19 | 提議 | AD-17、AD-29 |
+| [0025](0025-weekly-update-fetch-and-resume.md) | 每週更新的抓取：兩個工作＋佇列鎖、`fetching` 最多一筆；每本期刊每頁一個交易記進度並 upsert 暫存列（`batch_id`＝`weekly_run.id`）；收錄過濾在暫存前；sweep 時限 2 小時；1.8 停在 `fetching` | 提議 | AD-14、AD-19、AD-25 |
+| [0026](0026-weekly-update-apply-snapshot-and-report.md) | 每週更新的套用：接在同一個工作、一個交易（搶 `weekly_run` 那一列當互斥）寫論文、指定 `first_snapshot_id`、發佈快照、刪暫存列，commit 後才送心跳；快照主鍵照慣例、`as_of` 用發佈時間；唯讀的 `radar weekly-run report` 與基準檔 `config/import_baseline.yaml`、5% 規則；一本期刊一個交易的退路先不做 | 提議 | AD-5、AD-19、AD-25 |
+| [0027](0027-counted-paper-cube-and-coverage.md) | 「哪些論文算數」的 view `counted_paper`（欄位明列、`radar_app` 只能讀）；`PublicViewer` 用 `EXISTS` 接它；`repo/stats.py` 一個查詢數到（期刊, 年份, 目前的摘要來源），`total`／`with_abstract`／依來源都由它推出；計數方塊的列 `CubeRow` 在 `domain/contracts.py`；ISSN-L 在 domain 換代號、設定沒有就報錯；快照前後各讀一次；截至日期用台北時間；唯讀的 `radar coverage`；架構測試守 AD-5 | 提議 | AD-4、AD-5、AD-19、AD-21 |
+| [0028](0028-weekly-update-failure-limit-and-change-detection.md) | 每週更新的失敗上限與變動偵測：`weekly_run.failure_count` 從建立起累計（跨工作重試、sweep、下一週），次數先存，到 `RADAR_WEEKLY_UPDATE_MAX_FAILURES`（預設 8）再用另一個交易收尾（標 `failed`＋刪暫存列）、記錯誤日誌、不送心跳，已到上限還沒收尾的只再試收尾；抓取每頁以 `fetching` 為條件；額度停下等不算失敗；`paper.source_changed_at`（拿到列鎖後的 `clock_timestamp()`）與 `changed` 篇數記 `source_hash` 變了的論文；套用壞掉的那一列記外部鍵 | 提議 | AD-14、AD-19、AD-25 |
 
 「提議」表示還沒經過 Kevin 確認；PR 合併後改成「已接受」。
 

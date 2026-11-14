@@ -21,7 +21,7 @@ from radar.domain.viewer import MemberViewer, PublicViewer, SystemViewer
 from radar.repo import papers as papers_module
 from radar.repo.db import Database
 from radar.repo.papers import get_paper, upsert_by_external_id
-from tests.database import APP_ROLE, TestDatabase, connect_admin, migrate
+from tests.database import APP_ROLE, OWNER_ROLE, TestDatabase, connect_admin, migrate
 
 T1 = datetime(2026, 11, 1, 3, 0, tzinfo=UTC)
 T2 = T1 + timedelta(days=7)
@@ -487,6 +487,176 @@ def test_excluded_reason_is_stored(papers_db: TestDatabase, database: Database) 
     assert _paper_row(papers_db, result.paper_id)["excluded_reason"] == "editorial"
 
 
+# --- 變動偵測：source_hash 變了才記 source_changed_at（Story 1.11、ADR-0028） --------------------
+
+
+def _changed_at(db: TestDatabase, paper_id: uuid.UUID) -> tuple[Any, ...]:
+    [row] = _rows(db, "SELECT source_hash, source_changed_at FROM paper WHERE id = %s", paper_id)
+    return row
+
+
+def test_new_paper_has_no_source_change(papers_db: TestDatabase, database: Database) -> None:
+    created = _upsert(database, _paper())
+
+    assert created.outcome is UpsertOutcome.CREATED
+    assert created.source_changed is False
+    source_hash, changed_at = _changed_at(papers_db, created.paper_id)
+    assert source_hash == _paper().source_hash
+    assert changed_at is None
+
+
+def test_same_fingerprint_is_not_a_change_even_if_citations_change(
+    papers_db: TestDatabase, database: Database
+) -> None:
+    created = _upsert(database, _paper(cited_by_count=1))
+
+    # 被引用次數、引用清單、文章類型不在指紋裡：照樣覆寫，但不算變動。
+    result = _upsert(
+        database,
+        _paper(fetched_at=T2, cited_by_count=9, referenced_works=("W77",), work_type="review"),
+    )
+
+    assert result.outcome is UpsertOutcome.UPDATED
+    assert result.source_changed is False
+    assert _changed_at(papers_db, created.paper_id) == (_paper().source_hash, None)
+    assert _rows(papers_db, "SELECT cited_by_count FROM paper") == [(9,)]
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"abstract": "A new abstract.", "abstract_source": "openalex"},
+        {"is_retracted": True},
+        {"volume": "42"},
+    ],
+    ids=["abstract", "retracted", "volume"],
+)
+def test_changed_fingerprint_sets_source_changed_at(
+    papers_db: TestDatabase, database: Database, change: dict[str, object]
+) -> None:
+    created = _upsert(database, _paper())
+    changed = _paper(fetched_at=T2, **change)
+    assert changed.source_hash != _paper().source_hash
+
+    with database.transaction() as connection:
+        before_write = connection.exec_driver_sql("SELECT now()").scalar_one()
+    result = _upsert(database, changed)
+
+    assert result.outcome is UpsertOutcome.UPDATED
+    assert result.source_changed is True
+    source_hash, changed_at = _changed_at(papers_db, created.paper_id)
+    assert source_hash == changed.source_hash
+    assert changed_at is not None
+    assert changed_at >= before_write
+    with database.transaction() as connection:
+        stored = get_paper(SystemViewer(), connection, created.paper_id)
+    assert stored is not None
+    assert stored.source_changed_at == changed_at
+
+    # 之後同指紋再寫一次：保留原本的變動時間，不算變動。
+    again = _upsert(database, _paper(fetched_at=T2 + timedelta(days=1), **change))
+    assert again.source_changed is False
+    assert _changed_at(papers_db, created.paper_id) == (changed.source_hash, changed_at)
+
+
+def test_missing_old_fingerprint_counts_as_a_change(
+    papers_db: TestDatabase, database: Database
+) -> None:
+    # 舊的 source_hash 是 NULL（例如 1.7 之前寫的）：要寫的不同，算變動。
+    created = _upsert(database, _paper())
+    _owner(papers_db, "UPDATE paper SET source_hash = NULL WHERE id = %s", created.paper_id)
+
+    result = _upsert(database, _paper(fetched_at=T2))
+
+    assert result.source_changed is True
+    source_hash, changed_at = _changed_at(papers_db, created.paper_id)
+    assert source_hash == _paper().source_hash
+    assert changed_at is not None
+
+
+def test_source_changed_at_is_the_statement_time_not_the_transaction_start(
+    papers_db: TestDatabase, database: Database
+) -> None:
+    # Codex C3：同一個交易裡先停一下再寫，記下的變動時間要是那一句執行的時間（clock_timestamp），
+    # 不是交易開始的時間（now()）。
+    created = _upsert(database, _paper())
+
+    with database.transaction() as connection:
+        started = connection.exec_driver_sql("SELECT now()").scalar_one()
+        connection.exec_driver_sql("SELECT pg_sleep(0.3)")
+        result = upsert_by_external_id(
+            connection,
+            _paper(fetched_at=T2, volume="7"),
+            origin=PaperOrigin.TRACKED,
+            excluded_reason=None,
+            scope=SCOPE,
+        )
+        same_transaction_now = connection.exec_driver_sql("SELECT now()").scalar_one()
+
+    assert result.source_changed is True
+    _hash, changed_at = _changed_at(papers_db, created.paper_id)
+    assert same_transaction_now == started
+    assert changed_at - started >= timedelta(seconds=0.3)
+
+
+def test_source_changed_at_is_taken_after_waiting_for_the_paper_lock(
+    papers_db: TestDatabase, database: Database
+) -> None:
+    # Codex C3：較新的單篇寫入先開交易，等每週套用持有的論文列鎖；套用在最後發佈快照
+    # （as_of＝clock_timestamp()）後 commit。它拿到鎖之後才寫的 source_changed_at 要晚於那個
+    # as_of，用「前後兩次快照的 as_of」篩選時才不會漏掉。
+    created = _upsert(database, _paper())
+    results: dict[str, Any] = {}
+    errors: list[BaseException] = []
+
+    def writer() -> None:
+        try:
+            with database.transaction() as connection:
+                results["started"] = connection.exec_driver_sql("SELECT now()").scalar_one()
+                results["upsert"] = upsert_by_external_id(
+                    connection,
+                    _paper(fetched_at=T2, volume="8"),
+                    origin=PaperOrigin.IMPORT,
+                    excluded_reason=None,
+                    scope=SCOPE,
+                )
+        except BaseException as exc:
+            errors.append(exc)
+
+    with papers_db.connect(APP_ROLE, autocommit=False) as apply_connection:
+        # 每週套用的交易：鎖著這篇論文。
+        apply_connection.execute(
+            "SELECT id FROM paper WHERE id = %s FOR UPDATE", (created.paper_id,)
+        )
+        thread = threading.Thread(target=writer)
+        thread.start()
+        try:
+            _wait_until_a_backend_waits_on_a_lock(papers_db)
+            # 寫入已經開了交易、正在等鎖；套用這時才發佈快照、commit。
+            row = apply_connection.execute("SELECT clock_timestamp()").fetchone()
+            assert row is not None
+            as_of = row[0]
+            apply_connection.commit()
+        finally:
+            thread.join(30)
+    assert not thread.is_alive()
+
+    assert errors == []
+    assert results["upsert"].source_changed is True
+    _hash, changed_at = _changed_at(papers_db, created.paper_id)
+    assert results["started"] < as_of < changed_at
+
+
+def test_stale_write_is_not_a_change(papers_db: TestDatabase, database: Database) -> None:
+    created = _upsert(database, _paper(fetched_at=T2))
+
+    result = _upsert(database, _paper(fetched_at=T1, volume="99"))
+
+    assert result.outcome is UpsertOutcome.STALE
+    assert result.source_changed is False
+    assert _changed_at(papers_db, created.paper_id) == (_paper().source_hash, None)
+
+
 # --- 讀者身分 -----------------------------------------------------------------------------
 
 
@@ -513,16 +683,85 @@ def test_get_paper_follows_viewer(database: Database) -> None:
     assert member_private is None
     assert system_private is not None
     assert system_private.in_scope is False
-    # Story 1.10 之前，PublicViewer 一篇都看不到。
+    # 沒有發佈的快照，不在 counted_paper。
     assert public_shared is None
     assert missing is None
 
 
-@pytest.mark.skip(
-    reason="等 Story 1.10 建好 counted_paper：PublicViewer 只看得到 counted_paper 裡的論文"
-)
-def test_public_viewer_sees_counted_papers() -> None:
-    raise AssertionError("等 Story 1.10")
+def _owner(db: TestDatabase, sql: str, *params: object) -> list[tuple[Any, ...]]:
+    with db.connect(OWNER_ROLE) as connection:
+        cursor = connection.execute(sql, params)
+        return cursor.fetchall() if cursor.description else []
+
+
+def _snapshot(db: TestDatabase, number: int, status: str) -> uuid.UUID:
+    """用擁有者直接造一筆每週更新與它的快照（只在測試裡；正式只由每週更新的套用寫）。"""
+    [(run_id,)] = _owner(db, "INSERT INTO weekly_run (status) VALUES ('failed') RETURNING id")
+    as_of = T2 if status == "published" else None
+    [(snapshot_id,)] = _owner(
+        db,
+        "INSERT INTO snapshot (number, weekly_run_id, status, as_of) VALUES (%s, %s, %s, %s)"
+        " RETURNING id",
+        number,
+        run_id,
+        status,
+        as_of,
+    )
+    return uuid.UUID(str(snapshot_id))
+
+
+def test_public_viewer_sees_counted_papers(papers_db: TestDatabase, database: Database) -> None:
+    # PublicViewer 看得到的論文 ⇔ 在 counted_paper 裡（AD-4、AD-5）：追蹤範圍內、沒有被排除、
+    # first_snapshot_id 指向已發佈的快照。
+    published = _snapshot(papers_db, 1, "published")
+    building = _snapshot(papers_db, 2, "building")
+    failed = _snapshot(papers_db, 3, "failed")
+    counted = _upsert(database, _paper(doi="10.1/a", openalex_id=None))
+    excluded = _upsert(
+        database, _paper(doi="10.1/b", openalex_id=None), excluded_reason="editors_comments"
+    )
+    out_of_scope = _upsert(
+        database,
+        _paper(doi="10.1/c", openalex_id=None, journal_issn_l="0960-085X"),
+        origin=PaperOrigin.IMPORT,
+    )
+    unassigned = _upsert(database, _paper(doi="10.1/d", openalex_id=None))
+    on_building = _upsert(database, _paper(doi="10.1/e", openalex_id=None))
+    on_failed = _upsert(database, _paper(doi="10.1/f", openalex_id=None))
+    for result, snapshot_id in (
+        (counted, published),
+        (excluded, published),
+        (out_of_scope, published),  # 範圍外的即使指定了已發佈的快照也一樣不算
+        (on_building, building),
+        (on_failed, failed),
+    ):
+        _owner(
+            papers_db,
+            "UPDATE paper SET first_snapshot_id = %s WHERE id = %s",
+            snapshot_id,
+            result.paper_id,
+        )
+
+    public = PublicViewer()
+    with database.transaction() as connection:
+        seen = {
+            name: get_paper(public, connection, result.paper_id)
+            for name, result in {
+                "counted": counted,
+                "excluded": excluded,
+                "out_of_scope": out_of_scope,
+                "unassigned": unassigned,
+                "on_building": on_building,
+                "on_failed": on_failed,
+            }.items()
+        }
+        system_sees = get_paper(SystemViewer(), connection, out_of_scope.paper_id)
+
+    counted_paper = seen.pop("counted")
+    assert counted_paper is not None
+    assert counted_paper.id == counted.paper_id
+    assert seen == dict.fromkeys(seen)  # 其他都是 None
+    assert system_sees is not None
 
 
 # --- CHECK 約束 ---------------------------------------------------------------------------

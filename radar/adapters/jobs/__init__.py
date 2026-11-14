@@ -153,7 +153,8 @@ def create_job_app(url: str, *, max_connections: int, connect_timeout: int) -> J
 def defer_job(app: procrastinate.App, job: JobSpec, ids: Mapping[str, uuid.UUID]) -> bool:
     """排入一個工作；回 True＝新排入，False＝同一件事已經在排隊（同一個排隊鎖），沒有再排。
 
-    `pdf` 佇列的工作一律帶同一把鎖（同時只跑一個）。UUID 轉成字串存進 JSON。
+    `pdf` 佇列的工作一律帶同一把鎖（同時只跑一個）；其他工作帶 `job.lock`（沒有就不帶）。
+    帶同一把鎖的工作同時只跑一個。UUID 轉成字串存進 JSON。
 
     Raises:
         ValueError: 參數不是 `*_id`／UUID。
@@ -163,7 +164,7 @@ def defer_job(app: procrastinate.App, job: JobSpec, ids: Mapping[str, uuid.UUID]
         job.name,
         allow_unknown=True,
         queue=job.queue.value,
-        lock=PDF_LOCK if job.queue is Queue.PDF else None,
+        lock=PDF_LOCK if job.queue is Queue.PDF else job.lock,
         queueing_lock=make_queueing_lock(job, ids),
     )
     try:

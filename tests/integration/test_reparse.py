@@ -1,8 +1,8 @@
 """`services.reparse.reparse_papers` 對真的 PostgreSQL＋`FakeObjectStore`。
 
 只動已匯入的論文、壞資料略過並計數、套用中途失敗整個退回、比較舊的資料不寫、物件儲存的呼叫
-時沒有開著的交易、身分不對不碰任何東西、排除規則改了之後跟著變、只寫允許的表也不碰快照；
-以及 `list_latest_raw_fetches`、暫存表函式的分頁與驗證。
+時沒有開著的交易、身分不對不碰任何東西、排除規則改了之後跟著變、只寫允許的表也不碰快照、
+每週更新正在抓取時拒絕且什麼都不寫；以及 `list_latest_raw_fetches`、暫存表函式的分頁與驗證。
 
 論文內容取自錄好的 OpenAlex 回應（`tests/openalex_cassette.py`，CC0）。每個測試一個全新、
 已遷移的資料庫，用應用程式角色（`radar_app`）連線。
@@ -39,8 +39,13 @@ from radar.repo.ingest_staging import (
 )
 from radar.repo.papers import update_paper_keywords, upsert_by_external_id
 from radar.repo.raw_fetches import create_raw_fetches, list_latest_raw_fetches
+from radar.repo.weekly_runs import (
+    create_weekly_run,
+    update_weekly_run_fetch_finished,
+    update_weekly_run_published,
+)
 from radar.services import reparse as reparse_module
-from radar.services.reparse import ReparseResult, reparse_papers
+from radar.services.reparse import ReparseResult, WeeklyUpdateInProgressError, reparse_papers
 from tests.database import APP_ROLE, TestDatabase, migrate
 from tests.openalex_cassette import ISSN_L, cassette_works, work_bytes
 
@@ -285,6 +290,31 @@ def test_running_twice_keeps_counts(
     }
     assert after["abstract"] == before["abstract"]
     assert after["keyword"] == before["keyword"]
+
+
+def test_reparse_records_source_changes(
+    reparse_db: TestDatabase, database: TrackingDatabase, store: GuardedStore
+) -> None:
+    # ADR-0028 決定第 6 點：reparse 經同一個寫入函式，指紋變了也寫 source_changed_at。
+    same, changed = _works(2)
+    for work in (same, changed):
+        _seed_raw(database, store, _key(work), work_bytes(work), T1)
+    # 一篇和原始資料解析出來的一樣（指紋不變）；一篇是舊解析（沒有摘要，指紋不同）。
+    _seed_paper(database, parse_openalex_work(work_bytes(same), fetched_at=T1))
+    _seed_paper(database, _old_parse(changed, T1))
+
+    result = _reparse(database, store)
+
+    assert result.updated == 2
+    changed_at = dict(
+        _rows(
+            reparse_db,
+            "SELECT e.value_norm, p.source_changed_at FROM paper p"
+            " JOIN external_id e ON e.paper_id = p.id AND e.scheme = 'openalex'",
+        )
+    )
+    assert changed_at[_key(same)] is None
+    assert changed_at[_key(changed)] is not None
 
 
 # --- 壞資料 ---------------------------------------------------------------------------------
@@ -628,3 +658,51 @@ def test_creating_a_paper_while_applying_rolls_back(
 
     assert _rows(reparse_db, "SELECT count(*) FROM paper") == [(1,)]
     assert _snapshot(reparse_db) == before
+
+
+# --- 每週更新正在抓取 -----------------------------------------------------------------------
+
+
+def test_refuses_while_weekly_update_is_fetching(
+    reparse_db: TestDatabase, database: TrackingDatabase, store: GuardedStore
+) -> None:
+    # 有一筆 fetching 的 weekly_run：丟錯、什麼都不寫（連上次留下的暫存列都不清）、不讀物件。
+    works = _works(2)
+    for work in works:
+        _seed_raw(database, store, _key(work), work_bytes(work), T1)
+        _seed_paper(database, _old_parse(work, T1))
+    leftover = StagingItem(
+        external_key=_key(works[0]),
+        paper=parse_openalex_work(work_bytes(works[0]), fetched_at=T1),
+        excluded_reason=None,
+    )
+    with database.transaction() as connection:
+        create_staged_papers(
+            connection, batch_id=uuid.uuid7(), kind=StagingKind.REPARSE, items=[leftover]
+        )
+        run_id = create_weekly_run(connection)
+    assert run_id is not None
+    before = _snapshot(reparse_db)
+    database.statements.clear()
+
+    with pytest.raises(WeeklyUpdateInProgressError) as caught:
+        _reparse(database, store)
+
+    assert caught.value.weekly_run_id == run_id
+    assert str(run_id) in str(caught.value)
+    assert "等它發佈或失敗後再跑 reparse" in str(caught.value)
+    assert _snapshot(reparse_db) == before
+    assert _rows(reparse_db, "SELECT kind, count(*) FROM ingest_staging GROUP BY kind") == [
+        ("reparse", 1)
+    ]
+    assert store.gets == []
+    for statement in database.statements:
+        assert _WRITE_SQL.search(statement) is None, statement
+
+    # 發佈之後就能跑：清掉留下的暫存列、照常更新。
+    with database.transaction() as connection:
+        assert update_weekly_run_fetch_finished(connection, run_id)
+        assert update_weekly_run_published(connection, run_id)
+    result = _reparse(database, store)
+    assert result.updated == 2
+    assert _rows(reparse_db, "SELECT count(*) FROM ingest_staging") == [(0,)]

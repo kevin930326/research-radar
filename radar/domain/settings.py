@@ -5,6 +5,7 @@ from urllib.parse import urlsplit
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationInfo, field_validator
 
 from radar.domain.jobs import WORKER_HEARTBEAT_SECONDS
+from radar.domain.weekly_run import DEFAULT_MAX_FAILURES
 
 DATABASE_URL_SCHEMES = frozenset({"postgresql", "postgresql+psycopg"})
 HEARTBEAT_URL_SCHEMES = frozenset({"https", "http"})
@@ -92,9 +93,14 @@ class Settings(BaseModel):
     # 第 n 次重試前等 n × job_retry_wait 秒。連線層的重試在各 adapter，不在這裡。
     job_max_retries: int = Field(default=3, ge=0, le=20)
     job_retry_wait: int = Field(default=30, ge=1, le=3600)
+    # 一筆每週更新從建立起累計失敗幾次就標成 failed（ADR-0028）：跨工作重試、sweep 補排、下一週
+    # cron 接著同一筆都一起算；額度停下、reparse 正在跑而先不做不算失敗。
+    weekly_update_max_failures: int = Field(default=DEFAULT_MAX_FAILURES, ge=1, le=100)
     # 心跳（AD-15）：一個排程一個網址，沒設的排程不送心跳、只記警告。
     # 欄位名稱是 heartbeat_url_<排程名稱>，和 radar/domain/jobs.py 的排程一一對應（有測試）。
     heartbeat_url_sweep: SecretStr | None = None
+    # 每週更新：發佈快照後才送（Story 1.9）；1.8 只先登記欄位（架構測試要求每個排程一個）。
+    heartbeat_url_weekly_update: SecretStr | None = None
     # 送一次心跳的 HTTP 逾時（秒）與最多嘗試幾次（含第一次；失敗只記錯誤，不讓工作失敗）。
     heartbeat_timeout: int = Field(default=5, ge=1, le=60)
     heartbeat_attempts: int = Field(default=3, ge=1, le=10)

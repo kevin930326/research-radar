@@ -7,8 +7,10 @@
 - 409、429、5xx、連線錯誤與逾時由 stamina 指數退避重試；帶 `Retry-After` 時照對方給的秒數等
   （ADR-0004）。要等的超過 `retry_after_max_seconds` 就不再重試、丟 `PaperSourceError`（不提早
   重送）。其他 4xx 不重試。
-- 每次可重試的失敗後先看對方回報的額度：「上限 − 剩餘」到 `quota.stop_at_usd` 或剩 0 就不再
-  重試，丟 `QuotaReachedError`（帶著每次嘗試），由 services 照「額度停下」處理、不算失敗。
+- 每次可重試的失敗後先看額度：剩 0，或「最新一次同時帶上限與剩餘的回報（上限 − 剩餘）」加上
+  那之後每次嘗試的 `cost_usd` 到 `quota.stop_at_usd`，就不再重試，丟 `QuotaReachedError`（帶著
+  每次嘗試），由 services 照「額度停下」處理、不算失敗。回報記在 adapter 物件上、跨頁沿用；
+  是前一個 UTC 日的回報就不用（OpenAlex 在 UTC 午夜重置）。
 - 每次 HTTP 嘗試都記一筆 `ApiCall`；失敗時 `PaperSourceError` 帶著它們。確定沒送出的
   （ConnectError、ConnectTimeout）記 0 元，其他沒有回應標頭的錯誤照預設單價算。
 - 錯誤訊息只有固定的原因（狀態碼、錯誤類別），不含網址與 key：網址裡有 key，重試時 stamina
@@ -19,7 +21,8 @@ import json
 import re
 import time
 from collections.abc import Callable, Mapping
-from datetime import UTC, datetime
+from dataclasses import dataclass
+from datetime import UTC, date, datetime
 from decimal import Decimal, InvalidOperation
 from types import TracebackType
 from typing import Any, Self
@@ -68,6 +71,17 @@ def _utc_now() -> datetime:
     return datetime.now(UTC)
 
 
+@dataclass
+class _ReportedUsage:
+    """最新一次同時帶上限與剩餘的回報：當時的用量（上限 − 剩餘）、回報的 UTC 日期，以及那之後
+    每次嘗試的 `cost_usd` 加總（那一次自己的花費已經算在對方回報的數字裡，不重複加）。
+    """
+
+    used_usd: Decimal
+    day: date
+    cost_since_usd: Decimal = Decimal(0)
+
+
 class OpenAlexSource:
     """依期刊 cursor 分頁抓 OpenAlex 的 works。用完呼叫 `close()`（或用 `with`）。"""
 
@@ -92,6 +106,7 @@ class OpenAlexSource:
         self._clock = clock
         self._interval = 1.0 / config.requests_per_second
         self._last_request: float | None = None
+        self._reported: _ReportedUsage | None = None
         self._client = httpx2.Client(timeout=config.timeout_seconds, transport=transport)
 
     def __repr__(self) -> str:
@@ -199,24 +214,23 @@ class OpenAlexSource:
             response = self._client.get(f"{self._config.base_url}/works", params=params)
         except (httpx2.ConnectError, httpx2.ConnectTimeout) as exc:
             # 連線都沒建立：請求確定沒送出，不花額度。
-            calls.append(self._call(None, {}, cost=Decimal(0)))
+            call = self._record(calls, self._call(None, {}, cost=Decimal(0)))
+            self._stop_if_quota_reached(call, type(exc).__name__)
             raise RetryableOpenAlexError(type(exc).__name__) from None
         except httpx2.TransportError as exc:
             # 讀寫逾時、連線中斷等：請求可能已經送到對方、被計費，照預設單價算（寧可高估）。
-            calls.append(self._call(None, {}))
+            call = self._record(calls, self._call(None, {}))
+            self._stop_if_quota_reached(call, type(exc).__name__)
             raise RetryableOpenAlexError(type(exc).__name__) from None
         except httpx2.HTTPError as exc:
             # 例如回應的壓縮格式解不開（DecodingError）：對方已經回應，照預設單價算，不重試。
-            calls.append(self._call(None, {}))
+            self._record(calls, self._call(None, {}))
             raise PaperSourceError(type(exc).__name__) from None
 
         status = response.status_code
-        call = self._call(status, response.headers)
-        calls.append(call)
+        call = self._record(calls, self._call(status, response.headers))
         if status in RETRY_STATUSES or status >= 500:
-            if self._quota_reached(call):
-                # 額度已經到了，再試只會繼續被擋（還可能再扣錢）：停下，交給 services。
-                raise QuotaReachedError(f"HTTP {status}，對方回報的額度已到停下的比例")
+            self._stop_if_quota_reached(call, f"HTTP {status}")
             raise RetryableOpenAlexError(
                 f"HTTP {status}",
                 retry_after=parse_retry_after(response.headers.get("Retry-After")),
@@ -225,17 +239,34 @@ class OpenAlexSource:
             raise PaperSourceError(f"HTTP {status}")
         return response
 
+    def _record(self, calls: list[ApiCall], call: ApiCall) -> ApiCall:
+        """記下這次嘗試，並更新「最新一次回報＋之後的花費」。"""
+        calls.append(call)
+        if call.remaining_usd is not None and call.limit_usd is not None:
+            self._reported = _ReportedUsage(
+                used_usd=call.limit_usd - call.remaining_usd, day=_utc_day(call.called_at)
+            )
+        elif self._reported is not None:
+            self._reported.cost_since_usd += call.cost_usd
+        return call
+
+    def _stop_if_quota_reached(self, call: ApiCall, reason: str) -> None:
+        """可重試的失敗之後：額度到了就丟 `QuotaReachedError`（再試只會繼續被擋，還可能再扣錢）。"""
+        if self._quota_reached(call):
+            raise QuotaReachedError(f"{reason}，對方回報的額度已到停下的比例")
+
     def _quota_reached(self, call: ApiCall) -> bool:
-        """這次回應回報的額度到了沒：剩 0，或「上限 − 剩餘」到 `quota.stop_at_usd`。
+        """額度到了沒：這次回報剩 0，或「最新一次回報的用量＋之後每次嘗試的花費」到
+        `quota.stop_at_usd`。回報是前一個 UTC 日（`call` 之前的那一天）的不用。
 
         門檻和 services 讀用量時用的是同一條線（`daily_budget_usd × stop_at_ratio`）。
         """
-        remaining, limit = call.remaining_usd, call.limit_usd
-        if remaining is None:
-            return False
-        if remaining <= 0:
+        if call.remaining_usd is not None and call.remaining_usd <= 0:
             return True
-        return limit is not None and limit - remaining >= self._config.quota.stop_at_usd
+        reported = self._reported
+        if reported is None or reported.day != _utc_day(call.called_at):
+            return False
+        return reported.used_usd + reported.cost_since_usd >= self._config.quota.stop_at_usd
 
     def _call(
         self, status: int | None, headers: Mapping[str, str], *, cost: Decimal | None = None
@@ -253,6 +284,10 @@ class OpenAlexSource:
             limit_usd=_usd_header(headers, LIMIT_HEADER),
             called_at=self._clock(),
         )
+
+
+def _utc_day(moment: datetime) -> date:
+    return moment.astimezone(UTC).date()
 
 
 def _usd_header(headers: Mapping[str, str], name: str) -> Decimal | None:

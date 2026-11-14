@@ -44,6 +44,10 @@ STATUS_TABLE_EXCEPTIONS: dict[str, str] = {
         "Procrastinate 自己的佇列表；卡在執行中的工作由 sweep 的 stalled job 重試處理，"
         "不是登記清單的狀態表"
     ),
+    "snapshot": (
+        "在每週更新的套用交易裡建立並發佈（ADR-0026），交易外看不到建立中的快照，沒有會卡住的"
+        "中間狀態；推進它的是已登記的 weekly_run（抓完待套用時仍是 fetching，由 sweep 補排）"
+    ),
 }
 
 SETTINGS = Settings.model_validate({"database_url": "postgresql://radar_app@db:5432/radar"})
@@ -166,6 +170,27 @@ def test_crontab_matches_scheduled_jobs_one_to_one() -> None:
     assert sorted(schedules) == sorted(job.check for job in scheduled_jobs())
 
 
+def test_weekly_update_runs_once_a_week() -> None:
+    # Story 1.11：分、時是固定的一個數字，日、月是 `*`，星期是一個值（0–7）→ 一週剛好一次。
+    # 時間本身（UTC 週日 19:00＝台北週一 03:00）由 Story 3.19 確認主機時區時再看，這裡不寫死。
+    lines = [
+        line
+        for line in CRONTAB.read_text(encoding="utf-8").splitlines()
+        if line.endswith(" radar enqueue weekly-update")
+    ]
+    assert len(lines) == 1
+    match = CRON_LINE.fullmatch(lines[0].strip())
+    assert match
+    minute, hour, day, month, weekday = match["when"].split()
+    assert minute.isdigit()
+    assert 0 <= int(minute) <= 59
+    assert hour.isdigit()
+    assert 0 <= int(hour) <= 23
+    assert (day, month) == ("*", "*")
+    assert weekday.isdigit()
+    assert 0 <= int(weekday) <= 7
+
+
 def test_sweep_runs_every_15_minutes() -> None:
     lines = [
         line for line in CRONTAB.read_text(encoding="utf-8").splitlines() if line.endswith(" sweep")
@@ -235,14 +260,16 @@ def test_every_status_table_is_swept_or_excused(migrated_database: TestDatabase)
 
 def test_status_table_check_catches_unregistered_table(migrated_database: TestDatabase) -> None:
     # 證明守門真的擋得住：在交易裡建一張有 status 欄的表，檢查完整個退回。
+    # 已經登記的真的狀態表（例如 weekly_run）照樣算登記過，只有新建的這張沒有。
+    already = {entry.table for entry in SWEEP_REGISTRY}
     with migrated_database.connect(OWNER_ROLE, autocommit=False) as connection:
         try:
             connection.execute(
                 "CREATE TABLE weekly_probe (id uuid PRIMARY KEY DEFAULT uuidv7(), status text)"
             )
-            problems = status_table_problems(connection, set(), STATUS_TABLE_EXCEPTIONS)
+            problems = status_table_problems(connection, already, STATUS_TABLE_EXCEPTIONS)
             registered = status_table_problems(
-                connection, {"weekly_probe"}, STATUS_TABLE_EXCEPTIONS
+                connection, {"weekly_probe", *already}, STATUS_TABLE_EXCEPTIONS
             )
         finally:
             connection.rollback()
