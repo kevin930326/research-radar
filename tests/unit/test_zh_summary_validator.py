@@ -3,6 +3,8 @@
 spec 2.4 的 I/O 表每一列，加上每條判準的邊界與不該誤判的例子。標題、摘要、輸出全是測試自己編的。
 """
 
+import contextlib
+import time
 import uuid
 
 import pytest
@@ -607,3 +609,248 @@ def test_new_ai_result_rejects_content_on_a_rejected_row() -> None:
             reject_reason=ErrorCode.ZH_SUMMARY_FIELD_TOO_LONG,
             zh_summary=ZhSummaryContent("研究問題", None, None, None),
         )
+
+
+# --- Codex 主審查後補：一次掃描的分句（不會平方級回溯）-----------------------------------------
+
+
+def test_long_run_of_dots_is_split_in_linear_time() -> None:
+    # 原本的 `[.!?]+\s+` 在 16,000 個句點後面沒有空白時約 0.8 秒；現在只掃一次。
+    started = time.perf_counter()
+
+    assert count_abstract_sentences("a" + "." * 16_000 + "b") == 1
+    assert count_abstract_sentences("a" + "." * 16_000 + " b") == 2
+
+    assert time.perf_counter() - started < 0.5
+
+
+@pytest.mark.parametrize(
+    "unit",
+    [".", "a.", "1,", "1,000", "-.", "a-", "x<", "<", "[a]", "&amp;", "原文未", "1e", "a-a."],
+)
+def test_long_adversarial_input_is_validated_quickly(unit: str) -> None:
+    text = unit * 16_000
+    loose = RULES.model_copy(update={"max_chars_per_field": 10**6, "min_cjk_percent": 1})
+    output = _output(research_question="研究" + text, method=None, theory=None, findings=None)
+    started = time.perf_counter()
+
+    with contextlib.suppress(OutputRejectedError):
+        validate_zh_summary(output, _input(abstract=text), loose)
+    is_placeholder(text)
+
+    assert time.perf_counter() - started < 2
+
+
+# --- Codex 主審查後補：數字的正負號、指數、百分比、不支援的寫法 ---------------------------------
+
+
+@pytest.mark.parametrize(
+    ("method", "abstract"),
+    [
+        ("效果為 1e3", "The effect was 1e-3."),
+        ("效果為 0.35", "The effect was -0.35."),
+        ("效果為 -0.35", "The effect was 0.35."),
+        ("效果為 0.35%", "The effect was 0.35."),
+        ("採用率 35", "Adoption was 35%."),
+        ("採用率 35%", "Adoption was 35."),
+    ],
+)
+def test_sign_exponent_and_percent_change_the_number(method: str, abstract: str) -> None:
+    with pytest.raises(OutputRejectedError) as caught:
+        _numbers_only(method, abstract)
+
+    assert caught.value.code is ErrorCode.ZH_SUMMARY_UNSUPPORTED_CONTENT
+
+
+@pytest.mark.parametrize(
+    ("method", "abstract"),
+    [
+        ("效果為 0.001", "The effect was 1e-3."),
+        ("效果為 1e-3", "The effect was 1e-3."),
+        ("效果為 -0.35", "The effect was -0.35."),
+        ("效果為 −0.35", "The effect was -0.35."),
+        ("效果為 -0.35", "The effect was (–0.35)."),
+        ("採用率 35%", "Adoption was 35 percent."),
+        ("採用率 35 %", "Adoption was 35%."),
+        ("介於 3 到 5 年", "Tenure was 3-5 years."),
+    ],
+)
+def test_same_signed_and_scaled_numbers_match(method: str, abstract: str) -> None:
+    assert _numbers_only(method, abstract).method == method
+
+
+@pytest.mark.parametrize(
+    "method", ["效果為 10²", "效果為 ½", "效果為 2^10", "效果增加 ×10", "比例 5‰"]
+)
+def test_unsupported_number_notation_is_rejected(method: str) -> None:
+    abstract = "The effect was 100, 0.5, 1024, 10 and 5 per mille."
+    with pytest.raises(OutputRejectedError) as caught:
+        _numbers_only(method, abstract)
+
+    assert caught.value.code is ErrorCode.ZH_SUMMARY_UNSUPPORTED_CONTENT
+
+
+# --- Codex 主審查後補：其他文字的十進位數字 ------------------------------------------------------
+
+
+def test_non_ascii_decimal_digits_are_compared_as_numbers() -> None:
+    with pytest.raises(OutputRejectedError) as caught:
+        _numbers_only("訪談 ٩٩٩ 名使用者", "We interviewed 12 users.")
+
+    assert caught.value.code is ErrorCode.ZH_SUMMARY_UNSUPPORTED_CONTENT
+    assert _numbers_only("訪談 ٩٩٩ 名使用者", "We interviewed 999 users.").method is not None
+    assert _numbers_only("訪談 १२ 名使用者", "We interviewed 12 users.").method is not None
+
+
+# --- Codex 主審查後補：英文數字詞組只留整個詞組的值 ----------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("method", "abstract"),
+    [
+        ("調查 3 名經理", "We surveyed three hundred managers."),
+        ("調查 100 名經理", "We surveyed three hundred managers."),
+        ("調查 20 名經理", "We surveyed three hundred and twenty managers."),
+        ("調查 5 名經理", "We surveyed twenty five managers."),
+        ("調查 2 名經理", "We surveyed two thousand managers."),
+        ("採用率 50", "Adoption was fifty percent."),
+    ],
+)
+def test_parts_of_a_number_phrase_are_not_allowed(method: str, abstract: str) -> None:
+    with pytest.raises(OutputRejectedError) as caught:
+        _numbers_only(method, abstract)
+
+    assert caught.value.code is ErrorCode.ZH_SUMMARY_UNSUPPORTED_CONTENT
+
+
+@pytest.mark.parametrize(
+    ("method", "abstract"),
+    [
+        ("調查 320 名經理", "We surveyed three hundred and twenty managers."),
+        ("調查 3 與 4 組", "We compared three four groups."),
+        ("採用率 50%", "Adoption was fifty percent."),
+        ("採用率 50%", "Adoption was fifty per cent."),
+        ("調查 300 名經理與 3 位主管", "We surveyed three hundred managers and three heads."),
+    ],
+)
+def test_whole_number_phrases_are_allowed(method: str, abstract: str) -> None:
+    assert _numbers_only(method, abstract).method == method
+
+
+# --- Codex 主審查後補：檢查用副本（零寬字元、全形、HTML 實體）-------------------------------
+
+
+@pytest.mark.parametrize(
+    ("value", "code"),
+    [
+        ("採用問卷，摘​要未提及樣本數", ErrorCode.ZH_SUMMARY_PLACEHOLDER_TEXT),
+        ("採用問卷，摘⁠要未提及樣本數", ErrorCode.ZH_SUMMARY_PLACEHOLDER_TEXT),
+        ("＜ｂ＞問卷調查＜／ｂ＞", ErrorCode.ZH_SUMMARY_UNSAFE_TEXT),
+        ("&lt;b&gt;問卷調查&lt;/b&gt;", ErrorCode.ZH_SUMMARY_UNSAFE_TEXT),
+        ("&amp;lt;b&amp;gt;問卷調查", ErrorCode.ZH_SUMMARY_UNSAFE_TEXT),
+        ("見 ｈｔｔｐｓ：／／example.org", ErrorCode.ZH_SUMMARY_UNSAFE_TEXT),
+        ("&#96;問卷調查&#96;", ErrorCode.ZH_SUMMARY_UNSAFE_TEXT),
+    ],
+)
+def test_rules_run_on_a_normalized_copy(value: str, code: ErrorCode) -> None:
+    assert _rejected(_output(method=value)) is code
+
+
+def test_field_of_only_invisible_characters_is_null() -> None:
+    assert _validate(_output(theory="​‍﻿")).theory is None
+
+
+def test_stored_text_is_not_the_check_copy() -> None:
+    # 檢查用副本只拿來檢查；存的仍是 NFC＋空白縮成一個的原文。
+    assert _validate(_output(theory="科技接受模型（ＴＡＭ）")).theory == "科技接受模型（ＴＡＭ）"
+
+
+# --- Codex 主審查後補：粗體、裸網域、參照式連結 --------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "**問卷調查**",
+        "__問卷調查__",
+        "~~問卷調查~~",
+        "研究資料：osf.io",
+        "研究資料見 example.org",
+        "研究資料見 data.gov.tw",
+        "研究資料見[資料][1]",
+        "[1]: 問卷調查",
+    ],
+)
+def test_bold_bare_domains_and_reference_links_are_rejected(value: str) -> None:
+    abstract = ABSTRACT + " Data are available at osf.io and example.org and data.gov.tw."
+
+    assert _rejected(_output(method=value), _input(abstract=abstract)) is (
+        ErrorCode.ZH_SUMMARY_UNSAFE_TEXT
+    )
+
+
+def test_technology_names_with_dots_are_not_domains() -> None:
+    abstract = ABSTRACT + " The platform was built on ASP.NET."
+
+    content = _validate(_output(method="以 ASP.NET 建置平台"), _input(abstract=abstract))
+
+    assert content.method == "以 ASP.NET 建置平台"
+
+
+# --- Codex 主審查後補：完整的比較式不是標記 ------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("value", "abstract"),
+    [
+        (">50% 的受訪者採用平台", "More than 50% of respondents adopted the platform."),
+        ("結果顯示 x<y", "Results show that x<y."),
+        ("結果顯示 a > b，而 x<y", "Results show that a > b and x<y."),
+        ("有用性的效果 β > 0", "The effect of usefulness was positive (β > 0)."),
+        ("顯著（p<.05）", "Usefulness was significant (p<.05)."),
+    ],
+)
+def test_complete_comparisons_are_not_markup(value: str, abstract: str) -> None:
+    content = _validate(
+        _output(research_question=None, method=None, theory=None, findings=value),
+        _input(title="Adoption", abstract=abstract),
+    )
+
+    assert content.findings == value
+
+
+@pytest.mark.parametrize("value", ["x<b>粗體", "a<b class=x>粗體", "<b>50% 的受訪者"])
+def test_tags_next_to_letters_are_still_markup(value: str) -> None:
+    assert _rejected(_output(findings=value)) is ErrorCode.ZH_SUMMARY_UNSAFE_TEXT
+
+
+# --- Codex 主審查後補：「原文／文中」不一定是在講摘要 ---------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "原文未揭露姓名時仍可推得作者身分",
+        "去識別化後原文未提及姓名，仍可推得作者身分",
+        "作者未揭露身分的評論更受信任",
+        "文中未揭露個人資訊時隱私風險較低",
+        "研究未揭露的個人資訊仍會外洩",
+    ],
+)
+def test_original_text_in_privacy_findings_is_not_a_placeholder(value: str) -> None:
+    abstract = "We study de-identification and information disclosure in online reviews."
+
+    content = _validate(
+        _output(research_question=None, method=None, theory=None, findings=value),
+        _input(title="Disclosure", abstract=abstract),
+    )
+
+    assert content.findings == value
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["問卷調查，文中未說明樣本數", "問卷調查，原文沒有提到。", "問卷調查，原文並未說明研究方法"],
+)
+def test_original_text_about_missing_research_elements_is_still_rejected(value: str) -> None:
+    assert _rejected(_output(method=value)) is ErrorCode.ZH_SUMMARY_PLACEHOLDER_TEXT
