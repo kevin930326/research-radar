@@ -59,6 +59,8 @@ coverage.xml
 .mypy_cache/
 .ruff_cache/
 .pyre/
+# Hypothesis（性質測試）在本機存的範例資料庫
+.hypothesis/
 .ipynb_checkpoints/
 
 # =========================================================

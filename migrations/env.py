@@ -10,6 +10,7 @@
 from alembic import context
 from sqlalchemy import Connection
 
+import radar.repo.papers  # noqa: F401  # 把 paper、external_id 的表定義登記到 Base.metadata
 from radar.repo.migrations import include_name
 from radar.repo.models import Base
 

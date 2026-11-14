@@ -1,0 +1,96 @@
+# ADR-0020：識別碼怎麼正規化、論文怎麼寫入（先新增再認領、每個來源一欄抓取時間、衝突不合併）
+
+- 狀態：提議（等 Kevin 在 PR 確認）
+- 日期：2026-11-14
+- 對應：epics Story 1.5；架構文件 AD-3、AD-4、AD-5、AD-6、AD-25 第四點、AD-27；ADR-0002（viewer）；ADR-0014 「寫入分兩段」第 4 點（本 ADR 只寫「怎麼做」，不改 ADR-0014 的決定）
+
+## 背景
+
+AD-6 已經定了：識別碼只有一份正規化函式、`external_id` 對（scheme, value_norm）唯一、論文只能經 `upsert_by_external_id` 建立。ADR-0014 定了「舊的不蓋掉新的」：論文上記每個來源的抓取時間，寫入時先鎖再比。Story 1.5 實作時還有幾件事沒有定、但會影響之後每個寫論文的 Story：
+
+- 三種識別碼各自收哪些寫法、輸出長什麼樣子；ISSN 要不要驗檢查碼。
+- 兩個交易同時新增同一篇新論文時，怎麼保證只留一篇。
+- 抓取時間要存在哪裡：一欄還是每個來源一欄。
+- DOI 和 OpenAlex ID 指向兩篇不同的論文時怎麼辦。
+
+## 考慮過的選項
+
+**1. ISSN-L 要不要驗檢查碼**
+
+| | 做法 | 缺點 |
+|---|---|---|
+| A | 驗檢查碼（mod 11），算錯就丟錯 | OpenAlex 偶爾會給檢查碼不對的 ISSN；整批匯入會因為一筆資料卡住，或被迫在呼叫端吞掉錯誤 |
+| B | 只檢查格式（`NNNN-NNNC`），不驗檢查碼 | 打錯一位數的 ISSN 會被當成另一本期刊；但追蹤期刊是設定檔列的 14 本，打錯的那本只會「不在追蹤範圍」 |
+
+**2. 並行新增同一篇論文**
+
+| | 做法 | 缺點 |
+|---|---|---|
+| A | 每個識別碼拿一把 advisory lock，拿到才找、才新增 | 第一次匯入在一個交易裡寫約一萬篇，每篇一兩把鎖會超過共用鎖表（預設約 6,400 格），交易直接失敗 |
+| B | 交易隔離層級開到 SERIALIZABLE，衝突就重試 | 重試要在 services 包整個交易；一萬篇的交易重來一次代價很大 |
+| C | 先新增論文，再用 `INSERT … ON CONFLICT DO NOTHING` 依固定優先序認領識別碼；第一個就認領不到的話，刪掉自己剛新增的那列、改成更新已經存在的那篇 | 多一次新增與刪除（只在真的撞到時）；要寫並行測試證明 |
+
+**3. 抓取時間存哪裡**
+
+| | 做法 | 缺點 |
+|---|---|---|
+| A | 論文上一欄 `fetched_at`，不分來源 | 第二個來源（例如 Crossref）加入後，Crossref 昨天抓的資料會被當成比 OpenAlex 今天抓的舊，或反過來；不同來源的時間不能比 |
+| B | 每個來源一欄（現在只有 `openalex_fetched_at`），NULL＝沒有這個來源的資料 | 加來源時要加一欄（一個遷移） |
+
+**4. 識別碼指向不同論文**
+
+| | 做法 | 缺點 |
+|---|---|---|
+| A | 自動合併兩篇 | 合併會牽動摘要、AI 產出、文獻庫、關係；判斷錯了很難拆回來 |
+| B | 整筆寫入失敗 | 一筆資料不一致就讓整批匯入失敗 |
+| C | 照優先序更新找到的那篇，沒有搬走的識別碼放在結果的 `conflicts`、記警告日誌，留給管理者處理 | 兩篇論文會暫時並存，要有人看日誌 |
+
+## 決定
+
+全部選 B／C／B／C。
+
+1. **正規化規則**（`radar/domain/identifiers.py`，只收 `str`，看不懂就丟 `InvalidIdentifierError`，是 `ValueError` 的子類別）：
+   - DOI：去頭尾空白；去掉 `doi:`（不分大小寫、冒號後可有空白），或可省略的 `http(s)://`＋可省略的 `dx.`／`www.`＋`doi.org/`（網址形式先切掉第一個沒有編碼的 `?` 或 `#` 之後的查詢字串與錨點，再做 percent-decoding，解出來不是 UTF-8 就算看不懂；貼上的連結帶 `?utm_source=…` 也認得是同一篇）；只把 ASCII 字母轉小寫；結果要是 `10.<數字>(.<數字>)*/<至少一個字元>`、全部可印出、不含空白、最長 500 字元。數字只認 ASCII 0–9。
+   - ISSN-L：去頭尾空白；可省略 `ISSN` 或 `ISSN-L` 前綴（後面接空白或冒號）；有無連字號都收；輸出 `NNNN-NNNC`（`C` 是數字或大寫 `X`）。**只檢查格式，不驗檢查碼**。
+   - OpenAlex ID：可帶 `http(s)://(api.)openalex.org/` 與一段小寫的實體路徑（例如 `works/`）；輸出一個大寫字母加數字（例如 `W2741809807`）。論文的 ID 另外在 `ParsedPaper` 要求 `W` 開頭。
+   - 三個函式成功時做兩次等於做一次，用 Hypothesis 的性質測試守著。
+2. **`ParsedPaper`**（Pydantic、frozen、`extra="forbid"`）：識別碼欄位在建構時就正規化；`fetched_at` 必須帶時區；`doi` 與 `openalex_id` 至少一個；`publication_year` 是 1000–9999 的整數（strict，不收 `True`、字串）；`title` 去空白後非空、不能含 NUL 字元（PostgreSQL 的 text 存不了，會讓整批交易失敗）。現在只有 1.5 需要的欄位，作者、摘要等由 Story 1.7 加。
+3. **`upsert_by_external_id(connection, paper, *, origin, excluded_reason, scope)`**（`radar/repo/papers.py`，`paper` 與 `external_id` 唯一的寫入者）：在呼叫端用 `Database.transaction()` 開好的交易裡做，不 commit。
+   1. 依優先序（DOI、再 OpenAlex ID）找既有的論文。
+   2. 找到：`SELECT … FOR UPDATE` 鎖住，比 `openalex_fetched_at`。要寫的比較舊就什麼都不寫，回 `stale`（不掛任何識別碼，也不回報衝突）；一樣新或比較新才寫，並把還沒有主人的識別碼掛上來。
+   3. 找不到：新增論文，依優先序用 `ON CONFLICT DO NOTHING` 認領識別碼。另一個交易還沒 commit 的同一個識別碼會讓這一步等它結束，結束後就知道誰贏。**任何一個識別碼認領不到**（找的時候每個識別碼都沒有主人，所以只可能是另一個交易剛建好同一篇），就刪掉自己剛掛上的識別碼與剛新增、還沒 commit 的論文（別人看不到它們），改走第 2 步；結果和兩個交易依序執行時一樣。例如交易一寫 (10.1/a, W9) 還沒 commit，交易二寫 (10.1/b, W9)：交易二認領到 10.1/b、在 W9 等；交易一 commit 後，交易二放掉自己的論文與 10.1/b，改成更新交易一那篇，並把 10.1/b 掛上去。
+   - 第 3 步的「刪掉再重查」靠交易隔離層級是 READ COMMITTED（PostgreSQL 預設，每個語句重新拿快照，才讀得到另一個交易剛 commit 的論文）。改成 REPEATABLE READ 或 SERIALIZABLE 會失效。
+   4. 識別碼已經屬於另一篇論文時不搬、不合併，放在結果的 `conflicts` 並記警告日誌。
+   - `in_scope` 只由 `domain/scope.py` 的 `is_in_scope` 算（期刊在設定的 ISSN-L 集合、出版年 ≥ 2016、沒有上限）。`lab_visible`＝原本的值 OR `in_scope` OR 這次是引用擴展；設為真之後不改回去。`origin` 只在新增時寫；`manual` 不能經這個函式（之後的 `create_manual`）。`excluded_reason` 由呼叫端明確傳、每次寫入整欄覆寫（傳 None 就變回 NULL）。
+   - 傳的不是 `ParsedPaper` 丟 `TypeError`、`origin` 不對丟 `ValueError`，都在碰資料庫之前。
+   - 和 1.5 的規格寫法的差別：規格寫「一個都認領不到才刪」。實作改成「任何一個認領不到就刪」：因為找的時候一個都沒有主人，任何一個認領不到都代表並行的交易剛建好同一篇；如果這時候照樣保留自己的那列、只掛上認領到的識別碼，同一篇論文就會變成兩筆。改成刪掉後走第 2 步，結果和「一個都認領不到」那條路一樣，只是多涵蓋了部分重疊的情況。
+4. **每個來源一欄抓取時間**：`paper.openalex_fetched_at`。第二個來源加入時另加一欄，比較只和同一個來源比。
+5. **讀取權限的底層**：三種 Viewer 在 `radar/domain/viewer.py`；可見條件只在 `radar/repo/visibility.py` 的 `visible_papers(viewer, *, alias)`：成員看 `lab_visible`、系統看全部、`PublicViewer` 暫時一篇都看不到（等 Story 1.10 的 `counted_paper`）。寫入權限表在 `radar/domain/permissions.py`，規則四種：`any_member`、`owner`（管理者不因為是管理者就通過）、`admin`、`system`；`PublicViewer` 什麼都不能寫。`sweep` 讀狀態表的 `find_stuck_ids` 也改成第一個參數收 `SystemViewer`。
+6. **架構測試**（`tests/arch/test_repo_rules.py`）：repo 公開函式的名稱前綴（讀取 `get_`、`list_`、`find_`、`count_`、`search_`、`visible_`；寫入 `upsert_`、`create_`、`update_`、`delete_`），讀取類第一個參數是沒有預設值的 `viewer`，基礎設施例外列名並寫理由；`lab_visible` 只出現在 `repo/visibility.py` 與 `repo/papers.py`；一張表一個寫入者（掃 repo 字串裡的寫入 SQL，不准用 SQLAlchemy 的 `insert`／`update`／`delete`）；`commit`／`rollback`／`begin` 只在 `repo/db.py` 與遷移，`.transaction()` 只在 services；services 的公開函式用到寫入類 repo 函式時第一個參數叫 `actor`。schema 體檢另外檢查外鍵都有完整的索引（只有部分索引的不算）；例外只有 Procrastinate 凍結 SQL 的 `procrastinate_jobs.worker_id`。
+
+## 理由
+
+1. **ISSN 不驗檢查碼**：ISSN 在這裡只用來判斷「是不是追蹤的期刊」，比對的對象是設定檔裡自己核對過的 14 個 ISSN-L。驗檢查碼擋下的錯誤資料，結果和「不在追蹤範圍」一樣；擋下反而要處理例外。
+2. **先新增再認領不需要額外的鎖**：唯一約束本身就是仲裁者，PostgreSQL 會讓後到的交易等前一個結束，不佔共用鎖表（`max_locks_per_transaction` 決定的那張），一個交易寫一萬篇也沒問題。真的撞到時才多一次新增與刪除，平常（同一篇只有一個交易在寫）沒有額外成本。
+3. **每個來源一欄**：不同來源的抓取時間沒有可比性，放同一欄會讓「比較新」失去意義。
+4. **衝突不合併**：合併是管理者的決定（之後的 Story），寫入函式只負責不弄壞資料、把問題報出來。
+
+## 取捨
+
+- **兩篇論文可能暫時並存**：DOI 和 OpenAlex ID 指向不同論文時，兩篇都留著，要看警告日誌才知道。之後有合併的 Story 時，再決定要不要把衝突寫進資料表讓管理者處理。
+- **並行時多一次新增與刪除**：刪掉的列從來沒有被別人看到，但 `paper` 表會多一點要清的空間（autovacuum 會處理）。
+- **兩個大批次仍可能死結**：同一篇論文裡依固定優先序認領，兩個交易不會為了同一篇互等；但兩個大批次用不同順序寫到重疊的論文時（例如交易 A 鎖住論文 X、正要認領識別碼 e，交易 B 已經認領了 e、之後又要更新 X），仍可能死結。PostgreSQL 偵測到會中止其中一個交易，那個交易要整個重跑。每週更新同時只有一筆在跑；單篇寫入的交易很短、只碰一篇，不會和批次互鎖。
+- **ISSN 打錯一位數會變成另一本期刊**：只影響追蹤範圍外的論文，接受。
+- **什麼時候重新考慮**：加第二個資料來源時（加一欄抓取時間，並確認比較邏輯）；衝突的警告日誌常常出現時（改成寫進資料表）。
+
+## 名詞
+
+- **正規化（識別碼）**：把同一個識別碼的不同寫法變成同一種寫法，例如 `https://doi.org/10.1/ABC` 和 `doi:10.1/abc` 都變成 `10.1/abc`。
+- **percent-decoding**：網址裡的特殊字元會寫成 `%` 加兩位十六進位（例如 `/` 寫成 `%2F`），解回原本的字元就是 percent-decoding。
+- **ISSN-L**：一本期刊紙本和電子版各有一個 ISSN，ISSN-L 是把它們串起來的那一個，一本期刊只有一個。
+- **檢查碼**：ISSN 最後一碼是用前七碼算出來的，用來發現打錯；這裡不驗它。
+- **`ON CONFLICT DO NOTHING`**：PostgreSQL 新增資料時，撞到唯一約束就跳過、不報錯的寫法。
+- **交易隔離層級**：決定一個交易看不看得到別的交易剛 commit 的資料。READ COMMITTED（PostgreSQL 預設）每個語句都看最新 commit 的資料；REPEATABLE READ 整個交易都看開始時的樣子；SERIALIZABLE 再加上「結果要和依序執行一樣」，做不到就讓交易失敗。
+- **共用鎖表**：PostgreSQL 記錄「誰拿著哪些鎖」的一塊固定大小的記憶體，大小由 `max_locks_per_transaction` 決定，滿了交易就失敗。
+- **autovacuum**：PostgreSQL 在背景自動清掉已刪除或被改掉的舊資料列、回收空間的程序。
+- **死結（deadlock）**：兩個交易各自拿著對方要的鎖、互相等；PostgreSQL 會發現並中止其中一個。

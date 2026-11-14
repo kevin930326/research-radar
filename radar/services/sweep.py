@@ -11,6 +11,7 @@ import structlog
 
 from radar.domain.jobs import SWEEP, Enqueue
 from radar.domain.sweep import SWEEP_BATCH_LIMIT, SweepEntry
+from radar.domain.viewer import SystemViewer
 from radar.repo.db import Database
 from radar.repo.sweep import find_stuck_ids
 from radar.services.scheduled import run_scheduled_job
@@ -58,8 +59,10 @@ def _sweep_once(
     stuck: list[tuple[SweepEntry, list[uuid.UUID]]] = []
     if registry:
         with database.transaction() as connection:
+            viewer = SystemViewer()
             stuck = [
-                (entry, find_stuck_ids(connection, entry, SWEEP_BATCH_LIMIT)) for entry in registry
+                (entry, find_stuck_ids(viewer, connection, entry, SWEEP_BATCH_LIMIT))
+                for entry in registry
             ]
 
     stuck_rows = requeued = 0

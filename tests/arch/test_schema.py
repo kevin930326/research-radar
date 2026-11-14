@@ -3,6 +3,8 @@
 - 主鍵：單一欄位、型別 `uuid`、預設值 `uuidv7()`。例外只能列在 `PRIMARY_KEY_EXCEPTIONS`，
   而且清單裡的每一張表都要真的存在（表改名或拿掉時，例外不會默默留著）。
 - 時間：不能有 `timestamp`（不帶時區）的欄位；名稱是 `*_at` 的欄位一定是 `timestamptz`。
+- 外鍵：每個外鍵的欄位都要有索引（索引的開頭幾欄剛好是外鍵的欄位，順序不拘；
+  部分索引（帶 WHERE）不算）。
 """
 
 import psycopg
@@ -20,6 +22,14 @@ PRIMARY_KEY_EXCEPTIONS: dict[str, str] = {
     "procrastinate_workers": PROCRASTINATE_REASON,
     "procrastinate_events": PROCRASTINATE_REASON,
     "procrastinate_periodic_defers": PROCRASTINATE_REASON,
+}
+
+# 只有部分索引（或沒有索引）、但不能改的外鍵，寫明理由；清單裡的每一項都要真的是沒有完整索引的外鍵。
+FOREIGN_KEY_INDEX_EXCEPTIONS: dict[str, str] = {
+    "procrastinate_jobs.worker_id": (
+        "Procrastinate 凍結的 SQL（ADR-0019）只建了部分索引"
+        "（idx_procrastinate_jobs_worker_not_null，WHERE status = 'doing'），不改套件原檔"
+    ),
 }
 
 TABLES_SQL = """
@@ -47,11 +57,38 @@ ORDER BY a.attnum
 """
 
 
+# 沒有索引的外鍵：索引開頭的 n 欄（n＝外鍵的欄數）和外鍵的欄位是同一組。
+UNINDEXED_FOREIGN_KEYS_SQL = """
+SELECT (
+    SELECT string_agg(a.attname, ', ' ORDER BY k.ord)
+    FROM unnest(con.conkey) WITH ORDINALITY AS k(attnum, ord)
+    JOIN pg_attribute a ON a.attrelid = con.conrelid AND a.attnum = k.attnum
+)
+FROM pg_constraint con
+WHERE con.conrelid = %s AND con.contype = 'f'
+  AND NOT EXISTS (
+    SELECT 1
+    FROM pg_index i,
+         LATERAL (
+             SELECT (string_to_array(i.indkey::text, ' ')::int2[])
+                    [1:cardinality(con.conkey)] AS lead
+         ) l
+    WHERE i.indrelid = con.conrelid AND i.indpred IS NULL
+      AND l.lead @> con.conkey AND l.lead <@ con.conkey
+  )
+ORDER BY con.conname
+"""
+
+
 def _short(qualified: str) -> str:
     return qualified.removeprefix("public.")
 
 
-def schema_problems(connection: psycopg.Connection, exceptions: dict[str, str]) -> list[str]:
+def schema_problems(
+    connection: psycopg.Connection,
+    exceptions: dict[str, str],
+    foreign_key_exceptions: dict[str, str] = FOREIGN_KEY_INDEX_EXCEPTIONS,
+) -> list[str]:
     """回傳每一條違規；沒有違規時是空清單。"""
     tables = connection.execute(TABLES_SQL).fetchall()
     names = {_short(name) for _oid, name in tables}
@@ -61,6 +98,7 @@ def schema_problems(connection: psycopg.Connection, exceptions: dict[str, str]) 
         if missing not in names
     ]
 
+    unindexed_exceptions: set[str] = set()
     for oid, qualified in tables:
         table = _short(qualified)
         if table not in exceptions:
@@ -82,6 +120,17 @@ def schema_problems(connection: psycopg.Connection, exceptions: dict[str, str]) 
                 problems.append(f"{where}：時間欄位要用 timestamptz（現在是 {type_name}）")
             elif column.endswith("_at") and base_type != "timestamp with time zone":
                 problems.append(f"{where}：*_at 欄位要用 timestamptz（現在是 {type_name}）")
+        for (columns,) in connection.execute(UNINDEXED_FOREIGN_KEYS_SQL, (oid,)).fetchall():
+            foreign_key = f"{table}.{columns}"
+            if foreign_key in foreign_key_exceptions:
+                unindexed_exceptions.add(foreign_key)
+            else:
+                problems.append(f"{foreign_key}：外鍵沒有索引")
+    problems += [
+        f"{foreign_key}：在外鍵索引的例外清單裡，但它不是沒有完整索引的外鍵"
+        for foreign_key in foreign_key_exceptions
+        if foreign_key not in unindexed_exceptions
+    ]
     return problems
 
 
@@ -92,6 +141,15 @@ def test_migrated_schema_follows_conventions(migrated_database: TestDatabase) ->
 
 def test_every_exception_has_a_reason() -> None:
     assert all(reason.strip() for reason in PRIMARY_KEY_EXCEPTIONS.values())
+    assert all(reason.strip() for reason in FOREIGN_KEY_INDEX_EXCEPTIONS.values())
+
+
+def test_stale_foreign_key_exception_is_reported(migrated_database: TestDatabase) -> None:
+    exceptions = {**FOREIGN_KEY_INDEX_EXCEPTIONS, "external_id.paper_id": "測試用"}
+    with migrated_database.connect(OWNER_ROLE) as connection:
+        problems = schema_problems(connection, PRIMARY_KEY_EXCEPTIONS, exceptions)
+
+    assert problems == ["external_id.paper_id：在外鍵索引的例外清單裡，但它不是沒有完整索引的外鍵"]
 
 
 VIOLATIONS = {
@@ -109,6 +167,16 @@ VIOLATIONS = {
     "bad_at_column": (
         "CREATE TABLE bad_at_column (id uuid PRIMARY KEY DEFAULT uuidv7(), created_at date)"
     ),
+    "bad_unindexed_fk": (
+        "CREATE TABLE bad_unindexed_fk (id uuid PRIMARY KEY DEFAULT uuidv7(),"
+        " good_table_id uuid NOT NULL REFERENCES good_table (id))"
+    ),
+    # 只有部分索引（帶 WHERE）的外鍵也算沒有索引。
+    "bad_partial_fk": (
+        "CREATE TABLE bad_partial_fk (id uuid PRIMARY KEY DEFAULT uuidv7(),"
+        " good_table_id uuid REFERENCES good_table (id));"
+        " CREATE INDEX ON bad_partial_fk (good_table_id) WHERE good_table_id IS NOT NULL"
+    ),
 }
 
 
@@ -120,6 +188,12 @@ def test_schema_check_catches_each_violation(migrated_database: TestDatabase) ->
                 "CREATE TABLE good_table"
                 " (id uuid PRIMARY KEY DEFAULT uuidv7(), created_at timestamptz NOT NULL)"
             )
+            # 有索引的外鍵（含複合索引的開頭欄）不算違規。
+            connection.execute(
+                "CREATE TABLE good_child (id uuid PRIMARY KEY DEFAULT uuidv7(),"
+                " good_table_id uuid NOT NULL REFERENCES good_table (id), n int)"
+            )
+            connection.execute("CREATE INDEX ON good_child (good_table_id, n)")
             for statement in VIOLATIONS.values():
                 connection.execute(statement)
 
