@@ -344,14 +344,30 @@ def test_undecodable_content(content: bytes, reason: str | None) -> None:
         assert caught.value.reason == reason
 
 
-def test_deeply_nested_object_is_parse_error() -> None:
+def test_deeply_nested_object_is_parse_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    # 多深才會 RecursionError 看平台的 C 堆疊（Python 3.14 依堆疊大小判斷）：macOS 在 10 萬層
+    # 就丟，CI 的 Linux 解得完。所以直接讓解析 JSON 時丟 RecursionError，確定會轉成 ParseError。
+    def too_deep(_text: str) -> Any:
+        raise RecursionError("maximum recursion depth exceeded")
+
+    monkeypatch.setattr("radar.domain.parsers.openalex.json.loads", too_deep)
+
+    with pytest.raises(ParseError, match="巢狀太深"):
+        parse_openalex_work(b'{"id": "W1", "title": "x"}', fetched_at=FETCHED_AT)
+
+
+def test_deeply_nested_content_never_escapes_as_another_error() -> None:
+    # 真的很深的內容：解得完（多出來的鍵不用）或解析失敗都可以，不能丟出別種例外。
     depth = 100_000
     content = (
         b'{"id": "W1", "title": "x", "biblio": ' + b'{"a": ' * depth + b"1" + b"}" * depth + b"}"
     )
 
-    with pytest.raises(ParseError):
-        parse_openalex_work(content, fetched_at=FETCHED_AT)
+    try:
+        parsed = parse_openalex_work(content, fetched_at=FETCHED_AT)
+    except ParseError:
+        return
+    assert parsed.openalex_id == "W1"
 
 
 # --- 倒排索引還原的性質 -----------------------------------------------------------------------

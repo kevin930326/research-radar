@@ -228,3 +228,5 @@ deferred: []
 - reparse 不新增論文；第一次匯入要等 1.8／1.9，真的 OpenAlex＋R2 的整條流程要到那時才跑。
 - 套用的交易對每篇論文 `FOR UPDATE`，和單篇寫入或 1.9 的每週套用碰到同一篇、等鎖超過 `statement_timeout` 時整批退回，要手動重跑。
 - 排除規則只有 PRD 寫明的四條；`Editorial Board`、`Corrigendum` 等候選等 Kevin 決定。
+
+**CI 修正（第一次 push 後）**：CI 的 Linux 上 `tests/unit/test_openalex_parser.py::test_deeply_nested_object_is_parse_error` 失敗（10 萬層巢狀在 Linux 解得完、不會 RecursionError；Python 3.14 依 C 堆疊大小判斷遞迴深度，macOS 會丟）。這是本 Story 新寫的測試，原本的假設依平台而定。改成兩個測試：讓 `json.loads` 丟 `RecursionError`，確定轉成 `ParseError`（訊息「巢狀太深」）；真的 10 萬層內容只允許「解得完」或 `ParseError`，不能丟別種例外。程式沒改。
