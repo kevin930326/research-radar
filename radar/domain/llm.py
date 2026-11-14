@@ -18,7 +18,11 @@ import json
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any, ClassVar, Final, Literal, get_args
+from typing import Any, ClassVar, Final, Literal, cast, final, get_args
+
+from pydantic import BaseModel
+from pydantic.json_schema import GenerateJsonSchema, JsonSchemaValue, model_json_schema
+from pydantic_core import core_schema
 
 from radar.domain.errors import ErrorCode
 from radar.domain.policy import (
@@ -41,6 +45,10 @@ DATA_NOT_INSTRUCTIONS: Final = (
 
 type Effort = Literal["low", "medium", "high"]
 EFFORTS: Final[frozenset[str]] = frozenset(get_args(Effort.__value__))
+
+# 可以送出的模型 ID（白名單）。`model` 也會原樣送到雲端，所以不收任意字串（ADR-0029）。
+# 目前還沒有模型設定檔，先放 domain 常數；2.2 的 `config/models.yaml` 之後接手。
+ALLOWED_MODELS: Final[frozenset[str]] = frozenset({"claude-haiku-5-5"})
 
 # 正常結束與長度截斷的 `stop_reason`（其餘都當格式不對）。
 END_TURN: Final = "end_turn"
@@ -191,6 +199,7 @@ class LlmConfigurationError(LlmError):
 # --- 請求 ----------------------------------------------------------------------------------
 
 
+@final
 @dataclass(frozen=True, slots=True)
 class LlmRequest:
     """一次 LLM 呼叫。
@@ -198,8 +207,12 @@ class LlmRequest:
     - `system`：這個工作的系統提示（送出時前面會接上 `DATA_NOT_INSTRUCTIONS`）。來源必須是
       `prompt_template`：使用者或文件的文字不能變成系統提示。
     - `content`：使用者訊息的區塊，一個 `CloudSafeText` 一個文字區塊，至少一個。
-    - `effort`、`disable_thinking`：Haiku 5.5 的思考設定；`output_schema`：要固定 JSON 格式時的
-      JSON schema（結構化輸出），有給時回應必須是 JSON 物件。
+    - `model`：必須在 `ALLOWED_MODELS` 裡。
+    - `effort`、`disable_thinking`：Haiku 5.5 的思考設定。
+    - `output_schema`：要固定 JSON 格式時，傳 repo 裡寫死的 Pydantic 模型**類別**（不收 dict）；
+      建立時由類別產生 JSON schema 並凍結成字串，送出時才轉回 dict，建好之後改不到。
+      有給時回應必須是 JSON 物件。schema 和 `model` 一樣會送到雲端，所以也在放行範圍內
+      （ADR-0029）：只收寫在程式裡的類別，不收外部文字組出來的 schema。
 
     Raises:
         NotCloudSafeError: `system` 或 `content` 的區塊不是 `CloudSafeText`；被硬改過、
@@ -213,10 +226,55 @@ class LlmRequest:
     max_tokens: int
     effort: Effort | None = None
     disable_thinking: bool = False
-    output_schema: Mapping[str, object] | None = None
+    output_schema: type[BaseModel] | None = None
+    _output_json: str | None = field(init=False, default=None, repr=False, compare=False)
+
+    def __init_subclass__(cls) -> None:
+        # `@final` 只有 mypy 看；執行期也不給繼承（子類別可以用 property 每次讀回不同的值）。
+        raise TypeError("LlmRequest 不能被繼承")
 
     def __post_init__(self) -> None:
         _validate_request(self)
+        object.__setattr__(self, "_output_json", _schema_json(self.output_schema))
+
+    def output_json_schema(self) -> dict[str, Any] | None:
+        """送出用的 JSON schema：每次從建立時凍結的字串轉一份新的 dict，改它不影響請求。"""
+        if self._output_json is None:
+            return None
+        schema: dict[str, Any] = json.loads(self._output_json)
+        return schema
+
+
+class _SchemaWithoutTitles(GenerateJsonSchema):
+    """產生 JSON schema 時不放 Pydantic 自動加的 `title`（由欄位名稱與類別名稱推出，送出只是多
+    花 token）。"""
+
+    def field_title_should_be_set(
+        self, schema: core_schema.CoreSchema | core_schema.ModelField | Any
+    ) -> bool:
+        return False
+
+    def model_schema(self, schema: core_schema.ModelSchema) -> JsonSchemaValue:
+        result = super().model_schema(schema)
+        result.pop("title", None)
+        return result
+
+
+def _schema_json(output_schema: type[BaseModel] | None) -> str | None:
+    """由 Pydantic 模型類別產生 JSON schema，凍結成排序過的 JSON 字串。"""
+    if output_schema is None:
+        return None
+    # 用模組函式，不呼叫類別上可被覆寫的 `model_json_schema`。
+    schema = model_json_schema(output_schema, schema_generator=_SchemaWithoutTitles)
+    return json.dumps(schema, ensure_ascii=False, sort_keys=True, allow_nan=False)
+
+
+def _is_model_class(value: object) -> bool:
+    """真的是 `BaseModel` 的子類別（看真實型別是不是 metaclass，偽裝 `__class__` 的物件不算）。"""
+    if not issubclass(type(value), type):
+        return False
+    # 上一行已確認真實型別是 metaclass（value 是真的類別）；cast 只是讓 mypy 收窄。
+    return issubclass(cast(type, value), BaseModel) and value is not BaseModel
 
 
 def _validate_request(request: LlmRequest) -> None:
@@ -231,7 +289,8 @@ def _validate_request(request: LlmRequest) -> None:
             f"LlmRequest.system 的來源必須是 prompt_template（收到 {system_source.value}）"
         )
     content: object = request.content
-    if not isinstance(content, tuple):
+    # 一律看真實型別（不用 isinstance）：子類別或偽裝的物件可以每次讀回不同的值。
+    if type(content) is not tuple:
         raise NotCloudSafeError(_not_cloud_safe("LlmRequest.content", content, container=True))
     if not content:
         raise ValueError("LlmRequest.content 至少要有一個區塊")
@@ -240,18 +299,23 @@ def _validate_request(request: LlmRequest) -> None:
             raise NotCloudSafeError(_not_cloud_safe(f"LlmRequest.content[{index}]", block))
         # 核對號碼仍在放行登記裡（被 object.__setattr__ 硬改過的丟 CloudSafeTextIntegrityError）。
         cloud_text(block)
-    if not isinstance(request.model, str) or not request.model.strip():
-        raise ValueError("LlmRequest.model 不能是空的")
-    if isinstance(request.max_tokens, bool) or not isinstance(request.max_tokens, int):
+    # model 會原樣送出：只收白名單裡的 ID；訊息不帶收到的值（可能是不該送出的文字）。
+    if type(request.model) is not str or request.model not in ALLOWED_MODELS:
+        raise ValueError(
+            "LlmRequest.model 必須是登記過的模型 ID（" + "、".join(sorted(ALLOWED_MODELS)) + "）"
+        )
+    if type(request.max_tokens) is not int:
         raise TypeError("LlmRequest.max_tokens 必須是整數")
     if request.max_tokens < 1:
         raise ValueError("LlmRequest.max_tokens 至少是 1")
-    if request.effort is not None and request.effort not in EFFORTS:
+    if request.effort is not None and (
+        type(request.effort) is not str or request.effort not in EFFORTS
+    ):
         raise ValueError("LlmRequest.effort 只能是 low、medium、high 或 None")
-    if not isinstance(request.disable_thinking, bool):
+    if type(request.disable_thinking) is not bool:
         raise TypeError("LlmRequest.disable_thinking 必須是 bool")
-    if request.output_schema is not None and not isinstance(request.output_schema, Mapping):
-        raise TypeError("LlmRequest.output_schema 必須是 mapping 或 None")
+    if request.output_schema is not None and not _is_model_class(request.output_schema):
+        raise TypeError("LlmRequest.output_schema 必須是 Pydantic 模型類別或 None（不收 dict）")
 
 
 def _not_cloud_safe(where: str, value: object, *, container: bool = False) -> str:
@@ -260,17 +324,40 @@ def _not_cloud_safe(where: str, value: object, *, container: bool = False) -> st
 
 
 def check_llm_request(obj: object) -> LlmRequest:
-    """adapter 入口的執行期檢查：一定是 `LlmRequest`，而且每個欄位仍然合法。
+    """執行期檢查：真實型別一定是 `LlmRequest`（不用 isinstance），而且每個欄位仍然合法。
+
+    回傳的是同一個物件；adapter 送出前要用 `snapshot_llm_request` 拿重建的副本。
 
     Raises:
-        NotCloudSafeError: 不是 `LlmRequest`（例如直接傳 `str`），或裡面有不是
-            `CloudSafeText` 的文字。
+        NotCloudSafeError: 不是 `LlmRequest`（例如直接傳 `str`、偽裝 `__class__` 的物件），
+            或裡面有不是 `CloudSafeText` 的文字。
     """
-    if not isinstance(obj, LlmRequest):
+    if type(obj) is not LlmRequest:
         raise NotCloudSafeError(_not_cloud_safe("LlmProvider.complete 的參數", obj))
     # 建立時已經檢查過；再查一次，擋下用 object.__setattr__ 硬改欄位的情況。
     _validate_request(obj)
     return obj
+
+
+def snapshot_llm_request(obj: object) -> LlmRequest:
+    """adapter 入口：檢查後，用讀到的值重建一份新的 `LlmRequest`，adapter 之後只讀這一份。
+
+    每個欄位只讀一次，副本建立時再完整驗證一次、重新由模型類別產生 JSON schema，所以檢查與
+    送出之間沒有時間差可以鑽（例如建好後才改凍結的 schema 字串）。
+
+    Raises:
+        NotCloudSafeError, TypeError, ValueError: 同 `check_llm_request` 與 `LlmRequest`。
+    """
+    request = check_llm_request(obj)
+    return LlmRequest(
+        model=request.model,
+        system=request.system,
+        content=request.content,
+        max_tokens=request.max_tokens,
+        effort=request.effort,
+        disable_thinking=request.disable_thinking,
+        output_schema=request.output_schema,
+    )
 
 
 def check_cloud_safe_text(obj: object) -> CloudSafeText:

@@ -1,7 +1,8 @@
 """Anthropic 的 `LlmProvider`（AD-8、AD-9、ADR-0009、ADR-0029）：全專案唯一的 Anthropic 連接點。
 
-- 入口先 `check_llm_request`：不是 `LlmRequest`、或裡面有不是 `CloudSafeText` 的文字，在送出
-  任何請求前丟 `NotCloudSafeError`。
+- 入口先 `snapshot_llm_request`（檢查後重建副本，之後只讀副本）：不是 `LlmRequest`、或裡面
+  有不是 `CloudSafeText` 的文字，在送出任何請求前丟 `NotCloudSafeError`；`model` 不在白名單、
+  `output_schema` 不是模型類別也送不出去。
 - 請求：`POST {base_url}/v1/messages`，系統提示是 `system_prompt(request)`（固定聲明開頭），
   單一 user 訊息、每個 `CloudSafeText` 一個 text 區塊。不給工具；不送 temperature、top_p、
   top_k 與 assistant prefill（Haiku 5.5 會回 400）。effort、結構化輸出放 `output_config`，
@@ -47,8 +48,8 @@ from radar.domain.llm import (
     LlmTimeoutError,
     LlmTransientError,
     LlmUsage,
-    check_llm_request,
     interpret_completion,
+    snapshot_llm_request,
     system_prompt,
 )
 from radar.domain.policy import cloud_text
@@ -261,7 +262,8 @@ class AnthropicLlmProvider:
 
     def complete(self, request: LlmRequest) -> LlmResult:
         """送一次請求，回判讀好的結果（錯誤見 `radar.ports.LlmProvider.complete`）。"""
-        checked = check_llm_request(request)
+        # 檢查後重建一份副本，之後只讀這一份（檢查與送出之間沒有時間差）。
+        checked = snapshot_llm_request(request)
         for attempt in stamina.retry_context(
             on=self._backoff,
             attempts=self._attempts,
@@ -292,11 +294,9 @@ class AnthropicLlmProvider:
         output_config: OutputConfigParam = {}
         if request.effort is not None:
             output_config["effort"] = request.effort
-        if request.output_schema is not None:
-            output_config["format"] = {
-                "type": "json_schema",
-                "schema": dict(request.output_schema),
-            }
+        schema = request.output_json_schema()
+        if schema is not None:
+            output_config["format"] = {"type": "json_schema", "schema": schema}
         # 文字一律經 policy 的 cloud_text 拿：號碼不在放行登記裡（被硬改過）就丟錯、不送出。
         content: list[TextBlockParam] = [
             {"type": "text", "text": cloud_text(block)} for block in request.content

@@ -6,6 +6,7 @@ import dataclasses
 from typing import Any
 
 import pytest
+from pydantic import BaseModel
 
 from radar.adapters.fake import fake_completion
 from radar.domain.errors import ErrorCode
@@ -61,7 +62,12 @@ def _request(**changes: Any) -> LlmRequest:
     return LlmRequest(**values)
 
 
-JSON_REQUEST = _request(output_schema={"type": "object"})
+# output_schema 改成只收 Pydantic 模型類別（Opus 確認審查第 1 點）；原本是 {"type": "object"}。
+class AnyObject(BaseModel):
+    pass
+
+
+JSON_REQUEST = _request(output_schema=AnyObject)
 
 
 # --- system_prompt ---------------------------------------------------------------------------

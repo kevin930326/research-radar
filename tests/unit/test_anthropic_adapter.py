@@ -12,6 +12,7 @@ import anthropic
 import httpx2
 import pytest
 import stamina
+from pydantic import BaseModel, ConfigDict
 
 from radar.adapters.anthropic import (
     ANTHROPIC_BASE_URL,
@@ -50,6 +51,15 @@ SCHEMA: dict[str, object] = {
     "required": ["research_question"],
     "additionalProperties": False,
 }
+
+
+# output_schema 改成只收 Pydantic 模型類別（Opus 確認審查第 1 點）：這個類別產生的 JSON schema
+# 就是上面的 SCHEMA（不寫 docstring：docstring 會變成 schema 的 description）。
+class ResearchQuestion(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    research_question: str
+
 
 type Reply = httpx2.Response | Exception | Callable[[], httpx2.Response]
 
@@ -179,7 +189,7 @@ def test_effort_structured_output_and_disabled_thinking_are_sent() -> None:
     recorder = Recorder(_cassette("ok_json"))
 
     _provider(recorder).complete(
-        _request(effort="low", output_schema=SCHEMA, disable_thinking=True)
+        _request(effort="low", output_schema=ResearchQuestion, disable_thinking=True)
     )
 
     body = recorder.body()
@@ -229,7 +239,9 @@ def test_request_with_str_content_sends_nothing() -> None:
 
 
 def test_ok_json_with_thinking_block() -> None:
-    result = _provider(Recorder(_cassette("ok_json"))).complete(_request(output_schema=SCHEMA))
+    result = _provider(Recorder(_cassette("ok_json"))).complete(
+        _request(output_schema=ResearchQuestion)
+    )
 
     assert result.parsed == {
         "research_question": "（假）遠距工作如何影響團隊的知識分享",
@@ -284,7 +296,7 @@ def test_max_tokens() -> None:
     recorder = Recorder(_cassette("max_tokens"))
 
     with pytest.raises(LlmTruncatedError) as info:
-        _provider(recorder).complete(_request(output_schema=SCHEMA))
+        _provider(recorder).complete(_request(output_schema=ResearchQuestion))
 
     assert info.value.usage == LlmUsage(input_tokens=1234, output_tokens=1024)
     assert info.value.request_id == "req_fake_0004"
@@ -360,7 +372,7 @@ def test_no_text_block_is_malformed() -> None:
 
 def test_json_requested_but_text_is_not_json_object() -> None:
     with pytest.raises(LlmMalformedResponseError):
-        _provider(Recorder(_cassette("ok_text"))).complete(_request(output_schema=SCHEMA))
+        _provider(Recorder(_cassette("ok_text"))).complete(_request(output_schema=ResearchQuestion))
 
 
 def test_to_completion_ignores_unknown_fields() -> None:

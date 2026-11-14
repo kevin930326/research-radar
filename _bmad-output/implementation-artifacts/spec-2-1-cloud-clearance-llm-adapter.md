@@ -230,6 +230,13 @@ deferred:
 - findings:
   - `[high]` `[patch]` 一般物件讓 `__class__` 回 `CloudSafeText` 就騙得過 `isinstance`，`cloud_text` 又直接回 `value.text`，不查登記表 — 所有核對點改用 `is_cloud_safe_text`（`type(x) is CloudSafeText`），`cloud_text`／新的 `cloud_source` 用建類別時存下的 slot descriptor 讀號碼、直接查登記表；`CloudSafeText.text`／`.source` 反過來呼叫這兩個函式；新增架構規則「policy.py 以外不用 isinstance／issubclass 判斷 CloudSafeText」與反向測試 `tests/unit/test_cloud_disguise.py`。
 
+### 2026-11-15 — Opus 確認審查 77caba7
+- verdicts: 3 findings — high 1, medium 1, low 1
+- findings:
+  - `[high]` `[patch]` `output_schema` 收任意 mapping、`model` 收任意字串，付費全文能經由 schema 或 model 送出，建好後改 dict 也行 — `output_schema` 改成只收 Pydantic 模型類別，建立時產生 schema 並凍結成字串；`model` 用白名單 `ALLOWED_MODELS`；架構測試禁止 `create_model`、`json_schema_extra`。既有測試裡用 dict 當 schema 的四處輸入改成模型類別（斷言不變）。
+  - `[medium]` `[patch]` `check_llm_request` 用 isinstance、`LlmRequest` 沒有 `@final`，adapter 檢查後重讀欄位 — `@final`＋執行期不能繼承、`type(obj) is LlmRequest`、欄位全看真實型別、adapter 改用 `snapshot_llm_request` 重建的副本；架構測試禁止 policy／llm 以外用 isinstance 判斷 `LlmRequest`。
+  - `[low]` `[patch]` ADR 把架構測試守私有狀態說得太滿 — ADR 改寫範圍；加一條 `radar/` 不 import `gc`、不用 `__globals__`。
+
 ## Design Notes
 
 `CloudSafeText` 只靠 mypy 擋不住執行期的誤用，所以建構子收一個只有 `policy.py` 拿得到的私有記號：

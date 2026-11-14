@@ -6,6 +6,7 @@ import math
 from typing import Any
 
 import pytest
+from pydantic import BaseModel
 
 from radar.adapters.fake import (
     FakeEmbeddingProvider,
@@ -32,6 +33,11 @@ from radar.ports import EmbeddingProvider, LlmProvider
 POLICY = CloudPolicy()
 
 
+# output_schema 改成只收 Pydantic 模型類別（Opus 確認審查第 1 點）；原本是 {"type": "object"}。
+class AnyObject(BaseModel):
+    pass
+
+
 def _safe(text: str, source: ContentSource = ContentSource.TITLE) -> CloudSafeText:
     return clear_for_cloud(text, source, None, POLICY)
 
@@ -53,7 +59,7 @@ def _request(**changes: Any) -> LlmRequest:
 def test_fake_llm_is_an_llm_provider_and_records_requests() -> None:
     fake = FakeLlmProvider([fake_completion('{"a": 1}', thinking=True)])
     provider: LlmProvider = fake
-    request = _request(output_schema={"type": "object"})
+    request = _request(output_schema=AnyObject)
 
     result = provider.complete(request)
 
@@ -80,7 +86,7 @@ def test_fake_llm_raises_the_same_rejected_errors_as_the_adapter(
     fake = FakeLlmProvider([completion])
 
     with pytest.raises(error_type) as info:
-        fake.complete(_request(output_schema={"type": "object"}))
+        fake.complete(_request(output_schema=AnyObject))
 
     assert isinstance(info.value, LlmRejectedError)
     assert info.value.usage == completion.usage

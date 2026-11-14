@@ -2,8 +2,8 @@
 
 - `replies`：每次呼叫用掉一個。是 `Completion` 就走和真實 adapter 同一個 `interpret_completion`
   （拒答、截斷、格式不對丟同一批錯誤）；是 `LlmError` 就原樣丟出（模擬逾時、限流、金鑰錯）。
-- 入口同樣先 `check_llm_request`：傳 `str` 會丟 `NotCloudSafeError`，而且不會記進 `requests`、
-  不會用掉回覆。
+- 入口同樣先 `snapshot_llm_request`（檢查後重建副本）：傳 `str` 會丟 `NotCloudSafeError`，
+  而且不會記進 `requests`、不會用掉回覆。`requests` 記的是重建的副本（和原請求相等）。
 - 每次合法的請求記在 `requests`。回覆用完還被呼叫時丟 `FakeRepliesExhaustedError`。
 - `fake_completion(text, ...)` 產生一個 `Completion`（內容是測試自己編的）。
 """
@@ -19,8 +19,8 @@ from radar.domain.llm import (
     LlmRequest,
     LlmResult,
     LlmUsage,
-    check_llm_request,
     interpret_completion,
+    snapshot_llm_request,
 )
 
 FAKE_MODEL = "claude-haiku-5-5"
@@ -81,7 +81,7 @@ class FakeLlmProvider:
         return len(self._replies)
 
     def complete(self, request: LlmRequest) -> LlmResult:
-        checked = check_llm_request(request)
+        checked = snapshot_llm_request(request)
         self.requests.append(checked)
         if not self._replies:
             raise FakeRepliesExhaustedError(

@@ -52,6 +52,8 @@ class LlmProvider(Protocol):
         Raises:
             NotCloudSafeError: 參數不是 `LlmRequest`，或裡面有不是 `CloudSafeText` 的文字；
                 在送出任何請求前丟出。
+            TypeError, ValueError: 請求建好後欄位被硬改成不合法的值（例如 `model` 不在
+                白名單、`output_schema` 不是模型類別）；同樣在送出任何請求前丟出。
             LlmRejectedError: 拒收——拒答（`LlmRefusalError`）、長度截斷（`LlmTruncatedError`）、
                 回應格式不對（`LlmMalformedResponseError`）、請求不合法（`LlmInvalidRequestError`）。
             LlmTransientError: 重試用完仍是逾時、限流、服務端錯誤或連線錯誤。

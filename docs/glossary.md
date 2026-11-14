@@ -626,3 +626,6 @@
 - **`CloudSafeTextIntegrityError`**：`CloudSafeText` 的號碼不在放行登記處（被硬改過、物件已回收、不是經放行做出來的空殼）時丟的錯誤，原因代碼 `cloud_text_not_registered`，在送出任何請求之前就擋下。
 - **非有限的數值（inf、NaN）**：無限大或「不是數字」這類特殊浮點數；`1e400` 超過浮點數能表示的範圍，會被 JSON 解析成無限大，本專案把含這種值的 LLM 回應當成格式不對。
 - **真實型別（`type(x) is ...`）vs `isinstance`**：`isinstance` 問的是「你說你是什麼」，物件可以謊報自己的類別；`type(x)` 看的是 Python 內部記的真實類別，騙不了。本專案判斷 `CloudSafeText` 一律看真實型別（`is_cloud_safe_text`）。
+- **模型白名單（`ALLOWED_MODELS`）**：可以送出的模型 ID 清單（目前只有 `claude-haiku-5-5`）；`model` 也會原樣送到雲端，所以不收清單以外的字串。
+- **`snapshot_llm_request`（請求副本）**：adapter 送出前，把檢查過的請求用讀到的值重新建一份，之後只讀這份，像影印一份簽過名的文件再寄出，原件之後被塗改也影響不到寄出去的那份。
+- **TOCTOU（檢查與使用之間的時間差）**：先檢查、後使用時，中間被換掉的漏洞；本專案用「檢查後重建副本、只用副本」避開。
