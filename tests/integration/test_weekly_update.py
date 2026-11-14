@@ -1358,9 +1358,20 @@ class _WrappedSetupError(Exception):
         (_WrappedSetupError("ValueError"), "ValueError"),
         (_WrappedSetupError("Invalid endpoint: http://leak.example:9000"), None),
         (_WrappedSetupError(42), None),
+        (_WrappedSetupError("abc123account"), None),
+        (_WrappedSetupError("secret_value"), None),
+        (_WrappedSetupError("A" * 65), None),
         (_SetupBrokenError("secret-value-in-message"), None),
     ],
-    ids=["class-name", "url-in-error-type", "not-a-string", "no-error-type"],
+    ids=[
+        "class-name",
+        "url-in-error-type",
+        "not-a-string",
+        "lowercase-setting-value",
+        "underscore-word",
+        "too-long",
+        "no-error-type",
+    ],
 )
 def test_setup_failure_log_carries_only_a_class_name_as_cause(
     weekly_db: TestDatabase, database: TrackingDatabase, error: Exception, cause: str | None

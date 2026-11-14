@@ -46,6 +46,7 @@ AD-14、AD-19、AD-25、ADR-0004、ADR-0014、ADR-0025）。
 都不在開著的交易裡呼叫 source、物件儲存或心跳。
 """
 
+import re
 import time
 import uuid
 from collections import Counter
@@ -816,15 +817,19 @@ def _warn_blocked_by_reparse(weekly_run_id: uuid.UUID) -> None:
     )
 
 
+_CLASS_NAME = re.compile(r"[A-Z][A-Za-z0-9]{0,63}")
+
+
 def _cause_type(exc: BaseException) -> str | None:
     """包裝過的例外帶的原本錯誤類別名稱（例如 worker 的 `AdapterSetupError.error_type`）。
 
-    只讀 `error_type` 這個屬性，而且只收像類別名稱的字串（`str.isidentifier()`）：
-    其他例外剛好有同名屬性、內容卻是訊息或網址時一律不收，回 None，日誌不會帶出網址。
-    不讀例外訊息、`__cause__`、`__context__`。
+    只讀 `error_type` 這個屬性，而且只收 Python 類別命名慣例的字串（大寫英文字母開頭、
+    只有英文字母與數字、最多 64 字，見 `_CLASS_NAME`）：其他例外剛好有同名屬性、內容卻是
+    訊息、網址、小寫的設定值時一律不收，回 None。這是第二道防線；唯一會設這個屬性的
+    `AdapterSetupError` 填的是 `type(exc).__name__`。不讀例外訊息、`__cause__`、`__context__`。
     """
     value = getattr(exc, "error_type", None)
-    if isinstance(value, str) and value.isidentifier():
+    if isinstance(value, str) and _CLASS_NAME.fullmatch(value):
         return value
     return None
 

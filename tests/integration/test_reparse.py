@@ -30,7 +30,7 @@ from radar.domain.scope import ScopeSettings
 from radar.domain.staging import StagingItem, StagingKind
 from radar.domain.storage_keys import RAW_CONTENT_TYPE, raw_object_key
 from radar.domain.viewer import MemberViewer, SystemViewer
-from radar.repo.db import Database, SessionLock
+from radar.repo.db import INGEST_WRITE_LOCK_KEY, Database, SessionLock
 from radar.repo.ingest_staging import (
     create_staged_papers,
     delete_staged_papers,
@@ -510,6 +510,30 @@ def test_tracking_database_counts_the_lock_transactions(
     assert _reparse(database, store) == ReparseResult()
     assert database.opened == 4
     assert database.open_transactions == 0
+
+
+def test_tracking_session_lock_counts_while_the_transaction_is_open(
+    database: TrackingDatabase,
+) -> None:
+    # 交易進行中 `open_transactions` 是 1、離開後回 0，例外離開也一樣；
+    # 少了 `counting()` 的加減，GET 時的零交易斷言就又永遠成立（K8，Codex 低）。
+    with database.session_lock(INGEST_WRITE_LOCK_KEY) as lock:
+        assert lock is not None
+        with lock.transaction():
+            assert database.open_transactions == 1
+        assert database.open_transactions == 0
+        seen: list[int] = []
+
+        def fail_inside() -> None:
+            with lock.transaction():
+                seen.append(database.open_transactions)
+                raise RuntimeError("boom")
+
+        with pytest.raises(RuntimeError, match="boom"):
+            fail_inside()
+        assert seen == [1]
+        assert database.open_transactions == 0
+    assert database.opened == 3
 
 
 def test_empty_database_does_nothing(database: TrackingDatabase, store: GuardedStore) -> None:

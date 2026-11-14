@@ -103,6 +103,8 @@
 #   kevin_h_low、kevin_h_high: Kevin 自己坐在電腦前處理大約幾小時（含讀程式、理解設計、看審查意見、
 #     回答問題、手動驗證）；只回報一個數字時兩欄寫一樣；還沒回報時兩欄寫 null
 #   rough: true 表示 Kevin 動手的時間是粗估、沒有認真計
+# epic-1 那一筆：elapsed_h 與 kevin_h_* 都是 Kevin 2026-11-14 親自回報（第三輪自動執行中補報「約 20 小時」
+#   「約 3～4 小時，粗估，沒有認真計」），不是自動執行端猜的。
 # 重估的倍率只用 kevin_h_low、kevin_h_high（見上面「怎麼重估」第 1 點），elapsed_h 只留著對照。
 # 這個區塊要留在 generated 上面，重跑 skill 才不會洗掉註解（2026-11-14 測過）。
 actual_hours:
