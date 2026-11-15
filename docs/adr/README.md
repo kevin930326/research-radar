@@ -45,6 +45,7 @@
 | [0036](0036-frontend-serving-security-headers-and-web-ci.md) | （0029～0035 由 Epic 2 的 PR 使用）成員版前端由 api 送出：全站安全標頭只有一份（`radar/entrypoints/api/security_headers.json`，api 與 `vite preview` 都讀），每個回應都帶（含 404、500、`/healthz`）；建置資料夾裡的檔案照送、其餘非 `/api/` 的 GET／HEAD 回頁面殼、`/api/` 維持 404 JSON、擋路徑穿越；建置結果固定在工作目錄下的 `web/dist`；HSTS 不在應用程式設；CI 另開和 `checks` 平行的 `web` job（Playwright 三種引擎）；示範站的「找不到這一頁」不放回首頁連結 | 提議 | AD-21、AD-22、AD-24 |
 | [0037](0037-design-tokens-guard-and-a11y-floor.md) | 設計代幣與無障礙底線：`styles.css` 主題放 `DESIGN.md` YAML 的全部代幣＋五個字體＋四個斷點，測試逐項比對；Vite 外掛用 Tailwind 自己的設計系統讓「不產生 CSS 的類別」建置失敗；ESLint 擋寫死的色碼與字級（版面任意值不擋）；焦點外框與減少動態各一條 base 層規則，程式只能用 `use-reduced-motion.ts` 判斷；無障礙六項檢查跑正式頁面清單＋開發伺服器的元件示範頁 | 提議 | AD-21、AD-22 |
 | [0038](0038-design-reference-and-visual-compare.md) | 前端畫面以 `docs/ux/reference/screens/` 的設計稿為準；做完用 `web/scripts/design-compare.mjs` 量差異（字級、行高、顏色、字重、字距、距離、髮線），報告貼 PR、差異要有原因，是合併門檻；`DESIGN.md` 加字級、行高、字距三組尺度（另一個 PR 實作）；沒有設計稿的畫面先問 Kevin | 提議 | AD-21 |
+| [0046](0046-fake-login-sessions-and-access-jwt.md) | （0039～0045 保留給另一條線）Google 登入之前的假登入與 session：遷移 0020 建 `member`、`allowed_email`、`session`（只存 token 的 SHA-256、`__Host-radar_session`、閒置 14 天／最長 30 天、移出名單或刪 session 立刻失效、應用程式角色不能刪成員）；`RADAR_ENVIRONMENT` 沒設是正式，正式開假登入或假登入＋Google 登入 api 不啟動；開發選人登入、試用驗 Cloudflare Access 的 JWT（只收 RS256、claims 型別自己檢查）後只登入管理者；會改資料的路由在同一個 `/api/v1` router、相依項檢查 `Origin`；`radar members allow`／`set-admin` 用維運身分、寫稽核，輸出只有成員 ID；CLI 身分與權限表不一致列給 Kevin 決定 | 提議 | AD-2、AD-23、AD-26 |
 
 「提議」表示還沒經過 Kevin 確認；PR 合併後改成「已接受」。
 

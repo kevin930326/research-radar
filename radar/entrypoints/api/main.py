@@ -1,6 +1,7 @@
 """api 行程的進入點：單一 uvicorn 行程；收到 SIGTERM 做完手上的請求後以退出碼 0 結束。"""
 
 import signal
+from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
 from types import FrameType
@@ -8,10 +9,21 @@ from types import FrameType
 import structlog
 import uvicorn
 
-from radar.config import ConfigError, database_pool_size, load_domain_config, load_settings
+from radar.config import (
+    ConfigError,
+    database_pool_size,
+    load_auth_settings,
+    load_domain_config,
+    load_settings,
+)
 from radar.entrypoints.api.app import create_app
+from radar.entrypoints.api.auth import build_auth_routes, install_auth_routes
 from radar.entrypoints.api.web import mount_web
-from radar.entrypoints.bootstrap import MigrationsNotFoundError, build_readiness_probes
+from radar.entrypoints.bootstrap import (
+    MigrationsNotFoundError,
+    build_fake_login_confirm,
+    build_readiness_probes,
+)
 from radar.entrypoints.logging_config import configure_logging
 from radar.services.health import check_readiness
 
@@ -22,12 +34,20 @@ log = structlog.get_logger(__name__)
 WEB_DIST = Path("web/dist")
 
 
+def _utc_now() -> datetime:
+    """session 的時鐘。"""
+    return datetime.now(UTC)
+
+
 def main() -> int:
     configure_logging()
     try:
         # 領域設定（config/*.yaml）錯了也不啟動（AD-18）。
         load_domain_config()
         settings = load_settings()
+        # 登入設定的組合不合法（正式環境開假登入、假登入與 Google 登入同時開、試用環境缺 Access
+        # 設定等）也不啟動（ADR-0046）。
+        auth_settings = load_auth_settings()
     except ConfigError as exc:
         log.error("設定錯誤，無法啟動", service="api", problems=exc.problems)
         return 1
@@ -40,6 +60,13 @@ def main() -> int:
         return 1
 
     app = create_app(readiness_check=partial(check_readiness, probes.ping, probes.schema_state))
+    # 登入路由用就緒檢查的同一個連線池；一定要在 mount_web 之前裝（install_auth_routes 會檢查）。
+    install_auth_routes(
+        app,
+        build_auth_routes(
+            probes.database, auth_settings, build_fake_login_confirm(auth_settings), _utc_now
+        ),
+    )
     # 頁面殼另外掛、不經 create_app 的 web_dist 參數：關機的整合測試會把 create_app 換成只收
     # readiness_check 的版本、再加自己的路由；分開掛，那些路由才排在「其餘路徑」之前。
     mount_web(app, WEB_DIST)

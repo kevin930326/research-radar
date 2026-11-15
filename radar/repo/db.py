@@ -5,7 +5,10 @@ from contextlib import contextmanager
 from typing import Final
 
 import structlog
-from sqlalchemy import Connection, Engine, create_engine, make_url, text
+
+# Connection 明確轉出：services 收交易連線時要寫型別，但 services 不能 import sqlalchemy。
+from sqlalchemy import Connection as Connection
+from sqlalchemy import Engine, create_engine, make_url, text
 from sqlalchemy.exc import DBAPIError, SQLAlchemyError
 from sqlalchemy.pool import QueuePool
 

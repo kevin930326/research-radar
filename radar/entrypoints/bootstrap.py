@@ -4,6 +4,7 @@ import importlib.metadata
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -12,12 +13,14 @@ from radar.adapters.heartbeat import HttpHeartbeat
 from radar.adapters.jobs import JobApp, create_job_app, defer_job, retry_stalled_jobs
 from radar.config import ConfigError, env_name
 from radar.domain.ai_outputs import CallMode, GatewayConfig
+from radar.domain.auth import FakeLoginRequest, LoginIdentity
+from radar.domain.auth_settings import AuthSettings, FakeLoginMode, fake_login_mode
 from radar.domain.domain_config import OpenAlexConfig
 from radar.domain.jobs import Enqueue
 from radar.domain.pricing import ModelsConfig
 from radar.domain.schema import SchemaState
 from radar.domain.settings import MigrationSettings, Settings
-from radar.repo.db import Database
+from radar.repo.db import Database as Database  # 明確轉出：api 的登入路由要寫這個型別
 from radar.repo.migrations import MigrationScripts, read_schema_state, upgrade_to_head
 
 if TYPE_CHECKING:
@@ -43,12 +46,14 @@ class ReadinessProbes:
 
     ping: Callable[[], bool]
     schema_state: Callable[[], SchemaState]
+    # 同一個連線池：api 的登入與 session 也用它（api 只有這一個連線池，預算 8 條）。
+    database: Database
 
 
 def build_readiness_probes(
     settings: Settings, *, pool_size: int, migrations_dir: Path = DEFAULT_MIGRATIONS_DIR
 ) -> ReadinessProbes:
-    """建立資料庫連線池，回傳 ping 與遷移狀態兩個探測函式。
+    """建立資料庫連線池，回傳 ping 與遷移狀態兩個探測函式（連同連線池本身）。
 
     Raises:
         MigrationsNotFoundError: 找不到遷移檔（比對版本要用）。
@@ -60,7 +65,9 @@ def build_readiness_probes(
         pool_size=pool_size,
     )
     return ReadinessProbes(
-        ping=database.ping, schema_state=partial(read_schema_state, database, scripts)
+        ping=database.ping,
+        schema_state=partial(read_schema_state, database, scripts),
+        database=database,
     )
 
 
@@ -274,3 +281,46 @@ def code_version() -> str:
         return importlib.metadata.version("radar")
     except importlib.metadata.PackageNotFoundError:
         return "unknown"
+
+
+def build_fake_login_confirm(
+    auth_settings: AuthSettings,
+) -> Callable[[FakeLoginRequest], LoginIdentity] | None:
+    """假登入確認身分的函式（ADR-0046）：開發是「選一位成員」的替身，試用是驗 Access 的 JWT；
+    沒開假登入回 None。不連線。
+
+    兩個 adapter 都在這裡才 import：api 行程只有試用環境才載入 joserfc（mem_limit 很緊）。
+
+    Raises:
+        ConfigError: 試用環境缺 Access 設定或管理者 email（`load_auth_settings` 已經先擋）。
+    """
+    match fake_login_mode(auth_settings):
+        case None:
+            return None
+        case FakeLoginMode.PICK_MEMBER:
+            from radar.adapters.fake.login import pick_member_identity
+
+            return pick_member_identity
+        case FakeLoginMode.ACCESS_ADMIN:
+            team_domain = auth_settings.access_team_domain
+            audience = auth_settings.access_audience
+            admin_email = auth_settings.admin_email
+            if team_domain is None or audience is None or admin_email is None:
+                raise ConfigError(["試用環境的假登入缺少 Access 設定或管理者 email"])
+            from radar.adapters.cloudflare_access import (
+                confirm_access_identity,
+                fetch_access_jwks,
+            )
+
+            return partial(
+                confirm_access_identity,
+                team_domain=team_domain,
+                audience=audience,
+                admin_email=admin_email.get_secret_value(),
+                fetch_jwks=partial(fetch_access_jwks, team_domain),
+                clock=_utc_now,
+            )
+
+
+def _utc_now() -> datetime:
+    return datetime.now(UTC)

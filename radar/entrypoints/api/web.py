@@ -151,3 +151,10 @@ class _WebShell:
             raise HTTPException(status_code=404)
         # 直接要 /index.html 也走這裡，同樣帶 no-cache。送的是解析後的實體檔，不再經過連結。
         return FileResponse(index, headers=SHELL_HEADERS)
+
+
+def web_mounted(app: FastAPI) -> bool:
+    """`mount_web` 是不是已經把「其餘路徑」掛上：掛上之後再加的 API 路由會被頁面殼蓋掉。"""
+    return any(
+        isinstance(getattr(route, "endpoint", None), _WebShell) for route in app.router.routes
+    )

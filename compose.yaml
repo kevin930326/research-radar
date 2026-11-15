@@ -59,6 +59,9 @@ services:
     environment:
       DATABASE_URL: postgresql://radar_app@db:5432/radar
       RADAR_API_SHUTDOWN_GRACEFUL_TIMEOUT: "10"
+      # 本機開發：開假登入（選一位允許名單上的成員登入，ADR-0046）；正式／試用主機的 compose 不這樣設。
+      RADAR_ENVIRONMENT: development
+      RADAR_FAKE_LOGIN: "true"
     ports:
       - "127.0.0.1:8000:8000"
     depends_on:

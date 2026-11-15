@@ -9,6 +9,7 @@ from typing import Any, Literal
 import yaml
 from pydantic import BaseModel, SecretStr, ValidationError
 
+from radar.domain.auth_settings import AuthSettings, auth_settings_problems
 from radar.domain.budget import BudgetConfig
 from radar.domain.context_values import ContextValues, context_values_registry_problems
 from radar.domain.domain_config import (
@@ -402,3 +403,22 @@ def _yaml_position(error: yaml.YAMLError) -> str:
     if mark is None:
         return "格式錯誤"
     return f"第 {mark.line + 1} 行第 {mark.column + 1} 欄"
+
+
+# --- 登入設定（Story 3.3、ADR-0046） -----------------------------------------------------------
+
+
+def load_auth_settings(environ: Mapping[str, str] | None = None) -> AuthSettings:
+    """api 的登入設定（假登入、Google 登入旗標、管理者 email、Access、站台來源、session 期限）。
+
+    格式不對或組合不合法（正式環境開假登入、假登入與 Google 登入同時開、試用環境開假登入卻缺
+    Access 設定、管理者 email 或站台來源）都丟 `ConfigError`，api 不啟動。
+
+    Raises:
+        ConfigError: 訊息只列環境變數名稱與原因，不含任何設定值。
+    """
+    settings = _load(AuthSettings, environ)
+    problems = auth_settings_problems(settings, env_name)
+    if problems:
+        raise ConfigError(problems)
+    return settings

@@ -232,3 +232,11 @@ def hypothesis_sentence_sha256(normalized_sentence: str) -> str:
     if not isinstance(normalized_sentence, str) or not normalized_sentence:
         raise ValueError("hypothesis_sentence_sha256 要收正規化後、不是空的原句")
     return _canonical_sha256({"v": HYPOTHESIS_SENTENCE_VERSION, "sentence": normalized_sentence})
+
+
+def session_token_sha256(token: str) -> bytes:
+    """session token 的 SHA-256（32 位元組，ADR-0008 第 2 項）：資料庫只存這個，不存 token。
+
+    格式由呼叫端（`domain/auth.token_sha256`）先驗；這裡只算雜湊。
+    """
+    return hashlib.sha256(token.encode("ascii")).digest()
