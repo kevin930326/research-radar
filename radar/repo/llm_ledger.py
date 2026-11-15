@@ -9,7 +9,8 @@ ADR-0030）。
   程式角色對它沒有 UPDATE、DELETE（遷移 0010 收回）：帳只能新增。
 - 兩張表都由 services 用自己的短交易寫、立刻 commit（Conventions 的例外：主交易回滾時帳照記）。
 - 寫入一律用 `text()` SQL；函式收呼叫端開好的交易連線，不 commit。
-- 讀取函式第一個參數是 `viewer`，只給系統工作（`visible_to_system_only`）。
+- 讀取函式第一個參數是 `viewer`，只給系統工作（`visible_to_system_only`）；AI 區塊用的
+  `find_running_call_mode` 給任何讀者（接 `visible_papers`）。
 """
 
 import json
@@ -48,9 +49,9 @@ from radar.domain.ai_outputs import (
     SavedLlmOutput,
 )
 from radar.domain.errors import ErrorCode
-from radar.domain.viewer import SystemViewer
+from radar.domain.viewer import SystemViewer, Viewer
 from radar.repo.models import Base
-from radar.repo.visibility import visible_to_system_only
+from radar.repo.visibility import visible_papers, visible_to_system_only
 
 # --- 表的定義（`alembic check` 拿來和資料庫比對；遷移 0010 建表） -----------------------------
 
@@ -256,6 +257,25 @@ def find_running_derivation_run_id(
         {**_key_params(key), "eval_run_id": eval_run_id},
     ).scalar_one_or_none()
     return None if value is None else uuid.UUID(str(value))
+
+
+def find_running_call_mode(viewer: Viewer, connection: Connection, key: RunKey) -> CallMode | None:
+    """這組鍵有平常流程（不是評估）的 `running` 時回它的呼叫方式（互動或 Batch）；沒有、論文不存在或
+    `viewer` 看不到時回 None。AI 區塊分 `pending_interactive`／`pending_batch` 用。
+    """
+    visible = visible_papers(viewer, alias="paper")
+    value = connection.execute(
+        text(
+            "SELECT r.call_mode FROM derivation_run AS r JOIN paper ON paper.id = r.paper_id"
+            f" WHERE {visible}"
+            " AND r.paper_id = :paper_id AND r.task = :task AND r.prompt_version = :prompt_version"
+            " AND r.model = :model AND r.input_sha256 = :input_sha256"
+            " AND r.status = 'running' AND r.eval_run_id IS NULL"
+            " ORDER BY r.created_at, r.id LIMIT 1"
+        ),
+        _key_params(key),
+    ).scalar_one_or_none()
+    return None if value is None else CallMode(value)
 
 
 def list_llm_costs_by_task(

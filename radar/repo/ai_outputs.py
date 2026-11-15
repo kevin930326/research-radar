@@ -13,7 +13,8 @@ ADR-0015、ADR-0030）。
 - 同一篇論文、同一種語言最多一筆 `active`（部分唯一索引）。內容不 UPDATE：重跑就新增一列，
   舊的 `active` 標成 `superseded`（只改 `status`）。
 - 結果只經 `services/ai_results.py` 寫入；`repo` 裡除了這個模組，其他查詢不直接讀表頭與細項表
-  （`tests/arch/test_ai_table_reads.py`；之後的有效值 view 在遷移裡）。
+  （`tests/arch/test_ai_table_reads.py`）。有效值讀遷移 0014 的 `effective_*` view
+  （`repo/ai_blocks.py`）。
 - 寫入 SQL 每張表各寫一份字面值（架構測試掃字串確認一張表一個寫入者，表名不能是變數）。
 - `abstract_id` 不設外鍵（ADR-0030）：`paper_abstract` 在來源拿掉摘要時會被刪掉，外鍵會讓每週
   更新失敗；表頭是歷史，留著原本的 id。
@@ -52,10 +53,10 @@ from radar.domain.ai_outputs import (
     ResultStatus,
     RunKey,
 )
-from radar.domain.viewer import SystemViewer
+from radar.domain.viewer import SystemViewer, Viewer
 from radar.repo.constructs import upsert_constructs
 from radar.repo.models import Base
-from radar.repo.visibility import visible_to_system_only
+from radar.repo.visibility import visible_papers, visible_to_system_only
 
 # --- 表的定義（`alembic check` 拿來和資料庫比對；遷移 0010 建表） -----------------------------
 
@@ -440,6 +441,61 @@ def find_blocking_ai_result(
             )
     value = connection.execute(sql, params).scalar_one_or_none()
     return None if value is None else ResultStatus(value)
+
+
+def find_rejected_ai_result_id(
+    viewer: Viewer, connection: Connection, key: RunKey
+) -> uuid.UUID | None:
+    """這組鍵有平常流程留下的 `rejected` 時回那列表頭的 id（有好幾列時回最早的）；沒有、論文不存在
+    或 `viewer` 看不到時回 None。AI 區塊判定 `failed` 用（ADR-0015 判定順序第 4 步）。
+
+    條件和 `find_blocking_ai_result` 的 `rejected` 分支一樣：評估留下的 `rejected` 不算。
+
+    Raises:
+        ValueError: 這個工作沒有表頭表。
+    """
+    visible = visible_papers(viewer, alias="paper")
+    task = _check_task(key.task)
+    params = {
+        "paper_id": key.paper_id,
+        "task": task.value,
+        "prompt_version": key.prompt_version,
+        "model": key.model,
+        "input_sha256": key.input_sha256,
+    }
+    match task:
+        case LlmTask.ZH_SUMMARY:
+            sql = text(
+                "SELECT h.id FROM zh_summary AS h JOIN derivation_run AS r ON r.id = h.run_id"
+                " JOIN paper ON paper.id = h.paper_id"
+                f" WHERE {visible} AND r.paper_id = :paper_id AND r.task = :task"
+                " AND r.prompt_version = :prompt_version AND r.model = :model"
+                " AND r.input_sha256 = :input_sha256"
+                " AND h.status = 'rejected' AND r.eval_run_id IS NULL"
+                " ORDER BY h.created_at, h.id LIMIT 1"
+            )
+        case LlmTask.CLASSIFY:
+            sql = text(
+                "SELECT h.id FROM classification AS h JOIN derivation_run AS r ON r.id = h.run_id"
+                " JOIN paper ON paper.id = h.paper_id"
+                f" WHERE {visible} AND r.paper_id = :paper_id AND r.task = :task"
+                " AND r.prompt_version = :prompt_version AND r.model = :model"
+                " AND r.input_sha256 = :input_sha256"
+                " AND h.status = 'rejected' AND r.eval_run_id IS NULL"
+                " ORDER BY h.created_at, h.id LIMIT 1"
+            )
+        case _:
+            sql = text(
+                "SELECT h.id FROM research_model AS h JOIN derivation_run AS r ON r.id = h.run_id"
+                " JOIN paper ON paper.id = h.paper_id"
+                f" WHERE {visible} AND r.paper_id = :paper_id AND r.task = :task"
+                " AND r.prompt_version = :prompt_version AND r.model = :model"
+                " AND r.input_sha256 = :input_sha256"
+                " AND h.status = 'rejected' AND r.eval_run_id IS NULL"
+                " ORDER BY h.created_at, h.id LIMIT 1"
+            )
+    value = connection.execute(sql, params).scalar_one_or_none()
+    return None if value is None else uuid.UUID(str(value))
 
 
 # --- 寫入 ---------------------------------------------------------------------------------
