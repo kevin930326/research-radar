@@ -164,10 +164,10 @@
 ## 3.4 留給 3.6 以後的 Story：權限測試、錯誤格式、產生的型別
 
 - **新增端點一定要登記**（ADR-0047）：在 `tests/permissions/cases.py` 用 `@REGISTRY.case("方法", "路徑樣板")` 寫「成員 B 怎麼呼叫它」；沒登記 `tests/unit/test_permission_coverage.py` 就失敗。
-  - 會讀或改某位成員資料的端點（3.6 論文頁的私人欄位、3.16 文獻庫、Epic 5 問答紀錄、Epic 6 上傳）：**不豁免**。呼叫函式先用 `ctx.extras["database"]`（整合測試的 `Database`）替成員 A 建資料，再 `ctx.as_other(...)` 打 A 的資料；`tests/integration/test_permissions.py` 檢查結果是 404（代碼 `not_found`）或 `items == []`（有 `total` 的話要是 0）。
-  - 不豁免的端點還要給 `control=`：成員 A 用 `ctx.as_owner(...)` 打同一筆資料，要 200 且有內容（呼叫函式建好的資料 ID 放在 `ctx.scratch` 傳過去）；沒有對照，單元測試就失敗。
-  - 能放文字的私人資料，把 `tests/permissions/framework.py` 的 `CANARY` 放進去；金絲雀測試會打每個登記的端點，檢查 B 的回應與日誌都沒有它。
-  - 只回自己資料、或不碰成員資料的端點才寫 `exempt="理由"`。
+  - 會讀或改某位成員資料的端點（3.6 論文頁的私人欄位、3.16 文獻庫、Epic 5 問答紀錄、Epic 6 上傳）：**不豁免**。登記的函式先用 `ctx.extras["database"]`（整合測試的 `Database`）替成員 A 建資料，再回傳一份 `EndpointRequest(path_params=..., query=..., body=...)`（方法與路徑樣板來自登記本身）。框架用這一份請求先以 B 的身分送、再以 A 的身分送（對照），兩次都要打到登記的端點；`tests/integration/test_permissions.py` 檢查 B 得到剛好四個欄位的 404 problem，或只有回應模型清單欄位的空清單（`items == []`、`total` 沒有或是 0），A 要 200 且有內容。
+  - 能放文字的私人資料，把 `tests/permissions/framework.py` 的 `CANARY` 放進去；金絲雀測試會打每個登記的端點，檢查 B 的回應與這個請求的日誌都沒有它。
+  - 只回自己資料、或不碰成員資料的端點才寫 `exempt="理由"`，同時寫 `status=成員 B 打它的預期狀態碼`（金絲雀測試會核對）。
+  - 不要另外加 `include_in_schema=False` 的路由：不在 `openapi.json` 的路由只准 FastAPI 文件頁、頁面殼、健康檢查的 HEAD，而且以處理函式辨認。
 - **路由只在 `radar/entrypoints/api/main.py` 的 `install_api_routes` 裝**（`openapi.json` 也用它）；不要在 `main()` 另外裝 router。
 - **錯誤只丟 `ApiProblemError(ErrorCode.X)`**（`radar/entrypoints/api/problems.py`）：新代碼加在 `radar/domain/errors.py` 檔尾，並加進 `PROBLEM_STATUS` 與 `ProblemCode`（單元測試核對兩者一致）。不要回 `detail` 或例外訊息。沒有權限與不存在回同一個 `not_found`。
 - **改了 API 之後**：`uv run radar export-schema`、`cd web && npm run generate:api`，把 `openapi.json` 與 `web/src/generated/` 一起 commit（CI 會比對）。頁面與元件只能 `import type` 產生的檔；呼叫函式在 `web/src/datasource/api/` 用。

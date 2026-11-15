@@ -130,6 +130,7 @@ deferred:
 ## Spec Change Log
 
 - 2026-11-15（審查後）：Code Map 與 Tasks 的名稱改成和實作一致：`ApiProblem` → `ApiProblemError`；`install_api_routes` 放在 `main.py`（不另開 `routes.py`，既有測試 monkeypatch `api_main.install_auth_routes`，放在 main.py 才不必改那些測試）；`endpoint_case`／`assert_no_secret` → `REGISTRY.case`／`response_texts`＋`secrets_found`；端點數五 → 六；加上審查後新增的對照（`control=`、`as_owner`、`assert_visible_to_owner`）。intent-contract 段落沒改（只把 npm 別名的網址拿掉，見 Review Triage Log）。
+- 2026-11-15（Codex 主審查後）：換人測試改成「一份請求、只換身分」：登記的函式回傳 `EndpointRequest`（路徑參數、查詢、本文），框架以 B、A 各送一次（`run_cross_member_case`），`control=`、`ctx.scratch` 拿掉；框架核對實際處理請求的路由（`assert_reached`）。豁免要寫 `status=`（金絲雀測試核對，`run_canary_case`：送出前清空日誌、以 request ID 確認接到）。不在 `openapi.json` 的路由以處理函式＋方法辨認（`web.py` 加 `is_web_shell`）。404 要剛好四個欄位與 `application/problem+json`，空清單只能有回應模型的清單欄位（`list_fields_of`）。上面 Code Map 的 `control=`、`as_owner`（給對照用）是修正前的名稱。
 
 ## Review Triage Log
 

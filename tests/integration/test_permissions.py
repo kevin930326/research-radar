@@ -3,11 +3,12 @@
 兩位成員都經開發環境的假登入取得真的 session：成員 A 的 email 是金絲雀字串（`CANARY`），成員 B 打
 `tests/permissions/cases.py` 登記的每一個端點。
 
-- 金絲雀：B 的回應（本文與標頭）與這段期間的日誌，都不能出現金絲雀字串，也不能出現 A 的
-  session token。
-- 換人測試：沒有豁免的端點，B 打 A 的資料要得到 404 或空清單；接著對照，A 自己打同一筆資料要
-  拿得到。目前的端點都豁免（理由寫在登記表），所以這一組現在沒有用例；第一個會回成員資料的端點
-  （Story 3.6 起）加進登記表後就會跑。
+- 金絲雀（`run_canary_case`）：B 的請求要打到登記的端點、狀態是登記的預期（豁免）或「看不到」
+  （沒豁免）；B 的回應（本文與標頭）與這個請求期間的日誌（送出前清空，以 request ID 確認接到了），
+  都不能出現金絲雀字串，也不能出現 A 的 session token。
+- 換人測試（`run_cross_member_case`）：沒有豁免的端點，同一份請求 B 送要得到 404 或空清單，A 送
+  （對照）要拿得到，兩次都要打到登記的端點。目前的端點都豁免（理由寫在登記表），所以這一組現在沒有
+  用例；第一個會回成員資料的端點（Story 3.6 起）加進登記表後就會跑。
 資料全是測試自己編的（`*@example.com`、假名字）。
 """
 
@@ -30,15 +31,12 @@ from tests.database import TestDatabase, migrate
 from tests.llm_support import execute
 from tests.permissions.cases import REGISTRY
 from tests.permissions.framework import (
-    CANARY,
     CANARY_EMAIL,
     EndpointCase,
     Member,
     PermissionContext,
-    assert_hidden_from_other_member,
-    assert_visible_to_owner,
-    response_texts,
-    secrets_found,
+    run_canary_case,
+    run_cross_member_case,
 )
 
 DEV_ORIGIN = "http://localhost:8000"
@@ -75,7 +73,7 @@ def _log_in(client: TestClient, database: Database, email: str, name: str) -> Me
 
 @pytest.fixture
 def context(db: TestDatabase, capsys: pytest.CaptureFixture[str]) -> PermissionContext:
-    # 日誌接到 capsys：測試讀得到從這裡開始的每一筆（含兩位成員登入）。
+    # 日誌接到 capsys（run_canary_case 送出前會先清空，登入留下的不算）。
     configure_logging()
     database = Database(db.app_url, connect_timeout=5, pool_size=2)
     settings = AuthSettings(environment=Environment.DEVELOPMENT, fake_login=True)
@@ -84,11 +82,11 @@ def context(db: TestDatabase, capsys: pytest.CaptureFixture[str]) -> PermissionC
     install_api_routes(
         app, auth_routes=build_auth_routes(database, settings, pick_member_identity, lambda: NOW)
     )
-    client = TestClient(app, base_url="https://testserver")
-    owner = _log_in(client, database, CANARY_EMAIL, "測試甲")
-    other = _log_in(client, database, OTHER_EMAIL, "測試乙")
+    login_client = TestClient(app, base_url="https://testserver")
+    owner = _log_in(login_client, database, CANARY_EMAIL, "測試甲")
+    other = _log_in(login_client, database, OTHER_EMAIL, "測試乙")
     return PermissionContext(
-        client=client,
+        app=app,
         owner=owner,
         other=other,
         origin=DEV_ORIGIN,
@@ -107,24 +105,18 @@ def test_other_member_never_sees_the_canary(
     emails = {row[0] for row in execute(db, "SELECT email FROM allowed_email")}
     assert CANARY_EMAIL in emails
 
-    response = case.call(context)
-    captured = capsys.readouterr()
-    logs = captured.out + captured.err
+    def read_logs() -> str:
+        captured = capsys.readouterr()
+        return captured.out + captured.err
 
-    # B 的 session 是有效的：這個請求真的是以成員 B 的身分送的。
-    assert response.status_code != 401, response.text
-    # 日誌真的有接到（不然「日誌裡沒有」沒有意義）。
-    assert "請求完成" in logs
-    assert secrets_found([*response_texts(response), logs], [CANARY, context.owner.token]) == []
+    run_canary_case(case, context, read_logs)
 
 
 @pytest.mark.parametrize("case", CROSS_MEMBER_CASES, ids=_case_id)
 def test_other_member_gets_404_or_an_empty_list(
     case: EndpointCase, context: PermissionContext
 ) -> None:
-    assert case.control is not None  # coverage_problems 已經要求沒有豁免的端點要有對照
-    assert_hidden_from_other_member(case.call(context))
-    assert_visible_to_owner(case.control(context))
+    run_cross_member_case(case, context)
 
 
 def test_other_member_session_is_really_the_other_member(context: PermissionContext) -> None:
