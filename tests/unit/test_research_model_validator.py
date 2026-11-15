@@ -2363,13 +2363,24 @@ def test_sample_size_from_an_abbreviated_magnitude_variant_is_rejected(
 # 第 6 條：研究問題後面只有一個斷點、接著大量結果寫法時，不能變成平方時間。
 
 
-def test_many_result_markers_after_one_clause_break_is_quick() -> None:
-    quote = "we examine whether trust, " + "zz find that " * 128_000
+def _seconds_for_markers(repeats: int) -> float:
+    quote = "we examine whether trust, " + "zz find that " * repeats
     data = _data()
     data["hypotheses"][0]["result_quote"] = quote.strip()
-    started = time.perf_counter()
+    best = float("inf")
+    for _ in range(3):
+        started = time.perf_counter()
+        with contextlib.suppress(OutputRejectedError):
+            _validate(data, _input(abstract=ABSTRACT + " " + quote))
+        best = min(best, time.perf_counter() - started)
+    return best
 
-    with contextlib.suppress(OutputRejectedError):
-        _validate(data, _input(abstract=ABSTRACT + " " + quote))
 
-    assert time.perf_counter() - started < 2
+def test_many_result_markers_after_one_clause_break_is_quick() -> None:
+    # 比「輸入變 8 倍、時間變幾倍」，不比絕對秒數（CI 機器比本機慢，絕對秒數會時好時壞）：
+    # 線性約 8 倍，平方時間約 64 倍（Codex 量到修正前單是這個函式 8,000→64,000 就差約 40 倍）；
+    # 門檻取 20 倍，另加 0.05 秒吸收很短時間的雜訊。
+    small = _seconds_for_markers(8_000)
+    large = _seconds_for_markers(64_000)
+
+    assert large < small * 20 + 0.05
