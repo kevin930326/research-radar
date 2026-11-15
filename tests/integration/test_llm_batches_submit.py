@@ -6,18 +6,22 @@ provider 是 `FakeLlmProvider`（batch ID 是編的，不是真的錄的，形�
 """
 
 import dataclasses
+import threading
 import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 from zoneinfo import ZoneInfo
 
+import psycopg
 import pytest
 from structlog.testing import capture_logs
 
+import radar.repo.llm_batches as llm_batches_repo
 import radar.services.llm_batches as llm_batches
 from radar.adapters.fake import FakeLlmProvider
 from radar.domain.ai_outputs import LlmTask
+from radar.domain.budget import BudgetConfig
 from radar.domain.errors import ErrorCode
 from radar.domain.fingerprints import LLM_BATCH_BUDGET_LOCK_KEY
 from radar.domain.llm import (
@@ -39,6 +43,7 @@ from radar.domain.llm_batches import (
 from radar.domain.viewer import SystemViewer
 from radar.ports import LlmProvider
 from radar.repo.db import Database
+from radar.services.budget import BudgetGuard, get_budget_status
 from radar.services.llm_batches import LlmBatchSetup, plan_llm_batches, submit_llm_batch
 from tests.batch_support import (
     BATCH_ID,
@@ -811,3 +816,253 @@ def test_provider_setup_error_keeps_the_batch_queued(
 
     assert batch_status(db, submission_id)[:3] == ("queued", None, None)
     assert _run_states(db, submission_id) == {("running", None)}
+
+
+# --- Codex 複查與確認審查的修正（第二輪：R2、L1） ------------------------------------------
+
+
+def _budget(breaker: Decimal, **task_budgets: str | None) -> BudgetConfig:
+    """熔斷線調成 `breaker`（workspace 上限 70）；沒給的工作沒有個別上限。"""
+    budgets: dict[str, str | None] = {task.value: None for task in LlmTask}
+    budgets.update(task_budgets)
+    return BudgetConfig.model_validate(
+        {
+            "workspace_limit_usd": "70",
+            "monthly_breaker_usd": str(breaker),
+            "task_budgets_usd": budgets,
+        }
+    )
+
+
+def _reserved_by_submission(db: TestDatabase, submission_id: uuid.UUID) -> Decimal:
+    [(value,)] = execute(
+        db,
+        "SELECT COALESCE(sum(i.estimated_max_cost_usd), 0) FROM batch_item AS i"
+        " JOIN derivation_run AS r ON r.id = i.run_id"
+        " WHERE i.batch_submission_id = %s AND r.status = 'running'",
+        submission_id,
+    )
+    assert isinstance(value, Decimal)
+    return value
+
+
+# R2：熔斷線或功能預算調低後，再等也放不下的批次在同一個交易取消、釋放預留。
+
+
+def test_lowered_breaker_cancels_a_batch_that_can_never_fit_and_releases_its_reservation(
+    db: TestDatabase, database: Database, setup: LlmBatchSetup
+) -> None:
+    submission_id = _planned(database, setup)
+    reserved = _reserved(db)
+    # 規劃之後把熔斷線調成這批預留的一半：這批自己就超過，等到下個月也放不下。
+    lowered = _budget(reserved / 2)
+    low_setup = batch_setup(budget=lowered)
+    guard = BudgetGuard(database, lowered, clock=lambda: NOW)
+    assert not guard(LlmTask.QA_ANSWER)  # 預留卡住互動
+
+    with capture_logs() as logs:
+        result = submit_llm_batch(
+            SYSTEM, database, _no_provider, low_setup, submission_id, clock=lambda: NOW
+        )
+
+    assert result == LlmBatchSubmitResult(
+        SubmitOutcome.FAILED,
+        BatchSubmissionStatus.FAILED,
+        reason=ErrorCode.BATCH_BUDGET_CANNOT_FIT,
+    )
+    assert batch_status(db, submission_id)[:3] == ("failed", None, "batch_budget_cannot_fit")
+    assert _run_states(db, submission_id) == {("failed", "batch_budget_cannot_fit")}
+    status = get_budget_status(SYSTEM, database, lowered, now=NOW)
+    assert status.reserved_usd == 0
+    assert guard(LlmTask.QA_ANSWER)  # 互動恢復
+    [entry] = [log for log in logs if log["event"].startswith("Batch 再等也放不下")]
+    assert entry["log_level"] == "warning"
+    assert entry["reason"] == "batch_budget_cannot_fit"
+    assert entry["released_runs"] == 3
+
+    # 下一次規劃依新預算重排：只排得下新熔斷線放得下的部分。
+    replanned = plan_llm_batches(
+        SYSTEM, database, low_setup, weekly_run_id=None, clock=lambda: NOW, enqueue=lambda *_: True
+    )
+    assert replanned.planned >= 1
+    assert replanned.deferred_budget >= 1
+    [new_id] = replanned.submission_ids
+    assert _reserved_by_submission(db, new_id) <= reserved / 2
+
+
+def test_lowered_task_budget_cancels_a_batch_that_can_never_fit(
+    db: TestDatabase, database: Database, setup: LlmBatchSetup
+) -> None:
+    submission_id = _planned(database, setup)
+    [(zh_reserved,)] = execute(
+        db,
+        "SELECT i.estimated_max_cost_usd FROM batch_item AS i"
+        " JOIN derivation_run AS r ON r.id = i.run_id WHERE r.task = 'zh_summary'",
+    )
+    # 中文重點的功能預算調得比這批自己的中文重點預留還低。
+    low_setup = batch_setup(budget=_budget(Decimal(50), zh_summary=str(zh_reserved / 2)))
+
+    result = submit_llm_batch(
+        SYSTEM, database, _no_provider, low_setup, submission_id, clock=lambda: NOW
+    )
+
+    assert result.reason is ErrorCode.BATCH_BUDGET_CANNOT_FIT
+    assert batch_status(db, submission_id)[:3] == ("failed", None, "batch_budget_cannot_fit")
+    assert _run_states(db, submission_id) == {("failed", "batch_budget_cannot_fit")}
+
+
+def test_queued_batches_that_fit_only_one_at_a_time_hold_the_older_and_cancel_the_newer(
+    db: TestDatabase, database: Database
+) -> None:
+    """兩批各自放得下、加起來放不下（熔斷線調低後）：先建的延後（預留留著），後建的讓位取消，
+    之後先建的送得出去；不會兩批互相等、永遠卡住。"""
+    setup = batch_setup(max_requests=3)
+    for n in (1, 2):
+        _paper(database, n)
+    plan = plan_llm_batches(
+        SYSTEM, database, setup, weekly_run_id=None, clock=lambda: NOW, enqueue=lambda *_: True
+    )
+    older, newer = plan.submission_ids
+    older_reserved = _reserved_by_submission(db, older)
+    newer_reserved = _reserved_by_submission(db, newer)
+    breaker = max(older_reserved, newer_reserved) + min(older_reserved, newer_reserved) / 2
+    low_setup = batch_setup(budget=_budget(breaker), max_requests=3)
+
+    def submit(submission_id: uuid.UUID, open_provider: Any = _no_provider) -> Any:
+        return submit_llm_batch(
+            SYSTEM, database, open_provider, low_setup, submission_id, clock=lambda: NOW
+        )
+
+    # 先建的：帳本＋兩批的預留超過，但前面沒有別的 queued 批次、自己放得下 → 一般延後。
+    held = submit(older)
+    assert held == LlmBatchSubmitResult(
+        SubmitOutcome.HELD, BatchSubmissionStatus.QUEUED, reason=ErrorCode.BATCH_BUDGET_EXCEEDED
+    )
+    assert _reserved_by_submission(db, older) == older_reserved  # 延後時預留留著
+    assert _run_states(db, older) == {("running", None)}
+
+    # 後建的：前面那批＋自己就超過 → 取消、釋放。
+    assert submit(newer).reason is ErrorCode.BATCH_BUDGET_CANNOT_FIT
+    assert _reserved_by_submission(db, newer) == 0
+
+    # 先建的現在放得下，送出。
+    provider = FakeLlmProvider(batch_replies=[BATCH_ID])
+    assert submit(older, lambda: provider).outcome is SubmitOutcome.SUBMITTED
+    assert batch_status(db, older)[:2] == ("submitted", BATCH_ID)
+
+
+def test_cancel_loses_to_another_worker_and_touches_no_run(
+    db: TestDatabase, database: Database, setup: LlmBatchSetup, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    submission_id = _planned(database, setup)
+    low_setup = batch_setup(budget=_budget(_reserved(db) / 2))
+    original = llm_batches_repo.list_batch_reservations_ahead_by_task
+
+    def read_then_lose(*args: Any) -> Any:
+        amounts = original(*args)
+        # 判定要取消、還沒改列之前，別的送出者已把這批改走（另一條連線，馬上 commit）。
+        execute(
+            db, "UPDATE batch_submission SET status = 'submitting' WHERE id = %s", submission_id
+        )
+        return amounts
+
+    monkeypatch.setattr(llm_batches, "list_batch_reservations_ahead_by_task", read_then_lose)
+
+    result = submit_llm_batch(
+        SYSTEM, database, _no_provider, low_setup, submission_id, clock=lambda: NOW
+    )
+
+    assert result == LlmBatchSubmitResult(SubmitOutcome.LOST_RACE, BatchSubmissionStatus.SUBMITTING)
+    assert _run_states(db, submission_id) == {("running", None)}
+
+
+# L1：等全域預算鎖逾時（規劃的長交易拿著）當成延後，不算失敗、不寫列、不建 provider。
+
+
+class _LockHolder:
+    """另一條連線開著交易、拿著全域 Batch 預算鎖，直到 `release()`（模擬規劃一批的長交易）。"""
+
+    def __init__(self, db: TestDatabase) -> None:
+        self._ready = threading.Event()
+        self._done = threading.Event()
+        self.error: BaseException | None = None
+
+        def hold() -> None:
+            try:
+                with psycopg.connect(db.admin_url) as connection:
+                    connection.execute(
+                        "SELECT pg_advisory_xact_lock(%s)", (LLM_BATCH_BUDGET_LOCK_KEY,)
+                    )
+                    self._ready.set()
+                    self._done.wait(30)
+            except BaseException as exc:
+                self.error = exc
+                self._ready.set()
+
+        self._thread = threading.Thread(target=hold, daemon=True)
+        self._thread.start()
+        assert self._ready.wait(10)
+        assert self.error is None
+
+    def release(self) -> None:
+        self._done.set()
+        self._thread.join(10)
+        assert not self._thread.is_alive()
+
+
+@pytest.mark.parametrize(
+    ("connect_timeout", "lock_timeout_ms"),
+    [
+        (5, 200),  # lock_timeout 先到（SQLSTATE 55P03）
+        (1, 5_000),  # 連線的 statement_timeout 先到（57014）
+    ],
+)
+def test_waiting_too_long_for_the_budget_lock_holds_the_batch(
+    db: TestDatabase, setup: LlmBatchSetup, connect_timeout: int, lock_timeout_ms: int
+) -> None:
+    submission_id = _planned(Database(db.app_url, connect_timeout=5, pool_size=2), setup)
+    database = Database(db.app_url, connect_timeout=connect_timeout, pool_size=2)
+    holder = _LockHolder(db)
+    try:
+        with capture_logs() as logs:
+            result = submit_llm_batch(
+                SYSTEM,
+                database,
+                _no_provider,
+                setup,
+                submission_id,
+                clock=lambda: NOW,
+                lock_timeout_ms=lock_timeout_ms,
+            )
+    finally:
+        holder.release()
+
+    assert result == LlmBatchSubmitResult(
+        SubmitOutcome.HELD, BatchSubmissionStatus.QUEUED, reason=ErrorCode.BATCH_BUDGET_LOCK_BUSY
+    )
+    assert batch_status(db, submission_id)[:3] == ("queued", None, None)
+    assert _run_states(db, submission_id) == {("running", None)}
+    assert [log["reason"] for log in logs if log["event"].startswith("Batch 送出延後")] == [
+        "batch_budget_lock_busy"
+    ]
+    # 鎖放掉之後照常送出（資料沒壞）。
+    provider = FakeLlmProvider(batch_replies=[BATCH_ID])
+    assert _submit(database, provider, setup, submission_id).outcome is SubmitOutcome.SUBMITTED
+
+
+@pytest.mark.parametrize("lock_timeout_ms", [0, -1, 1.5, True])
+def test_bad_lock_timeout_is_rejected_before_touching_the_database(
+    setup: LlmBatchSetup, lock_timeout_ms: Any
+) -> None:
+    unreachable = Database("postgresql+psycopg://nobody@127.0.0.1:1/none", connect_timeout=1)
+
+    with pytest.raises(ValueError, match="lock_timeout_ms"):
+        submit_llm_batch(
+            SYSTEM,
+            unreachable,
+            _no_provider,
+            setup,
+            uuid.uuid4(),
+            clock=lambda: NOW,
+            lock_timeout_ms=lock_timeout_ms,
+        )

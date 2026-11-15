@@ -9,10 +9,13 @@ Story 2.9）。
 - `SUBMITTING_STALE_AFTER`：停在 `submitting` 而且沒有供應商 batch ID 超過這麼久，就判定送出的
   工作已經不在了（送出不重試，最久約一次 `RADAR_ANTHROPIC_TIMEOUT`），標 `needs_attention`、
   不重送；sweep 的 `submitting` 那一列用同一個常數。
+- `batch_never_fits`：送出前最後確認超過預算時，分「再等可能放得下」（延後）與「再等也放不下」
+  （取消、釋放預留）。
 - 結果型別（`LlmBatchPlanResult`、`LlmBatchSubmitResult`）的 `stop`／`outcome` 值會寫進日誌。
 """
 
 import uuid
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -22,7 +25,7 @@ from typing import Final
 from pydantic import BaseModel, ConfigDict, Field
 
 from radar.domain.ai_outputs import InputKind, LlmTask, PaperLlmSource, RunKey, RunStatus
-from radar.domain.budget import BUDGET_TIMEZONE
+from radar.domain.budget import BUDGET_TIMEZONE, BudgetConfig
 from radar.domain.errors import ErrorCode
 from radar.domain.processing import ProcessingFacts
 
@@ -35,6 +38,10 @@ PROVIDER_MAX_REQUESTS: Final = 100_000
 # `max_requests_per_batch` 的上限（比官方的 100,000 小很多）：一批在一個交易裡建，一個交易最多
 # 嘗試 2 × 上限筆、每筆一把 advisory lock；PostgreSQL 共用鎖表預設約 6,400 格（ADR-0041）。
 MAX_REQUESTS_PER_BATCH: Final = 1_000
+# 送出時等全域 Batch 預算鎖最多幾毫秒（`lock_timeout`）；等不到就延後（`batch_budget_lock_busy`），
+# sweep 之後補排。比正式的 `statement_timeout`（`database_connect_timeout`，預設 3 秒）短，所以
+# 通常是 `lock_timeout`（SQLSTATE 55P03）先到；`statement_timeout`（57014）先到時也照同樣處理。
+SUBMIT_BUDGET_LOCK_TIMEOUT_MS: Final = 2_000
 # 供應商 batch ID 的格式（和資料庫的 CHECK 一樣）。
 PROVIDER_BATCH_ID_PATTERN: Final = r"^[A-Za-z0-9_-]{1,128}$"
 
@@ -81,6 +88,53 @@ def in_month_start_hold(now: datetime, hours: int) -> bool:
         raise ValueError("hours 要是 0～24 的整數")
     local = now.astimezone(BUDGET_TIMEZONE)
     return local.day == 1 and local.hour < hours
+
+
+_ZERO: Final = Decimal(0)
+
+
+def batch_never_fits(
+    config: BudgetConfig,
+    tasks: Iterable[LlmTask],
+    own: Mapping[LlmTask, Decimal],
+    ahead: Mapping[LlmTask, Decimal],
+) -> bool:
+    """送出前最後確認已經超過預算時，這批是不是「再等也放不下」（ADR-0041 決定 12）。
+
+    `own`：這批還是 `running` 的 run 的預留；`ahead`：排在它前面（建立時間較早；同時建立的比 id）
+    、還在 `queued` 的其他批次的預留；都依工作加總，沒有的工作算 0。
+
+    放不下＝就算本月帳歸零（下個月）、已送出的批次都結束釋放，「前面的 queued 批次＋這批」仍超過：
+    - 熔斷線：`ahead` 合計＋`own` 合計 > `monthly_breaker_usd`；或
+    - `tasks`（這批要送的工作）裡任何一個有功能預算的：該工作的 `ahead`＋`own` > 功能預算。
+    包含「這批自己的預留就超過熔斷線或功能預算」。排在後面的 queued 批次與已送出、待人工確認的批次
+    不算：前者讓位給這批，後者結果匯入就會釋放（可能等得到）。帳本不算：下個月歸零。
+
+    Raises:
+        ValueError: 金額不是有限、不小於 0 的 `Decimal`，或有不認得的工作代碼。
+    """
+    own_by_task = _amounts(own)
+    ahead_by_task = _amounts(ahead)
+    total = sum(own_by_task.values(), _ZERO) + sum(ahead_by_task.values(), _ZERO)
+    if total > config.monthly_breaker_usd:
+        return True
+    for task in tasks:
+        budget = config.task_budget(task)
+        if budget is not None and own_by_task[task] + ahead_by_task[task] > budget:
+            return True
+    return False
+
+
+def _amounts(amounts: Mapping[LlmTask, Decimal]) -> dict[LlmTask, Decimal]:
+    if set(amounts) - set(LlmTask):
+        raise ValueError("預留裡有不認得的工作代碼")
+    by_task: dict[LlmTask, Decimal] = {}
+    for task in LlmTask:
+        amount = amounts.get(task, _ZERO)
+        if type(amount) is not Decimal or not amount.is_finite() or amount < 0:
+            raise ValueError(f"{task.value} 的預留要是有限、不小於 0 的 Decimal")
+        by_task[task] = amount
+    return by_task
 
 
 @dataclass(frozen=True, slots=True)
@@ -184,11 +238,14 @@ class SubmitOutcome(StrEnum):
     NOTHING_TO_DO = "nothing_to_do"  # 已經送過、已失敗或已標 needs_attention：不做事
     LOST_RACE = "lost_race"  # 另一個送出者先把 queued 改走了
     NOT_STALE = "not_stale"  # 停在 submitting、還沒過時限：不動、不送
-    # 月初窗口、已熔斷，或帳本＋預留超過預算：不動（維持 queued）、不送，sweep 之後補排
+    # 月初窗口、已熔斷、帳本＋預留超過預算（再等可能放得下），或等預算鎖逾時：不動（維持 queued）、
+    # 不送，sweep 之後補排
     HELD = "held"
     NEEDS_ATTENTION = "needs_attention"  # 停在 submitting 已過時限：標 needs_attention、不送
     REQUEUED = "requeued"  # 429：退回 queued，sweep 之後補排
-    FAILED = "failed"  # 全部輸入都變了，或供應商明確拒絕：批次與 run 改 failed
+    # 全部輸入都變了、供應商明確拒絕，或預算調低後再等也放不下（`batch_budget_cannot_fit`，不送）：
+    # 批次與 run 改 failed
+    FAILED = "failed"
 
 
 @dataclass(frozen=True)

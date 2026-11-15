@@ -124,3 +124,9 @@ class ErrorCode(StrEnum):
     # 送出前最後確認（全域 Batch 預算鎖裡）：本月帳＋全部尚未結束的 Batch 預留超過熔斷線或這批工作的
     # 功能預算（規劃之後互動又花了、或預算調低）：不動、不送，列維持 queued，sweep 之後補排
     BATCH_BUDGET_EXCEEDED = "batch_budget_exceeded"
+    # 送出前最後確認：這批再等也放不下（熔斷線或功能預算調低後，這批自己的預留加上排在它前面、還在
+    # queued 的批次的預留就超過；`domain/llm_batches.batch_never_fits`）：同一個交易把批次從
+    # queued 改 failed、這批的 run 改 failed（釋放預留），下一次規劃依新預算重排
+    BATCH_BUDGET_CANNOT_FIT = "batch_budget_cannot_fit"
+    # 送出時等全域 Batch 預算鎖逾時（規劃的長交易拿著）：不動、不送，列維持 queued，sweep 之後補排
+    BATCH_BUDGET_LOCK_BUSY = "batch_budget_lock_busy"

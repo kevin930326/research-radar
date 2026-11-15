@@ -28,8 +28,11 @@ Story 2.9）。`batch_submission` 的狀態只在這裡改。
 - `queued`：先看月初窗口與帳本熔斷（規劃之後可能變了），在窗口裡或已熔斷就不動、不送（回 `HELD`，
   列維持 `queued`，sweep 之後補排）。再每筆重讀論文、再問 `plan_for`（被排除或輸入種類變了也算
   對不上）、重建請求、核對 run 的鍵；對不上的 run 改 `failed`、不送。
-  一個交易裡先拿全域 Batch 預算鎖，再看一次月初窗口（查核可能跨過午夜）與「帳本＋全部預留」
-  （超過熔斷線或這批工作的功能預算就 `HELD`／`batch_budget_exceeded`，不寫任何列），都過了才
+  一個交易裡先拿全域 Batch 預算鎖（等超過 `lock_timeout_ms` 就整個交易退回，`HELD`／
+  `batch_budget_lock_busy`），再看一次月初窗口（查核可能跨過午夜）與「帳本＋全部預留」（超過熔斷線
+  或這批工作的功能預算時：再等也放不下〔`batch_never_fits`〕就在同一個交易把批次從 `queued` 改
+  `failed`、這批的 run 改 `failed`〔`batch_budget_cannot_fit`，釋放預留〕；否則 `HELD`／
+  `batch_budget_exceeded`，不寫任何列），都過了才
   條件式 `queued`→`submitting`（同一句改實際筆數），套用了才建 provider（`open_provider`，缺金鑰
   時整個交易退回、列還是 `queued`；過期標記、延後、全部對不上、搶輸這些只碰資料庫的路都不建），
   並把對不上的 run 改 `failed`；交易外經閘門的
@@ -65,7 +68,7 @@ from radar.domain.ai_outputs import (
 )
 from radar.domain.budget import BudgetConfig
 from radar.domain.context_values import ContextValues
-from radar.domain.errors import ErrorCode
+from radar.domain.errors import ErrorCode, LockWaitTimeoutError
 from radar.domain.fingerprints import LLM_BATCH_BUDGET_LOCK_KEY
 from radar.domain.jobs import SUBMIT_LLM_BATCH, Enqueue
 from radar.domain.llm import (
@@ -78,6 +81,7 @@ from radar.domain.llm import (
 from radar.domain.llm_batches import (
     BATCH_TASKS,
     PROVIDER_BATCH_ID_PATTERN,
+    SUBMIT_BUDGET_LOCK_TIMEOUT_MS,
     SUBMITTING_STALE_AFTER,
     BatchSubmissionStatus,
     BatchSubmitUncertainError,
@@ -86,6 +90,7 @@ from radar.domain.llm_batches import (
     LlmBatchSubmitResult,
     PlanStop,
     SubmitOutcome,
+    batch_never_fits,
     in_month_start_hold,
 )
 from radar.domain.permissions import Action, require
@@ -103,6 +108,7 @@ from radar.repo.llm_batches import (
     create_batch_submission,
     find_batch_submission,
     list_batch_items,
+    list_batch_reservations_ahead_by_task,
     update_batch_submission_failed,
     update_batch_submission_late_batch_id,
     update_batch_submission_needs_attention,
@@ -491,6 +497,7 @@ def submit_llm_batch(
     *,
     clock: Callable[[], datetime],
     stale_after: timedelta = SUBMITTING_STALE_AFTER,
+    lock_timeout_ms: int = SUBMIT_BUDGET_LOCK_TIMEOUT_MS,
 ) -> LlmBatchSubmitResult:
     """送出一個 `queued` 的批次（見模組說明）。
 
@@ -499,10 +506,15 @@ def submit_llm_batch(
     `needs_attention`、已結束、延後、全部對不上、搶輸這些只碰資料庫的路都不建 provider，所以缺金鑰時
     也照樣做得完。它丟的錯（例如缺金鑰的 `ConfigError`）原樣往上丟、交易退回，列維持 `queued`。
 
+    最後確認的交易等鎖超過 `lock_timeout_ms` 毫秒（規劃的長交易拿著全域預算鎖）時回 `HELD`
+    （`batch_budget_lock_busy`），不寫列、不建 provider。預算調低後這批再等也放不下時，同一個交易
+    取消（批次與 run 改 `failed`、`batch_budget_cannot_fit`，回 `FAILED`，不丟例外）。
+
     Raises:
         PermissionDeniedError: `actor` 不是系統工作（不碰資料庫）。
         LookupError: 沒有這個 `batch_submission`。
-        ValueError: `stale_after` 不是正的時間長度，或時鐘回了沒有時區的時間。
+        ValueError: `stale_after` 不是正的時間長度、`lock_timeout_ms` 不是正整數，或時鐘回了沒有時區
+            的時間。
         PromptIntegrityError, PromptFormatError: prompt 檔或登記不對（列維持 `queued`）。
         Exception: `open_provider` 丟的錯（例如缺金鑰的 `ConfigError`）原樣丟出（列維持 `queued`）。
         LlmError, NotCloudSafeError: 一定沒有建立（4xx 但 429 除外、沒有狀態碼的設定錯、送出前就
@@ -514,6 +526,8 @@ def submit_llm_batch(
     require(actor, Action.RUN_AI_JOBS, None)
     if stale_after <= timedelta(0):
         raise ValueError("stale_after 要大於 0")
+    if type(lock_timeout_ms) is not int or lock_timeout_ms < 1:
+        raise ValueError("lock_timeout_ms 要是正整數")
     viewer = SystemViewer()
     with database.transaction() as connection:
         row = find_batch_submission(viewer, connection, batch_submission_id)
@@ -559,19 +573,61 @@ def submit_llm_batch(
 
     # 查核可能很久（最多重建 1,000 筆、可能跨過台北午夜）：真正送出前，在全域 Batch 預算鎖裡再看
     # 一次月初窗口與「帳本＋全部預留」，和 queued→submitting 同一個交易，中間不會有人插隊。
-    with database.transaction() as connection:
-        Database.transaction_lock(connection, LLM_BATCH_BUDGET_LOCK_KEY)
-        held = _held_reason_locked(connection, setup, clock(), checked.sent_tasks)
-        moved = False
-        if held is None:
-            moved = update_batch_submission_submitting(
-                connection, batch_submission_id, len(checked.requests)
+    # 等鎖（或交易裡任何一句等鎖）超過 `lock_timeout_ms` 就整個交易退回、當成延後（L1）。
+    cancelled = False
+    moved = False
+    try:
+        with database.transaction_with_lock_timeout(lock_timeout_ms) as connection:
+            Database.transaction_lock(connection, LLM_BATCH_BUDGET_LOCK_KEY)
+            held = _held_reason_locked(
+                connection, setup, clock(), batch_submission_id, checked.sent_tasks
             )
-            if moved:
-                # 確定要送才建 provider（不連線）：缺金鑰時在這裡丟、整個交易退回，列還是 queued。
-                provider = open_provider()
-                for run_id, reason in checked.changed:
-                    update_derivation_run_failed(connection, run_id, reason)
+            if held is ErrorCode.BATCH_BUDGET_CANNOT_FIT:
+                # 再等也放不下（R2）：同一個交易取消批次、結束 run（釋放預留），不建 provider。
+                cancelled = update_batch_submission_failed(
+                    connection,
+                    batch_submission_id,
+                    ErrorCode.BATCH_BUDGET_CANNOT_FIT,
+                    from_status=BatchSubmissionStatus.QUEUED,
+                )
+                if cancelled:
+                    for run_id in checked.sent_run_ids:
+                        update_derivation_run_failed(
+                            connection, run_id, ErrorCode.BATCH_BUDGET_CANNOT_FIT
+                        )
+                    for run_id, reason in checked.changed:
+                        update_derivation_run_failed(connection, run_id, reason)
+            elif held is None:
+                moved = update_batch_submission_submitting(
+                    connection, batch_submission_id, len(checked.requests)
+                )
+                if moved:
+                    # 確定要送才建 provider（不連線）：缺金鑰時在這裡丟、整個交易退回，
+                    # 列還是 queued。
+                    provider = open_provider()
+                    for run_id, reason in checked.changed:
+                        update_derivation_run_failed(connection, run_id, reason)
+    except LockWaitTimeoutError:
+        # 交易已退回：什麼都沒寫（provider 若已建，由呼叫端的 ExitStack 關），列維持 queued。
+        return _held(batch_submission_id, ErrorCode.BATCH_BUDGET_LOCK_BUSY)
+    if held is ErrorCode.BATCH_BUDGET_CANNOT_FIT:
+        if not cancelled:
+            # 交易結束、連線還回去之後才重讀（連線池只有一條時不會等自己）。
+            return _lost_race(database, batch_submission_id)
+        log.warning(
+            "Batch 再等也放不下（熔斷線或功能預算調低），取消：批次與 run 改 failed、預留釋放，"
+            "下次規劃依新預算重排",
+            batch_submission_id=str(batch_submission_id),
+            reason=ErrorCode.BATCH_BUDGET_CANNOT_FIT.value,
+            released_runs=len(checked.sent_run_ids) + len(changed_ids),
+            input_changed=len(changed_ids),
+        )
+        return LlmBatchSubmitResult(
+            SubmitOutcome.FAILED,
+            BatchSubmissionStatus.FAILED,
+            input_changed=len(changed_ids),
+            reason=ErrorCode.BATCH_BUDGET_CANNOT_FIT,
+        )
     if held is not None:
         return _held(batch_submission_id, held)
     if not moved:
@@ -693,23 +749,34 @@ def _held_reason(database: Database, setup: LlmBatchSetup, now: datetime) -> Err
 
 
 def _held_reason_locked(
-    connection: DbConnection, setup: LlmBatchSetup, now: datetime, tasks: frozenset[LlmTask]
+    connection: DbConnection,
+    setup: LlmBatchSetup,
+    now: datetime,
+    batch_submission_id: uuid.UUID,
+    tasks: frozenset[LlmTask],
 ) -> ErrorCode | None:
-    """（全域 Batch 預算鎖裡）真正送出前的最後確認；要延後時回原因代碼。
+    """（全域 Batch 預算鎖裡）真正送出前的最後確認；要延後或取消時回原因代碼。
 
     - 月初窗口：查核途中跨過台北午夜也擋得到。
     - 帳本已到熔斷線：`batch_budget_tripped`。
-    - 帳本＋全部預留（含這批自己的）**超過**熔斷線或這批工作的功能預算：`batch_budget_exceeded`。
+    - 帳本＋全部預留（含這批自己的）**超過**熔斷線或這批工作的功能預算：
+      - 再等也放不下（`domain/llm_batches.batch_never_fits`：前面的 queued 批次＋這批的預留就
+        超過）：`batch_budget_cannot_fit`（呼叫端在同一個交易取消批次、釋放預留）。
+      - 否則（再等可能放得下）：`batch_budget_exceeded`（延後，預留留著）。
       規劃時剛好排滿不算超過；規劃之後互動又花了（在途的呼叫）或預算調低才會超過。
     """
     if in_month_start_hold(now, setup.batches.month_start_hold_hours):
         return ErrorCode.BATCH_MONTH_START_HOLD
-    status = read_budget_status(SystemViewer(), connection, setup.budget, now=now)
+    viewer = SystemViewer()
+    status = read_budget_status(viewer, connection, setup.budget, now=now)
     if status.ledger_breaker_tripped:
         return ErrorCode.BATCH_BUDGET_TRIPPED
-    if status.over_committed(tasks):
-        return ErrorCode.BATCH_BUDGET_EXCEEDED
-    return None
+    if not status.over_committed(tasks):
+        return None
+    own, ahead = list_batch_reservations_ahead_by_task(viewer, connection, batch_submission_id)
+    if batch_never_fits(setup.budget, tasks, own, ahead):
+        return ErrorCode.BATCH_BUDGET_CANNOT_FIT
+    return ErrorCode.BATCH_BUDGET_EXCEEDED
 
 
 def _current_status(database: Database, batch_submission_id: uuid.UUID) -> BatchSubmissionStatus:

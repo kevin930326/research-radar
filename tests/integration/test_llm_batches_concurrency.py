@@ -4,6 +4,9 @@
 1. 兩個 worker 同時規劃同一份資料：每個鍵只有一筆 running、item 不重複、預留總額不超過剩餘預算
    （功能預算與熔斷線各測一次）。
 2. 兩個 worker 同時送出同一批：provider 只被呼叫一次。
+3. 互動不拿全域預算鎖時，最後確認只攔得住已入帳的花費，超支上限＝並行中的互動呼叫數×單次費用
+   （Codex 複查 R1）。
+4. 兩個 worker 同時取消同一批（預算調低後再等也放不下）：只有一個成功（Codex 複查 R2）。
 
 provider 是 `FakeLlmProvider` 的子類（batch ID 是編的）；論文、摘要都是測試自己編的。
 """
@@ -12,20 +15,41 @@ import threading
 import time
 import uuid
 from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
 import pytest
 
+import radar.services.llm_batches as llm_batches
+from radar.adapters.fake import FakeLlmProvider, fake_completion
 from radar.adapters.fake.jobs import FakeJobQueue
-from radar.domain.ai_outputs import LlmTask
-from radar.domain.llm_batches import LlmBatchPlanResult, LlmBatchSubmitResult, SubmitOutcome
+from radar.domain.ai_outputs import InputKind, LlmTask
+from radar.domain.budget import month_window
+from radar.domain.errors import ErrorCode
+from radar.domain.llm import LlmUsage
+from radar.domain.llm_batches import (
+    BatchSubmissionStatus,
+    LlmBatchPlanResult,
+    LlmBatchSubmitResult,
+    SubmitOutcome,
+)
+from radar.domain.pricing import llm_call_cost
 from radar.domain.viewer import SystemViewer
+from radar.ports import LlmProvider
 from radar.repo.db import Database
-from radar.services.llm_batches import LlmBatchSetup, plan_llm_batches, submit_llm_batch
+from radar.services.budget import BudgetGuard, get_budget_status
+from radar.services.llm_batches import (
+    LlmBatchSetup,
+    llm_job,
+    plan_llm_batches,
+    submit_llm_batch,
+)
+from radar.services.llm_gateway import GatewayOutcome, run_llm_job
 from tests.batch_support import (
     BATCH_ID,
     NOW,
+    ROOT,
     WAIT,
     GatedBatchProvider,
     batch_setup,
@@ -34,7 +58,15 @@ from tests.batch_support import (
     prepared,
 )
 from tests.database import TestDatabase, migrate
-from tests.llm_support import budget_config, create_paper, execute, insert_ledger
+from tests.llm_support import (
+    GatedProvider,
+    budget_config,
+    create_paper,
+    execute,
+    gateway_config,
+    insert_ledger,
+    models_config,
+)
 
 SYSTEM = SystemViewer()
 PAPERS = 6
@@ -206,3 +238,134 @@ def test_two_submitters_at_once_call_the_provider_once(db: TestDatabase) -> None
         SubmitOutcome.NOT_STALE.value,
     }
     assert batch_status(db, submission_id)[:2] == ("submitted", BATCH_ID)
+
+
+# --- Codex 複查 R1、R2（第二輪） ------------------------------------------------------------------
+
+MODEL = "claude-haiku-5-5"
+GOOD = '{"research_question": "團隊怎麼採用資訊系統？"}'
+USAGE = LlmUsage(input_tokens=1200, output_tokens=300)
+
+
+def _no_provider() -> LlmProvider:
+    raise AssertionError("這條路不該建 provider")
+
+
+def _reserved_by_submission(db: TestDatabase, submission_id: uuid.UUID) -> Decimal:
+    [(value,)] = execute(
+        db,
+        "SELECT COALESCE(sum(i.estimated_max_cost_usd), 0) FROM batch_item AS i"
+        " JOIN derivation_run AS r ON r.id = i.run_id"
+        " WHERE i.batch_submission_id = %s AND r.status = 'running'",
+        submission_id,
+    )
+    assert isinstance(value, Decimal)
+    return value
+
+
+def test_final_check_stops_only_spending_booked_before_it_and_overshoot_is_one_call(
+    db: TestDatabase,
+) -> None:
+    """R1（ADR-0041 決定 12）：互動不拿全域預算鎖。交錯順序「互動通過預算檢查 → Batch A 最後確認
+    通過、送出 → 互動才記帳」時，A 擋不到還沒入帳的互動，總額超過熔斷線；超過的量不超過並行中的
+    互動呼叫數（這裡 1）× 單次費用。互動入帳之後才做最後確認的 Batch B 就被延後（只攔得住
+    已入帳的）。
+
+    閘門記的 `llm_call.created_at` 是資料庫真的現在，所以時鐘與假帳本也用真的現在。互動用正式的
+    prompt（和 Batch 同一份登記），假回覆不是合格的中文重點，所以是拒收；拒收前已記帳（閘門
+    第 7 步）。
+    """
+    now = datetime.now(UTC)
+    if month_window(now) != month_window(now + timedelta(minutes=2)):
+        pytest.skip("正好跨台北的月份邊界：閘門記的帳會落在下個月")
+    clock = lambda: datetime.now(UTC)  # noqa: E731
+    setup = batch_setup(max_requests=3, hold_hours=0)
+    database = _database(db)
+    _papers(database)
+    plan = plan_llm_batches(
+        SYSTEM, database, setup, weekly_run_id=None, clock=clock, enqueue=lambda *_: True
+    )
+    first, second, *rest = plan.submission_ids
+    reserved = sum((_reserved_by_submission(db, s) for s in plan.submission_ids), Decimal(0))
+    per_call = llm_call_cost(models_config(), MODEL, USAGE, is_batch=False).cost_usd
+    gap = (per_call / 2).quantize(Decimal("0.000001"))
+    assert Decimal(0) < gap < per_call
+    paper = create_paper(database, doi="10.1/interactive", openalex_id="W999")
+    # 帳本＋全部預留＝熔斷線−半次互動：互動通過檢查，Batch 最後確認也通過。
+    insert_ledger(db, paper, LlmTask.QA_ANSWER, str(Decimal(50) - reserved - gap), now)
+    guard = BudgetGuard(database, budget_config(), clock=clock)
+    gated = GatedProvider(FakeLlmProvider([fake_completion(GOOD, usage=USAGE)]))
+    config = gateway_config(ROOT / "prompts")
+    job = llm_job(setup, paper, LlmTask.ZH_SUMMARY, InputKind.ABSTRACT)
+    interactive = _Worker(
+        lambda: run_llm_job(SYSTEM, _database(db), gated, config, job, budget_allows=guard),
+        threading.Barrier(1),
+    )
+    assert gated.entered.wait(WAIT)  # 互動已通過預算檢查、在等模型
+
+    provider = FakeLlmProvider(batch_replies=[BATCH_ID])
+    sent = submit_llm_batch(SYSTEM, database, lambda: provider, setup, first, clock=clock)
+    gated.release.set()
+    assert interactive.join().outcome is GatewayOutcome.REJECTED
+    assert gated.calls == 1
+    late = submit_llm_batch(SYSTEM, database, _no_provider, setup, second, clock=clock)
+
+    assert sent.outcome is SubmitOutcome.SUBMITTED
+    assert late == LlmBatchSubmitResult(
+        SubmitOutcome.HELD, BatchSubmissionStatus.QUEUED, reason=ErrorCode.BATCH_BUDGET_EXCEEDED
+    )
+    status = get_budget_status(SYSTEM, database, budget_config(), now=datetime.now(UTC))
+    assert status.committed_usd == Decimal(50) - gap + per_call
+    assert Decimal(50) < status.committed_usd <= Decimal(50) + 1 * per_call
+    assert all(batch_status(db, s)[0] == "queued" for s in [second, *rest])
+
+
+def test_two_workers_cancelling_the_same_batch_cancel_it_once(
+    db: TestDatabase, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R2：兩個 worker 同時處理同一批、都查核完才進預算鎖：只有一個取消成功（條件式 UPDATE），
+    另一個搶輸、照實回報；都不建 provider。"""
+    setup = batch_setup()
+    database = _database(db)
+    _papers(database)
+    plan = plan_llm_batches(
+        SYSTEM, database, setup, weekly_run_id=None, clock=lambda: NOW, enqueue=lambda *_: True
+    )
+    [submission_id] = plan.submission_ids
+    lowered = budget_config().model_copy(
+        update={"monthly_breaker_usd": _reserved_by_submission(db, submission_id) / 2}
+    )
+    low_setup = batch_setup(budget=lowered)
+    both_checked = threading.Barrier(2)
+    original = llm_batches._check_items
+
+    def check_then_wait(*args: Any) -> Any:
+        checked = original(*args)
+        both_checked.wait(WAIT)  # 兩個都查核完，才一起去拿預算鎖
+        return checked
+
+    monkeypatch.setattr(llm_batches, "_check_items", check_then_wait)
+
+    def submit() -> LlmBatchSubmitResult:
+        return submit_llm_batch(
+            SYSTEM, _database(db), _no_provider, low_setup, submission_id, clock=lambda: NOW
+        )
+
+    gate = threading.Barrier(2)
+    workers = [_Worker(submit, gate), _Worker(submit, gate)]
+    results = sorted((worker.join() for worker in workers), key=lambda r: r.outcome.value)
+
+    assert results == [
+        LlmBatchSubmitResult(
+            SubmitOutcome.FAILED,
+            BatchSubmissionStatus.FAILED,
+            reason=ErrorCode.BATCH_BUDGET_CANNOT_FIT,
+        ),
+        LlmBatchSubmitResult(SubmitOutcome.LOST_RACE, BatchSubmissionStatus.FAILED),
+    ]
+    assert batch_status(db, submission_id)[:3] == ("failed", None, "batch_budget_cannot_fit")
+    assert execute(
+        db,
+        "SELECT r.status, r.failure_reason, count(*) FROM batch_item AS i"
+        " JOIN derivation_run AS r ON r.id = i.run_id GROUP BY 1, 2",
+    ) == [("failed", "batch_budget_cannot_fit", PAPERS * 3)]

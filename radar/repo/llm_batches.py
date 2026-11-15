@@ -252,6 +252,46 @@ def list_llm_spending_and_reservations_by_task(
     return spent, reserved
 
 
+def list_batch_reservations_ahead_by_task(
+    viewer: SystemViewer, connection: Connection, batch_submission_id: uuid.UUID
+) -> tuple[dict[LlmTask, Decimal], dict[LlmTask, Decimal]]:
+    """一句 SQL 讀：回（這批的預留, 排在它前面、還在 `queued` 的其他批次的預留），各依工作加總，
+    沒有的工作不在結果裡（ADR-0041 決定 12「再等也放不下」）。
+
+    - 預留只算 run 還是 `running` 的 `batch_item.estimated_max_cost_usd`（和
+      `list_llm_spending_and_reservations_by_task` 的預留一樣）。
+    - 「前面」：`(created_at, id)` 比這批小（先建的先排；同時建的比 id，順序固定、不會互相等）。
+    - 這批不存在時兩個都是空的。
+
+    Raises:
+        TypeError: `viewer` 不是 `SystemViewer`。
+    """
+    visible = visible_to_system_only(viewer)
+    rows = connection.execute(
+        text(
+            "SELECT r.task,"
+            " COALESCE(sum(i.estimated_max_cost_usd) FILTER (WHERE s.id = me.id), 0),"
+            " COALESCE(sum(i.estimated_max_cost_usd) FILTER (WHERE s.id <> me.id), 0)"
+            " FROM batch_submission AS me"
+            " JOIN batch_submission AS s ON s.id = me.id OR (s.status = 'queued'"
+            " AND (s.created_at, s.id) < (me.created_at, me.id))"
+            " JOIN batch_item AS i ON i.batch_submission_id = s.id"
+            " JOIN derivation_run AS r ON r.id = i.run_id"
+            f" WHERE {visible} AND me.id = :id AND r.status = 'running'"
+            " GROUP BY r.task"
+        ),
+        {"id": batch_submission_id},
+    ).all()
+    own: dict[LlmTask, Decimal] = {}
+    ahead: dict[LlmTask, Decimal] = {}
+    for task, own_amount, ahead_amount in rows:
+        if own_amount:
+            own[LlmTask(task)] = Decimal(own_amount)
+        if ahead_amount:
+            ahead[LlmTask(task)] = Decimal(ahead_amount)
+    return own, ahead
+
+
 # --- 寫入 ---------------------------------------------------------------------------------
 
 

@@ -15,6 +15,7 @@ from radar.adapters.fake import FakeLlmProvider
 from radar.adapters.fake.llm import FakeRepliesExhaustedError
 from radar.config import ConfigError, load_llm_batch_config
 from radar.domain.ai_outputs import InputKind, LlmTask, RunKey, RunStatus
+from radar.domain.budget import BudgetConfig
 from radar.domain.fingerprints import LLM_BATCH_BUDGET_LOCK_KEY, named_lock_key
 from radar.domain.jobs import (
     JOBS,
@@ -33,13 +34,14 @@ from radar.domain.llm_batches import (
     BatchSubmissionStatus,
     BatchSubmitUncertainError,
     LlmBatchConfig,
+    batch_never_fits,
     in_month_start_hold,
 )
 from radar.domain.policy import CloudPolicy, ContentSource, clear_for_cloud
 from radar.domain.pricing import max_call_cost
 from radar.domain.sweep import SWEEP_REGISTRY
 from radar.repo.db import EMBEDDING_QUOTA_LOCK_KEY, INGEST_WRITE_LOCK_KEY
-from tests.llm_support import models_config
+from tests.llm_support import budget_config, models_config
 from tests.prompt_support import template_text
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -313,3 +315,62 @@ def test_fake_submit_batch_validates_like_the_adapter() -> None:
         fake.submit_batch([object()])  # type: ignore[list-item]
 
     assert fake.batch_requests == []
+
+
+# --- 再等也放不下（Codex 複查 R2、ADR-0041 決定 12） ---------------------------------------
+
+
+def _lowered(breaker: str, **budgets: str | None) -> BudgetConfig:
+    """熔斷線調成 `breaker`（workspace 上限 70）；沒給的工作沒有個別上限。"""
+    config = budget_config(**budgets)
+    return config.model_copy(update={"monthly_breaker_usd": Decimal(breaker)})
+
+
+ZH = LlmTask.ZH_SUMMARY
+CL = LlmTask.CLASSIFY
+
+
+@pytest.mark.parametrize(
+    ("breaker", "own", "ahead", "never"),
+    [
+        # 這批自己的預留就超過熔斷線：等到下個月也放不下。
+        ("20", {ZH: Decimal(30)}, {}, True),
+        # 剛好等於：放得下（和最後確認一樣用「超過」）。
+        ("30", {ZH: Decimal(30)}, {}, False),
+        # 前面的 queued 批次＋這批超過：排在後面的讓位。
+        ("50", {ZH: Decimal(30)}, {CL: Decimal(30)}, True),
+        # 前面的 queued 批次＋這批放得下：延後（帳本、已送出的預留之後會變）。
+        ("50", {ZH: Decimal(20)}, {CL: Decimal(30)}, False),
+        ("50", {}, {}, False),
+    ],
+)
+def test_batch_never_fits_compares_own_and_ahead_with_the_breaker(
+    breaker: str, own: dict[LlmTask, Decimal], ahead: dict[LlmTask, Decimal], never: bool
+) -> None:
+    assert batch_never_fits(_lowered(breaker), [ZH], own, ahead) is never
+
+
+def test_batch_never_fits_checks_only_the_task_budgets_of_tasks_it_sends() -> None:
+    config = _lowered("50", zh_summary="1", classify="1")
+    own = {ZH: Decimal("0.6"), CL: Decimal("2")}
+    ahead = {ZH: Decimal("0.5")}
+
+    # 中文重點：前面 0.5＋這批 0.6 > 1。
+    assert batch_never_fits(config, [ZH], own, ahead)
+    # 只送分類時看分類的功能預算（這批自己的 2 > 1）。
+    assert batch_never_fits(config, [CL], own, {})
+    # 不在這批要送的工作裡：不看它的功能預算。
+    assert not batch_never_fits(config, [LlmTask.EXTRACT_MODEL], own, ahead)
+    # 剛好等於功能預算不算超過。
+    assert not batch_never_fits(config, [ZH], {ZH: Decimal("0.5")}, {ZH: Decimal("0.5")})
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [{ZH: Decimal(-1)}, {ZH: Decimal("NaN")}, {ZH: 1}, {"nope": Decimal(1)}],
+)
+def test_batch_never_fits_rejects_bad_amounts(bad: dict[Any, Any]) -> None:
+    with pytest.raises(ValueError, match="預留"):
+        batch_never_fits(budget_config(), [ZH], bad, {})
+    with pytest.raises(ValueError, match="預留"):
+        batch_never_fits(budget_config(), [ZH], {}, bad)
