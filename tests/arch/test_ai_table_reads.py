@@ -7,6 +7,11 @@
 做法照 `test_keyword_table_reads.py`：掃 `radar/` 每個 .py 檔的字串（f-string 的變數換成佔位
 字元、不含 docstring），`FROM`／`JOIN`／`USING` 這四張表只准出現在 `repo/ai_outputs.py`；
 `DELETE FROM` 是寫入，不算讀取。表的物件（`zh_summary_table` 等）也不准在別處用。
+
+有效值只由三個 view 決定（AD-10、Story 2.7）：正向檢查 `repo/ai_blocks.py` 讀的是
+`effective_zh_summary`、`effective_classification`、`effective_research_model`；反向檢查 `radar/`
+裡讀這三個 view 只准在允許清單（`VIEW_READERS`）裡的模組。view 本身不接可見範圍，讀的模組要自己
+接 `visible_papers`。
 """
 
 import ast
@@ -29,6 +34,17 @@ _READ = re.compile(
     rf"({'|'.join(TABLES)})\"?(?!\w)",
     re.IGNORECASE,
 )
+
+
+EFFECTIVE_VIEWS = ("effective_classification", "effective_research_model", "effective_zh_summary")
+_VIEW_READ = re.compile(
+    r"\b(?:FROM|JOIN)\s+(?:\"?[A-Za-z_]\w*\"?\.)?\"?"
+    rf"({'|'.join(EFFECTIVE_VIEWS)})\"?(?!\w)",
+    re.IGNORECASE,
+)
+# 准讀三個有效值 view 的模組。view 不接可見範圍：之後新增讀取者時加進這裡，並在查詢裡接上
+# `repo/visibility.py` 的可見條件（`visible_papers`）。
+VIEW_READERS = frozenset({"radar/repo/ai_blocks.py"})
 
 
 def _reads_in_strings(source: str) -> list[str]:
@@ -122,5 +138,63 @@ def test_scanner_catches_each_mistake() -> None:
         "radar/repo/papers.py",
         "radar/repo/stats.py",
         "radar/repo/stats2.py",
+        "radar/services/x.py",
+    ], problems
+
+
+def effective_view_reads(source: str) -> set[str]:
+    """原始碼字串裡 `FROM`／`JOIN` 到的有效值 view。"""
+    return {
+        match.group(1).lower()
+        for literal in _string_literals(ast.parse(source))
+        for match in _VIEW_READ.finditer(literal)
+    }
+
+
+def test_ai_blocks_reads_the_three_effective_views() -> None:
+    source = (RADAR / "repo" / "ai_blocks.py").read_text(encoding="utf-8")
+
+    assert effective_view_reads(source) == set(EFFECTIVE_VIEWS)
+    assert _reads_in_strings(source) == []
+
+
+def test_view_scanner_sees_from_and_join_only() -> None:
+    source = (
+        '"""SELECT 1 FROM effective_research_model"""\n'
+        'A = "SELECT 1 FROM effective_zh_summary AS e"\n'
+        'B = f"SELECT 1 FROM paper JOIN \\"effective_classification\\" ON {x}"\n'
+        'C = "SELECT 1 FROM effective_research_model_old"\n'
+    )
+
+    assert effective_view_reads(source) == {"effective_zh_summary", "effective_classification"}
+
+
+def effective_view_read_problems(sources: Mapping[str, str]) -> list[str]:
+    """`sources`（相對路徑 → 原始碼）裡，在 `VIEW_READERS` 以外讀有效值 view 的地方。"""
+    return [
+        f"{relative}：讀 {view}，只准在 {sorted(VIEW_READERS)}（要接 visible_papers）"
+        for relative, source in sorted(sources.items())
+        if relative not in VIEW_READERS
+        for view in sorted(effective_view_reads(source))
+    ]
+
+
+def test_only_allowed_modules_read_the_effective_views() -> None:
+    assert effective_view_read_problems(_radar_sources()) == []
+
+
+def test_view_read_scanner_catches_reads_outside_the_allowlist() -> None:
+    sources = {
+        "radar/repo/stats.py": 'SQL = "SELECT field, keys FROM effective_classification"',
+        "radar/services/x.py": 'SQL = "SELECT 1 FROM paper p JOIN public.effective_zh_summary z"',
+        # 不算：允許的模組、docstring。
+        "radar/repo/ai_blocks.py": 'SQL = "SELECT 1 FROM effective_research_model"',
+        "radar/repo/doc.py": '"""SELECT 1 FROM effective_research_model"""',
+    }
+
+    problems = effective_view_read_problems(sources)
+
+    assert [problem.split("：")[0] for problem in problems] == [
+        "radar/repo/stats.py",
         "radar/services/x.py",
     ], problems
