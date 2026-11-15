@@ -26,7 +26,11 @@ test("member: notice shows only paragraphs 3 and 4, word for word", async ({ pag
     TEXT["notice:notice.limits.heading"],
     TEXT["notice:notice.numbers.heading"],
   ]);
-  await expect(sections.nth(0).locator("p")).toHaveText([TEXT["notice:notice.limits.body"]]);
+  await expect(sections.nth(0).locator("p")).toHaveText([
+    TEXT["notice:notice.limits.noQuestions"],
+    TEXT["notice:notice.limits.noPasteable"],
+    TEXT["notice:notice.limits.screeningOnly"],
+  ]);
 
   const numbers = sections.nth(1).locator("p");
   await expect(numbers).toHaveText([

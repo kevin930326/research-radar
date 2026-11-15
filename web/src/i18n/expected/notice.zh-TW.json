@@ -8,7 +8,9 @@
   "strings": {
     "notice:notice.page.title": "使用須知",
     "notice:notice.limits.heading": "這個系統不做的事",
-    "notice:notice.limits.body": "不產生研究問題；不提供可以直接貼進論文的段落；中文重點只供篩選閱讀。",
+    "notice:notice.limits.noQuestions": "不產生研究問題。",
+    "notice:notice.limits.noPasteable": "不提供可以直接貼進論文的段落。",
+    "notice:notice.limits.screeningOnly": "中文重點只供篩選閱讀，不可直接放入論文。",
     "notice:notice.numbers.heading": "怎麼讀這裡的數字",
     "notice:notice.numbers.coverage": "每本期刊、每一年有多少論文有摘要，在資料涵蓋範圍。",
     "caveat:caveat.rare.warning": "少見只代表這 14 本期刊裡沒找到幾篇，不代表值得做",
