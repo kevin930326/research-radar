@@ -19,6 +19,8 @@ import pytest
 from typer.testing import CliRunner, Result
 
 import radar.entrypoints.cli as cli
+import radar.services.ai_results as ai_results
+import radar.services.llm_gateway as llm_gateway
 from radar.adapters.fake import FakeLlmProvider, fake_batch_status
 from radar.domain.ai_outputs import LlmTask
 from radar.domain.llm import (
@@ -587,3 +589,125 @@ def test_report_takes_the_newest_normal_run_and_skips_eval_runs(
     assert len(rows) == 3
     assert [row.outcome for row in rows if row.task is LlmTask.ZH_SUMMARY] == [RunOutcome.ACTIVE]
     assert {row.outcome for row in rows} == {RunOutcome.ACTIVE}
+
+
+# --- 審查後：Codex 主審查第 2、5、6 條 ------------------------------------------------------
+
+OTHER_BATCH_ID = "msgbatch_01FAKEotherBatchIdForTests"
+
+
+def _queued_batch(database: Database, n: int) -> uuid.UUID:
+    """第 n 篇論文排成一批 queued（還沒送出），回它的 id。"""
+    banking_paper(database, n)
+    plan = plan_llm_batches(
+        SYSTEM,
+        database,
+        batch_setup(),
+        weekly_run_id=None,
+        clock=lambda: NOW,
+        enqueue=lambda *_: True,
+        manual=True,
+    )
+    [queued] = plan.submission_ids
+    return queued
+
+
+def _status_of(db: TestDatabase, submission_id: uuid.UUID) -> str:
+    return str(submission_row(db, submission_id)[0])
+
+
+def test_create_shows_and_sends_batches_already_queued(
+    db: TestDatabase, database: Database, env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """之前留下的 queued 批次列在確認畫面、算進合計上限，確認後一起送出。"""
+    left_over = _queued_batch(database, 1)
+    banking_paper(database, 2)
+    provider = _ClosingFake((BATCH_ID, OTHER_BATCH_ID))
+    _use(monkeypatch, provider)
+
+    estimate = _invoke(["batches", "create", "--estimate"])
+
+    assert estimate.exit_code == 0, estimate.output
+    shown = "\n".join(_lines(estimate.output))
+    assert "已排好、還沒送出的批次：1 批" in shown
+    assert str(left_over) in shown
+    assert "這次會送出：6 筆（新排 3＋已排好 3）" in shown
+
+    result = _invoke(["batches", "create", "--yes"])
+
+    assert result.exit_code == 0, result.output
+    assert execute(db, "SELECT status, count(*) FROM batch_submission GROUP BY status") == [
+        ("submitted", 2)
+    ]
+    assert submission_row(db, left_over)[:2] == ("submitted", BATCH_ID)
+
+
+def test_create_does_not_send_batches_planned_while_confirming(
+    db: TestDatabase, database: Database, env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """確認畫面出來之後，別的規劃（例如每週）才建的 queued 批次不在確認範圍：不送、列出來。"""
+    confirmed = _queued_batch(database, 1)
+    planned_later: list[uuid.UUID] = []
+
+    def confirm_while_another_plan_runs(question: str) -> bool:
+        planned_later.append(_queued_batch(database, 2))
+        return True
+
+    monkeypatch.setattr(cli, "_confirm", confirm_while_another_plan_runs)
+    _use(monkeypatch, _ClosingFake((BATCH_ID,)))
+
+    result = _invoke(["batches", "create"])
+
+    assert result.exit_code == 0, result.output
+    [later] = planned_later
+    assert submission_row(db, confirmed)[:2] == ("submitted", BATCH_ID)
+    assert _status_of(db, later) == "queued"
+    assert "另有 1 批 queued 不在這次確認的範圍" in result.output
+    assert str(later) in result.output
+
+
+def test_wait_without_targets_still_reports_needs_attention(
+    db: TestDatabase, database: Database, env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """沒有 submitted／ended，但上次留下 needs_attention：不能當成成功，印 resolve 指令、
+    退出碼 1。"""
+    stuck = _stuck(database)
+    built = _use(monkeypatch, _closing([]))
+
+    result = _invoke(["batches", "wait"])
+
+    assert result.exit_code == 1
+    assert str(stuck) in result.output
+    assert "radar batches resolve" in result.output
+    assert built == []
+
+
+def test_wait_exits_1_while_a_result_is_left_waiting_to_resume(
+    db: TestDatabase, database: Database, env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """第一輪寫表頭失敗（run 改 llm_result_pending），第二輪其他項目收完、批次 imported：那一項
+    仍沒有表頭，wait 不能以 0 結束，要印論文 ID 與接續方式。"""
+    submission_id = submitted_batch(database, batch_setup())
+    items = list(by_task(database, submission_id).values())
+    real = ai_results.record_batch_llm_result
+    calls = {"n": 0}
+
+    def broken_once(*args: object, **kwargs: object) -> object:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("寫表頭壞了")
+        return real(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(llm_gateway, "record_batch_llm_result", broken_once)
+    _use(monkeypatch, _closing([succeeded(item) for item in items]))
+    slept = _sleeps(monkeypatch)
+
+    result = _invoke(["batches", "wait"])
+
+    assert result.exit_code == 1, result.output
+    assert slept == [600]
+    assert _status_of(db, submission_id) == "imported"
+    assert "已結束 1 批、還在跑 0 批" in result.output
+    assert "radar runs trial" in result.output
+    assert str(items[0].key.paper_id) in result.output
+    assert len(ledger(db)) == 3  # 接續不用再付錢：帳都在

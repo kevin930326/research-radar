@@ -345,3 +345,36 @@ def test_parsing_logs_nothing_about_the_content() -> None:
         to_batch_result(_line({"type": "succeeded", "message": _message(content=3)}))
 
     assert SECRET_OUTPUT not in repr(logs)
+
+
+# --- request_counts（Story 2.11 審查後） --------------------------------------------------------
+
+
+def test_retrieve_batch_reads_request_counts() -> None:
+    counts = {"processing": 0, "succeeded": 7, "errored": 1, "canceled": 2, "expired": 3}
+
+    status = to_batch_status(json.dumps(_batch(request_counts=counts)).encode(), "req_fake")
+
+    assert status.request_counts is not None
+    assert status.request_counts.succeeded == 7
+    assert status.request_counts.finished == 13
+
+
+@pytest.mark.parametrize(
+    "counts",
+    [
+        None,  # 沒有計數就核對不了結果有沒有讀完
+        {"processing": 0, "succeeded": 1, "errored": 0, "canceled": 0},  # 少一種
+        {"processing": 0, "succeeded": -1, "errored": 0, "canceled": 0, "expired": 0},
+        {"processing": 0, "succeeded": "1", "errored": 0, "canceled": 0, "expired": 0},
+    ],
+)
+def test_status_without_usable_request_counts_is_malformed(counts: object) -> None:
+    body = _batch()
+    if counts is None:
+        del body["request_counts"]
+    else:
+        body["request_counts"] = counts
+
+    with pytest.raises(LlmMalformedResponseError, match="request_counts"):
+        to_batch_status(json.dumps(body).encode(), "req_fake")

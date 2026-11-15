@@ -236,6 +236,29 @@ def count_batch_running_runs(
     return int(value)
 
 
+def list_batch_pending_paper_ids(
+    viewer: SystemViewer, connection: Connection, batch_submission_ids: Iterable[uuid.UUID]
+) -> list[uuid.UUID]:
+    """這幾批裡寫結果失敗、等互動接續的 run（`failed`／`llm_result_pending`：帳記了、輸出存著，表頭
+    還沒寫）屬於哪些論文，不重複、依論文 id（`radar batches wait` 結束前印，Story 2.11 審查後）。
+
+    Raises:
+        TypeError: `viewer` 不是 `SystemViewer`。
+    """
+    visible = visible_to_system_only(viewer)
+    rows = connection.execute(
+        text(
+            "SELECT DISTINCT r.paper_id"
+            " FROM batch_item AS i JOIN derivation_run AS r ON r.id = i.run_id"
+            f" WHERE {visible} AND i.batch_submission_id = ANY(:ids)"
+            " AND r.status = 'failed' AND r.failure_reason = :pending"
+            " ORDER BY r.paper_id"
+        ),
+        {"ids": list(batch_submission_ids), "pending": ErrorCode.LLM_RESULT_PENDING.value},
+    ).all()
+    return [uuid.UUID(str(paper_id)) for (paper_id,) in rows]
+
+
 def find_batch_attention_run(viewer: Viewer, connection: Connection, key: RunKey) -> bool:
     """這組鍵有沒有平常流程的 `running` run，屬於卡在 `needs_attention` 的批次（AI 區塊判定
     `failed` 用，ADR-0004 決定第 4 點、ADR-0015）。論文不存在或 `viewer` 看不到時回 False。
@@ -267,8 +290,8 @@ def find_batch_attention_run(viewer: Viewer, connection: Connection, key: RunKey
 def list_batch_items(
     viewer: SystemViewer, connection: Connection, batch_submission_id: uuid.UUID
 ) -> list[BatchItemRun]:
-    """這個批次的每一筆 `batch_item` 與它的 `derivation_run`（鍵、`input_kind`、狀態），依
-    `batch_item.id` 排序。
+    """這個批次的每一筆 `batch_item` 與它的 `derivation_run`（鍵、`input_kind`、狀態），連同所屬
+    批次的 id 與讀出當下的供應商 batch ID，依 `batch_item.id` 排序。
 
     Raises:
         TypeError: `viewer` 不是 `SystemViewer`。
@@ -279,8 +302,9 @@ def list_batch_items(
             text(
                 "SELECT i.id AS item_id, i.run_id, i.abstract_id, i.estimated_max_cost_usd,"
                 " r.paper_id, r.task, r.prompt_version, r.model, r.input_sha256, r.input_kind,"
-                " r.status AS run_status"
+                " r.status AS run_status, s.id AS batch_submission_id, s.provider_batch_id"
                 " FROM batch_item AS i JOIN derivation_run AS r ON r.id = i.run_id"
+                " JOIN batch_submission AS s ON s.id = i.batch_submission_id"
                 f" WHERE {visible} AND i.batch_submission_id = :id"
                 " ORDER BY i.id"
             ),
@@ -304,9 +328,38 @@ def list_batch_items(
             run_status=RunStatus(row["run_status"]),
             abstract_id=row["abstract_id"],
             estimated_max_cost_usd=Decimal(row["estimated_max_cost_usd"]),
+            batch_submission_id=row["batch_submission_id"],
+            provider_batch_id=row["provider_batch_id"],
         )
         for row in rows
     ]
+
+
+def find_batch_submission_importing(
+    viewer: SystemViewer,
+    connection: Connection,
+    batch_submission_id: uuid.UUID,
+    provider_batch_id: str,
+) -> bool:
+    """（結果匯入的每個寫入交易開頭）這批還是 `ended`、而且供應商 batch ID 還是 `provider_batch_id`
+    就以 `FOR SHARE` 鎖住這一列、回 True；否則回 False（Story 2.11 審查後）。
+
+    鎖到交易結束：期間別的行程不能把這批改成 `needs_attention`、`imported` 或換 ID（那些
+    UPDATE 會等這個交易做完，之後的交易就會看到新狀態）；兩個 poller 同時拿 `FOR SHARE` 不互擋。
+    鎖的順序一律先批次、再論文、再 run。
+
+    Raises:
+        TypeError: `viewer` 不是 `SystemViewer`。
+    """
+    visible = visible_to_system_only(viewer)
+    value = connection.execute(
+        text(
+            f"SELECT 1 FROM batch_submission WHERE {visible} AND id = :id"
+            " AND status = 'ended' AND provider_batch_id = :batch_id FOR SHARE"
+        ),
+        {"id": batch_submission_id, "batch_id": provider_batch_id},
+    ).scalar_one_or_none()
+    return value is not None
 
 
 def list_llm_spending_and_reservations_by_task(
@@ -572,52 +625,61 @@ def update_batch_submission_needs_attention(
     return result.rowcount == 1
 
 
-def update_batch_submission_ended(connection: Connection, batch_submission_id: uuid.UUID) -> bool:
-    """`submitted` → `ended`（供應商那邊處理完了），記 `ended_at`；不是 `submitted` 就不改、回
-    False（Story 2.11）。"""
+def update_batch_submission_ended(
+    connection: Connection, batch_submission_id: uuid.UUID, provider_batch_id: str
+) -> bool:
+    """`submitted` → `ended`（供應商那邊處理完了），記 `ended_at`；不是 `submitted`、或供應商
+    batch ID 已經不是查到的那個就不改、回 False（Story 2.11）。"""
     result = connection.execute(
         text(
             "UPDATE batch_submission SET status = 'ended', ended_at = clock_timestamp(),"
             " updated_at = clock_timestamp()"
-            " WHERE id = :id AND status = 'submitted'"
+            " WHERE id = :id AND status = 'submitted' AND provider_batch_id = :batch_id"
         ),
-        {"id": batch_submission_id},
+        {"id": batch_submission_id, "batch_id": provider_batch_id},
     )
     return result.rowcount == 1
 
 
 def update_batch_submission_imported(
-    connection: Connection, batch_submission_id: uuid.UUID
+    connection: Connection, batch_submission_id: uuid.UUID, provider_batch_id: str
 ) -> bool:
-    """`ended` → `imported`，記 `imported_at`；只在這批已經沒有 `running` 的 run 時才改（同一句
-    判斷），
-    不符就不改、回 False（Story 2.11）。"""
+    """`ended` → `imported`，記 `imported_at`；只在供應商 batch ID 還是 `provider_batch_id`、而且
+    這批已經沒有 `running` 的 run 時才改（同一句判斷），不符就不改、回 False（Story 2.11）。"""
     result = connection.execute(
         text(
             "UPDATE batch_submission SET status = 'imported', imported_at = clock_timestamp(),"
             " updated_at = clock_timestamp()"
-            " WHERE id = :id AND status = 'ended' AND NOT EXISTS ("
+            " WHERE id = :id AND status = 'ended' AND provider_batch_id = :batch_id"
+            " AND NOT EXISTS ("
             " SELECT 1 FROM batch_item AS i JOIN derivation_run AS r ON r.id = i.run_id"
             " WHERE i.batch_submission_id = batch_submission.id AND r.status = 'running')"
         ),
-        {"id": batch_submission_id},
+        {"id": batch_submission_id, "batch_id": provider_batch_id},
     )
     return result.rowcount == 1
 
 
 def update_batch_submission_attention_on_not_found(
-    connection: Connection, batch_submission_id: uuid.UUID, reason: ErrorCode
+    connection: Connection,
+    batch_submission_id: uuid.UUID,
+    provider_batch_id: str,
+    reason: ErrorCode,
 ) -> bool:
     """`submitted`／`ended` → `needs_attention`，記原因代碼（例如供應商回 404）；`ended` 是匯入到
-    一半中斷、之後供應商找不到的情況。不是這兩種狀態就不改、回 False（Story 2.11）。供應商 batch ID
-    留著，人工確認時查得到。"""
+    一半中斷、之後供應商找不到的情況。不是這兩種狀態、或供應商 batch ID 已經不是查的那個（人工確認
+    換了 ID）就不改、回 False（Story 2.11）。供應商 batch ID 留著，人工確認時查得到。"""
     result = connection.execute(
         text(
             "UPDATE batch_submission SET status = 'needs_attention', failure_reason = :reason,"
             " updated_at = clock_timestamp()"
-            " WHERE id = :id AND status IN ('submitted', 'ended')"
+            " WHERE id = :id AND status IN ('submitted', 'ended') AND provider_batch_id = :batch_id"
         ),
-        {"id": batch_submission_id, "reason": ErrorCode(reason).value},
+        {
+            "id": batch_submission_id,
+            "batch_id": provider_batch_id,
+            "reason": ErrorCode(reason).value,
+        },
     )
     return result.rowcount == 1
 

@@ -22,6 +22,12 @@ deferred:
     location: >-
       radar/services/llm_batches.py _poll_one（缺項判定）
     severity: medium (unverified)
+    status: 'resolved'
+    resolution: >-
+      已處理（Codex 主審查第 3 條，2026-11-16）：adapter 必讀 request_counts；串流讀完先比對讀到的項數
+      （不重複的 custom_id＋讀不到 custom_id 的行），少於供應商計數就記錯誤、批次留 ended、下次重讀，
+      不判缺項（test_truncated_results_are_not_treated_as_missing_and_are_read_again）。剩下「截在最後
+      一行中間」最多一項會被判缺項，寫在 ADR-0043 取捨。
 ---
 
 <intent-contract>
@@ -161,6 +167,18 @@ deferred:
   - `[low]` `[reject]` （intent）新的部分唯一索引擋的事舊索引本來就擋住 — 同 blind#10。
   - `[false]` `[reject]` （intent）費用算在匯入的月份 — ADR-0043 取捨已寫，列為 Kevin 決定 2.11-4；不是缺陷。
   - `[false]` `[reject]` （intent）sprint-status、PR 說明、commit、push、併 2.10 還沒做 — 審查時流程還沒走到；之後都做了。
+
+### 2026-11-16 — Codex 主審查（e08b55c）
+- verdicts: 8 findings — high 2, medium 6；全部同意、全部修（triage：docs/runs/epic-2b/reviews/2.11-triage.md，不進 git）
+- findings:
+  - `[high]` `[patch]` 批次被別的 poll 標成 needs_attention 後，舊的 poll 仍寫得進 active — 匯入的每個寫入交易先 `FOR SHARE` 鎖批次列、核對 `ended`＋同一個供應商 batch ID，不符就停止這一批（`BatchImportStoppedError`）；批次狀態的條件式 UPDATE 加上 ID 條件、檢查回傳值。
+  - `[high]` `[patch]` `radar batches create` 確認畫面的範圍和實際送出的不同 — 確認前列出既有 queued 批次與合計上限；確認後只送這份清單＋這次規劃建的。
+  - `[medium]` `[patch]` 截短的串流被當成缺項（原 deferred 那條）— 核對 `request_counts`，不夠就留 `ended` 重讀。
+  - `[medium]` `[patch]` 超過 29 天仍回 in_progress／canceling 永遠不結束 — 29 天判定移到提前返回之前。
+  - `[medium]` `[patch]` `wait` 沒有目標時忽略 needs_attention — 印 resolve 指令、退出碼 1。
+  - `[medium]` `[patch]` `wait` 只看最後一輪，`llm_result_pending` 被掩蓋 — 結束前查目標批次，有就印論文 ID 與 `radar runs trial`、退出碼 1。
+  - `[medium]` `[patch]` 0017 降版再升版違反 CHECK — 升版先用 `updated_at` 回填。
+  - `[medium]` `[patch]` PR 說明的 `| tee` 吃掉退出碼 — PR 說明改用 `set -o pipefail` 並立即檢查。
 
 ## Design Notes
 

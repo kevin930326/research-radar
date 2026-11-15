@@ -32,7 +32,8 @@
 - Batch 結果匯入（Story 2.11、ADR-0043）：
   - `retrieve_batch`：`GET {base_url}/v1/messages/batches/{id}`（`with_raw_response.retrieve`），
     暫時性錯誤照 `complete` 的規則重試；回應用 Pydantic 驗（`processing_status` 只收
-    `in_progress`、`canceling`、`ended`，時間要帶時區），驗不過丟 `LlmMalformedResponseError`。
+    `in_progress`、`canceling`、`ended`，時間要帶時區，`request_counts` 五種計數都要有），驗不過丟
+    `LlmMalformedResponseError`。
   - `batch_results`：`with_streaming_response.results`（SDK 先查一次批次、再下載 `results_url`），
     `iter_lines()` 逐行自己解析，**不重試**；一行看不懂就回 `malformed`（讀得到 usage 時帶上），
     不丟錯；下載途中的錯誤照 `to_llm_error` 換成 domain 的錯誤。
@@ -64,6 +65,7 @@ from pydantic import (
 from radar.adapters.heartbeat import parse_retry_after
 from radar.domain.llm import (
     BatchProcessingStatus,
+    BatchRequestCounts,
     Completion,
     CompletionBlock,
     LlmBatchRequest,
@@ -264,14 +266,28 @@ def to_batch_id(body: bytes, request_id: str | None) -> str:
     return batch.id
 
 
+class _RequestCounts(BaseModel):
+    """查批次回應裡的 `request_counts`（五種都要有、不小於 0 的整數）。"""
+
+    model_config = ConfigDict(extra="ignore", strict=True, frozen=True)
+
+    processing: int = Field(ge=0)
+    succeeded: int = Field(ge=0)
+    errored: int = Field(ge=0)
+    canceled: int = Field(ge=0)
+    expired: int = Field(ge=0)
+
+
 class _BatchStatus(BaseModel):
-    """查批次的回應：只取用得到的欄位（其餘忽略）。不是真的錄的，形狀照官方文件。"""
+    """查批次的回應：只取用得到的欄位（其餘忽略）。不是真的錄的，形狀照官方文件。
+    `request_counts` 必填：匯入時拿它核對結果檔讀到的行數（截短的串流不判缺項）。"""
 
     model_config = ConfigDict(extra="ignore", strict=True, frozen=True)
 
     id: str = Field(pattern=PROVIDER_BATCH_ID_PATTERN)
     type: Literal["message_batch"]
     processing_status: Literal["in_progress", "canceling", "ended"]
+    request_counts: _RequestCounts
     created_at: AwareDatetime
     expires_at: AwareDatetime
     ended_at: AwareDatetime | None = None
@@ -309,6 +325,13 @@ def to_batch_status(body: bytes, request_id: str | None) -> LlmBatchStatus:
         expires_at=batch.expires_at,
         ended_at=batch.ended_at,
         results_available=bool(batch.results_url),
+        request_counts=BatchRequestCounts(
+            processing=batch.request_counts.processing,
+            succeeded=batch.request_counts.succeeded,
+            errored=batch.request_counts.errored,
+            canceled=batch.request_counts.canceled,
+            expired=batch.request_counts.expired,
+        ),
     )
 
 

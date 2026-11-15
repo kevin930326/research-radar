@@ -181,7 +181,9 @@ class BatchSubmission:
 class BatchItemRun:
     """一筆 `batch_item` 與它的 `derivation_run`（送出前重建請求、核對鍵用）。
 
-    `custom_id` 就是 `item_id.hex`。
+    `custom_id` 就是 `item_id.hex`。`batch_submission_id`／`provider_batch_id` 是它所屬的批次與讀出
+    當下那批的供應商 batch ID（`repo/llm_batches.list_batch_items` 一起讀；匯入的每個寫入交易拿它們
+    核對批次還在匯入同一個 ID，Story 2.11 審查後）。
     """
 
     item_id: uuid.UUID
@@ -191,10 +193,21 @@ class BatchItemRun:
     run_status: RunStatus
     abstract_id: uuid.UUID | None
     estimated_max_cost_usd: Decimal
+    batch_submission_id: uuid.UUID | None = None
+    provider_batch_id: str | None = None
 
     @property
     def custom_id(self) -> str:
         return self.item_id.hex
+
+
+class BatchImportStoppedError(Exception):
+    """匯入途中發現這批已經不在匯入同一個供應商 batch ID（被改成 `needs_attention`、人工確認改了
+    ID、或已經不是 `ended`）：這一批停止、不再寫任何列（Story 2.11 審查後）。訊息只有批次 id。"""
+
+    def __init__(self, batch_submission_id: uuid.UUID | None) -> None:
+        self.batch_submission_id = batch_submission_id
+        super().__init__(f"批次 {batch_submission_id} 已經不在匯入中，停止匯入")
 
 
 class BatchSubmitUncertainError(Exception):
@@ -302,6 +315,22 @@ def results_expired(status: LlmBatchStatus, now: datetime) -> bool:
     return now > status.created_at + PROVIDER_RESULTS_RETENTION
 
 
+def results_incomplete(status: LlmBatchStatus, read: int) -> int | None:
+    """結果檔是不是沒讀完：供應商的 `request_counts` 說有幾項結果（`finished`），這次只讀到 `read`
+    項（不重複的 custom_id，加上連 custom_id 都讀不到的行）就回應該有的項數；讀夠了，或供應商沒給
+    計數（只有替身會這樣）回 None。沒讀完時不判缺項，批次留 `ended` 下次重讀。
+
+    Raises:
+        ValueError: `read` 是負數。
+    """
+    if read < 0:
+        raise ValueError("read 不能是負數")
+    counts = status.request_counts
+    if counts is None or read >= counts.finished:
+        return None
+    return counts.finished
+
+
 def batch_overdue(status: LlmBatchStatus, now: datetime) -> bool:
     """還沒結束、但已經過了供應商的處理期限（`expires_at`）：照文件應該要結束了，標「逾期」。
 
@@ -368,6 +397,8 @@ class BatchPollRow:
     - `provider_status`：供應商那邊的 `processing_status`（沒查到時是 None）。
     - `overdue`：還沒結束、但已經過了 `expires_at`。
     - `error`：這批出錯時的錯誤類別（與狀態碼），不含訊息；沒有是 None。
+    - `stopped`：匯入途中這批被改走（`needs_attention`、換了供應商 batch ID 或已不是 `ended`），
+      停止、沒有再寫。
     """
 
     batch_submission_id: uuid.UUID
@@ -376,6 +407,7 @@ class BatchPollRow:
     counts: BatchImportCounts = field(default_factory=BatchImportCounts)
     overdue: bool = False
     error: str | None = None
+    stopped: bool = False
 
 
 @dataclass
@@ -434,6 +466,8 @@ def render_poll_row(row: BatchPollRow) -> str:
         parts.append("、".join(shown))
     if row.overdue:
         parts.append("逾期")
+    if row.stopped:
+        parts.append("停止匯入（批次狀態變了）")
     if row.error is not None:
         parts.append(f"錯誤：{row.error}")
     return "  ".join(parts)
@@ -502,6 +536,31 @@ def render_batch_estimate(estimate: LlmBatchEstimate, status: BudgetStatus) -> l
         lines.append("已熔斷：規劃不會排任何批次")
     elif estimate.estimated_max_cost_usd > status.remaining_usd:
         lines.append("保守上限超過離熔斷線的金額：放不下的會計 deferred_budget，這次不排")
+    return lines
+
+
+def render_queued_batches(
+    queued: Iterable[BatchSubmission], estimate: LlmBatchEstimate
+) -> list[str]:
+    """`radar batches create` 確認前印：已經排好、還沒送出的批次（這次一起送），與這次確認的合計
+    上限（已排好的＋新排的）。"""
+    rows = list(queued)
+    queued_cost = sum((row.estimated_max_cost_usd for row in rows), _ZERO)
+    lines: list[str] = []
+    if rows:
+        lines += ["", f"已排好、還沒送出的批次：{len(rows)} 批（這次一起送）", ""]
+        body = [
+            [str(row.id), f"{row.item_count:,}", format_usd(row.estimated_max_cost_usd)]
+            for row in rows
+        ]
+        lines += render_table(["批次", "筆數", "保守上限"], body, align="lrr")
+    queued_items = sum(row.item_count for row in rows)
+    split = f"（新排 {estimate.planned:,}＋已排好 {queued_items:,}）" if rows else ""
+    lines += [
+        "",
+        f"這次會送出：{estimate.planned + queued_items:,} 筆{split}，保守上限合計 "
+        f"{format_usd(estimate.estimated_max_cost_usd + queued_cost)} 美元",
+    ]
     return lines
 
 

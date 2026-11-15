@@ -137,3 +137,33 @@ def test_a_batch_run_is_charged_at_most_once(db: TestDatabase) -> None:
         run_id,
     )
     assert inserted == []
+
+
+def test_upgrade_again_after_batches_were_imported(db: TestDatabase) -> None:
+    """用過之後降版（兩欄刪掉）再升版：已經 ended／imported 的列先回填時間（用 updated_at），CHECK
+    才加得上（Story 2.11 審查後）。"""
+    ended = _submission(db, "ended", ended_at="2026-11-15T04:00:00Z")
+    imported = _submission(
+        db, "imported", ended_at="2026-11-15T04:00:00Z", imported_at="2026-11-15T05:00:00Z"
+    )
+    submitted = _submission(db, "submitted")
+
+    down = _alembic(db, "downgrade", "0016")
+    assert down.returncode == 0, down.stdout + down.stderr
+
+    migrate(db)
+
+    assert db.revisions() == {"0017"}
+    rows = {
+        uuid.UUID(str(row[0])): row[1:]
+        for row in execute(
+            db,
+            "SELECT id, ended_at = updated_at, imported_at = updated_at, imported_at IS NULL"
+            " FROM batch_submission",
+        )
+    }
+    assert rows[ended] == (True, None, True)
+    assert rows[imported] == (True, True, False)
+    assert rows[submitted] == (None, None, True)
+    check = _alembic(db, "check")
+    assert check.returncode == 0, check.stdout + check.stderr

@@ -55,6 +55,7 @@ from radar.domain.llm_batches import (
     render_batch_estimate,
     render_poll_row,
     render_poll_summary,
+    render_queued_batches,
     render_wait_progress,
 )
 from radar.domain.run_reports import RunScope, parse_ids_file, parse_since, render_run_report
@@ -103,6 +104,7 @@ from radar.services.llm_batches import (
     LlmBatchSetup,
     count_llm_batch_running_runs,
     estimate_llm_batches,
+    list_llm_batch_pending_papers,
     list_llm_batches,
     plan_llm_batches,
     poll_llm_batches,
@@ -800,9 +802,11 @@ def batches_create(
 ) -> None:
     """手動規劃全庫的 AI 工作（中文重點、分類、研究模型）並送出 Batch。
 
-    先印預估（各工作筆數、Batch 價的保守上限合計、本月預算剩餘），確認後（--yes 不問）規劃
-    （不看 weekly_planning_enabled；月初窗口、熔斷照樣看），再在這個行程裡送出所有 queued 的
-    批次，印每批結果與下一步（radar batches wait）。--estimate 只估不寫。
+    先印預估（各工作筆數、Batch 價的保守上限、本月預算剩餘），以及已經排好、還沒送出的 queued
+    批次（id、筆數、上限）與兩者合計的上限；確認後（--yes 不問）規劃（不看
+    weekly_planning_enabled；月初窗口、熔斷照樣看），再在這個行程裡只送出確認過的批次（確認前列出的
+    queued 批次＋這次規劃建的），印每批結果與下一步（radar batches wait）。確認之後才出現的其他
+    queued 批次（例如同時進行的每週規劃）不送，列出來讓你另外確認。--estimate 只估不寫。
 
     設定錯、讀不到資料庫、沒有確認、有批次沒送成（延後、失敗、不確定）：退出碼 1。Ctrl-C：退出碼
     130。錯誤只印類別或狀態碼，不印金鑰與連線字串。
@@ -814,11 +818,15 @@ def batches_create(
             database = build_database(settings, pool_size=database_pool_size(settings, "cli"))
             estimate = estimate_llm_batches(SystemViewer(), database, setup)
             status = get_budget_status(SystemViewer(), database, setup.budget, now=_utc_now())
+            # 確認的範圍：預估（新排的）＋現在已經排好、還沒送出的批次（這次一起送）。
+            confirmed = list_llm_batches(SystemViewer(), database, {BatchSubmissionStatus.QUEUED})
         except Exception as exc:
             # 例外訊息可能含主機與帳號，只記類別名稱。
             log.error("Batch 預估失敗", error_type=type(exc).__name__)
             _fail(f"預估失敗（{type(exc).__name__}），沒有執行；細節見日誌", [])
         for line in render_batch_estimate(estimate, status):
+            typer.echo(line)
+        for line in render_queued_batches(confirmed, estimate):
             typer.echo(line)
         if estimate_only:
             return
@@ -849,25 +857,44 @@ def batches_create(
             typer.echo(line)
         if plan.stop is not PlanStop.COMPLETED:
             not_sent = True
-        queued = list_llm_batches(SystemViewer(), database, {BatchSubmissionStatus.QUEUED})
+        # 只送確認過的：確認前列出的 queued 批次＋這次規劃建的（之後才出現的另行確認）。
+        to_send = list(dict.fromkeys([*(row.id for row in confirmed), *plan.submission_ids]))
         with ExitStack() as stack:
             open_provider = _lazy_provider(settings, stack)
-            for row in queued:
+            for submission_id in to_send:
                 try:
                     result = submit_llm_batch(
-                        SystemViewer(), database, open_provider, setup, row.id, clock=_utc_now
+                        SystemViewer(),
+                        database,
+                        open_provider,
+                        setup,
+                        submission_id,
+                        clock=_utc_now,
                     )
                 except BatchSubmitUncertainError as exc:
                     log.error("Batch 送出結果不確定", error_type=exc.error_type)
                     typer.echo(
-                        f"{row.id}  needs_attention  不確定有沒有送出（{exc.error_type}），"
+                        f"{submission_id}  needs_attention  不確定有沒有送出（{exc.error_type}），"
                         "停下；用 radar batches resolve 確認",
                         err=True,
                     )
                     raise typer.Exit(1) from None
-                typer.echo(_render_submit(row.id, result))
+                typer.echo(_render_submit(submission_id, result))
                 if result.outcome in _NOT_SENT:
                     not_sent = True
+        others = [
+            row.id
+            for row in list_llm_batches(SystemViewer(), database, {BatchSubmissionStatus.QUEUED})
+            if row.id not in to_send
+        ]
+        if others:
+            typer.echo(
+                f"另有 {len(others)} 批 queued 不在這次確認的範圍，沒有送"
+                "（worker 會照排程送；要現在送就再跑一次 radar batches create）：",
+                err=True,
+            )
+            for other in others:
+                typer.echo(f"  {other}", err=True)
     except ConfigError as exc:
         log.error("設定錯誤，無法送出 Batch", problems=exc.problems)
         _fail("設定錯誤，沒有送出（批次留在 queued）：", exc.problems)
@@ -952,8 +979,9 @@ def batches_wait(
     """一直查到目標批次都結束（imported／failed）或出現 needs_attention 為止，邊查邊匯入。
 
     目標是開始時 submitted／ended 的批次，或 --id 指定的。每次檢查印一行「已結束 X 批、還在跑
-    Y 批」。設定錯、讀不到資料庫、最後一次有錯誤、有 needs_attention：退出碼 1。Ctrl-C：退出碼
-    130，重跑接著收、不重複匯入。
+    Y 批」。設定錯、讀不到資料庫、最後一次有錯誤、有 needs_attention（沒有目標時也看全庫的）、
+    目標批次裡還有寫結果失敗等接續的項目（llm_result_pending，印論文 ID 與接續方式）：退出碼 1。
+    Ctrl-C：退出碼 130，重跑接著收、不重複匯入。
     """
     configure_logging()
     settings, setup = _load_batch_setup("等 Batch")
@@ -975,8 +1003,19 @@ def batches_wait(
                 )
             ]
         if not targets:
-            typer.echo("沒有要等的批次（submitted／ended）")
-            return
+            stuck = list_llm_batches(
+                SystemViewer(), database, {BatchSubmissionStatus.NEEDS_ATTENTION}
+            )
+            if not stuck:
+                typer.echo("沒有要等的批次（submitted／ended）")
+                return
+            typer.echo("沒有要等的批次（submitted／ended），但有批次要人工確認：", err=True)
+            for stuck_row in stuck:
+                typer.echo(f"  {stuck_row.id}", err=True)
+            typer.echo(
+                "radar batches resolve <批次 id> --provider-batch-id <ID> 或 --fail", err=True
+            )
+            raise typer.Exit(1)
         with ExitStack() as stack:
             open_provider = _lazy_provider(settings, stack)
             error_rounds = 0
@@ -1003,6 +1042,7 @@ def batches_wait(
                     )
                     break
                 _sleep(interval * 60)
+            pending = list_llm_batch_pending_papers(SystemViewer(), database, targets)
     except ConfigError as exc:
         log.error("設定錯誤，無法等 Batch", problems=exc.problems)
         _fail("設定錯誤，沒有等 Batch：", exc.problems)
@@ -1025,7 +1065,16 @@ def batches_wait(
             " --provider-batch-id <ID> 或 --fail",
             err=True,
         )
-    if attention or not result.healthy:
+    if pending:
+        # 帳記了、輸出存著，只差寫結果：Batch 不會重排，要用互動接續（不再呼叫模型、不再記帳）。
+        typer.echo(
+            f"有 {len(pending)} 篇論文的結果還沒寫好（寫入失敗、等接續）：用 radar runs trial"
+            " <論文 ID>… 接續（會先印預估、要確認；這幾項用存下的輸出，不再呼叫模型）",
+            err=True,
+        )
+        for paper_id in pending:
+            typer.echo(f"  {paper_id}", err=True)
+    if attention or pending or not result.healthy:
         raise typer.Exit(1)
 
 

@@ -8,8 +8,11 @@ ADR-0043）。
   也還在）。
 - `batch_submission`：新增 `ended_at`（供應商那邊處理完、我們看到 `ended` 的時間）、`imported_at`
   （匯入做完的時間），都可以是 NULL；CHECK：`ended`／`imported` 一定有 `ended_at`，`imported`
-  一定有 `imported_at`。既有的列只會是 `queued`～`submitted`、`failed`、`needs_attention`
-  （2.9 不會寫 `ended`／`imported`），所以加 CHECK 不用補資料。
+  一定有 `imported_at`。從 0016 第一次升上來時，既有的列只會是 `queued`～`submitted`、`failed`、
+  `needs_attention`（2.9 不會寫 `ended`／`imported`）；但降版到 0016 再升回來時，已經 `ended`／
+  `imported` 的列兩欄是空的，會違反 CHECK。所以加 CHECK 前先回填：這兩種狀態的列，空的
+  `ended_at`／`imported_at` 用 `updated_at`（最後一次狀態轉移的時間：`imported` 的列就是匯入做完
+  的時間，`ended` 的列就是看到結束的時間；不會早於送出時間，是手上最接近的值；Story 2.11 審查後）。
 
 和 `radar/repo/llm_ledger.py`、`radar/repo/llm_batches.py` 的表定義一致（`alembic check` 比對；
 CHECK 約束 autogenerate 不比，這裡照抄同一份條件）。可降版：降版刪掉兩欄（連同裡面的時間）與索引。
@@ -42,6 +45,15 @@ def upgrade() -> None:
     )
     op.add_column(
         "batch_submission", sa.Column("imported_at", sa.DateTime(timezone=True), nullable=True)
+    )
+    # 降版再升版時，已經 ended／imported 的列要先有時間才加得上 CHECK（見模組說明）。
+    op.execute(
+        "UPDATE batch_submission SET ended_at = updated_at"
+        " WHERE status IN ('ended', 'imported') AND ended_at IS NULL"
+    )
+    op.execute(
+        "UPDATE batch_submission SET imported_at = updated_at"
+        " WHERE status = 'imported' AND imported_at IS NULL"
     )
     op.create_check_constraint(
         "ck_batch_submission_ended_at_once_ended",
