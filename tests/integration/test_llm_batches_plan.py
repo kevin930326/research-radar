@@ -5,24 +5,32 @@
 論文、摘要都是測試自己編的；prompt 與設定用 repo 的正式檔。
 """
 
+import json
 import uuid
 from collections.abc import Mapping
 from datetime import datetime
 from decimal import Decimal
+from typing import Any
 from zoneinfo import ZoneInfo
 
 import pytest
 from structlog.testing import capture_logs
 
-from radar.adapters.fake import FakeLlmProvider
+import radar.services.llm_batches as llm_batches
+from radar.adapters.fake import FakeLlmProvider, fake_completion
 from radar.adapters.fake.jobs import FakeJobQueue, QueuedJob
 from radar.domain.ai_outputs import LlmTask
 from radar.domain.jobs import SUBMIT_LLM_BATCH, JobSpec
+from radar.domain.llm import LlmUsage
 from radar.domain.llm_batches import LlmBatchPlanResult, PlanStop
 from radar.domain.viewer import SystemViewer
 from radar.repo.db import Database
+from radar.repo.llm_batches import create_batch_item
+from radar.services.classification import run_classification
 from radar.services.llm_batches import LlmBatchSetup, plan_llm_batches
 from radar.services.llm_gateway import GatewayOutcome, run_llm_job
+from radar.services.research_model import run_research_model
+from radar.services.zh_summary import run_zh_summary
 from tests.batch_support import (
     NOW,
     ROOT,
@@ -387,3 +395,240 @@ def test_interactive_call_skips_a_key_already_running_in_a_batch(
 
     assert result.outcome is GatewayOutcome.SKIPPED
     assert execute(db, "SELECT count(*) FROM derivation_run WHERE task = 'zh_summary'") == [(1,)]
+
+
+def test_disabled_weekly_planning_writes_nothing(db: TestDatabase, database: Database) -> None:
+    _paper(database, 1)
+    queue = FakeJobQueue()
+
+    with capture_logs() as logs:
+        result = _plan(database, batch_setup(enabled=False), queue=queue)
+
+    assert result == LlmBatchPlanResult(stop=PlanStop.DISABLED)
+    assert _counts(db) == {"derivation_run": 0, "batch_submission": 0, "batch_item": 0}
+    assert queue.queued == []
+    assert [(log["event"], log["log_level"]) for log in logs] == [
+        ("每週 Batch 規劃沒有開（Story 2.11），不排", "info")
+    ]
+
+
+def test_planning_that_crosses_into_the_month_start_hold_stops(
+    db: TestDatabase, database: Database
+) -> None:
+    _paper(database, 1)
+    now = [datetime(2026, 11, 30, 23, 59, tzinfo=TAIPEI)]
+
+    def enqueue(job: JobSpec, ids: Mapping[str, uuid.UUID]) -> bool:
+        # 第一批 commit 之後時鐘跨過台北午夜，進到 12 月 1 日的月初窗口。
+        now[0] = datetime(2026, 12, 1, 0, 30, tzinfo=TAIPEI)
+        return True
+
+    result = plan_llm_batches(
+        SYSTEM,
+        database,
+        batch_setup(max_requests=1),
+        weekly_run_id=None,
+        clock=lambda: now[0],
+        enqueue=enqueue,
+    )
+
+    assert result.stop is PlanStop.HELD_MONTH_START
+    assert result.planned == 1
+    assert len(submissions(db)) == 1
+    assert _counts(db)["batch_item"] == 1
+
+
+def test_task_ledger_spending_counts_against_the_task_budget(
+    db: TestDatabase, database: Database
+) -> None:
+    setup = batch_setup()
+    paper_id = _paper(database, 1)
+    cost = item_cost(setup, prepared(database, setup, paper_id, LlmTask.ZH_SUMMARY))
+    # 中文重點本月已花「功能預算 − 這一筆的一半」：熔斷線還很寬，只有功能預算放不下。
+    insert_ledger(
+        db,
+        paper_id,
+        LlmTask.ZH_SUMMARY,
+        str(Decimal(1) - (cost / 2).quantize(Decimal("0.000001"))),
+        NOW,
+    )
+
+    result = _plan(database, batch_setup(budget=budget_config(zh_summary="1")))
+
+    assert (result.planned, result.deferred_budget) == (2, 1)
+    planned_zh = execute(
+        db,
+        "SELECT count(*) FROM batch_item AS i JOIN derivation_run AS r ON r.id = i.run_id"
+        " WHERE r.task = 'zh_summary'",
+    )
+    assert planned_zh == [(0,)]
+
+
+def test_candidates_past_the_attempt_cap_carry_over_to_the_next_batch(
+    db: TestDatabase, database: Database
+) -> None:
+    _paper(database, 1)
+    _plan(database, batch_setup())
+    second = _paper(database, 2)
+
+    # 一批 1 筆、一個交易最多嘗試 2 筆：第一篇已在跑的 3 筆超過上限，第二篇要留到之後的批次。
+    result = _plan(database, batch_setup(max_requests=1))
+
+    assert (result.skipped, result.planned) == (3, 3)
+    assert len(result.submission_ids) == 3
+    planned = execute(
+        db,
+        "SELECT r.paper_id FROM batch_item AS i JOIN derivation_run AS r ON r.id = i.run_id"
+        " WHERE i.batch_submission_id = ANY(%s)",
+        result.submission_ids,
+    )
+    assert [row[0] for row in planned] == [second] * 3
+
+
+def test_interrupted_planning_transaction_leaves_nothing_and_rerun_plans_once(
+    db: TestDatabase, database: Database, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _paper(database, 1)
+    calls = 0
+
+    def create_then_break(*args: Any) -> uuid.UUID:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise RuntimeError("interrupted")
+        return create_batch_item(*args)
+
+    monkeypatch.setattr(llm_batches, "create_batch_item", create_then_break)
+    queue = FakeJobQueue()
+    with pytest.raises(RuntimeError, match="interrupted"):
+        _plan(database, batch_setup(), queue=queue)
+    monkeypatch.undo()
+
+    assert _counts(db) == {"derivation_run": 0, "batch_submission": 0, "batch_item": 0}
+    assert queue.queued == []
+
+    result = _plan(database, batch_setup(), queue=queue)
+
+    assert result.planned == 3
+    assert _counts(db) == {"derivation_run": 3, "batch_submission": 1, "batch_item": 3}
+    assert execute(
+        db, "SELECT count(DISTINCT (task, paper_id)) FROM derivation_run WHERE status = 'running'"
+    ) == [(3,)]
+    assert len(queue.queued) == 1
+
+
+# 互動服務的假回應（不是真的錄的；內容照這篇編的摘要寫，過得了各自的驗證）。
+_BANKING_TITLE = "Perceived usefulness and trust in mobile banking adoption"
+_BANKING_SENTENCE = "Perceived usefulness positively affects trust (β = 0.42, p = .01)."
+_BANKING_ABSTRACT = (
+    "Based on a survey of 200 bank customers in Taiwan, we test a model of mobile banking "
+    "adoption. Perceived usefulness is defined as the degree to which users believe the app "
+    f"improves their banking. {_BANKING_SENTENCE} "
+    "Interviews with managers suggest that trust shapes loyalty. "
+    "Future research should test other countries."
+)
+_ZH_REPLY: dict[str, Any] = {
+    "research_question": "知覺有用性如何影響行動銀行的信任？",
+    "method": "問卷調查台灣 200 名銀行客戶，並訪談經理人。",
+    "theory": None,
+    "findings": "知覺有用性正向影響信任；訪談顯示信任影響忠誠度。",
+}
+_CLASSIFY_REPLY: dict[str, Any] = {"topics": ["fintech"], "methods": ["survey_sem"]}
+_MODEL_REPLY: dict[str, Any] = {
+    "is_review_or_meta_analysis": False,
+    "context": {
+        "country": "tw",
+        "industry": "financial_services",
+        "research_design": "survey",
+        "unit_of_analysis": "individual",
+        "sample_size": 200,
+    },
+    "limitations": None,
+    "future_research": "Future research should test other countries.",
+    "constructs": [
+        {
+            "name_en": "Perceived usefulness",
+            "label_zh": "知覺有用性",
+            "definition": "the degree to which users believe the app improves their banking",
+            "measurement": None,
+        },
+        {"name_en": "Trust", "label_zh": "信任", "definition": None, "measurement": None},
+    ],
+    "hypotheses": [
+        {
+            "sentence": _BANKING_SENTENCE,
+            "cause": "Perceived usefulness",
+            "effect": "Trust",
+            "evidence_type": "empirical_test",
+            "support": "supported",
+            "result_quote": _BANKING_SENTENCE,
+            "statistics": {
+                "beta": 0.42,
+                "p_value": 0.01,
+                "sample_size": 200,
+                "effect_type": None,
+            },
+        }
+    ],
+}
+
+
+def _reply(fields: dict[str, Any]) -> Any:
+    return fake_completion(
+        json.dumps(fields, ensure_ascii=False),
+        usage=LlmUsage(input_tokens=900, output_tokens=120),
+    )
+
+
+def test_keys_done_by_the_interactive_services_are_not_batched_again(
+    db: TestDatabase, database: Database
+) -> None:
+    # Batch 的 llm_job 要和互動服務組出一樣的 RunKey，不然 Batch 會為做過的工作再付一次錢。
+    setup = batch_setup()
+    paper_id = create_paper(
+        database,
+        doi="10.1/banking",
+        openalex_id="W77",
+        title=_BANKING_TITLE,
+        abstract=_BANKING_ABSTRACT,
+    )
+    interactive = gateway_config(ROOT / "prompts")
+    budget = budget_config()
+    zh = run_zh_summary(
+        SYSTEM,
+        database,
+        FakeLlmProvider([_reply(_ZH_REPLY)]),
+        interactive,
+        budget,
+        setup.zh_summary_rules,
+        paper_id,
+        clock=lambda: NOW,
+    )
+    classified = run_classification(
+        SYSTEM,
+        database,
+        FakeLlmProvider([_reply(_CLASSIFY_REPLY)]),
+        interactive,
+        budget,
+        setup.taxonomy,
+        paper_id,
+        clock=lambda: NOW,
+    )
+    model = run_research_model(
+        SYSTEM,
+        database,
+        FakeLlmProvider([_reply(_MODEL_REPLY)]),
+        interactive,
+        budget,
+        setup.context_values,
+        paper_id,
+        clock=lambda: NOW,
+    )
+    outcomes = [run.result.outcome if run.result else None for run in (zh, classified, model)]
+    assert outcomes == [GatewayOutcome.ACTIVE] * 3
+
+    result = _plan(database, setup)
+
+    assert (result.planned, result.skipped) == (0, 3)
+    assert _counts(db)["batch_item"] == 0
+    assert submissions(db) == []

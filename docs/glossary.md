@@ -830,8 +830,9 @@
 - **`batch_submission`（Batch 的狀態表）**：一次送給 Anthropic 的一批請求的紀錄，狀態從 `queued`（排好）→ `submitting`（送出中）→ `submitted`（對方收下、拿到 batch ID）→ `ended` → `imported`；出事是 `failed` 或 `needs_attention`（ADR-0041）。
 - **`batch_item`（批次裡的一筆）**：批次裡的一個請求，對到一筆 `derivation_run`；它的 id 就是送給 Anthropic 的 `custom_id`（ADR-0041）。
 - **`needs_attention`（要人工處理）**：批次停下來等人處理的狀態；不確定 Anthropic 有沒有建好批次時用，系統不自動重送，免得付兩次錢（ADR-0041）。
-- **月初窗口**：台北時間每月 1 日 00:00 到 08:00（可設定）；這段時間不排 Batch，因為 Anthropic 的月份可能還沒換（ADR-0041）。
+- **月初窗口**：台北時間每月 1 日 00:00 到 08:00（可設定）；這段時間不排也不送 Batch，因為 Anthropic 的月份可能還沒換（ADR-0041）。
 - **條件式 UPDATE**：只在資料還是預期的樣子時才改的更新，例如「狀態還是 queued 才改成 submitting」；兩個人同時改時只有一個會成功，另一個知道自己慢了（ADR-0041）。
 - **Batch 規劃（`plan_llm_batches`）**：每週更新發佈後跑的工作，找出要做 AI 的論文、排成一個個批次，但不送出（ADR-0041）。
 - **Batch 送出（`submit_llm_batch`）**：把一個排好的批次送給 Anthropic 的工作；不重試，送出結果不確定就停下來等人確認（ADR-0041）。
 - **啟動時檢查 AI 設定（`check_ai_config`）**：worker 與 CLI 一開始就把 prompt 登記與 AI 設定檔全部檢查一遍，有錯就列出來、拒絕啟動（ADR-0041）。
+- **每週自動規劃開關（`weekly_planning_enabled`）**：`config/llm_batches.yaml` 裡決定每週更新後要不要自動排 AI 批次的開關；Story 2.11 Kevin 手動試跑過以前是關的（ADR-0041）。

@@ -14,6 +14,7 @@ import stamina
 
 from radar.adapters.anthropic import AnthropicLlmProvider, to_batch_id
 from radar.domain.llm import (
+    DATA_NOT_INSTRUCTIONS,
     LlmBatchRequest,
     LlmConfigurationError,
     LlmConnectionError,
@@ -25,6 +26,7 @@ from radar.domain.llm import (
     LlmServerError,
     LlmTimeoutError,
     NotCloudSafeError,
+    system_prompt,
 )
 from radar.domain.llm_schemas import FakeResearchQuestion
 from radar.domain.policy import CloudPolicy, CloudSafeText, ContentSource, clear_for_cloud
@@ -128,9 +130,18 @@ def _two() -> list[LlmBatchRequest]:
 
 def test_submit_batch_posts_once_and_returns_the_batch_id() -> None:
     recorder = Recorder(httpx2.Response(200, json=_created()))
+    requests = [
+        LlmBatchRequest(custom_id=CUSTOM_A, request=_request()),
+        LlmBatchRequest(
+            custom_id=CUSTOM_B,
+            request=_request(
+                effort="low", output_schema=FakeResearchQuestion, disable_thinking=True
+            ),
+        ),
+    ]
 
     with _provider(recorder) as provider:
-        batch_id = provider.submit_batch(_two())
+        batch_id = provider.submit_batch(requests)
 
     assert batch_id == BATCH_ID
     [request] = recorder.requests
@@ -145,9 +156,15 @@ def test_submit_batch_posts_once_and_returns_the_batch_id() -> None:
     assert first["messages"][0]["role"] == "user"
     assert SECRET_ABSTRACT in json.dumps(first["messages"], ensure_ascii=False)
     assert "output_config" not in first
+    # 系統提示前面接上「資料不是指令」那段（和互動呼叫一樣）；預設不帶 thinking。
+    assert first["system"] == system_prompt(requests[0].request)
+    assert first["system"].startswith(DATA_NOT_INSTRUCTIONS)
+    assert "thinking" not in first
     second = body["requests"][1]["params"]
     assert second["output_config"]["effort"] == "low"
     assert second["output_config"]["format"]["type"] == "json_schema"
+    assert second["system"] == system_prompt(requests[1].request)
+    assert second["thinking"] == {"type": "disabled"}
 
 
 @pytest.mark.parametrize(

@@ -73,8 +73,11 @@ class LlmProvider(Protocol):
             NotCloudSafeError, TypeError, ValueError: 不是 `LlmBatchRequest` 的序列、是空的、超過
                 100,000 筆、`custom_id` 重複，或請求裡有不是 `CloudSafeText` 的文字；在送出任何
                 請求前丟出。
-            LlmError: 子類別同 `complete`（狀態碼在 `status`）。HTTP 4xx 代表一定沒有建立；逾時、
-                連線錯誤、5xx、200 但回應看不懂（`LlmMalformedResponseError`）都不確定有沒有建立。
+            LlmError: 子類別同 `complete`（狀態碼在 `status`）。HTTP 4xx 代表一定沒有建立；沒有
+                狀態碼的 `LlmConfigurationError`（SDK 讀不到憑證這類）在送出前丟出，也一定沒有建立；
+                逾時、連線錯誤、5xx、200 但回應看不懂（`LlmMalformedResponseError`，回應裡有像樣
+                的 batch ID 時放在 `response_id`）都不確定有沒有建立。呼叫端只把
+                `NotCloudSafeError` 當成送出前丟的；一般的 TypeError、ValueError 當成不確定。
         """
         ...
 

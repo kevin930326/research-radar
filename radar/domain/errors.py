@@ -110,8 +110,14 @@ class ErrorCode(StrEnum):
     # 沒了）：那筆 run 改 failed、不送（`derivation_run.failure_reason`）；整批都對不上時批次
     # 也記這個
     BATCH_INPUT_CHANGED = "batch_input_changed"
-    # 送出時逾時、斷線、5xx、回應看不懂或非預期的例外：不知道供應商有沒有建好批次，標
-    # `needs_attention`、不自動重送（沒有冪等鍵）；停在 submitting 太久也記這個
+    # 送出時逾時、斷線、5xx、回應看不懂或非預期的例外（含一般的 TypeError、ValueError）：不知道
+    # 供應商有沒有建好批次，標 `needs_attention`、不自動重送（沒有冪等鍵）；停在 submitting 太久
+    # 也記這個。一定沒建立的另記：4xx 照狀態碼；送出前就丟的 `NotCloudSafeError` 記
+    # `cloud_text_not_registered`、沒有狀態碼的 `LlmConfigurationError` 記 `llm_configuration`
     BATCH_SUBMIT_UNCERTAIN = "batch_submit_uncertain"
     # 供應商明確回了 4xx（429、401、403、404 以外）：一定沒有建立，批次與 run 都改 failed
     BATCH_SUBMIT_REJECTED = "batch_submit_rejected"
+    # 送出時在台北時間月初窗口裡：不動、不送，列維持 queued，sweep 之後補排
+    BATCH_MONTH_START_HOLD = "batch_month_start_hold"
+    # 送出時本月已熔斷：不動、不送，列維持 queued，sweep 之後補排
+    BATCH_BUDGET_TRIPPED = "batch_budget_tripped"

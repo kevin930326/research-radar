@@ -6,7 +6,7 @@ provider 是 `FakeLlmProvider`（batch ID 是編的，不是真的錄的，形�
 """
 
 import uuid
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -14,16 +14,17 @@ from structlog.testing import capture_logs
 
 import radar.services.llm_batches as llm_batches
 from radar.adapters.fake import FakeLlmProvider
+from radar.domain.ai_outputs import LlmTask
 from radar.domain.errors import ErrorCode
 from radar.domain.llm import (
     LlmConfigurationError,
     LlmConnectionError,
-    LlmError,
     LlmInvalidRequestError,
     LlmMalformedResponseError,
     LlmRateLimitedError,
     LlmServerError,
     LlmTimeoutError,
+    NotCloudSafeError,
 )
 from radar.domain.llm_batches import (
     BatchSubmissionStatus,
@@ -44,7 +45,7 @@ from tests.batch_support import (
     items,
 )
 from tests.database import TestDatabase, migrate
-from tests.llm_support import create_paper, execute, set_abstract
+from tests.llm_support import create_paper, execute, insert_ledger, set_abstract
 
 SYSTEM = SystemViewer()
 
@@ -101,6 +102,7 @@ def _submit(
     submission_id: uuid.UUID,
     **kwargs: Any,
 ) -> LlmBatchSubmitResult:
+    kwargs.setdefault("clock", lambda: NOW)
     return submit_llm_batch(SYSTEM, database, provider, setup, submission_id, **kwargs)
 
 
@@ -233,6 +235,36 @@ def test_429_puts_the_batch_back_to_queued_without_raising(
     assert len(provider.batch_requests) == 2
 
 
+def test_429_after_the_row_moved_reports_the_real_status(
+    db: TestDatabase, database: Database, setup: LlmBatchSetup
+) -> None:
+    submission_id = _planned(database, setup)
+
+    def sweep_marks_it() -> None:
+        execute(
+            db,
+            "UPDATE batch_submission SET status = 'needs_attention',"
+            " failure_reason = 'batch_submit_uncertain' WHERE id = %s",
+            submission_id,
+        )
+
+    provider = GatedBatchProvider(
+        [LlmRateLimitedError("HTTP 429", status=429)], during_call=sweep_marks_it
+    )
+
+    with capture_logs() as logs:
+        result = _submit(database, provider, setup, submission_id)
+
+    assert result == LlmBatchSubmitResult(
+        SubmitOutcome.LOST_RACE,
+        BatchSubmissionStatus.NEEDS_ATTENTION,
+        reason=ErrorCode.LLM_RATE_LIMITED,
+    )
+    assert batch_status(db, submission_id)[0] == "needs_attention"
+    [logged] = [log for log in logs if "429" in log["event"]]
+    assert (logged["changed"], logged["status"]) == (False, "needs_attention")
+
+
 @pytest.mark.parametrize(
     ("error", "reason"),
     [
@@ -240,13 +272,18 @@ def test_429_puts_the_batch_back_to_queued_without_raising(
         (LlmInvalidRequestError("HTTP 413", status=413), "batch_submit_rejected"),
         (LlmConfigurationError("HTTP 401", status=401), "llm_configuration"),
         (LlmConfigurationError("HTTP 404", status=404), "llm_configuration"),
+        (LlmTimeoutError("HTTP 408", status=408), "batch_submit_rejected"),
+        (LlmServerError("HTTP 409", status=409), "batch_submit_rejected"),
+        # 送出任何請求前就丟的：一定沒有建立（port 的約定）。
+        (LlmConfigurationError("讀不到憑證"), "llm_configuration"),
+        (NotCloudSafeError("LlmRequest.content 不是 CloudSafeText"), "cloud_text_not_registered"),
     ],
 )
 def test_definite_4xx_fails_batch_and_runs_and_reraises(
     db: TestDatabase,
     database: Database,
     setup: LlmBatchSetup,
-    error: LlmError,
+    error: Exception,
     reason: str,
 ) -> None:
     submission_id = _planned(database, setup)
@@ -269,6 +306,9 @@ def test_definite_4xx_fails_batch_and_runs_and_reraises(
         LlmServerError("HTTP 529", status=529),
         LlmMalformedResponseError("回應格式不對"),
         RuntimeError("unexpected"),
+        # 一般的 TypeError／ValueError 可能是送出後才丟的：不確定，不能因此重送。
+        TypeError("unexpected"),
+        ValueError("unexpected"),
     ],
 )
 def test_uncertain_errors_mark_needs_attention_and_never_resend(
@@ -312,6 +352,99 @@ def test_malformed_batch_id_is_treated_as_uncertain(
         None,
         "batch_submit_uncertain",
     )
+
+
+def test_malformed_response_with_batch_id_records_it_for_manual_check(
+    db: TestDatabase, database: Database, setup: LlmBatchSetup
+) -> None:
+    submission_id = _planned(database, setup)
+    error = LlmMalformedResponseError("回應格式不對", request_id="req_fake01", response_id=BATCH_ID)
+
+    with capture_logs() as logs, pytest.raises(BatchSubmitUncertainError):
+        _submit(database, FakeLlmProvider(batch_replies=[error]), setup, submission_id)
+
+    assert batch_status(db, submission_id)[:3] == (
+        "needs_attention",
+        BATCH_ID,
+        "batch_submit_uncertain",
+    )
+    [logged] = [log for log in logs if log["log_level"] == "error"]
+    assert (logged["provider_batch_id"], logged["request_id"]) == (BATCH_ID, "req_fake01")
+    assert logged["changed"] is True
+
+
+def test_malformed_response_with_bad_batch_id_records_nothing(
+    db: TestDatabase, database: Database, setup: LlmBatchSetup
+) -> None:
+    submission_id = _planned(database, setup)
+    error = LlmMalformedResponseError("回應格式不對", response_id="bad id")
+
+    with pytest.raises(BatchSubmitUncertainError):
+        _submit(database, FakeLlmProvider(batch_replies=[error]), setup, submission_id)
+
+    assert batch_status(db, submission_id)[:2] == ("needs_attention", None)
+
+
+def test_month_start_hold_leaves_the_batch_queued_without_calling_the_provider(
+    db: TestDatabase, database: Database, setup: LlmBatchSetup
+) -> None:
+    submission_id = _planned(database, setup)
+    provider = FakeLlmProvider()
+    # 台北 2026-12-01 07:59（窗口 8 小時，還在裡面）。
+    held_at = datetime(2026, 11, 30, 23, 59, tzinfo=UTC)
+
+    result = _submit(database, provider, setup, submission_id, clock=lambda: held_at)
+
+    assert result == LlmBatchSubmitResult(
+        SubmitOutcome.HELD,
+        BatchSubmissionStatus.QUEUED,
+        reason=ErrorCode.BATCH_MONTH_START_HOLD,
+    )
+    assert batch_status(db, submission_id)[:3] == ("queued", None, None)
+    assert _run_states(db, submission_id) == {("running", None)}
+    assert provider.batch_requests == []
+
+
+def test_tripped_breaker_leaves_the_batch_queued_without_calling_the_provider(
+    db: TestDatabase, database: Database, setup: LlmBatchSetup
+) -> None:
+    submission_id = _planned(database, setup)
+    [paper_id] = execute(db, "SELECT id FROM paper")[0]
+    insert_ledger(db, paper_id, LlmTask.QA_ANSWER, "50", NOW)
+    provider = FakeLlmProvider()
+
+    result = _submit(database, provider, setup, submission_id)
+
+    assert result == LlmBatchSubmitResult(
+        SubmitOutcome.HELD,
+        BatchSubmissionStatus.QUEUED,
+        reason=ErrorCode.BATCH_BUDGET_TRIPPED,
+    )
+    assert batch_status(db, submission_id)[:3] == ("queued", None, None)
+    assert _run_states(db, submission_id) == {("running", None)}
+    assert provider.batch_requests == []
+
+
+def test_paper_excluded_after_planning_is_not_sent(
+    db: TestDatabase, database: Database, setup: LlmBatchSetup
+) -> None:
+    submission_id = _planned(database, setup, papers=2)
+    [excluded] = execute(db, "SELECT id FROM paper WHERE title LIKE '%%part 1'")[0]
+    execute(db, "UPDATE paper SET excluded_reason = 'editors_comments' WHERE id = %s", excluded)
+    provider = FakeLlmProvider(batch_replies=[BATCH_ID])
+
+    result = _submit(database, provider, setup, submission_id)
+
+    assert (result.outcome, result.sent, result.input_changed) == (SubmitOutcome.SUBMITTED, 3, 3)
+    states = execute(
+        db,
+        "SELECT r.paper_id, r.status, r.failure_reason FROM batch_item AS i"
+        " JOIN derivation_run AS r ON r.id = i.run_id",
+    )
+    assert {(status, reason) for paper, status, reason in states if paper == excluded} == {
+        ("failed", "batch_input_changed")
+    }
+    assert len(provider.batch_requests[0]) == 3
 
 
 def test_submitting_without_id_is_left_alone_until_stale_then_needs_attention(

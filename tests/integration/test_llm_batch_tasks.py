@@ -20,10 +20,10 @@ import pytest
 import radar.entrypoints.worker.tasks as worker_tasks
 from radar.adapters.fake import FakeHeartbeat, FakeLlmProvider
 from radar.adapters.fake.jobs import FakeJobQueue, QueuedJob
-from radar.config import ConfigError
+from radar.config import ConfigError, load_llm_batch_config
 from radar.domain.jobs import PLAN_LLM_BATCHES, SUBMIT_LLM_BATCH
 from radar.domain.llm import LlmBatchRequest
-from radar.domain.llm_batches import in_month_start_hold
+from radar.domain.llm_batches import LlmBatchConfig, in_month_start_hold
 from radar.domain.settings import Settings
 from radar.domain.sweep import SWEEP_REGISTRY
 from radar.entrypoints.bootstrap import WorkerParts, build_worker
@@ -79,6 +79,15 @@ def _task(parts: WorkerParts, name: str) -> Callable[..., None]:
     return func
 
 
+def _enable_weekly_planning(monkeypatch: pytest.MonkeyPatch) -> None:
+    """repo 的設定在 Story 2.11 以前關著每週規劃；這裡讀完照樣打開，其他值不變。"""
+
+    def load_enabled() -> LlmBatchConfig:
+        return load_llm_batch_config().model_copy(update={"weekly_planning_enabled": True})
+
+    monkeypatch.setattr(worker_tasks, "load_llm_batch_config", load_enabled)
+
+
 def _planned(
     db: TestDatabase, monkeypatch: pytest.MonkeyPatch, queue: FakeJobQueue, **settings: Any
 ) -> tuple[WorkerParts, str]:
@@ -89,6 +98,7 @@ def _planned(
         db, "INSERT INTO weekly_run (status) VALUES ('published') RETURNING id"
     )
     parts, _ = _parts(db, monkeypatch, queue, **settings)
+    _enable_weekly_planning(monkeypatch)
     _task(parts, PLAN_LLM_BATCHES.name)(weekly_run_id=str(weekly_run_id))
     [(submission_id, run_ref)] = execute(db, "SELECT id, weekly_run_id FROM batch_submission")
     assert run_ref == weekly_run_id
@@ -109,6 +119,24 @@ def test_plan_task_builds_batches_and_enqueues_submit(
         (SUBMIT_LLM_BATCH, submission_id)
     ]
     assert execute(db, "SELECT count(*) FROM batch_item") == [(3,)]
+
+
+def test_plan_task_with_the_repo_config_plans_nothing(
+    db: TestDatabase, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    create_paper(Database(db.app_url, connect_timeout=5, pool_size=1))
+    [(weekly_run_id,)] = execute(
+        db, "INSERT INTO weekly_run (status) VALUES ('published') RETURNING id"
+    )
+    queue = FakeJobQueue()
+    parts, _ = _parts(db, monkeypatch, queue)
+
+    _task(parts, PLAN_LLM_BATCHES.name)(weekly_run_id=str(weekly_run_id))
+
+    # weekly_planning_enabled: false（ADR-0041 決定 11）：不寫列、不排送出。
+    assert execute(db, "SELECT count(*) FROM batch_submission") == [(0,)]
+    assert execute(db, "SELECT count(*) FROM derivation_run") == [(0,)]
+    assert queue.queued == []
 
 
 def test_submit_task_without_api_key_raises_config_error_and_keeps_queued(

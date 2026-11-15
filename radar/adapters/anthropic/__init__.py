@@ -63,11 +63,10 @@ from radar.domain.llm import (
     snapshot_llm_request,
     system_prompt,
 )
+from radar.domain.llm_batches import PROVIDER_BATCH_ID_PATTERN, PROVIDER_MAX_REQUESTS
 from radar.domain.policy import cloud_text
 
 ANTHROPIC_BASE_URL: Final = "https://api.anthropic.com"
-# 一批最多 100,000 個請求（官方上限；docs/runs/epic-2b/api-reference.md 第一節）。
-MAX_BATCH_REQUESTS: Final = 100_000
 CONFIGURATION_STATUSES: Final = frozenset({401, 403, 404})
 SERVER_STATUSES: Final = frozenset({409})
 
@@ -184,7 +183,7 @@ class _MessageBatch(BaseModel):
 
     model_config = ConfigDict(extra="ignore", strict=True, frozen=True)
 
-    id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,128}$")
+    id: str = Field(pattern=PROVIDER_BATCH_ID_PATTERN)
     type: Literal["message_batch"]
 
 
@@ -363,8 +362,8 @@ class AnthropicLlmProvider:
         checked = [snapshot_llm_batch_request(item) for item in requests]
         if not checked:
             raise ValueError("submit_batch 至少要有一筆請求")
-        if len(checked) > MAX_BATCH_REQUESTS:
-            raise ValueError(f"一批最多 {MAX_BATCH_REQUESTS} 個請求")
+        if len(checked) > PROVIDER_MAX_REQUESTS:
+            raise ValueError(f"一批最多 {PROVIDER_MAX_REQUESTS} 個請求")
         if len({item.custom_id for item in checked}) != len(checked):
             raise ValueError("同一批的 custom_id 不能重複")
         body: list[BatchRequestParam] = [

@@ -167,7 +167,7 @@ def register_tasks(app: procrastinate.App, parts: WorkerParts, settings: Setting
 
     def plan_llm_batches_job(weekly_run_id: uuid.UUID) -> None:
         # 每週更新發佈快照後排入（Story 2.9、ADR-0041）。只排批次、不呼叫供應商（不建 provider）；
-        # 每建好一批排入 submit_llm_batch。月初窗口、熔斷都正常結束（不算失敗）。
+        # 每建好一批排入 submit_llm_batch。設定沒開、月初窗口、熔斷都正常結束（不算失敗）。
         plan_llm_batches(
             SystemViewer(),
             parts.database,
@@ -180,7 +180,7 @@ def register_tasks(app: procrastinate.App, parts: WorkerParts, settings: Setting
     def submit_llm_batch_job(batch_submission_id: uuid.UUID) -> None:
         # 送出一個 queued 的批次（Story 2.9、ADR-0041）。建 provider 時 ConfigError（缺金鑰）
         # 原樣丟出，列維持 queued，sweep 1 小時後補排；不確定有沒有建好時丟
-        # BatchSubmitUncertainError。
+        # BatchSubmitUncertainError。月初窗口或已熔斷時不動（列維持 queued，sweep 補排）。
         setup = load_batch_setup()
         error_type: str | None = None
         try:
@@ -193,7 +193,14 @@ def register_tasks(app: procrastinate.App, parts: WorkerParts, settings: Setting
             # 在 except 外面丟，不串原例外（見 AdapterSetupError）。
             raise AdapterSetupError(error_type)
         with provider:
-            submit_llm_batch(SystemViewer(), parts.database, provider, setup, batch_submission_id)
+            submit_llm_batch(
+                SystemViewer(),
+                parts.database,
+                provider,
+                setup,
+                batch_submission_id,
+                clock=lambda: datetime.now(UTC),
+            )
 
     def load_scope() -> ScopeSettings:
         # 執行時才讀 config/journals.yaml：抓完後才改設定也照新的追蹤範圍算 in_scope。

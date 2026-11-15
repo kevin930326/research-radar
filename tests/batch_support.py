@@ -43,12 +43,15 @@ def batch_setup(
     budget: BudgetConfig | None = None,
     max_requests: int = 500,
     hold_hours: int = 8,
+    enabled: bool = True,
 ) -> LlmBatchSetup:
     return LlmBatchSetup(
         gateway=gateway_config(ROOT / "prompts", call_mode=CallMode.BATCH),
         budget=budget or budget_config(),
         batches=LlmBatchConfig(
-            max_requests_per_batch=max_requests, month_start_hold_hours=hold_hours
+            weekly_planning_enabled=enabled,
+            max_requests_per_batch=max_requests,
+            month_start_hold_hours=hold_hours,
         ),
         zh_summary_rules=load_zh_summary_rules(CONFIG_ENV),
         taxonomy=load_taxonomy(CONFIG_ENV),

@@ -1,7 +1,8 @@
 """Batch 規劃與送出的並行（Story 2.9、ADR-0041）：真的用兩個執行緒、各自的 `Database`（各自的
 連線池）製造並行。佇列鎖擋不住被誤判失聯後交給另一個 worker 的工作，所以靠資料層擋：
 
-1. 兩個 worker 同時規劃同一份資料：每個鍵只有一筆 running、item 不重複、預留總額不超過剩餘預算。
+1. 兩個 worker 同時規劃同一份資料：每個鍵只有一筆 running、item 不重複、預留總額不超過剩餘預算
+   （功能預算與熔斷線各測一次）。
 2. 兩個 worker 同時送出同一批：provider 只被呼叫一次。
 
 provider 是 `FakeLlmProvider` 的子類（batch ID 是編的）；論文、摘要都是測試自己編的。
@@ -33,7 +34,7 @@ from tests.batch_support import (
     prepared,
 )
 from tests.database import TestDatabase, migrate
-from tests.llm_support import budget_config, create_paper, execute
+from tests.llm_support import budget_config, create_paper, execute, insert_ledger
 
 SYSTEM = SystemViewer()
 PAPERS = 6
@@ -146,6 +147,30 @@ def test_two_planners_never_reserve_more_than_the_task_budget(db: TestDatabase) 
     assert sum(result.deferred_budget for result in results) > 0
 
 
+def test_two_planners_never_reserve_more_than_the_breaker_allows(db: TestDatabase) -> None:
+    probe = batch_setup()
+    papers = _papers(_database(db))
+    costs = [
+        item_cost(probe, prepared(_database(db), probe, p, task))
+        for p in papers
+        for task in (LlmTask.ZH_SUMMARY, LlmTask.CLASSIFY, LlmTask.EXTRACT_MODEL)
+    ]
+    # 沒有功能預算，只有熔斷線 50：本月帳記到只剩大約一半的預留放得下。
+    left = sum(sorted(costs)[: len(costs) // 2], Decimal(0))
+    insert_ledger(db, papers[0], LlmTask.QA_ANSWER, str(Decimal(50) - left), NOW)
+    setup = batch_setup(max_requests=2)
+    gate = threading.Barrier(2)
+
+    first = _Worker(_plan(db, setup), gate)
+    second = _Worker(_plan(db, setup), gate)
+    results = [first.join(), second.join()]
+
+    [(reserved,)] = execute(db, "SELECT COALESCE(sum(estimated_max_cost_usd), 0) FROM batch_item")
+    assert reserved <= left
+    assert sum(result.planned for result in results) >= 1
+    assert sum(result.deferred_budget for result in results) > 0
+
+
 def test_two_submitters_at_once_call_the_provider_once(db: TestDatabase) -> None:
     setup = batch_setup()
     database = _database(db)
@@ -158,7 +183,9 @@ def test_two_submitters_at_once_call_the_provider_once(db: TestDatabase) -> None
     gate = threading.Barrier(2)
 
     def submit() -> LlmBatchSubmitResult:
-        return submit_llm_batch(SYSTEM, _database(db), provider, setup, submission_id)
+        return submit_llm_batch(
+            SYSTEM, _database(db), provider, setup, submission_id, clock=lambda: NOW
+        )
 
     first = _Worker(submit, gate)
     second = _Worker(submit, gate)

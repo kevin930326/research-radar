@@ -3,7 +3,9 @@ Story 2.9）。`batch_submission` 的狀態只在這裡改。
 
 規劃（`plan_llm_batches`，每週更新發佈快照後排入）：
 
-1. 台北時間每月 1 日 00:00～`month_start_hold_hours` 點以前：整次延後，不寫任何列、不算失敗。
+0. 設定 `weekly_planning_enabled` 是 false：不排、不寫任何列（Story 2.11 的手動試跑以前）。
+1. 台北時間每月 1 日 00:00～`month_start_hold_hours` 點以前：整次延後，不寫任何列、不算失敗；
+   每一批開始前再看一次，途中跨進窗口就停（已 commit 的批次留著）。
 2. 已熔斷：整次不排。
 3. 每個工作讀一次 prompt；依論文 id 分頁讀論文，每篇照 `plan_for` 要做的工作組 `LlmJob`，經閘門的
    `prepare_llm_request` 放行、算指紋、組請求、檢查大小（`NO_INPUT`／`BLOCKED`／`TOO_LARGE`
@@ -21,13 +23,17 @@ Story 2.9）。`batch_submission` 的狀態只在這裡改。
 - `submitted` 以後、`failed`、`needs_attention`：不做事。
 - `submitting`（沒有 batch ID）：只有 `updated_at` 早於「現在減 `stale_after`」時改
   `needs_attention`（送出的工作已經不在），否則不動；兩種都不送（沒有冪等鍵，不重送）。
-- `queued`：每筆重讀論文、重建請求、核對 run 的鍵；對不上的 run 改 `failed`、不送。一個交易裡
+- `queued`：先看月初窗口與熔斷（規劃之後可能變了），在窗口裡或已熔斷就不動、不送（回 `HELD`，
+  列維持 `queued`，sweep 之後補排）。再每筆重讀論文、再問 `plan_for`（被排除或輸入種類變了也算
+  對不上）、重建請求、核對 run 的鍵；對不上的 run 改 `failed`、不送。一個交易裡
   條件式 `queued`→`submitting`（同一句改實際筆數）並把對不上的 run 改 `failed`；交易外經閘門的
   `send_llm_batch` 送出；拿到 ID 先記 info 日誌，再條件式 `submitting`→`submitted`。
 - 錯誤：有 HTTP 回應的 4xx 一定沒建立：429 退回 `queued`（不丟），其他改 `failed`、run 也改
-  `failed`，原例外丟出；其餘（逾時、斷線、5xx、回應看不懂、非預期例外）不確定，標
-  `needs_attention`、丟 `BatchSubmitUncertainError`。寫回本身失敗時不重送，下一次看到
-  `submitting` 走過期規則。
+  `failed`，原例外丟出；送出任何請求前就丟的 `NotCloudSafeError` 與沒有狀態碼的
+  `LlmConfigurationError` 也一定沒建立，照同樣處理。其餘（逾時、斷線、5xx、回應看不懂、一般的
+  TypeError／ValueError 與其他非預期例外）不確定，標 `needs_attention`、丟
+  `BatchSubmitUncertainError`；回應看不懂但帶了像樣的 batch ID 時一併記下。條件式更新沒套用時
+  重讀狀態、照實回報（`LOST_RACE`）。寫回本身失敗時不重送，下一次看到 `submitting` 走過期規則。
 
 日誌與錯誤只帶 id、計數、原因代碼與錯誤類別，不帶金鑰與文件內容。
 """
@@ -55,7 +61,13 @@ from radar.domain.context_values import ContextValues
 from radar.domain.errors import ErrorCode
 from radar.domain.fingerprints import LLM_BATCH_BUDGET_LOCK_KEY
 from radar.domain.jobs import SUBMIT_LLM_BATCH, Enqueue
-from radar.domain.llm import LlmBatchRequest, LlmConfigurationError, LlmError
+from radar.domain.llm import (
+    LlmBatchRequest,
+    LlmConfigurationError,
+    LlmError,
+    LlmMalformedResponseError,
+    NotCloudSafeError,
+)
 from radar.domain.llm_batches import (
     BATCH_TASKS,
     PROVIDER_BATCH_ID_PATTERN,
@@ -94,7 +106,11 @@ from radar.repo.llm_batches import (
     update_batch_submission_totals,
 )
 from radar.repo.llm_ledger import list_llm_costs_by_task, update_derivation_run_failed
-from radar.repo.papers import find_paper_llm_source, list_paper_ai_sources
+from radar.repo.papers import (
+    find_paper_llm_source,
+    find_paper_processing_facts,
+    list_paper_ai_sources,
+)
 from radar.services.budget import get_budget_status
 from radar.services.llm_gateway import (
     BatchClaimOutcome,
@@ -200,6 +216,10 @@ def plan_llm_batches(
     """
     require(actor, Action.RUN_AI_JOBS, None)
     result = LlmBatchPlanResult()
+    if not setup.batches.weekly_planning_enabled:
+        result.stop = PlanStop.DISABLED
+        log.info("每週 Batch 規劃沒有開（Story 2.11），不排", weekly_run_id=_id_text(weekly_run_id))
+        return result
     now = clock()
     if in_month_start_hold(now, setup.batches.month_start_hold_hours):
         result.stop = PlanStop.HELD_MONTH_START
@@ -235,6 +255,15 @@ def plan_llm_batches(
             else:
                 pending.append(item)
         if not pending:
+            break
+        if in_month_start_hold(clock(), setup.batches.month_start_hold_hours):
+            # 規劃途中跨進月初窗口：剩下的不排（不算失敗，下次再排）。
+            result.stop = PlanStop.HELD_MONTH_START
+            log.info(
+                "規劃途中進入月初窗口，剩下的 Batch 延後",
+                weekly_run_id=_id_text(weekly_run_id),
+                hold_hours=setup.batches.month_start_hold_hours,
+            )
             break
         used, submission_id = _plan_one_batch(
             actor, database, setup, pending, weekly_run_id, clock, result
@@ -447,6 +476,7 @@ def submit_llm_batch(
     setup: LlmBatchSetup,
     batch_submission_id: uuid.UUID,
     *,
+    clock: Callable[[], datetime],
     stale_after: timedelta = SUBMITTING_STALE_AFTER,
 ) -> LlmBatchSubmitResult:
     """送出一個 `queued` 的批次（見模組說明）。
@@ -454,9 +484,10 @@ def submit_llm_batch(
     Raises:
         PermissionDeniedError: `actor` 不是系統工作（不碰資料庫）。
         LookupError: 沒有這個 `batch_submission`。
-        ValueError: `stale_after` 不是正的時間長度。
+        ValueError: `stale_after` 不是正的時間長度，或時鐘回了沒有時區的時間。
         PromptIntegrityError, PromptFormatError: prompt 檔或登記不對（列維持 `queued`）。
-        LlmError: 供應商明確回了 4xx（429 除外）：批次與送出的 run 已改 `failed`，原樣丟出。
+        LlmError, NotCloudSafeError: 一定沒有建立（4xx 但 429 除外、沒有狀態碼的設定錯、送出前就
+            擋下的文字）：批次與送出的 run 已改 `failed`，原樣丟出。
         BatchSubmitUncertainError: 不知道供應商有沒有建好批次：已標 `needs_attention`（標不上時
             停在 `submitting`，之後照過期規則標）。
         Exception: 寫回時的資料庫錯誤原樣丟出（不重送；列停在 `submitting`）。
@@ -475,6 +506,14 @@ def submit_llm_batch(
         return LlmBatchSubmitResult(
             SubmitOutcome.NOTHING_TO_DO, row.status, provider_batch_id=row.provider_batch_id
         )
+    held = _held_reason(database, setup, clock())
+    if held is not None:
+        log.info(
+            "Batch 送出延後（列維持 queued，sweep 之後補排）",
+            batch_submission_id=str(batch_submission_id),
+            reason=held.value,
+        )
+        return LlmBatchSubmitResult(SubmitOutcome.HELD, BatchSubmissionStatus.QUEUED, reason=held)
 
     checked = _check_items(database, setup, batch_submission_id)
     changed_ids = [run_id for run_id, _ in checked.changed]
@@ -486,7 +525,7 @@ def submit_llm_batch(
                 ErrorCode.BATCH_INPUT_CHANGED,
                 from_status=BatchSubmissionStatus.QUEUED,
             ):
-                return _lost_race(batch_submission_id)
+                return _lost_race(database, batch_submission_id)
             for run_id, reason in checked.changed:
                 update_derivation_run_failed(connection, run_id, reason)
         log.warning(
@@ -505,7 +544,7 @@ def submit_llm_batch(
         if not update_batch_submission_submitting(
             connection, batch_submission_id, len(checked.requests)
         ):
-            return _lost_race(batch_submission_id)
+            return _lost_race(database, batch_submission_id)
         for run_id, reason in checked.changed:
             update_derivation_run_failed(connection, run_id, reason)
     if changed_ids:
@@ -600,15 +639,39 @@ def _expire_submitting(
     )
 
 
-def _lost_race(batch_submission_id: uuid.UUID) -> LlmBatchSubmitResult:
-    log.info("Batch 已被別的送出者處理", batch_submission_id=str(batch_submission_id))
-    return LlmBatchSubmitResult(SubmitOutcome.LOST_RACE, BatchSubmissionStatus.QUEUED)
+def _held_reason(database: Database, setup: LlmBatchSetup, now: datetime) -> ErrorCode | None:
+    """送出前再看一次月初窗口與熔斷（規劃之後可能變了）；要延後時回原因代碼。"""
+    if in_month_start_hold(now, setup.batches.month_start_hold_hours):
+        return ErrorCode.BATCH_MONTH_START_HOLD
+    if get_budget_status(SystemViewer(), database, setup.budget, now=now).breaker_tripped:
+        return ErrorCode.BATCH_BUDGET_TRIPPED
+    return None
+
+
+def _current_status(database: Database, batch_submission_id: uuid.UUID) -> BatchSubmissionStatus:
+    """條件式更新沒套用時，重讀這筆批次現在的狀態。"""
+    with database.transaction() as connection:
+        row = find_batch_submission(SystemViewer(), connection, batch_submission_id)
+    if row is None:
+        raise LookupError("找不到 batch_submission")
+    return row.status
+
+
+def _lost_race(database: Database, batch_submission_id: uuid.UUID) -> LlmBatchSubmitResult:
+    status = _current_status(database, batch_submission_id)
+    log.info(
+        "Batch 已被別的送出者處理",
+        batch_submission_id=str(batch_submission_id),
+        status=status.value,
+    )
+    return LlmBatchSubmitResult(SubmitOutcome.LOST_RACE, status)
 
 
 def _check_items(
     database: Database, setup: LlmBatchSetup, batch_submission_id: uuid.UUID
 ) -> _Checked:
-    """讀批次的 item 與 run（不是 running 的跳過），每筆重讀論文、重建請求、核對 run 的鍵。"""
+    """讀批次的 item 與 run（不是 running 的跳過），每筆重讀論文、再問 `plan_for`、重建請求、
+    核對 run 的鍵。"""
     viewer = SystemViewer()
     prompts: dict[LlmTask, LoadedPrompt] = {}
     requests: list[LlmBatchRequest] = []
@@ -616,21 +679,30 @@ def _check_items(
     changed: list[tuple[uuid.UUID, ErrorCode]] = []
     with database.transaction() as connection:
         items = list_batch_items(viewer, connection, batch_submission_id)
+        paper_ids = {item.key.paper_id for item in items if item.run_status is RunStatus.RUNNING}
         sources = {
-            item.key.paper_id: find_paper_llm_source(
-                viewer, connection, item.key.paper_id, for_update=False
-            )
-            for item in items
-            if item.run_status is RunStatus.RUNNING
+            paper_id: find_paper_llm_source(viewer, connection, paper_id, for_update=False)
+            for paper_id in paper_ids
+        }
+        facts = {
+            paper_id: find_paper_processing_facts(viewer, connection, paper_id)
+            for paper_id in paper_ids
         }
     for item in items:
         if item.run_status is not RunStatus.RUNNING:
             continue
         source = sources[item.key.paper_id]
-        if source is None:
+        paper_facts = facts[item.key.paper_id]
+        task = item.key.task
+        # 再問一次 plan_for（ADR-0032 的交接點）：規劃後被排除、或摘要到了改用別種輸入，就不送。
+        if (
+            source is None
+            or paper_facts is None
+            or plan_for(paper_facts).for_task(ProcessingTask(task.value)).input_kind
+            != item.input_kind
+        ):
             changed.append((item.run_id, ErrorCode.BATCH_INPUT_CHANGED))
             continue
-        task = item.key.task
         if task not in prompts:
             prompts[task] = load_prompt(setup.gateway.prompts_root, task)
         job = llm_job(setup, item.key.paper_id, task, item.input_kind)
@@ -645,9 +717,26 @@ def _check_items(
     return _Checked(requests=requests, sent_run_ids=sent_run_ids, changed=changed)
 
 
-def _is_definite_rejection(exc: BaseException) -> bool:
-    """供應商有回 HTTP 4xx：一定沒有建立批次。"""
-    return isinstance(exc, LlmError) and exc.status is not None and 400 <= exc.status < 500
+def _definite_reason(exc: BaseException) -> ErrorCode | None:
+    """一定沒有建立批次時回原因代碼；不確定時回 None。
+
+    一定沒建立：供應商有回 HTTP 4xx（429 由呼叫端另外處理）；送出任何請求前就丟的
+    `NotCloudSafeError`（port 的約定）與沒有狀態碼的 `LlmConfigurationError`（SDK 讀不到憑證這類）。
+    其他都不確定（含一般的 TypeError、ValueError：送出後才丟的也可能是這些，不能因此重送）。
+    """
+    if isinstance(exc, NotCloudSafeError):
+        return ErrorCode.CLOUD_TEXT_NOT_REGISTERED
+    if not isinstance(exc, LlmError):
+        return None
+    if exc.status is None:
+        return ErrorCode.LLM_CONFIGURATION if isinstance(exc, LlmConfigurationError) else None
+    if not 400 <= exc.status < 500:
+        return None
+    if exc.status == 429:
+        return ErrorCode.LLM_RATE_LIMITED
+    if isinstance(exc, LlmConfigurationError):
+        return ErrorCode.LLM_CONFIGURATION
+    return ErrorCode.BATCH_SUBMIT_REJECTED
 
 
 def _send_failed(
@@ -656,49 +745,83 @@ def _send_failed(
     checked: _Checked,
     failure: BaseException,
 ) -> LlmBatchSubmitResult:
-    """送出出錯：照「一定沒建立」與「不確定」分類處理（見模組說明）。"""
+    """送出出錯：照「一定沒建立」與「不確定」分類處理（見模組說明）。
+
+    條件式更新沒套用時（別人已改了這筆批次）重讀狀態，記在日誌與回傳值裡。
+    """
     error_type = type(failure).__name__
-    if _is_definite_rejection(failure):
-        status = failure.status if isinstance(failure, LlmError) else None
-        if status == 429:
-            with database.transaction() as connection:
-                update_batch_submission_requeued(connection, batch_submission_id)
+    status = failure.status if isinstance(failure, LlmError) else None
+    request_id = failure.request_id if isinstance(failure, LlmError) else None
+    reason = _definite_reason(failure)
+    if reason is ErrorCode.LLM_RATE_LIMITED:
+        with database.transaction() as connection:
+            changed = update_batch_submission_requeued(connection, batch_submission_id)
+        if not changed:
+            actual = _current_status(database, batch_submission_id)
             log.warning(
-                "Batch 送出被限流（429），退回 queued（sweep 之後補排）",
+                "Batch 送出被限流（429），但批次已不是 submitting，沒改",
                 batch_submission_id=str(batch_submission_id),
+                changed=False,
+                status=actual.value,
             )
             return LlmBatchSubmitResult(
-                SubmitOutcome.REQUEUED,
-                BatchSubmissionStatus.QUEUED,
-                reason=ErrorCode.LLM_RATE_LIMITED,
+                SubmitOutcome.LOST_RACE, actual, reason=ErrorCode.LLM_RATE_LIMITED
             )
-        reason = (
-            ErrorCode.LLM_CONFIGURATION
-            if isinstance(failure, LlmConfigurationError)
-            else ErrorCode.BATCH_SUBMIT_REJECTED
+        log.warning(
+            "Batch 送出被限流（429），退回 queued（sweep 之後補排）",
+            batch_submission_id=str(batch_submission_id),
+            changed=True,
         )
+        return LlmBatchSubmitResult(
+            SubmitOutcome.REQUEUED,
+            BatchSubmissionStatus.QUEUED,
+            reason=ErrorCode.LLM_RATE_LIMITED,
+        )
+    if reason is not None:
         with database.transaction() as connection:
-            if update_batch_submission_failed(
+            changed = update_batch_submission_failed(
                 connection,
                 batch_submission_id,
                 reason,
                 from_status=BatchSubmissionStatus.SUBMITTING,
-            ):
+            )
+            if changed:
                 for run_id in checked.sent_run_ids:
                     update_derivation_run_failed(connection, run_id, reason)
+        actual = (
+            BatchSubmissionStatus.FAILED
+            if changed
+            else _current_status(database, batch_submission_id)
+        )
         log.error(
-            "Batch 送出被供應商拒絕，批次與 run 改 failed",
+            "Batch 一定沒有建立，批次與 run 改 failed"
+            if changed
+            else "Batch 一定沒有建立，但批次已不是 submitting，沒改",
             batch_submission_id=str(batch_submission_id),
+            changed=changed,
+            batch_status=actual.value,
             status=status,
             reason=reason.value,
             error_type=error_type,
+            request_id=request_id,
         )
         raise failure
+    response_id = failure.response_id if isinstance(failure, LlmMalformedResponseError) else None
+    provider_batch_id = (
+        response_id if response_id is not None and _BATCH_ID.fullmatch(response_id) else None
+    )
+    marked: bool | None = None
+    recorded = False
     try:
         with database.transaction() as connection:
-            update_batch_submission_needs_attention(
+            marked = update_batch_submission_needs_attention(
                 connection, batch_submission_id, ErrorCode.BATCH_SUBMIT_UNCERTAIN, stale_after=None
             )
+            if provider_batch_id is not None:
+                # 回應看不懂但帶了像樣的 batch ID：記下來給人工確認時找供應商那邊的批次。
+                recorded = update_batch_submission_late_batch_id(
+                    connection, batch_submission_id, provider_batch_id
+                )
     except Exception as cleanup:
         # 標不上就停在 submitting，過了時限由 sweep 補排時標。
         log.warning(
@@ -706,10 +829,21 @@ def _send_failed(
             batch_submission_id=str(batch_submission_id),
             error_type=type(cleanup).__name__,
         )
+    actual_text = None
+    if marked is False:
+        actual_text = _current_status(database, batch_submission_id).value
     log.error(
-        "Batch 送出結果不確定，標 needs_attention（不重送，要人工確認）",
+        "Batch 送出結果不確定，標 needs_attention（不重送，要人工確認）"
+        if marked
+        else "Batch 送出結果不確定，沒標上 needs_attention（不重送，要人工確認）",
         batch_submission_id=str(batch_submission_id),
+        changed=bool(marked),
+        batch_status=BatchSubmissionStatus.NEEDS_ATTENTION.value if marked else actual_text,
         error_type=error_type,
+        status=status,
+        request_id=request_id,
+        provider_batch_id=provider_batch_id,
+        provider_batch_id_recorded=recorded,
     )
     raise BatchSubmitUncertainError(batch_submission_id, error_type)
 

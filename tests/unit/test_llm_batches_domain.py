@@ -25,6 +25,8 @@ from radar.domain.jobs import (
 )
 from radar.domain.llm import LlmBatchRequest, LlmRequest, LlmServerError, NotCloudSafeError
 from radar.domain.llm_batches import (
+    MAX_REQUESTS_PER_BATCH,
+    PROVIDER_MAX_REQUESTS,
     QUEUED_STUCK_AFTER,
     SUBMITTING_STALE_AFTER,
     BatchItemRun,
@@ -121,30 +123,55 @@ def test_max_call_cost_rounds_up_and_validates() -> None:
 def test_repo_config_loads_with_documented_defaults() -> None:
     config = load_llm_batch_config({"RADAR_CONFIG_DIR": str(ROOT / "config")})
 
-    assert config == LlmBatchConfig(max_requests_per_batch=500, month_start_hold_hours=8)
+    # 每週自動規劃在 Story 2.11 的手動試跑以前關著（ADR-0041 決定 11）。
+    assert config == LlmBatchConfig(
+        weekly_planning_enabled=False, max_requests_per_batch=500, month_start_hold_hours=8
+    )
+
+
+_GOOD: dict[str, Any] = {
+    "weekly_planning_enabled": True,
+    "max_requests_per_batch": 500,
+    "month_start_hold_hours": 8,
+}
+
+
+def test_max_requests_cap_is_1000_and_below_the_provider_limit() -> None:
+    assert MAX_REQUESTS_PER_BATCH == 1_000
+    assert MAX_REQUESTS_PER_BATCH <= PROVIDER_MAX_REQUESTS
+    config = LlmBatchConfig.model_validate({**_GOOD, "max_requests_per_batch": 1_000})
+    assert config.max_requests_per_batch == 1_000
+    with pytest.raises(ValidationError, match="max_requests_per_batch"):
+        LlmBatchConfig.model_validate({**_GOOD, "max_requests_per_batch": 1_001})
 
 
 @pytest.mark.parametrize(
-    "data",
+    "change",
     [
-        {"max_requests_per_batch": 0, "month_start_hold_hours": 8},
-        {"max_requests_per_batch": 100_001, "month_start_hold_hours": 8},
-        {"max_requests_per_batch": "500", "month_start_hold_hours": 8},
-        {"max_requests_per_batch": 500.0, "month_start_hold_hours": 8},
-        {"max_requests_per_batch": 500, "month_start_hold_hours": 25},
-        {"max_requests_per_batch": 500, "month_start_hold_hours": True},
-        {"max_requests_per_batch": 500},
-        {"max_requests_per_batch": 500, "month_start_hold_hours": 8, "extra": 1},
+        {"max_requests_per_batch": 0},
+        {"max_requests_per_batch": 1_001},
+        {"max_requests_per_batch": 100_001},
+        {"max_requests_per_batch": "500"},
+        {"max_requests_per_batch": 500.0},
+        {"month_start_hold_hours": 25},
+        {"month_start_hold_hours": True},
+        {"month_start_hold_hours": None},
+        {"weekly_planning_enabled": "false"},
+        {"weekly_planning_enabled": 0},
+        {"weekly_planning_enabled": None},
+        {"extra": 1},
     ],
 )
-def test_bad_config_values_are_rejected(data: dict[str, Any]) -> None:
+def test_bad_config_values_are_rejected(change: dict[str, Any]) -> None:
+    data = {key: value for key, value in {**_GOOD, **change}.items() if value is not None}
     with pytest.raises(ValidationError):
         LlmBatchConfig.model_validate(data)
 
 
 def test_bad_config_file_lists_the_field(tmp_path: Path) -> None:
     (tmp_path / "llm_batches.yaml").write_text(
-        "max_requests_per_batch: 0\nmonth_start_hold_hours: 8\n", encoding="utf-8"
+        "weekly_planning_enabled: true\nmax_requests_per_batch: 0\nmonth_start_hold_hours: 8\n",
+        encoding="utf-8",
     )
 
     with pytest.raises(ConfigError) as caught:

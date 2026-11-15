@@ -32,6 +32,9 @@ SUBMITTING_STALE_AFTER: Final = timedelta(minutes=30)
 QUEUED_STUCK_AFTER: Final = timedelta(hours=1)
 # Anthropic 一批最多 100,000 個請求（docs/runs/epic-2b/api-reference.md 第一節）。
 PROVIDER_MAX_REQUESTS: Final = 100_000
+# `max_requests_per_batch` 的上限（比官方的 100,000 小很多）：一批在一個交易裡建，一個交易最多
+# 嘗試 2 × 上限筆、每筆一把 advisory lock；PostgreSQL 共用鎖表預設約 6,400 格（ADR-0041）。
+MAX_REQUESTS_PER_BATCH: Final = 1_000
 # 供應商 batch ID 的格式（和資料庫的 CHECK 一樣）。
 PROVIDER_BATCH_ID_PATTERN: Final = r"^[A-Za-z0-9_-]{1,128}$"
 
@@ -51,15 +54,18 @@ class BatchSubmissionStatus(StrEnum):
 class LlmBatchConfig(BaseModel):
     """`config/llm_batches.yaml`。
 
-    - `max_requests_per_batch`：一個 `batch_submission` 最多幾個請求（官方上限 100,000）。一批在
-      一個交易裡建，每筆拿一把 advisory lock，所以不能太大（ADR-0041）。
+    - `weekly_planning_enabled`：每週更新發佈後要不要自動規劃 Batch。全庫第一次 AI 要由 Kevin
+      先試 20 篇再手動跑（epics Story 2.11），結果匯入也在 2.11，所以先關著（ADR-0041）。
+    - `max_requests_per_batch`：一個 `batch_submission` 最多幾個請求（1～`MAX_REQUESTS_PER_BATCH`，
+      官方上限 100,000）。一批在一個交易裡建，每筆拿一把 advisory lock，所以不能太大（ADR-0041）。
     - `month_start_hold_hours`：台北時間每月 1 日 00:00 到這個鐘點以前，整次規劃延後（Anthropic
       的 workspace 上限可能還在用 UTC 的上個月，ADR-0031 取捨）；0 表示不延後。
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    max_requests_per_batch: int = Field(ge=1, le=PROVIDER_MAX_REQUESTS, strict=True)
+    weekly_planning_enabled: bool = Field(strict=True)
+    max_requests_per_batch: int = Field(ge=1, le=MAX_REQUESTS_PER_BATCH, strict=True)
     month_start_hold_hours: int = Field(ge=0, le=24, strict=True)
 
 
@@ -138,7 +144,9 @@ class PlanStop(StrEnum):
     """一次規劃怎麼結束。"""
 
     COMPLETED = "completed"  # 看完全部論文（放不下的計 deferred_budget）
-    HELD_MONTH_START = "held_month_start"  # 台北每月 1 日 month_start_hold_hours 點以前：整次延後
+    DISABLED = "disabled"  # 設定關掉了每週自動規劃（weekly_planning_enabled: false）：整次不排
+    # 台北每月 1 日 month_start_hold_hours 點以前：整次延後（規劃途中跨進窗口也在下一批前停下）
+    HELD_MONTH_START = "held_month_start"
     BUDGET_TRIPPED = "budget_tripped"  # 已熔斷：整次不排
 
 
@@ -176,6 +184,8 @@ class SubmitOutcome(StrEnum):
     NOTHING_TO_DO = "nothing_to_do"  # 已經送過、已失敗或已標 needs_attention：不做事
     LOST_RACE = "lost_race"  # 另一個送出者先把 queued 改走了
     NOT_STALE = "not_stale"  # 停在 submitting、還沒過時限：不動、不送
+    # 月初窗口或已熔斷：不動（維持 queued）、不送，sweep 之後補排
+    HELD = "held"
     NEEDS_ATTENTION = "needs_attention"  # 停在 submitting 已過時限：標 needs_attention、不送
     REQUEUED = "requeued"  # 429：退回 queued，sweep 之後補排
     FAILED = "failed"  # 全部輸入都變了，或供應商明確拒絕：批次與 run 改 failed
