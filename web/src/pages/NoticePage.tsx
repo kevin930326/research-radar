@@ -11,21 +11,30 @@ const CAVEATS = ["rare", "supported", "evidenceMap", "trendLag"] as const;
 
 const SECTION_CLASS =
   "border-t border-hairline py-12 split:grid split:grid-cols-[240px_minmax(0,680px)] split:gap-x-[40px] wide:grid-cols-[320px_minmax(0,680px)] wide:gap-x-16";
-const HEADING_CLASS = "m-0 mb-4 font-title-zh text-section-title-zh text-text-primary split:mb-0";
-const PARAGRAPH_CLASS = "m-0 text-reading-zh text-text-reading";
+// 外距歸零交給 Tailwind 的 preflight（m-0 不是代幣，不產生 CSS）；只有上下排時標題下方留 16px。
+const HEADING_CLASS = "font-title-zh text-section-title-zh text-text-primary max-split:mb-4";
+// 內文照設計稿（畫面 17）：16px、閱讀用的文字色；同一段的句子各一行、行距 10px。
+const PARAGRAPH_CLASS = "text-body text-text-reading";
+const LIMITS = ["noQuestions", "noPasteable", "screeningOnly"] as const;
+// 第 4 段的小段：警語不加粗、用最亮的文字色，說明用次要文字色；小段之間一條髮線、上下各留 20px。
+const CAVEAT_CLASS = "border-t border-hairline py-[20px] first:border-t-0 first:pt-[0px]";
 
 export function NoticePage() {
   const { t } = useTranslation(["notice", "caveat"]);
   return (
     <article>
-      <h1 className="m-0 pb-12 font-title-zh text-page-title-zh text-text-primary">{t("notice:notice.page.title")}</h1>
+      <h1 className="pb-12 font-title-zh text-page-title-zh text-text-primary">{t("notice:notice.page.title")}</h1>
 
       <section aria-labelledby="notice-limits" className={SECTION_CLASS}>
         <h2 id="notice-limits" className={HEADING_CLASS}>
           {t("notice:notice.limits.heading")}
         </h2>
-        <div>
-          <p className={PARAGRAPH_CLASS}>{t("notice:notice.limits.body")}</p>
+        <div className="flex flex-col gap-[10px]">
+          {LIMITS.map((key) => (
+            <p key={key} className={PARAGRAPH_CLASS}>
+              {t(`notice:notice.limits.${key}`)}
+            </p>
+          ))}
         </div>
       </section>
 
@@ -33,14 +42,14 @@ export function NoticePage() {
         <h2 id="notice-numbers" className={HEADING_CLASS}>
           {t("notice:notice.numbers.heading")}
         </h2>
-        <div className="flex flex-col gap-8">
+        <div className="flex flex-col">
           {CAVEATS.map((key) => (
-            <div key={key} data-caveat={key}>
-              <p className="m-0 text-body text-text-primary">{t(`caveat:caveat.${key}.warning`)}</p>
-              <p className={PARAGRAPH_CLASS}>{t(`caveat:caveat.${key}.explanation`)}</p>
+            <div key={key} data-caveat={key} className={CAVEAT_CLASS}>
+              <p className="text-body text-text-primary">{t(`caveat:caveat.${key}.warning`)}</p>
+              <p className="mt-[6px] text-body text-text-secondary">{t(`caveat:caveat.${key}.explanation`)}</p>
             </div>
           ))}
-          <p data-coverage-line className={PARAGRAPH_CLASS}>
+          <p data-coverage-line className={`border-t border-hairline pt-[20px] ${PARAGRAPH_CLASS}`}>
             {t("notice:notice.numbers.coverage")}
           </p>
         </div>

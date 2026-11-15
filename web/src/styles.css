@@ -1,55 +1,123 @@
 /*
  * Tailwind 4 的主題：先把內建的顏色、間距、字級、斷點全部清掉（--*: initial），
- * 再只放 DESIGN.md 的設計代幣（名稱照 DESIGN.md）。Story 3.1 只放這一頁用到的；
- * 完整對照與「用到預設類別就建置失敗」的檢查在 Story 3.2。只有深色主題。
+ * 再只放 DESIGN.md 開頭 YAML 的設計代幣（名稱與值照 DESIGN.md；src/design-tokens.test.ts 逐項比對，
+ * 不能多也不能少）。用到不產生 CSS 的類別（例如 bg-red-500、text-xl）時建置失敗（tailwind-guard.ts）。
+ * 只有深色主題。
  */
 @import "tailwindcss";
+
+/* 故意違反規則的檔案不是網站的一部分，不掃它們的類別。 */
+@source not "../lint-fixtures";
 
 @theme {
   --*: initial;
 
-  /* colors */
+  /* colors（DESIGN.md colors，19 個） */
   --color-background: #050609;
+  --color-background-glow-inner: #0b0f19;
+  --color-background-glow-mid: #07090f;
   --color-text-primary: #efeae0;
   --color-text-secondary: #a8a294;
   --color-text-tertiary: #8e887b;
   --color-text-reading: #d5d0c5;
   --color-accent-gold: #e3b466;
+  --color-on-button: #0a0b0e;
   --color-hairline: #efeae029;
   --color-border: #efeae042;
+  --color-popover-surface: #050609eb;
+  --color-scrim: #050609b8;
+  --color-data-warm: #ffecd0;
+  --color-data-white: #f4f5fa;
+  --color-data-cool: #c4d6ff;
+  --color-data-dim: #7e8cac;
+  --color-data-ring: #8a98ba;
   --color-danger: #e58b7b;
 
-  /* 字體：中文標題字體還沒選定（DESIGN.md Typography），先用系統襯線字堆疊。 */
+  /*
+   * 字體（DESIGN.md Typography 的四種角色，英文原文摘要另用系統無襯線字）。
+   * 中文標題字體還沒選定（「待選」），先用系統襯線字堆疊（Kevin 決定）。
+   */
   --font-title-zh: "Songti TC", "Noto Serif TC", "PMingLiU", serif;
   --font-body: "PingFang TC", "Microsoft JhengHei", "Noto Sans TC", sans-serif;
   --font-display: "Instrument Serif", serif;
+  --font-reading-en: -apple-system, "Segoe UI", Roboto, sans-serif;
   --font-mono: "DM Mono", monospace;
 
-  /* typography（字級／行高／字距／字重） */
+  /* typography（DESIGN.md typography，21 個；字級＋YAML 有寫的行高／字距／字重） */
+  --text-display-zh: 60px;
+  --text-display-zh--line-height: 1.3;
+  --text-display-zh--letter-spacing: 0.04em;
+  --text-display-zh--font-weight: 300;
   --text-page-title-zh: 40px;
   --text-page-title-zh--line-height: 1.3;
   --text-page-title-zh--letter-spacing: 0.04em;
   --text-page-title-zh--font-weight: 300;
+  --text-finding-zh: 32px;
+  --text-finding-zh--line-height: 1.35;
+  --text-finding-zh--letter-spacing: 0.04em;
+  --text-finding-zh--font-weight: 300;
   --text-section-title-zh: 24px;
   --text-section-title-zh--line-height: 1.4;
   --text-section-title-zh--letter-spacing: 0.04em;
   --text-section-title-zh--font-weight: 300;
-  --text-reading-zh: 17px;
-  --text-reading-zh--line-height: 1.9;
-  --text-reading-zh--letter-spacing: 0.03em;
-  --text-reading-zh--font-weight: 400;
+  --text-unit-zh: 19px;
+  --text-unit-zh--font-weight: 300;
+  --text-readout-number: 68px;
+  --text-readout-number--line-height: 1.05;
+  --text-readout-number--letter-spacing: -0.01em;
+  --text-readout-number--font-weight: 400;
+  --text-paper-title: 34px;
+  --text-paper-title--line-height: 1.25;
+  --text-paper-title--letter-spacing: 0.005em;
+  --text-paper-title--font-weight: 400;
+  --text-paper-title-hover: 25px;
+  --text-paper-title-hover--line-height: 1.25;
+  --text-paper-title-hover--letter-spacing: 0.005em;
+  --text-paper-title-hover--font-weight: 400;
+  --text-paper-title-row: 21px;
+  --text-paper-title-row--line-height: 1.3;
+  --text-paper-title-row--letter-spacing: 0.005em;
+  --text-paper-title-row--font-weight: 400;
+  --text-brand: 24px;
+  --text-brand--letter-spacing: 0.01em;
+  --text-brand--font-weight: 400;
+  --text-subtitle-en: 23px;
+  --text-subtitle-en--line-height: 1.2;
+  --text-subtitle-en--letter-spacing: 0.01em;
+  --text-subtitle-en--font-weight: 400;
   --text-body: 16px;
   --text-body--line-height: 1.9;
   --text-body--letter-spacing: 0.03em;
   --text-body--font-weight: 400;
+  --text-reading-zh: 17px;
+  --text-reading-zh--line-height: 1.9;
+  --text-reading-zh--letter-spacing: 0.03em;
+  --text-reading-zh--font-weight: 400;
+  --text-reading-en: 16px;
+  --text-reading-en--line-height: 1.7;
+  --text-reading-en--font-weight: 400;
   --text-button: 15px;
   --text-button--letter-spacing: 0.08em;
   --text-button--font-weight: 500;
   --text-nav: 14px;
   --text-nav--letter-spacing: 0.04em;
   --text-nav--font-weight: 400;
+  --text-caption: 13px;
+  --text-caption--letter-spacing: 0.04em;
+  --text-caption--font-weight: 400;
+  --text-label-mono: 12px;
+  --text-label-mono--letter-spacing: 0.1em;
+  --text-label-mono--font-weight: 400;
+  --text-label-mono-reading: 13px;
+  --text-label-mono-reading--letter-spacing: 0.08em;
+  --text-label-mono-reading--font-weight: 400;
+  --text-micro-mono: 11px;
+  --text-micro-mono--letter-spacing: 0.1em;
+  --text-micro-mono--font-weight: 400;
+  --text-table-number: 14px;
+  --text-table-number--font-weight: 400;
 
-  /* spacing */
+  /* spacing（DESIGN.md spacing，17 個） */
   --spacing-1: 4px;
   --spacing-2: 8px;
   --spacing-3: 12px;
@@ -63,24 +131,27 @@
   --spacing-gutter-tablet: 48px;
   --spacing-gutter-mobile: 20px;
   --spacing-reading-width: 760px;
+  --spacing-rail-width: 248px;
   --spacing-button-height: 50px;
+  --spacing-button-height-compact: 44px;
   --spacing-tap-target: 44px;
 
-  /* rounded */
+  /* rounded（DESIGN.md rounded，2 個） */
   --radius-none: 0px;
   --radius-full: 999px;
 
-  /* 斷點：DESIGN.md 只有這四個值（ADR-0010 第 15 點）。 */
+  /* 斷點：DESIGN.md 內文只有這四個值（ADR-0010 第 15 點）。 */
   --breakpoint-tablet: 768px;
   --breakpoint-split: 900px;
   --breakpoint-desktop: 1200px;
   --breakpoint-wide: 1232px;
 }
 
-/* 手機上的頁面標題是 28／1.3（DESIGN.md Typography 規則）。 */
+/* 手機上的頁面標題是 28／1.3、論文標題是 26／1.25（DESIGN.md Typography 規則）。 */
 @media (width < 768px) {
   :root {
     --text-page-title-zh: 28px;
+    --text-paper-title: 26px;
   }
 }
 
@@ -99,5 +170,29 @@
     line-height: var(--text-body--line-height);
     letter-spacing: var(--text-body--letter-spacing);
     -webkit-font-smoothing: antialiased;
+  }
+
+  /*
+   * 鍵盤焦點（DESIGN.md Components 最後一行）：所有可以操作的元件都是 1px 金色外框、外擴 4px。
+   * 全站只有這一條；元件示範頁的外框樣本（data-focus-sample）用同一條規則。
+   */
+  :focus-visible,
+  [data-focus-sample] {
+    outline: 1px solid var(--color-accent-gold);
+    outline-offset: 4px;
+  }
+
+  /*
+   * 減少動態（UX-DR6、ADR-0010 第 14 點）：系統設定要求減少動態時，全站的過場與動畫一律關掉。
+   * 放在 base 層並加 !important：分層的 !important 是前面的層優先，所以連 utilities 層也蓋得過。
+   * 程式裡要知道這個設定時，只能用 src/hooks/use-reduced-motion.ts。
+   */
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      transition: none !important;
+      animation: none !important;
+    }
   }
 }

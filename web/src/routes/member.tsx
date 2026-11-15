@@ -1,4 +1,4 @@
-import { createRoute, redirect } from "@tanstack/react-router";
+import { createRoute, lazyRouteComponent, redirect } from "@tanstack/react-router";
 
 import { NoticePage } from "../pages/NoticePage";
 import { rootRoute } from "./root";
@@ -18,4 +18,18 @@ const noticeRoute = createRoute({
   component: NoticePage,
 });
 
-export const routeTree = rootRoute.addChildren([indexRoute, noticeRoute]);
+// 元件示範頁只在開發環境（Story 3.2）：正式建置時 import.meta.env.DEV 是 false，這一段連同動態 import
+// 整個被拿掉，建置結果沒有這個路由、元件與示範頁的文字（e2e/dev-only.spec.ts 檢查）。
+function devRoutes() {
+  return [
+    createRoute({
+      getParentRoute: () => rootRoute,
+      path: "/dev/components",
+      component: lazyRouteComponent(() => import("../pages/DevComponentsPage"), "DevComponentsPage"),
+    }),
+  ] as const;
+}
+
+export const routeTree = import.meta.env.DEV
+  ? rootRoute.addChildren([indexRoute, noticeRoute, ...devRoutes()])
+  : rootRoute.addChildren([indexRoute, noticeRoute]);

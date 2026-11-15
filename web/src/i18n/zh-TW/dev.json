@@ -1,0 +1,23 @@
+{
+  "dev": {
+    "page": {
+      "title": "元件示範"
+    },
+    "sections": {
+      "colors": "顏色與字級",
+      "buttons": "按鈕",
+      "links": "連結",
+      "aiBadges": "AI 標章",
+      "statusTags": "狀態標記",
+      "focus": "焦點外框"
+    },
+    "examples": {
+      "primary": "開啟全文",
+      "secondary": "取消",
+      "pending": "登入中…",
+      "outOfScope": "追蹤範圍外",
+      "outOfScopeInfo": "不在 14 本追蹤期刊或 2016 年以前，不計入趨勢與關係排行表",
+      "private": "只有你看得到"
+    }
+  }
+}

@@ -35,7 +35,7 @@ export function MessageBar({ tone, message, children, role = "status" }: Message
     <div role={role} className="flex items-start gap-3 py-3">
       <span className="flex h-tap-target shrink-0 items-center">{tone === "error" ? <ErrorIcon /> : <InfoIcon />}</span>
       <div className="flex flex-wrap items-center gap-x-6">
-        <p className="m-0 flex min-h-tap-target items-center text-body text-text-primary">{message}</p>
+        <p className="flex min-h-tap-target items-center text-body text-text-primary">{message}</p>
         {children}
       </div>
     </div>
