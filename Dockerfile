@@ -1,6 +1,17 @@
 # api 與 worker 共用的映像；compose 用 command 決定跑哪一個。
 FROM ghcr.io/astral-sh/uv:0.13.7 AS uv
 
+# 成員版前端（Story 3.1、ADR-0036）：在建置機的原生架構上建（產物是靜態檔，和映像架構無關），
+# 最後一段只複製 web/dist。安全標頭檔是 vite.config.ts 讀的唯一來源，所以一起複製。
+FROM --platform=$BUILDPLATFORM node:26-trixie-slim AS web
+WORKDIR /web
+COPY web/package.json web/package-lock.json ./
+RUN --mount=type=cache,target=/root/.npm \
+    npm ci --no-audit --no-fund
+COPY radar/entrypoints/api/security_headers.json /radar/entrypoints/api/security_headers.json
+COPY web/ ./
+RUN npm run build:member
+
 FROM python:3.14-slim-trixie AS build
 COPY --from=uv /uv /bin/uv
 ENV UV_COMPILE_BYTECODE=1 \
@@ -33,6 +44,8 @@ COPY migrations ./migrations
 COPY config ./config
 # LLM 工作的 prompt 檔與雜湊登記（AD-8、ADR-0030）：閘門預設讀工作目錄下的 prompts/。
 COPY prompts ./prompts
+# 成員版前端的建置結果：api 以工作目錄下的 web/dist 送出頁面殼與靜態檔（ADR-0036）。
+COPY --from=web /web/dist ./web/dist
 USER radar
 EXPOSE 8000
 CMD ["python", "-m", "radar.entrypoints.api"]

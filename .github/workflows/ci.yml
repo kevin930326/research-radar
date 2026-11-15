@@ -1,4 +1,5 @@
 # CI（ADR-0017）：固定檢查 → 兩種架構各自建映像並冒煙 → 合併成多架構標籤推到 GHCR。
+# 前端檢查是另一個和 checks 平行的 web job（ADR-0036）；映像的建置本身也會建前端。
 # - 不用任何 repo secret；推 GHCR 用內建的 github.token。
 # - 第三方 action 一律釘 40 碼 commit SHA，註解寫版本。
 # - 只有 push 事件推映像：pull_request 的 github.sha 是 GitHub 暫時產生的合併 commit。
@@ -106,6 +107,60 @@ jobs:
             > "${RUNNER_TEMP}/requirements.txt"
           uv run --no-sync pip-audit --disable-pip --strict --progress-spinner off \
             --requirement "${RUNNER_TEMP}/requirements.txt"
+
+  # 前端（Story 3.1、ADR-0036）：和 checks 平行；步驟和本機 web/ 的 npm scripts 同一組。
+  # Playwright 在 CI 跑 chromium、firefox、webkit 三種引擎（CI=true 時 playwright.config.ts 會打開）。
+  web:
+    name: web
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - name: 取出程式碼
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: 安裝 Node.js（版本照 web/.nvmrc）
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: web/.nvmrc
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - id: web-npm-ci
+        name: npm ci（照 package-lock.json）
+        run: npm ci --no-audit --no-fund
+
+      - id: web-lint
+        name: ESLint
+        run: npm run lint
+
+      - id: web-typecheck
+        name: 型別檢查
+        run: npm run typecheck
+
+      - id: web-test
+        name: Vitest
+        run: npm test
+
+      - id: web-build-member
+        name: 建置（成員版）
+        run: npm run build:member
+
+      - id: web-build-demo
+        name: 建置（示範站）
+        run: npm run build:demo
+
+      - id: web-playwright-install
+        name: 安裝 Playwright 的三種瀏覽器
+        run: npx playwright install --with-deps chromium firefox webkit
+
+      - id: web-e2e
+        name: Playwright＋axe（三種引擎，帶 CSP 的建置結果）
+        run: npm run e2e
 
   image:
     name: image (${{ matrix.arch }})
