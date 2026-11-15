@@ -29,7 +29,17 @@ from radar.config import (
     load_taxonomy,
     load_zh_summary_rules,
 )
-from radar.domain.ai_outputs import CallMode
+from radar.domain.admin_runs import (
+    ADMIN_TASKS,
+    render_paper_ai_report,
+    render_removal_blocks,
+    render_retry_plan,
+    render_retry_report,
+    render_revision_estimate,
+    render_source_removal_preview,
+    render_source_removal_result,
+)
+from radar.domain.ai_outputs import CallMode, LlmTask
 from radar.domain.budget import format_usd, render_cost_report
 from radar.domain.coverage import render_coverage_report
 from radar.domain.cube import UnknownJournalError
@@ -57,6 +67,7 @@ from radar.domain.llm_batches import (
     render_poll_summary,
     render_wait_progress,
 )
+from radar.domain.papers import AbstractSource
 from radar.domain.run_reports import RunScope, parse_ids_file, parse_since, render_run_report
 from radar.domain.settings import Settings
 from radar.domain.trial_runs import (
@@ -89,6 +100,11 @@ from radar.entrypoints.bootstrap import (
 from radar.entrypoints.logging_config import configure_logging
 from radar.entrypoints.startup import check_ai_config
 from radar.ports import LlmProvider
+from radar.services.admin_runs import (
+    get_paper_ai_report,
+    preview_source_removal,
+    remove_source_ai_outputs,
+)
 from radar.services.budget import get_budget_status
 from radar.services.coverage import get_coverage
 from radar.services.embeddings import (
@@ -100,9 +116,11 @@ from radar.services.embeddings import (
 from radar.services.import_report import get_import_report
 from radar.services.jobs import enqueue_scheduled_job
 from radar.services.llm_batches import (
+    REVISION_TASKS,
     LlmBatchSetup,
     count_llm_batch_running_runs,
     estimate_llm_batches,
+    estimate_revision_reruns,
     list_llm_batches,
     plan_llm_batches,
     poll_llm_batches,
@@ -117,6 +135,7 @@ from radar.services.reparse import (
     reparse_papers,
 )
 from radar.services.run_reports import get_run_report
+from radar.services.run_retry import plan_retry, run_retry
 from radar.services.trial_runs import (
     TrialPapersNotFoundError,
     TrialSetup,
@@ -767,6 +786,11 @@ def _render_plan(result: LlmBatchPlanResult) -> list[str]:
         lines.append("月初窗口（台北時間每月 1 日早上），規劃延後；過了再跑一次")
     elif result.stop is PlanStop.BUDGET_TRIPPED:
         lines.append("已熔斷，規劃不排任何批次")
+    elif result.stop is PlanStop.RERUN_CAP_EXCEEDED:
+        lines.append(
+            "分類表或情境值清單改版後要重跑的超過 revision_rerun_max_usd，規劃整次不排；"
+            "用 radar runs estimate-revision 看篇數與金額，決定後再調 config/llm_batches.yaml"
+        )
     return lines
 
 
@@ -1189,6 +1213,266 @@ def runs_report(
         _fail(f"讀取報表失敗（{type(exc).__name__}）；細節見日誌", [])
     for line in render_run_report(rows):
         typer.echo(line)
+
+
+# --- 管理者的 AI 指令（Story 2.12、ADR-0044） ------------------------------------------------
+
+
+def _parse_paper_target(target: str) -> uuid.UUID | str:
+    """一個論文 ID 或 DOI；看不懂印出來、退出碼 2（不碰資料庫）。"""
+    try:
+        return parse_trial_targets([target]).targets[0]
+    except TrialArgumentError as exc:
+        typer.echo(f"參數看不懂，沒有執行：{exc}", err=True)
+        raise typer.Exit(2) from None
+
+
+def _load_trial_setup(action: str) -> tuple[Settings, TrialSetup]:
+    """讀互動呼叫要的設定（和 `radar runs trial` 一樣）；設定錯就印出來、退出碼 1。"""
+    try:
+        settings = load_settings()
+        setup = TrialSetup(
+            gateway=build_gateway_config(settings, load_models_config()),
+            budget=load_budget_config(),
+            zh_summary_rules=load_zh_summary_rules(),
+            taxonomy=load_taxonomy(),
+            context_values=load_context_values(),
+        )
+    except ConfigError as exc:
+        log.error(f"設定錯誤，無法{action}", problems=exc.problems)
+        _fail(f"設定錯誤，沒有{action}：", exc.problems)
+    return settings, setup
+
+
+@runs_app.command("show")
+def runs_show(
+    target: Annotated[str, typer.Argument(help="論文 ID（UUID）或 DOI", show_default=False)],
+) -> None:
+    """查一篇論文的 AI 結果（只讀）：中文重點、分類、研究模型三個區塊的狀態、有效值與來歷
+    （模型、prompt 版本、產生時間、輸入種類、人工核對），以及歷次 run（工作、結果、原因代碼、模型、
+    prompt 版本、輸入種類、摘要來源、時間；評估另外標出）。
+
+    ID／DOI 看不懂：退出碼 2。找不到論文、設定錯、讀不到資料庫：退出碼 1。Ctrl-C：退出碼 130。
+    錯誤只印類別。
+    """
+    configure_logging()
+    paper = _parse_paper_target(target)
+    settings, setup = _load_trial_setup("查詢")
+    try:
+        database = build_database(settings, pool_size=database_pool_size(settings, "cli"))
+        report = get_paper_ai_report(SystemViewer(), database, setup, paper, now=_utc_now())
+    except KeyboardInterrupt:
+        typer.echo("中斷了（沒有寫任何資料）", err=True)
+        raise typer.Exit(INTERRUPTED_EXIT_CODE) from None
+    except Exception as exc:
+        # 例外訊息可能含主機與帳號，只記類別名稱。
+        log.error("查詢 AI 結果失敗", error_type=type(exc).__name__)
+        _fail(f"查詢失敗（{type(exc).__name__}）；細節見日誌", [])
+    if report is None:
+        _fail(f"找不到這篇論文：{paper}", [])
+    for line in render_paper_ai_report(report):
+        typer.echo(line)
+
+
+@runs_app.command("retry")
+def runs_retry(
+    target: Annotated[str, typer.Argument(help="論文 ID（UUID）或 DOI", show_default=False)],
+    tasks: Annotated[
+        list[LlmTask] | None,
+        typer.Option(
+            "--task",
+            help="只重跑這幾個工作（zh_summary、classify、extract_model，可重複）；不給＝三個裡"
+            "可以重跑的",
+            show_default=False,
+        ),
+    ] = None,
+    yes: Annotated[bool, typer.Option("--yes", help="不問確認，直接重跑")] = False,
+) -> None:
+    """重跑一篇論文被拒收的 AI 結果（只有目前輸入最新的結果是被拒收、沒有有效結果的工作）。
+
+    先印每個工作能不能重跑（不能的印原因）、含重試的最壞費用與本月預算，確認後（--yes 不問）每項經
+    同一個閘門互動呼叫一次，結果照常寫（有效或再一次被拒收）。確認後輸入變了的標 input_changed、不
+    呼叫；同時有另一個重跑在做的標 skipped、不再付錢。
+
+    ID／DOI 或 --task 看不懂：退出碼 2。找不到論文、沒有可以重跑的、沒有確認、設定錯、讀不到資料庫、
+    有暫時性失敗、出錯、預算不准或輸入在確認後變了的項目：退出碼 1。Ctrl-C：退出碼 130。錯誤只印
+    類別或狀態碼，不印金鑰與連線字串。
+    """
+    configure_logging()
+    paper = _parse_paper_target(target)
+    wanted = tuple(dict.fromkeys(tasks or ADMIN_TASKS))
+    if any(task not in ADMIN_TASKS for task in wanted):
+        typer.echo(
+            "參數看不懂，沒有執行：--task 只能是 zh_summary、classify、extract_model", err=True
+        )
+        raise typer.Exit(2)
+    settings, setup = _load_trial_setup("重跑")
+    try:
+        provider_context = build_llm_provider(settings)
+    except ConfigError as exc:
+        log.error("設定錯誤，無法重跑", problems=exc.problems)
+        _fail("設定錯誤，沒有重跑：", exc.problems)
+    with provider_context as provider:
+        try:
+            try:
+                database = build_database(settings, pool_size=database_pool_size(settings, "cli"))
+                selection = resolve_trial_papers(SystemViewer(), database, TrialTargets((paper,)))
+                plan = plan_retry(
+                    SystemViewer(),
+                    database,
+                    setup,
+                    selection.papers[0].paper_id,
+                    wanted,
+                    attempts=provider.attempts,
+                )
+                status = get_budget_status(SystemViewer(), database, setup.budget, now=_utc_now())
+            except TrialPapersNotFoundError:
+                _fail(f"找不到這篇論文，沒有重跑：{paper}", [])
+            except Exception as exc:
+                log.error("重跑的預估失敗", error_type=type(exc).__name__)
+                _fail(f"預估失敗（{type(exc).__name__}），沒有重跑；細節見日誌", [])
+            for line in render_retry_plan(plan, status):
+                typer.echo(line)
+            if not plan.retryable:
+                _fail("沒有可以重跑的工作，沒有呼叫模型", [])
+            if not yes and not _confirm("要重跑嗎？"):
+                typer.echo("沒有執行", err=True)
+                raise typer.Exit(1)
+        except KeyboardInterrupt:
+            log.warning("重跑在執行前被中斷")
+            typer.echo("中斷了，沒有執行", err=True)
+            raise typer.Exit(INTERRUPTED_EXIT_CODE) from None
+        try:
+            report = run_retry(SystemViewer(), database, provider, setup, plan, clock=_utc_now)
+        except KeyboardInterrupt:
+            log.warning("重跑被中斷")
+            typer.echo(
+                "中斷了：做完的已經寫好；中斷的那一項再跑一次 radar runs retry 即可（有存下的輸出"
+                "會接續、不重付）",
+                err=True,
+            )
+            raise typer.Exit(INTERRUPTED_EXIT_CODE) from None
+        except Exception as exc:
+            log.error("重跑失敗", error_type=type(exc).__name__)
+            _fail(f"重跑失敗（{type(exc).__name__}）；做完的已經寫好，細節見日誌", [])
+    for line in render_retry_report(report):
+        typer.echo(line)
+    if report.exit_code:
+        raise typer.Exit(report.exit_code)
+
+
+@runs_app.command("remove-by-source")
+def runs_remove_by_source(
+    source: Annotated[
+        AbstractSource,
+        typer.Argument(
+            help="摘要來源（openalex、semantic_scholar、uploaded_pdf）", show_default=False
+        ),
+    ],
+    execute: Annotated[
+        bool, typer.Option("--execute", help="真的刪（不給就只印會刪幾筆，資料庫一筆都不動）")
+    ] = False,
+    yes: Annotated[bool, typer.Option("--yes", help="--execute 不問確認")] = False,
+) -> None:
+    """依摘要來源移除衍生的 AI 產出（摘要來源授權改變時用；FR-11）。
+
+    不加 --execute：只印各表各狀態會刪幾筆、細項幾筆、還在跑的 run 數、目前摘要仍是這個來源的
+    論文數、來源不明的表頭數，資料庫一筆都不動。加 --execute：確認後（--yes 不問）在一個交易裡
+    直接刪掉送出時用了這個來源摘要的表頭與細項（不複製），寫一筆稽核（只記來源與計數）。還有這個
+    來源的 run 在跑、或有論文的目前摘要仍是這個來源時不刪：先停用來源、移除摘要，再跑這個指令。
+
+    來源看不懂：退出碼 2。設定錯、讀不到資料庫、被擋下、沒有確認：退出碼 1。Ctrl-C：退出碼 130。
+    """
+    configure_logging()
+    try:
+        settings = load_settings()
+    except ConfigError as exc:
+        log.error("設定錯誤，無法依來源移除", problems=exc.problems)
+        _fail("設定錯誤，沒有執行：", exc.problems)
+    try:
+        try:
+            database = build_database(settings, pool_size=database_pool_size(settings, "cli"))
+            preview = preview_source_removal(SystemViewer(), database, source)
+        except Exception as exc:
+            log.error("讀取要移除的 AI 產出失敗", error_type=type(exc).__name__)
+            _fail(f"讀取失敗（{type(exc).__name__}）；細節見日誌", [])
+        for line in render_source_removal_preview(preview):
+            typer.echo(line)
+        if not execute:
+            typer.echo("只印不做：加 --execute 才會刪")
+            return
+        if preview.blocks:
+            for line in render_removal_blocks(source, preview.blocks):
+                typer.echo(line, err=True)
+            raise typer.Exit(1)
+        if not yes and not _confirm("要刪除嗎？（不能復原）"):
+            typer.echo("沒有執行", err=True)
+            raise typer.Exit(1)
+    except KeyboardInterrupt:
+        typer.echo("中斷了，沒有執行", err=True)
+        raise typer.Exit(INTERRUPTED_EXIT_CODE) from None
+    try:
+        result = remove_source_ai_outputs(SystemViewer(), database, source)
+    except KeyboardInterrupt:
+        typer.echo("中斷了：整個交易退回，一筆都沒有刪", err=True)
+        raise typer.Exit(INTERRUPTED_EXIT_CODE) from None
+    except Exception as exc:
+        log.error("依來源移除失敗", error_type=type(exc).__name__)
+        _fail(f"移除失敗（{type(exc).__name__}），整個交易退回；細節見日誌", [])
+    if result.blocks:
+        for line in render_removal_blocks(source, result.blocks):
+            typer.echo(line, err=True)
+        raise typer.Exit(1)
+    for line in render_source_removal_result(result):
+        typer.echo(line)
+
+
+@runs_app.command("estimate-revision")
+def runs_estimate_revision(
+    taxonomy: Annotated[
+        bool, typer.Option("--taxonomy", help="分類表要改版：估分類（classify）會重跑多少")
+    ] = False,
+    context_values: Annotated[
+        bool,
+        typer.Option(
+            "--context-values", help="情境值清單要改版：估研究模型（extract_model）會重跑多少"
+        ),
+    ] = False,
+) -> None:
+    """改分類表或情境值清單之前，估下一次 Batch 規劃會重跑幾篇、花多少（只讀）。
+
+    印各工作「有現行 AI 結果、改版後會重跑」的篇數與 Batch 價保守上限、「還沒有結果」的篇數，以及
+    config/llm_batches.yaml 的 revision_rerun_max_usd。兩個旗標可以一起給。上限只看分類表與情境值
+    清單的版本：prompt 升版或換模型也會讓全部重跑，但不受這個上限管。
+
+    兩個旗標都沒給：退出碼 2。設定錯、讀不到資料庫、超過上限（改版後規劃會整次不排）：退出碼 1。
+    Ctrl-C：退出碼 130。
+    """
+    configure_logging()
+    tasks = tuple(
+        task
+        for task, wanted in zip(REVISION_TASKS, (taxonomy, context_values), strict=True)
+        if wanted
+    )
+    if not tasks:
+        typer.echo("參數看不懂，沒有執行：--taxonomy、--context-values 至少給一個", err=True)
+        raise typer.Exit(2)
+    settings, setup = _load_batch_setup("估改版")
+    try:
+        database = build_database(settings, pool_size=database_pool_size(settings, "cli"))
+        estimate = estimate_revision_reruns(
+            SystemViewer(), database, setup, tasks=tasks, assume_changed=True
+        )
+    except KeyboardInterrupt:
+        typer.echo("中斷了（沒有寫任何資料）", err=True)
+        raise typer.Exit(INTERRUPTED_EXIT_CODE) from None
+    except Exception as exc:
+        log.error("改版預估失敗", error_type=type(exc).__name__)
+        _fail(f"預估失敗（{type(exc).__name__}）；細節見日誌", [])
+    for line in render_revision_estimate(estimate):
+        typer.echo(line)
+    if estimate.exceeds_cap:
+        raise typer.Exit(1)
 
 
 def _fail(headline: str, problems: list[str]) -> NoReturn:

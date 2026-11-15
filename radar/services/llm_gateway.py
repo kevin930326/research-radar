@@ -18,7 +18,9 @@
    `rejected` 或 `running` 就 `SKIPPED`）→ 有 `llm_result_pending` 的 run 就改回 `running` 接續，
    否則新增 `running` 的 `derivation_run`（部分唯一索引兜底），立刻 commit。評估（帶
    `eval_run_id`）不問 `should_run`、不受 running 索引限制；同一個 `eval_run_id` 已經有 `running`
-   時 `SKIPPED`，也只接續同一個 `eval_run_id` 的 run。
+   時 `SKIPPED`，也只接續同一個 `eval_run_id` 的 run。管理者確認過的重跑（`retry_of`，只准
+   `services/run_retry.py` 傳，Story 2.12）：平常流程的 `rejected` 只在「這組鍵最新的一列平常流程
+   表頭就是 `retry_of`」時放行，`active` 照樣 `SKIPPED`；新增的 run 記下送出時用的摘要來源。
 6. 呼叫模型（不開著交易；接續時跳過 6、7）。暫時性錯誤 → run `failed`、`TRANSIENT_FAILURE`；
    設定錯 → run `failed` 後原樣丟出。
 7. 自己的短交易記 `llm_call`（有 usage 才記；費用由 `domain/pricing.py` 算），連同模型回的文字
@@ -120,7 +122,7 @@ from radar.domain.taxonomy import Taxonomy
 from radar.domain.validators.research_model import ResearchModelValidator
 from radar.domain.viewer import SystemViewer, Viewer
 from radar.ports import LlmProvider
-from radar.repo.ai_outputs import find_blocking_ai_result
+from radar.repo.ai_outputs import find_blocking_ai_result, find_latest_ai_result
 from radar.repo.db import Database, DbConnection
 from radar.repo.llm_ledger import (
     create_batch_llm_call,
@@ -336,15 +338,18 @@ def run_llm_job(
     budget_allows: Callable[[LlmTask], bool],
     eval_run_id: uuid.UUID | None = None,
     confirmed_key: RunKey | None = None,
+    retry_of: uuid.UUID | None = None,
 ) -> GatewayResult:
     """照 AD-8 的固定步驟跑一件 LLM 工作（見模組說明）。`confirmed_key` 有值時，這次算出的
-    `RunKey` 要和它一樣才往下（第 4 步之後、取得執行資格之前核對）。
+    `RunKey` 要和它一樣才往下（第 4 步之後、取得執行資格之前核對）。`retry_of` 是管理者確認要重跑的
+    那一列 `rejected` 表頭的 id（`radar runs retry`，Story 2.12；只准 `services/run_retry.py` 傳，
+    `tests/arch/test_retry_wiring.py` 守）：鎖內它還是這組鍵最新的平常流程表頭才放行。
 
     Raises:
         PermissionDeniedError: `actor` 不是系統工作（不碰資料庫）。
         ValueError: 工作沒有表頭表（2.2 只支援 `zh_summary`、`classify`、`extract_model`）、
-            分類表／情境值清單版本帶錯，或 `config.call_mode` 不是互動（Batch 還不支援；都不碰
-            資料庫）。
+            分類表／情境值清單版本帶錯、`config.call_mode` 不是互動（Batch 還不支援），或
+            `eval_run_id` 與 `retry_of` 一起帶（都不碰資料庫）。
         LookupError: 論文不存在。
         PromptIntegrityError, PromptFormatError: prompt 檔或登記不對（還沒寫任何列）。
         ConfirmedRequestChangedError: 帶了 `confirmed_key` 而這次的鍵不一樣（還沒寫任何列、
@@ -364,6 +369,9 @@ def run_llm_job(
     task = LlmTask(job.task)
     if task not in HEADER_TABLES:
         raise ValueError(f"{task.value} 還沒有表頭表，閘門不支援（2.2 只支援有表頭的工作）")
+    if eval_run_id is not None and retry_of is not None:
+        # 評估不問 should_run，本來就不受 rejected 擋；重跑只給平常流程。
+        raise ValueError("評估（eval_run_id）不能同時帶 retry_of")
     viewer = SystemViewer()
 
     # 1. 從資料列推出來源並放行。
@@ -395,7 +403,9 @@ def run_llm_job(
         raise ConfirmedRequestChangedError(confirmed_key, key)
 
     # 5. 取得執行資格（短交易，立刻 commit）。
-    claim = _acquire(database, config, prepared, eval_run_id, resume_only=resume_only)
+    claim = _acquire(
+        database, config, prepared, eval_run_id, resume_only=resume_only, retry_of=retry_of
+    )
     if claim is None:
         # 預算不准而且鎖裡已經沒有可接續的 run（別人接續完、或已經有結果）：照預算不准回報。
         return GatewayResult(
@@ -526,7 +536,9 @@ def claim_batch_run(
     require(actor, Action.RUN_AI_JOBS, None)
     if config.call_mode is not CallMode.BATCH:
         raise ValueError("claim_batch_run 要用 call_mode=batch 的閘門設定")
-    claim = _claim_locked(connection, config, prepared, None, resume_only=False, batch=True)
+    claim = _claim_locked(
+        connection, config, prepared, None, resume_only=False, batch=True, retry_of=None
+    )
     if isinstance(claim, _Claim):
         return BatchClaim(BatchClaimOutcome.CLAIMED, claim.run_id)
     return BatchClaim(claim)
@@ -888,13 +900,20 @@ def _acquire(
     eval_run_id: uuid.UUID | None,
     *,
     resume_only: bool = False,
+    retry_of: uuid.UUID | None = None,
 ) -> _Claim | None:
     """取得執行資格（互動）：一個短交易裡呼叫 `_claim_locked`，立刻 commit。不用跑回 None。
     `resume_only`（預算不准）時只接續、不新增，沒有可接續的就回 None，所以預算不准時一定不會呼叫
     模型。"""
     with database.transaction() as connection:
         claim = _claim_locked(
-            connection, config, prepared, eval_run_id, resume_only=resume_only, batch=False
+            connection,
+            config,
+            prepared,
+            eval_run_id,
+            resume_only=resume_only,
+            batch=False,
+            retry_of=retry_of,
         )
     return claim if isinstance(claim, _Claim) else None
 
@@ -907,10 +926,16 @@ def _claim_locked(
     *,
     resume_only: bool,
     batch: bool,
+    retry_of: uuid.UUID | None,
 ) -> _Claim | BatchClaimOutcome:
     """在呼叫端開好的交易裡上鎖、重問 `should_run`，再接續或新增 `running` 的 run（AD-8）。
 
     - 有 `running`、或（不是評估時）有 `active`／平常流程的 `rejected` → `SKIPPED`。
+    - 管理者確認過的重跑（`retry_of` 有值，Story 2.12）：`active` 照樣 `SKIPPED`；平常流程的
+      `rejected` 只在這組鍵最新的一列平常流程表頭（`created_at, id`）就是 `retry_of` 時往下（照常先
+      接續、再新增），否則 `SKIPPED`。看「最新一列表頭」不是「最新一筆 run」：重跑被中斷只留下
+      沒有表頭的 failed run，下一次照樣能重跑；同一個確認過的 id 重跑完已經有更新的表頭，不會再
+      付錢。
     - 互動：有 `llm_result_pending` 的 run 就改回 `running` 接續（回帶存下輸出的 `_Claim`）；
       `resume_only` 時沒有可接續的就 `SKIPPED`。
     - Batch（`batch=True`）：有可接續的 `llm_result_pending` 就 `RESUMABLE`（留給互動接續，不改、
@@ -929,8 +954,14 @@ def _claim_locked(
     # 驗證時，這裡找不到 pending，不擋就會新增 run、再付一次錢。評估不查表頭（`should_run`）。
     if find_running_derivation_run_id(viewer, connection, key, eval_run_id) is not None:
         return BatchClaimOutcome.SKIPPED
-    if eval_run_id is None and find_blocking_ai_result(viewer, connection, key) is not None:
-        return BatchClaimOutcome.SKIPPED
+    if eval_run_id is None:
+        blocking = find_blocking_ai_result(viewer, connection, key)
+        if blocking is ResultStatus.ACTIVE:
+            return BatchClaimOutcome.SKIPPED
+        if blocking is ResultStatus.REJECTED:
+            latest = None if retry_of is None else find_latest_ai_result(viewer, connection, key)
+            if latest is None or latest.id != retry_of:
+                return BatchClaimOutcome.SKIPPED
     if batch:
         # 已經付過錢、只差寫結果的 run：留給互動接續（不重付），Batch 不新增。
         if find_resumable_derivation_run_id(viewer, connection, key, eval_run_id) is not None:
@@ -958,6 +989,7 @@ def _claim_locked(
             code_version=config.code_version,
             call_mode=config.call_mode,
             eval_run_id=eval_run_id,
+            abstract_source=prepared.llm_input.abstract_source,
         ),
     )
     return BatchClaimOutcome.SKIPPED if run_id is None else _Claim(run_id, None)

@@ -21,3 +21,12 @@ month_start_hold_hours: 8
 # 批次 1 小時內做完、最長 24 小時；10 分鐘一次，一天最多 144 次查詢（Story 2.11、ADR-0043）。
 # worker 的 poll-batches 照 deploy/crontab（每 15 分鐘），不看這個值。
 poll_interval_minutes: 10
+# 分類表或情境值清單改版後，一次 Batch 規劃要重跑的（現行有效結果用的設定檔版本和現在不同的）
+# Batch 價保守上限合計最多多少美元（字串；0～50）。超過就整次不排、不寫任何列、記錯誤日誌
+# （`radar batches create` 印原因、退出碼 1）；第一次全庫沒有現行結果，不受影響。改設定檔前先用
+# `radar runs estimate-revision --taxonomy`／`--context-values` 看會重跑幾篇、花多少（Story 2.12、
+# ADR-0044）。
+# 預設 5：每月熔斷線 50 的 10%，留空間給每週新論文與問答。以 Batch 價保守上限粗估（不是實際值，以
+# 指令印的為準）：分類表改版約 3 美元會過，情境值清單改版約 6 美元會被擋——刻意的，第一次改情境值
+# 清單前要 Kevin 決定。數字待 Kevin 決定。
+revision_rerun_max_usd: "5"

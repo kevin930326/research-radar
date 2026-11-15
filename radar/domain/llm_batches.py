@@ -32,6 +32,7 @@ from radar.domain.ai_outputs import InputKind, LlmTask, PaperLlmSource, RunKey, 
 from radar.domain.budget import BUDGET_TIMEZONE, BudgetConfig, BudgetStatus, format_usd
 from radar.domain.errors import ErrorCode
 from radar.domain.llm import BatchProcessingStatus, LlmBatchStatus
+from radar.domain.pricing import ConfigDecimal
 from radar.domain.processing import ProcessingFacts
 from radar.domain.text_table import render_table
 
@@ -82,6 +83,9 @@ class LlmBatchConfig(BaseModel):
     - `month_start_hold_hours`：台北時間每月 1 日 00:00 到這個鐘點以前，整次規劃延後（Anthropic
       的 workspace 上限可能還在用 UTC 的上個月，ADR-0031 取捨）；0 表示不延後。
     - `poll_interval_minutes`：`radar batches wait` 每幾分鐘查一次供應商（預設 10）。
+    - `revision_rerun_max_usd`：分類表或情境值清單改版後，一次規劃要重跑的（`active` 用的設定檔
+      版本和現在不同的）Batch 價保守上限合計最多多少美元（0～50，預設 5）；超過就整次不排
+      （`PlanStop.RERUN_CAP_EXCEEDED`，Story 2.12、ADR-0044）。
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -92,6 +96,9 @@ class LlmBatchConfig(BaseModel):
     # `radar batches wait` 每幾分鐘查一次（1～1,440；Story 2.11）。有預設值，舊的設定檔照樣讀得
     # 進來。
     poll_interval_minutes: int = Field(default=10, ge=1, le=1440, strict=True)
+    # 改版後一次規劃的重跑上限（美元，字串；0～50）。有預設值，舊的設定檔照樣讀得進來
+    # （Story 2.12）。
+    revision_rerun_max_usd: ConfigDecimal = Field(default=Decimal(5), ge=0, le=50)
 
 
 def in_month_start_hold(now: datetime, hours: int) -> bool:
@@ -220,6 +227,8 @@ class PlanStop(StrEnum):
     # 台北每月 1 日 month_start_hold_hours 點以前：整次延後（規劃途中跨進窗口也在下一批前停下）
     HELD_MONTH_START = "held_month_start"
     BUDGET_TRIPPED = "budget_tripped"  # 已熔斷：整次不排
+    # 分類表或情境值清單改版後要重跑的保守上限超過 revision_rerun_max_usd：整次不排（Story 2.12）
+    RERUN_CAP_EXCEEDED = "rerun_cap_exceeded"
 
 
 @dataclass

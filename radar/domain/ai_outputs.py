@@ -110,7 +110,8 @@ class NewDerivationRun:
     """要新增的一筆 `derivation_run`（狀態一定是 `running`）。
 
     `params`：送出的參數（effort、max_tokens、disable_thinking、output_schema 名稱與雜湊），
-    寫成 jsonb；`eval_run_id` 有值代表評估（Epic 8 補外鍵）。
+    寫成 jsonb；`eval_run_id` 有值代表評估（Epic 8 補外鍵）。`abstract_source`：送出時用的摘要來源
+    （只看標題時是 None；Story 2.12，`radar runs remove-by-source` 照它找衍生的表頭）。
     """
 
     key: RunKey
@@ -122,6 +123,7 @@ class NewDerivationRun:
     code_version: str
     call_mode: CallMode
     eval_run_id: uuid.UUID | None
+    abstract_source: AbstractSource | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -553,11 +555,13 @@ class LlmInputBlock:
 
 @dataclass(frozen=True, slots=True)
 class LlmInput:
-    """一次呼叫的使用者訊息（依序的文件區塊）與它用到哪一筆摘要。"""
+    """一次呼叫的使用者訊息（依序的文件區塊）與它用到哪一筆摘要、那筆摘要的來源（只看標題時兩個
+    都是 None；來源記進 `derivation_run.abstract_source`，Story 2.12）。"""
 
     input_kind: InputKind
     blocks: tuple[LlmInputBlock, ...]
     abstract_id: uuid.UUID | None
+    abstract_source: AbstractSource | None
 
 
 class NoLlmInputError(Exception):
@@ -641,7 +645,7 @@ def build_llm_input(source: PaperLlmSource, input_kind: InputKind) -> LlmInput:
     )
     match input_kind:
         case InputKind.TITLE:
-            return LlmInput(input_kind, (title,), None)
+            return LlmInput(input_kind, (title,), None, None)
         case InputKind.ABSTRACT:
             abstract = source.abstract
             if abstract is None or not abstract.content.strip():
@@ -651,7 +655,7 @@ def build_llm_input(source: PaperLlmSource, input_kind: InputKind) -> LlmInput:
                 abstract_content_source(abstract.source),
                 wrap_document(DocumentType.ABSTRACT, abstract.content),
             )
-            return LlmInput(input_kind, (title, block), abstract.id)
+            return LlmInput(input_kind, (title, block), abstract.id, abstract.source)
         case InputKind.FULLTEXT:
             raise NoLlmInputError(input_kind)
         case _:

@@ -55,6 +55,7 @@ from radar.domain.ai_outputs import (
 )
 from radar.domain.embeddings import EMBED_TASK, NewEmbedRun
 from radar.domain.errors import ErrorCode
+from radar.domain.papers import AbstractSource
 from radar.domain.trial_runs import LlmCallDiagnostics
 from radar.domain.viewer import SystemViewer, Viewer
 from radar.repo.models import Base
@@ -89,6 +90,9 @@ derivation_run_table = Table(
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
     Column("updated_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
     Column("finished_at", DateTime(timezone=True)),
+    # 送出時用的摘要來源（遷移 0018、Story 2.12、ADR-0044）：只看標題的是 NULL；向量化先不記。
+    # `radar runs remove-by-source` 照它找衍生的表頭（摘要列刪掉後表頭的 abstract_id 接不回來源）。
+    Column("abstract_source", Text),
     # 開頭是 paper_id：同時當外鍵的索引；`should_run` 也照這組欄位查。
     Index("ix_derivation_run_key", *_KEY_COLUMNS),
     # 同一份輸入同時只有一個平常流程的 running（評估不受限制，ADR-0009 第 4 點）。
@@ -152,6 +156,12 @@ derivation_run_table = Table(
     CheckConstraint(
         "(status = 'running') = (finished_at IS NULL)", name="finished_at_iff_not_running"
     ),
+    CheckConstraint(
+        "abstract_source IS NULL"
+        " OR abstract_source IN ('openalex', 'semantic_scholar', 'uploaded_pdf')",
+        name="abstract_source",
+    ),
+    CheckConstraint("abstract_source IS NULL OR task <> 'embed'", name="abstract_source_not_embed"),
 )
 
 # 外鍵的索引由 run_id 的唯一約束提供。
@@ -414,11 +424,31 @@ def find_llm_call_diagnostics(
     )
 
 
+def count_running_runs_by_abstract_source(
+    viewer: SystemViewer, connection: Connection, source: AbstractSource
+) -> int:
+    """送出時用了 `source` 的摘要、現在還是 `running` 的 run 有幾筆（含評估與 Batch）。
+    `radar runs remove-by-source` 的擋下條件：它們回來會再寫一列這個來源的表頭（Story 2.12）。
+
+    Raises:
+        TypeError: `viewer` 不是 `SystemViewer`。
+    """
+    visible = visible_to_system_only(viewer)
+    value = connection.execute(
+        text(
+            f"SELECT count(*) FROM derivation_run WHERE {visible}"
+            " AND abstract_source = :source AND status = 'running'"
+        ),
+        {"source": AbstractSource(source).value},
+    ).scalar_one()
+    return int(value)
+
+
 # --- 寫入 ---------------------------------------------------------------------------------
 
 
 def create_derivation_run(connection: Connection, run: NewDerivationRun) -> uuid.UUID | None:
-    """新增一筆 `running` 的 `derivation_run`，回它的 id。
+    """新增一筆 `running` 的 `derivation_run`（連同送出時用的摘要來源），回它的 id。
 
     同一組鍵已經有平常流程的 `running`（部分唯一索引）時什麼都不寫、回 None（`ON CONFLICT DO
     NOTHING`）；評估（`eval_run_id` 有值）不受這個索引限制。在呼叫端開好的交易裡做，不 commit。
@@ -428,10 +458,10 @@ def create_derivation_run(connection: Connection, run: NewDerivationRun) -> uuid
             "INSERT INTO derivation_run"
             " (paper_id, task, prompt_version, prompt_sha256, model, input_sha256, input_kind,"
             " params, taxonomy_version, context_values_version, code_version, call_mode,"
-            " eval_run_id, status)"
+            " eval_run_id, abstract_source, status)"
             " VALUES (:paper_id, :task, :prompt_version, :prompt_sha256, :model, :input_sha256,"
             " :input_kind, CAST(:params AS jsonb), :taxonomy_version, :context_values_version,"
-            " :code_version, :call_mode, :eval_run_id, 'running')"
+            " :code_version, :call_mode, :eval_run_id, :abstract_source, 'running')"
             " ON CONFLICT (paper_id, task, prompt_version, model, input_sha256)"
             " WHERE status = 'running' AND eval_run_id IS NULL DO NOTHING"
             " RETURNING id"
@@ -446,6 +476,9 @@ def create_derivation_run(connection: Connection, run: NewDerivationRun) -> uuid
             "code_version": run.code_version,
             "call_mode": CallMode(run.call_mode).value,
             "eval_run_id": run.eval_run_id,
+            "abstract_source": (
+                None if run.abstract_source is None else AbstractSource(run.abstract_source).value
+            ),
         },
     ).scalar_one_or_none()
     return None if value is None else uuid.UUID(str(value))

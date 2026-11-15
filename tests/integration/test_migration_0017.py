@@ -84,7 +84,7 @@ def test_downgrade_to_0016_and_upgrade_again(db: TestDatabase) -> None:
 
     migrate(db)
 
-    assert db.revisions() == {"0017"}
+    assert db.revisions() == {"0018"}
     assert {"ended_at", "imported_at"} <= _columns(db)
     [(definition,)] = _index(db)
     assert "UNIQUE" in definition
