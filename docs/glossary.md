@@ -825,3 +825,4 @@
 - **ContextVar**：Python 標準庫的「目前情境變數」，同一個執行緒裡設一次、底下呼叫的函式都讀得到，不同執行緒各自一份；向量化用它把每次嘗試的回呼交給 adapter，不必改 port 的方法簽名（ADR-0040）。
 - **SQLSTATE 57014（query_canceled）**：PostgreSQL 回報「這一句被取消」的錯誤碼，`statement_timeout` 到了就是它；向量化在等鎖時收到它也當成「等鎖逾時」處理（ADR-0040）。
 - **跨日重查**：額度占好後、第一次送出前若已過了 UTC 午夜，就放掉前一天的占用、照新的一天的用量重新檢查一次，放得下才送（ADR-0040）。
+- **研究問題的前置語**：句子裡 `we examine whether` 前面的那段字（例如 `In this study, `）；要是這篇研究自己的說法，換成 `Other researchers report that` 這種別人的說法，後面的結果就不算（ADR-0039）。
