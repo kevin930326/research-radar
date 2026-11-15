@@ -73,11 +73,16 @@ def _alembic_config(directory: Path) -> Config:
 
 
 def create_migration_engine(url: str, *, connect_timeout: int) -> Engine:
-    """遷移用的 Engine：不留連線（NullPool），只設連線逾時。
+    """遷移用的 Engine：不留連線（NullPool），只設連線逾時；例外訊息不附查詢參數（同 `Database`）。
 
     不設 statement_timeout：之後的遷移（例如建索引）可能要跑比較久。
     """
-    return create_engine(url, poolclass=NullPool, connect_args={"connect_timeout": connect_timeout})
+    return create_engine(
+        url,
+        poolclass=NullPool,
+        hide_parameters=True,
+        connect_args={"connect_timeout": connect_timeout},
+    )
 
 
 def read_schema_state(database: Database, scripts: MigrationScripts) -> SchemaState:

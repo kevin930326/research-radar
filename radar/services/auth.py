@@ -93,13 +93,18 @@ def log_out_session(database: Database, token: str) -> None:
         owner = find_session_owner(connection, token_sha256(token))
         if owner is None:
             return
-        end_session(owner.viewer, connection, session_id=owner.session_id)
+        ended = end_session(owner.viewer, connection, session_id=owner.session_id)
+    # 交易 commit 成功才記：commit 失敗時那一列還在，不能記成已登出。
+    if ended:
+        log.info("已登出", member_id=str(owner.viewer.member_id))
 
 
-def end_session(actor: MemberViewer, connection: Connection, *, session_id: uuid.UUID) -> None:
-    """刪掉 `actor` 自己的這個 session（之後同一個 token 立刻失效）。在呼叫端開好的交易裡做。"""
-    if delete_session(connection, session_id=session_id, member_id=actor.member_id):
-        log.info("已登出", member_id=str(actor.member_id))
+def end_session(actor: MemberViewer, connection: Connection, *, session_id: uuid.UUID) -> bool:
+    """刪掉 `actor` 自己的這個 session（之後同一個 token 立刻失效）；回有沒有刪到。
+
+    在呼叫端開好的交易裡做、不記日誌：「已登出」由呼叫端在交易 commit 之後記。
+    """
+    return delete_session(connection, session_id=session_id, member_id=actor.member_id)
 
 
 def list_fake_login_members(database: Database) -> list[MemberSummary]:
