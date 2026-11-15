@@ -3,12 +3,20 @@
 # - 不用任何 repo secret；推 GHCR 用內建的 github.token。
 # - 第三方 action 一律釘 40 碼 commit SHA，註解寫版本。
 # - 只有 push 事件推映像：pull_request 的 github.sha 是 GitHub 暫時產生的合併 commit。
+# - push 只看 main；分支上的 commit 由 pull_request 檢查一次（ADR-0017 補充，Kevin 2026-11-15：
+#   原本每個 commit 跑兩遍，兩天用掉每月 3,000 分鐘的九成）。所以只有 main 的 commit 會推映像。
+# - 同一個 PR 有新的 commit 時，取消還在跑的舊執行。main 的每次執行各自一組（用 run_id），
+#   彼此不排隊、不取消：每個合併都要有結果與映像。
 name: CI
 
 on:
   push:
-    branches: ["**"]
+    branches: ["main"]
   pull_request:
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read

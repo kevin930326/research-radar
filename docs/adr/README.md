@@ -42,11 +42,12 @@
 | [0033](0033-classification-taxonomy-and-labels.md) | 分類表、分類 prompt 與標籤：`config/taxonomy.yaml`（最上面 `version`，PRD FR-15 的 6 個主題、5 個方法，用 `key`；`unclassified` 是保留字）；內容雜湊只看（`key`, 定義），登記在 `domain/taxonomy_hashes.py`，內容改了沒升版或版本沒登記讀設定時就擋；分類清單寫死在 `prompts/classify/v1.md`，單元測試逐字核對設定檔（改內容要同時升分類表與 prompt 版本）；`ClassificationOutput` 兩欄字串陣列、不放 `enum`；清單外（含大小寫、放錯欄位、夾指令）丟掉並計數、不拒收，主題不剩存 `unclassified`；遷移 0012（`dropped_label_count`、`classification_label`）；「現在的分類表」＝寫入的行程載入的那一個物件；`max_tokens` 512 | 提議 | AD-7、AD-8、AD-18 |
 | [0034](0034-research-model-extraction.md) | 研究模型擷取：萃取 schema v1（`ResearchModelOutput`，全部必填、可空給 null，版本＝prompt 版本＋`EXTRACTION_SCHEMA_VERSION`，記在 `derivation_run.params`）；情境值清單 `config/context_values.yaml`（草案，國家與產業附 `terms`，內容雜湊登記在 `domain/context_values_hashes.py`，清單寫死在 `prompts/extract_model/v1.md`、單元測試逐字核對）；原文欄位正規化後要是標題或摘要其中一段的子字串，否則整筆拒收；情境值清單外或國家、產業沒寫出存空值並計數，支持與否照擷取規則改值並計數，同一句同一條關係只留一筆、值衝突拒收；共用檢查搬到 `domain/validators/text_checks.py`；`normalize_name`；遷移 0013（表頭內容欄位、`construct`、`construct_mention`、`hypothesis`）；構面只經 `repo/constructs.upsert_constructs` 寫入、canonical 指向自己；`max_tokens` 2048；保守解讀與構面標籤挑選規則列給 Kevin 決定 | 提議 | AD-7、AD-8、AD-16、AD-18 |
 | [0035](0035-judgment-events-and-effective-values.md) | 人工判斷事件與有效值：`judgment_event` 只新增、`kind` 四個，形狀由 domain 型別＋CHECK 各擋一次（key 排序只在 domain），對象與成員不設外鍵，處理結果用 `INSERT … SELECT` 確認指到同一筆回報、一筆回報最多一筆處理結果；`audit_event` 只建表；兩張事件表收回 UPDATE／DELETE；三個 `effective_*` view（有效分類以（論文, `field`）為單位、最新人工修正優先，已核對／修正人數／意見不同同一個 view 算；研究模型的數字轉文字）收回寫入；`repo/ai_blocks.find_ai_block` 照 ADR-0015 順序判定八種狀態，`services/ai_blocks.get_ai_blocks` 組現在的 prompt 版本、模型、設定檔版本與預算；遷移 0014；保守解讀列給 Kevin 決定 | 提議 | AD-7、AD-10、AD-26、AD-30 |
-| [0036](0036-frontend-serving-security-headers-and-web-ci.md) | （0029～0035 由 Epic 2 的 PR 使用）成員版前端由 api 送出：全站安全標頭只有一份（`radar/entrypoints/api/security_headers.json`，api 與 `vite preview` 都讀），每個回應都帶（含 404、500、`/healthz`）；建置資料夾裡的檔案照送、其餘非 `/api/` 的 GET／HEAD 回頁面殼、`/api/` 維持 404 JSON、擋路徑穿越；建置結果固定在工作目錄下的 `web/dist`；HSTS 不在應用程式設；CI 另開和 `checks` 平行的 `web` job（Playwright 三種引擎）；示範站的「找不到這一頁」不放回首頁連結 | 提議 | AD-21、AD-22、AD-24 |
-| [0037](0037-design-tokens-guard-and-a11y-floor.md) | 設計代幣與無障礙底線：`styles.css` 主題放 `DESIGN.md` YAML 的全部代幣＋五個字體＋四個斷點，測試逐項比對；Vite 外掛用 Tailwind 自己的設計系統讓「不產生 CSS 的類別」建置失敗；ESLint 擋寫死的色碼與字級（版面任意值不擋）；焦點外框與減少動態各一條 base 層規則，程式只能用 `use-reduced-motion.ts` 判斷；無障礙六項檢查跑正式頁面清單＋開發伺服器的元件示範頁 | 提議 | AD-21、AD-22 |
+| [0036](0036-frontend-serving-security-headers-and-web-ci.md) | （0029～0035 由 Epic 2 的 PR 使用）成員版前端由 api 送出：全站安全標頭只有一份（`radar/entrypoints/api/security_headers.json`，api 與 `vite preview` 都讀），每個回應都帶（含 404、500、`/healthz`）；建置資料夾裡的檔案照送、其餘非 `/api/` 的 GET／HEAD 回頁面殼、`/api/` 維持 404 JSON、擋路徑穿越；建置結果固定在工作目錄下的 `web/dist`；HSTS 不在應用程式設；CI 另開和 `checks` 平行的 `web` job（Playwright 三種引擎）；示範站的「找不到這一頁」不放回首頁連結 | 已接受（Kevin 2026-11-15） | AD-21、AD-22、AD-24 |
+| [0037](0037-design-tokens-guard-and-a11y-floor.md) | 設計代幣與無障礙底線：`styles.css` 主題放 `DESIGN.md` YAML 的全部代幣＋五個字體＋四個斷點，測試逐項比對；Vite 外掛用 Tailwind 自己的設計系統讓「不產生 CSS 的類別」建置失敗；ESLint 擋寫死的色碼與字級（版面任意值不擋）；焦點外框與減少動態各一條 base 層規則，程式只能用 `use-reduced-motion.ts` 判斷；無障礙六項檢查跑正式頁面清單＋開發伺服器的元件示範頁 | 已接受（Kevin 2026-11-15） | AD-21、AD-22 |
 | [0038](0038-design-reference-and-visual-compare.md) | 前端畫面以 `docs/ux/reference/screens/` 的設計稿為準；做完用 `web/scripts/design-compare.mjs` 量差異（字級、行高、顏色、字重、字距、距離、髮線），報告貼 PR、差異要有原因，是合併門檻；`DESIGN.md` 加字級、行高、字距三組尺度（另一個 PR 實作）；沒有設計稿的畫面先問 Kevin | 提議 | AD-21 |
 | [0046](0046-fake-login-sessions-and-access-jwt.md) | （0039～0045 保留給另一條線）Google 登入之前的假登入與 session：遷移 0020 建 `member`、`allowed_email`、`session`（只存 token 的 SHA-256、`__Host-radar_session`、閒置 14 天／最長 30 天、移出名單或刪 session 立刻失效、應用程式角色不能刪成員）；`RADAR_ENVIRONMENT` 沒設是正式，正式開假登入或假登入＋Google 登入 api 不啟動；開發選人登入、試用驗 Cloudflare Access 的 JWT（只收 RS256、claims 型別自己檢查）後只登入管理者；會改資料的路由在同一個 `/api/v1` router、相依項檢查 `Origin`；`radar members allow`／`set-admin` 用維運身分、寫稽核，輸出只有成員 ID；CLI 身分與權限表不一致列給 Kevin 決定 | 提議 | AD-2、AD-23、AD-26 |
 | [0047](0047-problem-details-openapi-and-permission-tests.md) | 錯誤一律 RFC 9457（`application/problem+json`，只有 `type: about:blank`／`title`／`status`／`code`，不回 `detail`、例外訊息、輸入值；代碼在 `domain/errors.py`，狀態只在 `entrypoints/api/problems.py`；`/readyz` 的 503 例外）；前端用 `errors.<code>`，沒有 EXPERIENCE.md 句子的代碼落到通用句；`radar export-schema` 用子行程輸出根目錄的 `openapi.json`（全集，含假登入路由）；orval 8.47.0 只產生函式與型別到 `web/src/generated/`，lint 只排除這個資料夾、頁面只准 `import type`；CI 兩步重新產生後比對；換人測試與金絲雀測試用端點登記表（`tests/permissions/`）對 `openapi.json` 逐一比對，404 或空清單，金絲雀放成員 A 的 email | 提議 | AD-3、AD-21 |
+| [0060](0060-license-mit.md) | 這個 repo 用 MIT 授權；BMAD、各 skill、字體、設計稿裡的 CC BY 摘要、OpenAlex 書目照各自的授權（編號跳到 0060，避開兩條線保留的 0039～0059） | 已接受 | AR-48 |
 
 「提議」表示還沒經過 Kevin 確認；PR 合併後改成「已接受」。
 
@@ -66,9 +67,8 @@
 
 ## 還沒寫的 ADR
 
-addendum 列的待寫清單裡，下面兩份留到之後：
+addendum 列的待寫清單裡，下面一份留到之後（授權條款已寫成 ADR-0060）：
 
 - **夜間代理人（/goal）的隔離規則**（FR-47）：等真的要啟用夜間代理人時寫。
-- **授權條款（MIT 或 Apache-2.0）**：要 Kevin 決定，repo 公開之前寫。
 
 addendum 清單裡的其他項目已經併入上面的 ADR：「主機只做服務層、重運算在桌機」在 0003；「GitHub Actions 只做 CI、排程放主機」與「不引入 Redis、用 Procrastinate」在 0004；「資料來源先不做註冊表、LLM 與 embedding 可以先做」在 0001；「模型選擇」在 0009；「部署拓撲」在 0003；「試用環境的資料怎麼搬到正式環境」在 0003。
