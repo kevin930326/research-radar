@@ -93,9 +93,14 @@ class SchemaReplyProvider:
       丟出，例如 `LlmTimeoutError`、`KeyboardInterrupt`）。每次呼叫都用同一個回覆。
     - `gated`：每次呼叫先通知 `entered`、等 `release` 才回覆（並行測試用）。
     - `calls`：各工作被呼叫幾次。
+    - `attempts`：和 `AnthropicLlmProvider.attempts` 同名的屬性（CLI 用它算含重試的最壞花費）；
+      替身本身不重試。
     """
 
-    def __init__(self, replies: Mapping[LlmTask, Reply], *, gated: bool = False) -> None:
+    def __init__(
+        self, replies: Mapping[LlmTask, Reply], *, gated: bool = False, attempts: int = 1
+    ) -> None:
+        self.attempts = attempts
         schemas: dict[type[BaseModel], LlmTask] = {}
         for task in replies:
             schema = load_prompt(ROOT / "prompts", task).schema_class

@@ -3,12 +3,18 @@
 
 - **參數**：每個是論文 ID（UUID）或 DOI（任何 `normalize_doi` 看得懂的寫法）；去重後最多
   `MAX_TRIAL_PAPERS` 篇。看不懂就丟 `TrialArgumentError`（CLI 退出碼 2，不碰資料庫）。
+- **名單檔**（`--save-ids`／`--ids-file`）：一行一個論文 ID；讀的時候空行與 `#` 開頭的行略過，
+  每行照參數的規則解析（也收 DOI）。同一個 seed 只保證「同一時間點的候選」抽到同一批（新論文、
+  摘要或排除狀態變了都會換名單），要重跑「同樣這幾篇」用存下的名單檔。
 - **抽樣**：候選＝`plan_for` 三個 LLM 工作都要做（有摘要、沒被排除、不是手填書目）而且
   `split_for_dois` 是調整組；依 `trial_sample_sha256(seed, 最小的 DOI)` 排序取前 N（同分再比
   DOI）。不用 `random`：跨 Python 版本、跨資料庫都一樣，新增論文不會打亂既有論文之間的先後。
+- **預估**：每項記確認時的 `RunKey`（輸入指紋、prompt 版本、模型）與單次呼叫的費用上限；最壞花費
+  ＝單次上限 × adapter 每個請求最多送幾次（`attempts`，含第一次；逾時放棄的請求也可能計費）。
 - **項目狀態**（`TrialItemStatus`）：計畫不做 → `not_applicable`／`no_input`；交給閘門 →
   `GatewayOutcome` 的值；另有 `not_found`（論文在跑之前被刪）、`error`（非預期例外，只記類別名）、
-  `not_run`（設定錯停下後剩下的）。有 `transient_failure`／`error`／`not_run` 時退出碼 1。
+  `not_run`（設定錯停下後剩下的）、`input_changed`（確認後輸入變了，或確認時不會呼叫、現在會：
+  沒有呼叫模型）。有 `transient_failure`／`error`／`not_run`／`input_changed` 時退出碼 1。
 - **輸出文字**：只印 id、DOI、狀態、原因代碼、token 數、金額與回應的「形狀」（鍵與 type 名稱，
   只收 `^[A-Za-z0-9_]{1,64}$`，其他寫 `<?>`），不印論文內容。只有 `--show-output` 才印模型輸出：
   `json.dumps(ensure_ascii=False)`，控制字元與格式字元一律跳脫，最多 `SHOW_OUTPUT_MAX_CHARS` 字。
@@ -25,7 +31,7 @@ from decimal import ROUND_HALF_UP, Decimal
 from enum import StrEnum
 from typing import Final
 
-from radar.domain.ai_outputs import LlmTask
+from radar.domain.ai_outputs import LlmTask, RunKey
 from radar.domain.budget import BudgetStatus, format_usd
 from radar.domain.eval_split import EvalSplit, split_for_dois
 from radar.domain.fingerprints import trial_sample_sha256
@@ -113,6 +119,25 @@ def parse_trial_targets(values: Sequence[str]) -> TrialTargets:
             f"一次最多 {MAX_TRIAL_PAPERS} 篇（去掉重複後有 {len(targets)} 個）"
         )
     return TrialTargets(tuple(targets))
+
+
+def parse_trial_ids_file(text: str) -> TrialTargets:
+    """讀 `--ids-file` 的內容：一行一個論文 ID 或 DOI；空行與 `#` 開頭的行略過，其餘照
+    `parse_trial_targets` 的規則（去重、最多 `MAX_TRIAL_PAPERS` 篇）。
+
+    Raises:
+        TrialArgumentError: 檔案裡沒有任何論文、有看不懂的行，或去重後超過上限。
+    """
+    lines = [line.strip() for line in text.splitlines()]
+    values = [line for line in lines if line and not line.startswith("#")]
+    if not values:
+        raise TrialArgumentError("名單檔裡沒有論文")
+    return parse_trial_targets(values)
+
+
+def format_trial_ids(papers: Sequence[TrialPaper]) -> str:
+    """`--save-ids` 寫的內容：照執行順序一行一個論文 ID（`parse_trial_ids_file` 讀得回來）。"""
+    return "".join(f"{paper.paper_id}\n" for paper in papers)
 
 
 def check_sample_size(size: int) -> None:
@@ -223,10 +248,21 @@ def trial_paper(paper_id: uuid.UUID, dois: Iterable[str]) -> TrialPaper:
 # --- 預估 ---------------------------------------------------------------------------------
 
 
+def _check_attempts(attempts: int) -> None:
+    if type(attempts) is not int or attempts < 1:
+        raise ValueError("attempts 要是至少 1 的整數")
+
+
 @dataclass(frozen=True)
 class TrialPlanItem:
-    """一項會交給閘門的工作的預估：保守的費用上限、估計輸入 token、`max_tokens`、送出的字元數
-    （系統提示、文件內容、JSON schema）。"""
+    """一項會交給閘門的工作的預估：單次呼叫的保守費用上限（`max_cost_usd`）、估計輸入 token、
+    `max_tokens`、送出的字元數（系統提示、文件內容、JSON schema）、adapter 每個請求最多送幾次
+    （`attempts`，含第一次），以及確認時的 `RunKey`（`key`；執行時只有算出同一個鍵才呼叫，沒有鍵
+    的項目不呼叫）。
+
+    Raises:
+        ValueError: `attempts` 不是至少 1 的整數。
+    """
 
     paper_id: uuid.UUID
     task: LlmTask
@@ -236,17 +272,39 @@ class TrialPlanItem:
     system_chars: int
     content_chars: int
     schema_chars: int
+    attempts: int = 1
+    key: RunKey | None = None
+
+    def __post_init__(self) -> None:
+        _check_attempts(self.attempts)
+
+    @property
+    def worst_cost_usd(self) -> Decimal:
+        """含重試的最壞花費：單次上限 × `attempts`（逾時放棄的請求也可能計費、不進帳本）。"""
+        return self.max_cost_usd * self.attempts
 
 
 @dataclass(frozen=True)
 class TrialEstimate:
-    """執行前的預估：`plan_for` 要做、放行與大小都過了的項目（已有結果的也算，保守）。"""
+    """執行前的預估：`plan_for` 要做、放行與大小都過了的項目（已有結果的也算，保守）。
+    `attempts` 是 adapter 每個請求最多送幾次（含第一次），每一項的 `attempts` 都要一樣。
+
+    Raises:
+        ValueError: `attempts` 不是至少 1 的整數，或有項目的 `attempts` 不一樣。
+    """
 
     items: tuple[TrialPlanItem, ...]
+    attempts: int = 1
+
+    def __post_init__(self) -> None:
+        _check_attempts(self.attempts)
+        if any(item.attempts != self.attempts for item in self.items):
+            raise ValueError("每一項的 attempts 要和預估的一樣")
 
     @property
     def max_cost_usd(self) -> Decimal:
-        return sum((item.max_cost_usd for item in self.items), _ZERO)
+        """含重試的最壞花費合計（每項單次上限 × `attempts`）。"""
+        return sum((item.worst_cost_usd for item in self.items), _ZERO)
 
     def for_item(self, paper_id: uuid.UUID, task: LlmTask) -> TrialPlanItem | None:
         for item in self.items:
@@ -276,11 +334,17 @@ class TrialItemStatus(StrEnum):
     NOT_FOUND = "not_found"  # 論文在跑之前被刪了
     ERROR = "error"  # 非預期例外（只記類別名）
     NOT_RUN = "not_run"  # 金鑰或設定錯停下後，剩下沒跑的
+    INPUT_CHANGED = "input_changed"  # 確認後輸入變了（或確認時不呼叫、現在會）：沒有呼叫模型
 
 
 # 有這些狀態時退出碼 1。
 FAILING_STATUSES: Final = frozenset(
-    {TrialItemStatus.TRANSIENT_FAILURE, TrialItemStatus.ERROR, TrialItemStatus.NOT_RUN}
+    {
+        TrialItemStatus.TRANSIENT_FAILURE,
+        TrialItemStatus.ERROR,
+        TrialItemStatus.NOT_RUN,
+        TrialItemStatus.INPUT_CHANGED,
+    }
 )
 
 
@@ -330,6 +394,11 @@ class TrialItem:
     output: object | None = None
     output_is_raw: bool = False
 
+    @property
+    def called_model(self) -> bool:
+        """這一次有呼叫模型（有新的 run、不是接續）。略過、預算不准、擋下、沒跑、接續都不算。"""
+        return self.run_id is not None and not self.resumed
+
 
 @dataclass(frozen=True)
 class TrialReport:
@@ -357,6 +426,19 @@ class TrialReport:
             item.reason or "unknown"
             for item in self.items
             if item.status is TrialItemStatus.REJECTED
+        )
+        return dict(sorted(counts.items()))
+
+    def called_items(self) -> tuple[TrialItem, ...]:
+        """這一次有呼叫模型的項目（拒收率的分母只算這些）。"""
+        return tuple(item for item in self.items if item.called_model)
+
+    def not_called_by_status(self) -> dict[str, int]:
+        """這一次沒有呼叫模型的項目數，依狀態（接續的另記 `resumed`）。"""
+        counts = Counter(
+            "resumed" if item.resumed else item.status.value
+            for item in self.items
+            if not item.called_model
         )
         return dict(sorted(counts.items()))
 
@@ -482,7 +564,7 @@ def render_trial_estimate(estimate: TrialEstimate, status: BudgetStatus) -> list
     lines = [
         f"預估：會交給閘門 {len(estimate.items)} 項，費用上限"
         f" {format_trial_usd(estimate.max_cost_usd)} 美元"
-        "（保守估計；已經有結果、會略過的也算進去）",
+        f"（含重試的最壞情況：每項最多送 {estimate.attempts} 次；已經有結果、會略過的也算進去）",
         f"本月（{status.window.label}，台北時間）：已花 {format_usd(status.total_usd)}、"
         f"Batch 預留 {format_usd(status.reserved_usd)}、離熔斷線"
         f" {format_usd(status.remaining_usd)}（熔斷線 {format_usd(status.breaker_usd)}）",
@@ -552,6 +634,10 @@ def _diagnostic_lines(item: TrialItem) -> list[str]:
             f"    送出字元：系統提示 {plan.system_chars}、內容 {plan.content_chars}、"
             f"schema {plan.schema_chars}"
         )
+        lines.append(
+            f"    費用上限：單次 {format_trial_usd(plan.max_cost_usd)} 美元；含重試的最壞情況"
+            f" {format_trial_usd(plan.worst_cost_usd)} 美元（最多送 {plan.attempts} 次）"
+        )
     return lines
 
 
@@ -607,6 +693,14 @@ def render_trial_summary(report: TrialReport, *, verbose: bool) -> list[str]:
         )
     else:
         lines.append("拒收：沒有")
+    called = report.called_items()
+    called_rejected = sum(1 for item in called if item.status is TrialItemStatus.REJECTED)
+    not_called = report.not_called_by_status()
+    breakdown = "、".join(f"{status} {count}" for status, count in not_called.items())
+    lines.append(
+        f"這次呼叫模型：{len(called)} 項（其中拒收 {called_rejected} 項）；沒有呼叫模型："
+        f"{sum(not_called.values())} 項" + (f"（{breakdown}）" if breakdown else "")
+    )
     lines.append(f"這次費用：{format_trial_usd(report.cost_usd)} 美元（接續與略過是 0）")
     if verbose:
         lines += _verbose_summary(report)
@@ -617,6 +711,12 @@ def render_trial_summary(report: TrialReport, *, verbose: bool) -> list[str]:
         lines.append("有暫時性失敗：直接重跑同一個指令，做完的不會重付")
     if report.stopped_by_configuration:
         lines.append("金鑰或設定錯誤，已停下；剩下的標 not_run")
+    changed = [item for item in report.items if item.status is TrialItemStatus.INPUT_CHANGED]
+    if changed:
+        lines.append(
+            f"確認後輸入變了、沒有呼叫模型：{len(changed)} 項（重跑同一個指令會重新預估、確認）"
+        )
+        lines += [f"  {item.paper_id} {item.task.value}" for item in changed]
     return lines
 
 

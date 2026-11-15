@@ -9,6 +9,7 @@ import logging
 import shutil
 import uuid
 from collections.abc import Callable, Mapping
+from decimal import Decimal
 from pathlib import Path
 from types import TracebackType
 from typing import Any, Self
@@ -24,7 +25,7 @@ from radar.domain.llm import LlmConfigurationError, LlmServerError
 from radar.repo.db import Database
 from tests.batch_support import NOW
 from tests.database import ROOT, TestDatabase, migrate
-from tests.llm_support import insert_ledger, table_counts
+from tests.llm_support import execute, insert_ledger, table_counts
 from tests.trial_support import (
     BANKING_ABSTRACT,
     Reply,
@@ -416,6 +417,151 @@ def test_unreadable_arguments_exit_2_without_touching_the_database(
     monkeypatch.setattr(cli, "build_llm_provider", record)
 
     result = _trial(*args)
+
+    assert result.exit_code == 2
+    assert message in result.stderr
+    assert built == []
+
+
+# --- 審查後的修正（Codex 主審查第 1、3、4 條） ---------------------------------------------
+
+
+def _worst_case(lines: list[str]) -> tuple[str, str]:
+    """預估那一行的（金額, 每項最多送幾次）。"""
+    [line] = [line for line in lines if line.startswith("預估：")]
+    amount = line.split("費用上限 ")[1].split(" 美元")[0]
+    attempts = line.split("每項最多送 ")[1].split(" 次")[0]
+    return amount, attempts
+
+
+@pytest.mark.parametrize("attempts", [1, 4])
+def test_worst_case_uses_the_provider_attempts(
+    db: TestDatabase,
+    database: Database,
+    env: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    attempts: int,
+) -> None:
+    paper = banking_paper(database, doi_in(EvalSplit.TUNING, "1"), 1)
+
+    def build(_settings: object) -> _ProviderContext:
+        return _ProviderContext(SchemaReplyProvider(good_replies(), attempts=attempts))
+
+    monkeypatch.setattr(cli, "build_llm_provider", build)
+    single = _trial(str(paper), "--verbose", stdin="n\n")
+    assert single.exit_code == 1
+
+    amount, shown = _worst_case(_stdout(single))
+    assert shown == str(attempts)
+    assert "含重試的最壞情況" in single.stdout
+
+    result = _trial(str(paper), "--yes", "--verbose")
+
+    assert result.exit_code == 0, result.output
+    cost_lines = [line for line in _stdout(result) if line.startswith("    費用上限：單次 ")]
+    assert len(cost_lines) == 3
+    singles = [Decimal(line.split("單次 ")[1].split(" 美元")[0]) for line in cost_lines]
+    worsts = [Decimal(line.split("最壞情況 ")[1].split(" 美元")[0]) for line in cost_lines]
+    assert all(f"（最多送 {attempts} 次）" in line for line in cost_lines)
+    assert Decimal(amount) == sum(worsts)
+    for one, worst in zip(singles, worsts, strict=True):
+        assert abs(worst - one * attempts) <= Decimal("0.000001") * attempts
+
+
+def test_save_ids_then_ids_file_reruns_the_same_papers(
+    db: TestDatabase, database: Database, models: Models, tmp_path: Path
+) -> None:
+    for n in range(4):
+        banking_paper(database, doi_in(EvalSplit.TUNING, "1", skip=n), n)
+    saved = tmp_path / "trial-ids.txt"
+
+    drawn = _trial("--sample", "2", "--seed", "7", "--save-ids", str(saved), stdin="n\n")
+
+    # 按 n：什麼都沒跑，但名單已經存好。
+    assert drawn.exit_code == 1
+    assert models.calls == 0
+    assert table_counts(db)["derivation_run"] == 0
+    picked = [uuid.UUID(line) for line in saved.read_text(encoding="utf-8").splitlines()]
+    assert len(picked) == 2
+    assert f"名單已存到 {saved}（2 篇）" in _stdout(drawn)
+    # 之後又進了幾篇新論文（同一個 seed 可能抽到別篇），名單檔照樣跑原本那 2 篇。
+    for n in range(4, 30):
+        banking_paper(database, doi_in(EvalSplit.TUNING, "1", skip=n), n)
+
+    result = _trial("--ids-file", str(saved), "--yes")
+
+    assert result.exit_code == 0, result.output
+    lines = _stdout(result)
+    assert lines[0] == "選到的論文（2 篇）："
+    item_lines = [line for line in lines if line.startswith("[")]
+    assert [uuid.UUID(line.split()[1]) for line in item_lines[::3]] == picked
+    runs = execute(db, "SELECT DISTINCT paper_id FROM derivation_run")
+    assert {row[0] for row in runs} == set(picked)
+    assert "這次呼叫模型：6 項（其中拒收 0 項）；沒有呼叫模型：0 項" in lines
+
+    rerun = _trial("--ids-file", str(saved), "--yes")
+    assert "這次呼叫模型：0 項（其中拒收 0 項）；沒有呼叫模型：6 項（skipped 6）" in _stdout(rerun)
+
+
+def test_save_ids_never_overwrites(
+    db: TestDatabase, database: Database, models: Models, tmp_path: Path
+) -> None:
+    paper = banking_paper(database, doi_in(EvalSplit.TUNING, "1"), 1)
+    saved = tmp_path / "keep.txt"
+    saved.write_text("# 之前存的名單\n", encoding="utf-8")
+
+    result = _trial(str(paper), "--save-ids", str(saved), "--yes")
+
+    assert result.exit_code == 2
+    assert "--save-ids 的檔案已經存在，不覆寫" in result.stderr
+    assert saved.read_text(encoding="utf-8") == "# 之前存的名單\n"
+    assert models.calls == 0
+
+
+def test_save_ids_write_failure_runs_nothing(
+    db: TestDatabase, database: Database, models: Models, tmp_path: Path
+) -> None:
+    paper = banking_paper(database, doi_in(EvalSplit.TUNING, "1"), 1)
+
+    result = _trial(str(paper), "--save-ids", str(tmp_path / "no-such-dir" / "ids.txt"), "--yes")
+
+    assert result.exit_code == 1
+    assert "名單檔寫不進去（FileNotFoundError），沒有執行" in result.stderr
+    assert models.calls == 0
+    assert table_counts(db)["derivation_run"] == 0
+
+
+@pytest.mark.parametrize(
+    ("make_args", "message"),
+    [
+        (lambda p: ["--ids-file", str(p / "missing.txt")], "讀不到名單檔（FileNotFoundError）"),
+        (lambda p: ["--ids-file", str(p / "empty.txt")], "名單檔裡沒有論文"),
+        (lambda p: ["--ids-file", str(p / "bad.txt")], "看不懂"),
+        (lambda p: ["--ids-file", str(p / "latin1.txt")], "讀不到名單檔（UnicodeDecodeError）"),
+        (lambda p: ["--ids-file", str(p / "empty.txt"), "10.1/x"], "只能擇一"),
+        (
+            lambda p: ["--ids-file", str(p / "empty.txt"), "--sample", "1", "--seed", "1"],
+            "只能擇一",
+        ),
+        (lambda p: ["--ids-file", str(p / "empty.txt"), "--seed", "1"], "--seed 只能和"),
+    ],
+)
+def test_ids_file_problems_exit_2_without_touching_the_database(
+    env: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    make_args: Callable[[Path], list[str]],
+    message: str,
+) -> None:
+    (tmp_path / "empty.txt").write_text("# 沒有論文\n", encoding="utf-8")
+    (tmp_path / "bad.txt").write_text("not-a-paper\n", encoding="utf-8")
+    (tmp_path / "latin1.txt").write_bytes(b"\xff\xfe10.1/x\n")
+    built: list[object] = []
+    record: Callable[..., Any] = lambda *a, **k: built.append(a)  # noqa: E731
+    monkeypatch.setattr(cli, "build_database", record)
+    monkeypatch.setattr(cli, "build_llm_provider", record)
+
+    result = _trial(*make_args(tmp_path))
 
     assert result.exit_code == 2
     assert message in result.stderr

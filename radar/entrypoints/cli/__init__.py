@@ -4,6 +4,7 @@ import itertools
 import uuid
 from datetime import UTC, datetime
 from importlib.metadata import version as package_version
+from pathlib import Path
 from typing import Annotated, NoReturn
 
 import structlog
@@ -41,6 +42,8 @@ from radar.domain.trial_runs import (
     TrialItem,
     TrialTargets,
     check_sample_size,
+    format_trial_ids,
+    parse_trial_ids_file,
     parse_trial_targets,
     render_trial_estimate,
     render_trial_item,
@@ -439,17 +442,40 @@ def embeddings_backfill(
         raise typer.Exit(1)
 
 
-def _trial_request(
-    targets: list[str], sample: int | None, seed: int | None
-) -> TrialTargets | tuple[int, int]:
-    """`radar runs trial` 的參數：指定清單（`TrialTargets`）或抽樣（N, seed）。
+def _read_ids_file(path: Path) -> TrialTargets:
+    """讀 `--ids-file`（UTF-8）。
 
     Raises:
-        TrialArgumentError: 清單與 --sample 同時給、--sample 沒給 --seed（或反過來）、兩者都沒給、
-            N 不在範圍內，或清單看不懂、超過上限。
+        TrialArgumentError: 讀不到、不是 UTF-8，或內容看不懂（見 `parse_trial_ids_file`）。
     """
-    if targets and sample is not None:
-        raise TrialArgumentError("論文清單和 --sample 只能擇一")
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise TrialArgumentError(f"讀不到名單檔（{type(exc).__name__}）") from None
+    return parse_trial_ids_file(text)
+
+
+def _trial_request(
+    targets: list[str],
+    sample: int | None,
+    seed: int | None,
+    ids_file: Path | None = None,
+    save_ids: Path | None = None,
+) -> TrialTargets | tuple[int, int]:
+    """`radar runs trial` 的參數：指定清單或名單檔（`TrialTargets`），或抽樣（N, seed）。
+
+    Raises:
+        TrialArgumentError: 清單、--ids-file、--sample 給了不只一種、--sample 沒給 --seed（或反過
+            來）、都沒給、N 不在範圍內、清單或名單檔看不懂、超過上限，或 --save-ids 的檔案已經存在。
+    """
+    if save_ids is not None and save_ids.exists():
+        raise TrialArgumentError(f"--save-ids 的檔案已經存在，不覆寫：{save_ids}")
+    if sum((bool(targets), sample is not None, ids_file is not None)) > 1:
+        raise TrialArgumentError("論文清單、--ids-file、--sample 只能擇一")
+    if ids_file is not None:
+        if seed is not None:
+            raise TrialArgumentError("--seed 只能和 --sample 一起用")
+        return _read_ids_file(ids_file)
     if sample is None:
         if seed is not None:
             raise TrialArgumentError("--seed 只能和 --sample 一起用")
@@ -457,7 +483,9 @@ def _trial_request(
             raise TrialArgumentError("要指定論文 ID 或 DOI，或用 --sample N --seed S 抽樣")
         return parse_trial_targets(targets)
     if seed is None:
-        raise TrialArgumentError("--sample 要和 --seed 一起用（同一個 seed 才抽得到同一批）")
+        raise TrialArgumentError(
+            "--sample 要和 --seed 一起用（同一個 seed、同一時間點的候選才抽得到同一批）"
+        )
     check_sample_size(sample)
     return sample, seed
 
@@ -475,7 +503,24 @@ def runs_trial(
         ),
     ] = None,
     seed: Annotated[
-        int | None, typer.Option("--seed", help="抽樣的 seed（同一個 seed 抽到同一批）")
+        int | None,
+        typer.Option(
+            "--seed",
+            help="抽樣的 seed（候選沒變時同一個 seed 抽到同一批；要固定名單用 --save-ids）",
+        ),
+    ] = None,
+    ids_file: Annotated[
+        Path | None,
+        typer.Option(
+            "--ids-file",
+            help="從名單檔讀論文（一行一個 ID 或 DOI，# 開頭與空行略過）；重跑同一份名單用",
+        ),
+    ] = None,
+    save_ids: Annotated[
+        Path | None,
+        typer.Option(
+            "--save-ids", help="把選到的論文 ID 存成名單檔（不覆寫；確認前就寫，按 n 也會留下）"
+        ),
     ] = None,
     yes: Annotated[bool, typer.Option("--yes", help="不問確認，直接執行")] = False,
     verbose: Annotated[
@@ -490,18 +535,20 @@ def runs_trial(
 ) -> None:
     """只對指定的論文，用目前的 prompt 跑一次 AI（中文重點、分類、研究模型）。
 
-    給論文 ID／DOI（最多 100 篇），或用 --sample N --seed S 從調整組抽 N 篇。先印選到的論文、
-    保守的費用上限與本月預算，確認後才跑（--yes 不問）；每項都經同一個閘門（互動呼叫，照常略過
-    已有結果的、記帳、受熔斷限制）。每做完一項印一行，最後印每篇每種工作的狀態、拒收統計與這次的
-    費用。
+    給論文 ID／DOI（最多 100 篇）、用 --ids-file 讀名單檔，或用 --sample N --seed S 從調整組抽
+    N 篇（--save-ids 把選到的存成名單檔）。先印選到的論文、含重試的最壞費用與本月預算，確認後才跑
+    （--yes 不問）；只跑確認過的項目，確認後輸入變了的標 input_changed、不呼叫。每項都經同一個
+    閘門（互動呼叫，照常略過已有結果的、記帳、受熔斷限制）。每做完一項印一行，最後印每篇每種工作
+    的狀態、拒收統計、這次有沒有呼叫模型與這次的費用。
 
-    參數看不懂、清單和 --sample 同時給、--sample 沒給 --seed、超過 100 篇：退出碼 2（不碰資料庫）。
-    有論文找不到、沒有確認、設定錯、有暫時性失敗或出錯的項目：退出碼 1。Ctrl-C：退出碼 130，
-    重跑同一個指令只做沒做完的。錯誤只印類別或狀態碼，不印金鑰與連線字串。
+    參數看不懂、清單／--ids-file／--sample 給了不只一種、--sample 沒給 --seed、超過 100 篇、名單檔
+    讀不到、--save-ids 的檔案已經存在：退出碼 2（不碰資料庫）。有論文找不到、名單檔寫不進去、沒有
+    確認、設定錯、有暫時性失敗、出錯或輸入在確認後變了的項目：退出碼 1。Ctrl-C：退出碼 130，重跑
+    同一個指令只做沒做完的。錯誤只印類別或狀態碼，不印金鑰與連線字串。
     """
     configure_logging()
     try:
-        request = _trial_request(targets or [], sample, seed)
+        request = _trial_request(targets or [], sample, seed, ids_file, save_ids)
     except TrialArgumentError as exc:
         typer.echo(f"參數看不懂，沒有執行：{exc}", err=True)
         raise typer.Exit(2) from None
@@ -539,9 +586,20 @@ def runs_trial(
             if not selection.papers:
                 typer.echo("沒有可以跑的論文，沒有執行")
                 return
-            # 預估 → 確認 → 執行 → 總表。
+            if save_ids is not None:
+                try:
+                    with save_ids.open("x", encoding="utf-8") as file:
+                        file.write(format_trial_ids(selection.papers))
+                except OSError as exc:
+                    log.error("名單檔寫不進去", error_type=type(exc).__name__)
+                    _fail(f"名單檔寫不進去（{type(exc).__name__}），沒有執行", [])
+                log.info("試跑名單已存檔", papers=len(selection.papers))
+                typer.echo(f"名單已存到 {save_ids}（{len(selection.papers)} 篇）")
+            # 預估 → 確認 → 執行 → 總表。最壞花費照 adapter 實際的重試次數算。
             try:
-                estimate = estimate_trial(SystemViewer(), database, setup, selection)
+                estimate = estimate_trial(
+                    SystemViewer(), database, setup, selection, attempts=provider.attempts
+                )
                 status = get_budget_status(SystemViewer(), database, setup.budget, now=_utc_now())
             except Exception as exc:
                 log.error("試跑的預估失敗", error_type=type(exc).__name__)

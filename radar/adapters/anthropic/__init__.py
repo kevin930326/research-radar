@@ -23,6 +23,7 @@
 - 重試：只重試 `LlmTransientError`，最多 `attempts` 次（含第一次）；帶 `Retry-After` 時不超過
   `retry_after_max` 秒就照它等，超過就不再重試、丟出最後一次的錯誤（不提早重送）。
   `deadline`（秒）是含所有重試的總時限（交給 stamina 的 `timeout`），預設 None 不限。
+  `attempts` 屬性讀得到這個次數（試跑的最壞花費＝單次上限 × attempts，Story 2.10）。
 - Batch（`submit_batch`，Story 2.9、ADR-0041）：`POST {base_url}/v1/messages/batches`，每筆
   `{"custom_id", "params"}`，`params` 和 `complete` 送的一樣（同一份系統提示、訊息、思考與輸出
   設定）。**只送一次、不重試**（建立批次沒有冪等鍵）；錯誤沿用 `to_llm_error`；回應用 Pydantic 驗
@@ -348,6 +349,12 @@ class AnthropicLlmProvider:
             open_telemetry=False,
             http_client=http_client,
         )
+
+    @property
+    def attempts(self) -> int:
+        """`complete` 每個請求最多送幾次（含第一次；`submit_batch` 不重試）。試跑的最壞花費照它算
+        （Story 2.10）。"""
+        return self._attempts
 
     def __repr__(self) -> str:
         # 不印 key。

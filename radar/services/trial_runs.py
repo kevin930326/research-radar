@@ -6,10 +6,16 @@
   `TrialPapersNotFoundError`，一篇都不跑。
 - `sample_trial_papers`：從調整組、三個工作都要做的論文裡，用固定 seed 抽 N 篇（排序規則在
   `domain/trial_runs.sample_tuning_papers`）；seed 與抽到的論文（ID＋DOI）寫進 info 日誌。
-- `estimate_trial`：執行前的保守費用上限（每項 `max_call_cost(估計輸入, max_tokens, 互動)`；
-  已有結果、會被略過的也算）。指紋與實跑一樣（`services/llm_batches.llm_job`）。不碰帳本、不寫列。
-- `run_trial`：逐篇逐工作呼叫既有的 `run_zh_summary`／`run_classification`／`run_research_model`
-  （互動呼叫、同一個閘門：照常問 `plan_for` 與 `should_run`、記來歷與帳、受 `BudgetGuard` 限制）。
+- `estimate_trial`：執行前的保守費用上限。每項單次上限是 `max_call_cost(估計輸入, max_tokens,
+  互動)`，最壞花費再乘 adapter 每個請求最多送幾次（`attempts`，呼叫端從 adapter 讀，含第一次；
+  逾時放棄的請求也可能計費、不進帳本）。已有結果、會被略過的也算。每項記下確認時的 `RunKey`
+  （指紋與實跑一樣，`services/llm_batches.llm_job`）。不碰帳本、不寫列。
+- `run_trial`：只跑確認過的項目（`estimate` 裡有鍵的）：逐篇逐工作呼叫既有的
+  `run_zh_summary`／`run_classification`／`run_research_model`，帶 `confirmed_key`（互動呼叫、
+  同一個閘門：照常問 `plan_for` 與 `should_run`、記來歷與帳、受 `BudgetGuard` 限制）。閘門算出的
+  鍵和確認的不一樣（例如確認期間補上了摘要）→ `input_changed`，不呼叫模型。確認時不會呼叫的
+  項目不交給 service，只在這裡照預估同樣的步驟重算一次狀態（`not_applicable`、`no_input`、
+  `blocked`、`too_large`）；現在變成會呼叫的也是 `input_changed`。所以總花費不會超過確認的上限。
   這裡不新增寫入路徑：所有 AI 寫入都經 `run_llm_job` → `services/ai_results.py`。每做完一項呼叫
   `on_item`。
 
@@ -31,7 +37,7 @@ from typing import Final
 import structlog
 from pydantic import BaseModel
 
-from radar.domain.ai_outputs import CallMode, GatewayConfig, LlmTask
+from radar.domain.ai_outputs import CallMode, GatewayConfig, LlmTask, PaperLlmSource, RunKey
 from radar.domain.budget import BudgetConfig
 from radar.domain.context_values import ContextValues
 from radar.domain.errors import ErrorCode
@@ -39,7 +45,7 @@ from radar.domain.llm import LlmConfigurationError, frozen_schema_json, system_p
 from radar.domain.permissions import Action, require
 from radar.domain.policy import cloud_text
 from radar.domain.pricing import max_call_cost
-from radar.domain.processing import ProcessingTask, TaskPlan, plan_for
+from radar.domain.processing import ProcessingFacts, ProcessingTask, TaskPlan, plan_for
 from radar.domain.taxonomy import Taxonomy
 from radar.domain.trial_runs import (
     TRIAL_TASKS,
@@ -72,8 +78,13 @@ from radar.repo.papers import (
 )
 from radar.services.classification import run_classification
 from radar.services.llm_batches import llm_job
-from radar.services.llm_gateway import GatewayResult, PreparedLlmRequest, prepare_llm_request
-from radar.services.prompt_loader import load_prompt
+from radar.services.llm_gateway import (
+    ConfirmedRequestChangedError,
+    GatewayResult,
+    PreparedLlmRequest,
+    prepare_llm_request,
+)
+from radar.services.prompt_loader import LoadedPrompt, load_prompt
 from radar.services.research_model import run_research_model
 from radar.services.zh_summary import run_zh_summary
 
@@ -180,7 +191,7 @@ def sample_trial_papers(actor: Viewer, database: Database, size: int, seed: int)
 # --- 預估 ---------------------------------------------------------------------------------
 
 
-def _plan_item(setup: TrialSetup, prepared: PreparedLlmRequest) -> TrialPlanItem:
+def _plan_item(setup: TrialSetup, prepared: PreparedLlmRequest, attempts: int) -> TrialPlanItem:
     request = prepared.request
     schema_class = prepared.prompt.schema_class
     return TrialPlanItem(
@@ -198,40 +209,79 @@ def _plan_item(setup: TrialSetup, prepared: PreparedLlmRequest) -> TrialPlanItem
         system_chars=len(system_prompt(request)),
         content_chars=sum(len(cloud_text(block)) for block in request.content),
         schema_chars=0 if schema_class is None else len(frozen_schema_json(schema_class)),
+        attempts=attempts,
+        key=prepared.key,
     )
 
 
+def _trial_prompts(setup: TrialSetup) -> dict[LlmTask, LoadedPrompt]:
+    return {task: load_prompt(setup.gateway.prompts_root, task) for task in TRIAL_TASKS}
+
+
+def _read_paper(
+    database: Database, paper_id: uuid.UUID
+) -> tuple[ProcessingFacts, PaperLlmSource] | None:
+    """讀一篇論文的處理事實與送模型的來源（同一個交易）；論文不在回 None。"""
+    viewer = SystemViewer()
+    with database.transaction() as connection:
+        facts = find_paper_processing_facts(viewer, connection, paper_id)
+        source = find_paper_llm_source(viewer, connection, paper_id, for_update=False)
+    if facts is None or source is None:
+        return None
+    return facts, source
+
+
+def _prepare(
+    setup: TrialSetup,
+    prompts: dict[LlmTask, LoadedPrompt],
+    paper_id: uuid.UUID,
+    task: LlmTask,
+    facts: ProcessingFacts,
+    source: PaperLlmSource,
+) -> TaskPlan | GatewayResult | PreparedLlmRequest:
+    """和實跑一樣的前幾步（不碰資料庫、不看預算）：`plan_for` 說不做回 `TaskPlan`；放行或大小
+    擋下回 `GatewayResult`；會呼叫模型回 `PreparedLlmRequest`。"""
+    plan = plan_for(facts).for_task(ProcessingTask(task.value))
+    if plan.input_kind is None:
+        return plan
+    job = llm_job(setup, paper_id, task, plan.input_kind)
+    return prepare_llm_request(setup.gateway, job, source, prompts[task])
+
+
 def estimate_trial(
-    actor: Viewer, database: Database, setup: TrialSetup, selection: TrialSelection
+    actor: Viewer,
+    database: Database,
+    setup: TrialSetup,
+    selection: TrialSelection,
+    *,
+    attempts: int,
 ) -> TrialEstimate:
     """執行前的預估：每篇照 `plan_for` 要做的工作組請求（和實跑同一個 `prepare_llm_request`），
-    放行或大小擋下的不算；已經有結果、會被略過的照算（保守）。不看帳本、不寫列。
+    放行或大小擋下的不算；已經有結果、會被略過的照算（保守）。`attempts` 是 adapter 每個請求最多
+    送幾次（含第一次；CLI 從 `AnthropicLlmProvider.attempts` 讀），最壞花費＝單次上限 × attempts。
+    每項記下確認時的 `RunKey`，`run_trial` 只跑這些。不看帳本、不寫列。
 
     Raises:
         PermissionDeniedError: `actor` 不是系統工作（不碰資料庫）。
+        ValueError: `attempts` 不是至少 1 的整數（不碰資料庫）。
         PromptIntegrityError, PromptFormatError: prompt 檔或登記不對。
     """
     require(actor, Action.RUN_AI_JOBS, None)
-    viewer = SystemViewer()
-    prompts = {task: load_prompt(setup.gateway.prompts_root, task) for task in TRIAL_TASKS}
+    if type(attempts) is not int or attempts < 1:
+        raise ValueError("attempts 要是至少 1 的整數")
+    prompts = _trial_prompts(setup)
     items: list[TrialPlanItem] = []
     for paper in selection.papers:
-        with database.transaction() as connection:
-            facts = find_paper_processing_facts(viewer, connection, paper.paper_id)
-            source = find_paper_llm_source(viewer, connection, paper.paper_id, for_update=False)
-        if facts is None or source is None:
+        found = _read_paper(database, paper.paper_id)
+        if found is None:
             continue  # 剛被刪：執行時會是 not_found
-        plan = plan_for(facts)
+        facts, source = found
         for task in TRIAL_TASKS:
-            input_kind = plan.for_task(ProcessingTask(task.value)).input_kind
-            if input_kind is None:
-                continue
-            job = llm_job(setup, paper.paper_id, task, input_kind)
-            prepared = prepare_llm_request(setup.gateway, job, source, prompts[task])
-            if isinstance(prepared, GatewayResult):
-                continue  # 放行或大小擋下：不會呼叫模型
-            items.append(_plan_item(setup, prepared))
-    return TrialEstimate(tuple(items))
+            prepared = _prepare(setup, prompts, paper.paper_id, task, facts, source)
+            if isinstance(prepared, PreparedLlmRequest):
+                items.append(_plan_item(setup, prepared, attempts))
+            # 其餘（plan_for 不做、放行或大小擋下）不會呼叫模型，不算。
+    return TrialEstimate(tuple(items), attempts=attempts)
 
 
 # --- 執行 ---------------------------------------------------------------------------------
@@ -245,6 +295,7 @@ class _RunOptions:
     clock: Callable[[], datetime]
     diagnostics: bool
     show_output: bool
+    prompts: dict[LlmTask, LoadedPrompt]
 
 
 def run_trial(
@@ -255,25 +306,29 @@ def run_trial(
     selection: TrialSelection,
     *,
     clock: Callable[[], datetime],
-    estimate: TrialEstimate | None = None,
+    estimate: TrialEstimate,
     diagnostics: bool = False,
     show_output: bool = False,
     on_item: Callable[[TrialItem], None] | None = None,
 ) -> TrialReport:
-    """逐篇逐工作跑（見模組說明），回整次的結果。`diagnostics` 為真時有 run 的項目讀
-    `llm_call` 的診斷欄位；`show_output` 為真時帶驗證過的輸出（或被拒收時的模型原文）。
+    """逐篇逐工作跑（見模組說明），回整次的結果。只呼叫 `estimate`（確認過的預估）裡有鍵的
+    項目，而且閘門算出的鍵要一樣。`diagnostics` 為真時有 run 的項目讀 `llm_call` 的診斷欄位；
+    `show_output` 為真時帶驗證過的輸出（或被拒收時的模型原文）。
 
     Raises:
         PermissionDeniedError: `actor` 不是系統工作（不碰資料庫）。
+        PromptIntegrityError, PromptFormatError: prompt 檔或登記不對（還沒跑任何項目）。
         KeyboardInterrupt: 原樣往上丟（已完成的項目留著，重跑不重付）。
     """
     require(actor, Action.RUN_AI_JOBS, None)
-    options = _RunOptions(database, provider, setup, clock, diagnostics, show_output)
+    options = _RunOptions(
+        database, provider, setup, clock, diagnostics, show_output, _trial_prompts(setup)
+    )
     items: list[TrialItem] = []
     stopped = False
     for paper in selection.papers:
         for task in TRIAL_TASKS:
-            plan_item = None if estimate is None else estimate.for_item(paper.paper_id, task)
+            plan_item = estimate.for_item(paper.paper_id, task)
             if stopped:
                 item = TrialItem(paper.paper_id, task, TrialItemStatus.NOT_RUN, plan=plan_item)
             else:
@@ -306,11 +361,39 @@ def _run_one(
     task: LlmTask,
     plan_item: TrialPlanItem | None,
 ) -> TrialItem:
+    if plan_item is None or plan_item.key is None:
+        # 確認時不會呼叫模型的項目：不交給 service，只重算狀態。
+        try:
+            return _unconfirmed_item(options, paper, task)
+        except Exception as exc:
+            log.error(
+                "試跑的項目出錯",
+                paper_id=str(paper.paper_id),
+                task=task.value,
+                error_type=type(exc).__name__,
+            )
+            return TrialItem(paper.paper_id, task, TrialItemStatus.ERROR, reason=type(exc).__name__)
     started = time.monotonic()
     try:
-        run = _call_service(actor, options, paper.paper_id, task)
+        run = _call_service(actor, options, paper.paper_id, task, plan_item.key)
     except Exception as exc:
         elapsed = time.monotonic() - started
+        if isinstance(exc, ConfirmedRequestChangedError):
+            log.warning(
+                "確認後輸入變了，這一項沒有呼叫模型",
+                paper_id=str(paper.paper_id),
+                task=task.value,
+                prompt_version_changed=exc.confirmed.prompt_version != exc.current.prompt_version,
+                model_changed=exc.confirmed.model != exc.current.model,
+                input_changed=exc.confirmed.input_sha256 != exc.current.input_sha256,
+            )
+            return TrialItem(
+                paper.paper_id,
+                task,
+                TrialItemStatus.INPUT_CHANGED,
+                elapsed_seconds=elapsed,
+                plan=plan_item,
+            )
         if type(exc) is LookupError:
             # run_* 找不到論文時丟的就是 LookupError 本身（KeyError 之類的子類別算非預期錯誤）。
             return TrialItem(
@@ -380,8 +463,39 @@ def _run_one(
     )
 
 
+def _unconfirmed_item(options: _RunOptions, paper: TrialPaper, task: LlmTask) -> TrialItem:
+    """確認時不會呼叫模型的項目：照預估同樣的步驟重算狀態，不呼叫模型、不寫列。現在變成會呼叫
+    （例如確認期間補上了摘要）→ `input_changed`。"""
+    found = _read_paper(options.database, paper.paper_id)
+    if found is None:
+        return TrialItem(paper.paper_id, task, TrialItemStatus.NOT_FOUND)
+    facts, source = found
+    prepared = _prepare(options.setup, options.prompts, paper.paper_id, task, facts, source)
+    if isinstance(prepared, TaskPlan):
+        if prepared.skip is None:  # plan_for 保證不做時一定有 skip
+            raise RuntimeError("plan_for 說不做卻沒有狀態")
+        return TrialItem(paper.paper_id, task, TrialItemStatus(prepared.skip.value))
+    if isinstance(prepared, GatewayResult):
+        return TrialItem(
+            paper.paper_id,
+            task,
+            TrialItemStatus(prepared.outcome.value),
+            reason=None if prepared.reason is None else prepared.reason.value,
+        )
+    log.warning(
+        "確認時不會呼叫、現在會呼叫，這一項沒有呼叫模型",
+        paper_id=str(paper.paper_id),
+        task=task.value,
+    )
+    return TrialItem(paper.paper_id, task, TrialItemStatus.INPUT_CHANGED)
+
+
 def _call_service(
-    actor: Viewer, options: _RunOptions, paper_id: uuid.UUID, task: LlmTask
+    actor: Viewer,
+    options: _RunOptions,
+    paper_id: uuid.UUID,
+    task: LlmTask,
+    confirmed_key: RunKey,
 ) -> tuple[TaskPlan, GatewayResult | None]:
     setup = options.setup
     if task is LlmTask.ZH_SUMMARY:
@@ -394,6 +508,7 @@ def _call_service(
             setup.zh_summary_rules,
             paper_id,
             clock=options.clock,
+            confirmed_key=confirmed_key,
         )
         return zh.plan, zh.result
     if task is LlmTask.CLASSIFY:
@@ -406,6 +521,7 @@ def _call_service(
             setup.taxonomy,
             paper_id,
             clock=options.clock,
+            confirmed_key=confirmed_key,
         )
         return classified.plan, classified.result
     if task is LlmTask.EXTRACT_MODEL:
@@ -418,6 +534,7 @@ def _call_service(
             setup.context_values,
             paper_id,
             clock=options.clock,
+            confirmed_key=confirmed_key,
         )
         return model.plan, model.result
     raise ValueError(f"{task.value} 不是試跑的工作")
