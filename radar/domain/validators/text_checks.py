@@ -296,14 +296,15 @@ def _scientific_values(text: str) -> set[Number]:
 #   `5-MB`、`2 B2B`、`312 K-12 teachers`、`200 M-Turk`、`12 mmHg`，以及 Opus 確認審查 M4 的
 #   `412 M&A deals`、`120 M.B.A. students`、`20 M.D.`、`120 M/F` 不算）；句尾的 `12M.` 照樣算；
 # - 例外（Opus 確認審查 M3）：數字和字母**中間沒有空白也沒有連字號**時，後面接「連字號＋字母」的
-#   複合形容詞也算（`a 2M-user platform`、`a 10k-respondent panel`、`2B-dollar`）；中間有空白或
-#   連字號的（`200 M-Turk`、`312 K-12`）照上一條不算。
+#   複合形容詞也算（`a 2M-user platform`、`a 10k-respondent panel`、`2B-dollar`），接「連字號＋
+#   數字」的範圍也算（Opus 第三輪 L2：`a 12M-15M user base` 的 12）；中間有空白或連字號的
+#   （`200 M-Turk`、`312 K-12`）照上一條不算。
 _MAGNITUDE_NUMBER: Final = r"(?:(?:[0-9]{1,3}(?:,[0-9]{3})+|[0-9]+)(?:\.[0-9]+)?|\.[0-9]+)"
 _MAGNITUDE_LETTERS: Final = r"(?i:bln|bil|bn|mln|mil|mio|mm|mn|[kmb])"
 _ABBREVIATED_MAGNITUDE: Final = re.compile(
     rf"(?<![0-9A-Za-z.,]){_MAGNITUDE_NUMBER}"
     rf"(?:(?:\s?|-){_MAGNITUDE_LETTERS}(?![0-9A-Za-z&/-]|\.[A-Za-z])"
-    rf"|{_MAGNITUDE_LETTERS}(?=-[A-Za-z]))"
+    rf"|{_MAGNITUDE_LETTERS}(?=-[A-Za-z0-9]))"
 )
 
 

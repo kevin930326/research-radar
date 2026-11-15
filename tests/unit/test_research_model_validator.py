@@ -53,7 +53,9 @@ from radar.domain.llm_schemas import (
 from radar.domain.papers import AbstractSource
 from radar.domain.validators.research_model import (
     ResearchModelValidator,
+    _matches_label,
     _reported_part,
+    _result_contexts,
     quote_key,
     validate_research_model,
 )
@@ -2662,3 +2664,247 @@ def test_sample_size_before_a_magnitude_letter_in_another_word_is_kept(
     data["hypotheses"][0]["statistics"]["sample_size"] = None
 
     assert _validate(data, _input(abstract=abstract)).sample_size == sample_size
+
+
+# --- Opus 第三輪確認審查（PR #68）H1、M1、M2、L1 ------------------------------------------------
+# H1：代號與全部假設的直接陳述看結果原文在**輸入裡**的上下文。輸入只有外層那一句、結果原文只抄裡面
+# 那一小段時，外層說法照樣算數。
+
+SHORT_ABSTRACT = (
+    "Based on a survey of 200 bank customers in Taiwan, we test a model of mobile banking"
+    f" adoption. {H1_SENTENCE} {H2_SENTENCE}"
+)
+
+
+@pytest.mark.parametrize(
+    ("input_sentence", "result_quote"),
+    [
+        ("We dispute that H1 was supported.", "H1 was supported"),
+        ("Other researchers report that H1 was supported.", "H1 was supported"),
+        (
+            "Other researchers report that all hypotheses were supported.",
+            "all hypotheses were supported",
+        ),
+        ("It is not the case that H1 was supported.", "H1 was supported"),
+        ("Other researchers report that the results support H1.", "the results support H1"),
+        ("Whether H1 was supported remains unknown.", "H1 was supported"),
+        (
+            "Future studies will test whether all hypotheses were supported.",
+            "all hypotheses were supported",
+        ),
+        # 範圍符號、全部假設的例外字在結果原文後面也算（看整句）。
+        ("Results support H1-H3.", "Results support H1"),
+        ("All hypotheses were supported except H2.", "All hypotheses were supported"),
+        # 直接陳述的代號或全部假設在結果原文前面、不在結果原文裡：結果原文本身沒寫，不算。
+        ("H1 was supported; this result is robust.", "this result is robust"),
+        ("All hypotheses were supported; this result is robust.", "this result is robust"),
+    ],
+)
+def test_label_or_all_hypotheses_copied_from_inside_an_outer_claim_becomes_not_stated(
+    input_sentence: str, result_quote: str
+) -> None:
+    hypothesis = _labelled(H1_SENTENCE, result_quote, abstract=f"{SHORT_ABSTRACT} {input_sentence}")
+
+    assert hypothesis.support is SupportLevel.NOT_STATED
+    assert hypothesis.result_quote is None
+
+
+@pytest.mark.parametrize(
+    ("input_sentence", "result_quote"),
+    [
+        ("H1 was supported.", "H1 was supported"),
+        ("The results show that H1 was supported.", "H1 was supported"),
+        ("Thus, H1 was supported.", "H1 was supported"),
+        ("We find that all hypotheses were supported.", "all hypotheses were supported"),
+        ("Overall, the results support H1.", "the results support H1"),
+        ("All hypotheses were supported.", "All hypotheses were supported"),
+        # 輸入裡出現好幾次時，任何一處是直接陳述就算。
+        (
+            "Other researchers report that H1 was supported. In our study, H1 was supported.",
+            "H1 was supported",
+        ),
+    ],
+)
+def test_label_or_all_hypotheses_copied_from_a_direct_statement_is_kept(
+    input_sentence: str, result_quote: str
+) -> None:
+    hypothesis = _labelled(H1_SENTENCE, result_quote, abstract=f"{SHORT_ABSTRACT} {input_sentence}")
+
+    assert hypothesis.support is SupportLevel.SUPPORTED
+    assert hypothesis.result_quote == result_quote
+
+
+def _seconds_for_copies(repeats: int) -> float:
+    # 結果原文在同一句出現很多次、每一處都不是直接陳述：每處都要從句子開頭看起，不設上限就是平方
+    # 時間。直接量 `_result_contexts` 加 `_matches_label`（同 `_seconds_for_markers` 的理由）。
+    quote = "h1 was supported"
+    segments = (quote_key("We dispute that " + "H1 was supported " * repeats + "too."),)
+    reported = _reported_part(quote)
+    assert reported is not None
+    best = float("inf")
+    for _ in range(3):
+        started = time.perf_counter()
+        assert not _matches_label(_result_contexts(quote, reported, segments), H1_SENTENCE)
+        best = min(best, time.perf_counter() - started)
+    return best
+
+
+def test_many_copies_of_the_result_quote_in_one_sentence_is_quick() -> None:
+    # 比放大倍數（同 `test_many_result_markers_after_one_clause_break_is_quick`）：輸入變 8 倍，
+    # 有上限時時間約 8 倍，拿掉 `_MAX_QUOTE_OCCURRENCES` 上限後是平方時間。
+    small = _seconds_for_copies(2_000)
+    large = _seconds_for_copies(16_000)
+
+    assert large < small * 20 + 0.01
+
+
+# M1：研究問題後面寫出結果的子句，遇到「逗號／` - `／括號＋連接詞或新主詞」、或不接標點的
+# whereas／while／although 也結束。
+
+_QUESTION_THEN_OTHER_RESULT = (
+    "We examine whether perceived usefulness affects trust, and we find that satisfaction affects"
+    " loyalty"
+)
+
+
+@pytest.mark.parametrize(
+    "result_quote",
+    [
+        f"{_QUESTION_THEN_OTHER_RESULT}, and the questionnaire measures perceived usefulness and"
+        " trust",
+        f"{_QUESTION_THEN_OTHER_RESULT}, whereas the questionnaire measures perceived usefulness"
+        " and trust",
+        f"{_QUESTION_THEN_OTHER_RESULT} - the questionnaire measures perceived usefulness and"
+        " trust",
+        f"{_QUESTION_THEN_OTHER_RESULT} (the questionnaire measures perceived usefulness and"
+        " trust)",
+        f"{_QUESTION_THEN_OTHER_RESULT} while controlling for perceived usefulness and trust",
+        "We examine whether perceived usefulness affects trust, and satisfaction affects loyalty"
+        " (β = 0.30), whereas the questionnaire measures perceived usefulness and trust",
+    ],
+)
+def test_result_clause_after_a_research_question_ends_before_a_new_clause(
+    result_quote: str,
+) -> None:
+    data = _data()
+    data["hypotheses"][0]["result_quote"] = result_quote
+
+    content = _validate(data, _input(abstract=f"{ABSTRACT} {result_quote}."))
+
+    assert content.hypotheses[0].support is SupportLevel.NOT_STATED
+    assert content.hypotheses[0].result_quote is None
+
+
+@pytest.mark.parametrize(
+    "result_quote",
+    [
+        # 結果子句本身提到這條關係，後面的新子句截掉也不影響。
+        "We examine whether satisfaction affects loyalty, and we find that perceived usefulness"
+        " affects trust, and the questionnaire measures satisfaction and loyalty",
+        # 逗號後面接的不是連接詞或主詞（插入語 as expected、統計量），不截。
+        "We examine whether satisfaction affects loyalty, and we find that perceived usefulness,"
+        " as expected, affects trust",
+        "We examine whether satisfaction affects loyalty, and we find that the effect (β = 0.42,"
+        " p < .01) holds for perceived usefulness and trust",
+    ],
+)
+def test_result_clause_after_a_research_question_keeps_text_before_a_new_clause(
+    result_quote: str,
+) -> None:
+    data = _data()
+    data["hypotheses"][0]["result_quote"] = result_quote
+
+    content = _validate(data, _input(abstract=f"{ABSTRACT} {result_quote}."))
+
+    assert content.hypotheses[0].support is SupportLevel.SUPPORTED
+    assert content.hypotheses[0].result_quote == result_quote
+
+
+# L1：小數點不是句點。研究問題講的是另一條關係，所以不會靠代名詞那條路通過；把小數點當成句點時，
+# 第一句會變成 not_stated、第二句會變成 supported。
+
+
+@pytest.mark.parametrize(
+    ("result_quote", "expected"),
+    [
+        (
+            "We examine whether satisfaction affects loyalty, and we find that the effect"
+            " (β = 0.42) holds for perceived usefulness and trust",
+            SupportLevel.SUPPORTED,
+        ),
+        (
+            "We examine whether perceived usefulness affects trust, and we find that the effect"
+            " (β = 0.42) holds only for satisfaction and loyalty",
+            SupportLevel.NOT_STATED,
+        ),
+    ],
+)
+def test_decimal_point_does_not_end_the_result_clause(
+    result_quote: str, expected: SupportLevel
+) -> None:
+    data = _data()
+    data["hypotheses"][0]["result_quote"] = result_quote
+
+    content = _validate(data, _input(abstract=f"{ABSTRACT} {result_quote}."))
+
+    assert content.hypotheses[0].support is expected
+
+
+# M2：常見的正確寫法照樣判 supported（判定字之後的 and／whereas／while、this study、suggest、
+# hypothesis testing、empirical results）；外層說法照樣擋。剩下的（`The SEM results show that`、
+# `Results of the PLS analysis indicate that`、`Moreover H1 was supported`）鎖住現在的行為（少判，
+# ADR-0039 取捨有寫）。
+
+
+@pytest.mark.parametrize(
+    "result_quote",
+    [
+        "H1 was supported and H2 was rejected",
+        "H1 was rejected whereas H2 was supported",
+        "H1 was rejected while H2 was supported",
+    ],
+)
+def test_label_after_a_verdict_and_a_conjunction_is_kept(result_quote: str) -> None:
+    hypothesis = _labelled(
+        H2_SENTENCE,
+        result_quote,
+        cause="Trust",
+        effect="Loyalty",
+        abstract=f"{SHORT_ABSTRACT} {result_quote}.",
+    )
+
+    assert hypothesis.support is SupportLevel.SUPPORTED
+
+
+@pytest.mark.parametrize(
+    "result_quote",
+    [
+        "This study finds that H1 was supported",
+        "The present study shows that H1 was supported",
+        "The findings suggest that H1 is supported",
+        "Empirical results confirm that H1 was supported",
+        "Hypothesis testing shows that H1 was supported",
+    ],
+)
+def test_label_reported_by_more_study_subjects_is_kept(result_quote: str) -> None:
+    hypothesis = _labelled(H1_SENTENCE, result_quote, abstract=f"{SHORT_ABSTRACT} {result_quote}.")
+
+    assert hypothesis.support is SupportLevel.SUPPORTED
+
+
+@pytest.mark.parametrize(
+    "result_quote",
+    [
+        # 沒有標點的 and 前面沒有判定字：照樣擋。
+        "Other researchers report that loyalty and H1 were supported",
+        "Other researchers report that sales grew and H1 was supported",
+        # 剩下的誤傷（少判），鎖住現在的行為。
+        "The SEM results show that H1 was supported",
+        "Results of the PLS analysis indicate that H1 was supported",
+        "Moreover H1 was supported",
+    ],
+)
+def test_label_after_an_unlisted_lead_in_stays_not_stated(result_quote: str) -> None:
+    hypothesis = _labelled(H1_SENTENCE, result_quote, abstract=f"{SHORT_ABSTRACT} {result_quote}.")
+
+    assert hypothesis.support is SupportLevel.NOT_STATED
