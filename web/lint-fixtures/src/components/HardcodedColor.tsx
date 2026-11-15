@@ -1,4 +1,4 @@
-// 故意違反：寫死的色碼、色彩函式與顏色名稱（ADR-0030）。
+// 故意違反：寫死的色碼、色彩函式與顏色名稱（ADR-0037）。
 export function HardcodedColor() {
   return (
     <svg viewBox="0 0 10 10" aria-hidden="true">

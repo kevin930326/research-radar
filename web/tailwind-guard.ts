@@ -1,4 +1,4 @@
-// 建置檢查（Story 3.2、ADR-0030）：程式裡每個「看起來像 Tailwind 類別」的字串都必須真的產生 CSS。
+// 建置檢查（Story 3.2、ADR-0037）：程式裡每個「看起來像 Tailwind 類別」的字串都必須真的產生 CSS。
 //
 // 主題用 --*: initial 清掉了 Tailwind 的預設值，所以 bg-red-500、text-xl、lg:flex、m-0 這類寫法
 // 只是「不產生 CSS」，建置本身不會失敗。這裡用 Tailwind 自己的設計系統判斷：剝掉 variant（冒號前面
@@ -128,7 +128,7 @@ export const NOT_CLASSES: ReadonlyMap<string, string> = new Map([
   ["order-desc", "排序參數的值（例如 API 查詢字串）"],
 ]);
 
-/** 去掉 not- 前綴後，這個 variant 是任意值斷點、自訂 @media／@container 或 dark（ADR-0030）。 */
+/** 去掉 not- 前綴後，這個 variant 是任意值斷點、自訂 @media／@container 或 dark（ADR-0037）。 */
 function isForbiddenVariant(variant: string): boolean {
   const bare = variant.replace(/^(?:not-)+/, "");
   return bare === "dark" || /^(?:@?(?:min|max)-\[|@\[|\[@(?:media|container))/.test(bare);

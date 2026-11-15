@@ -1,4 +1,4 @@
-// 證明 eslint.config.js 的樣式規則（Story 3.2、ADR-0030）真的擋得住：寫死的色碼、色彩函式、
+// 證明 eslint.config.js 的樣式規則（Story 3.2、ADR-0037）真的擋得住：寫死的色碼、色彩函式、
 // 任意字級、style 字級、字串裡的 font-size、自己查減少動態都要被擋；照規則寫的樣式與整個 src/ 不能被誤擋。
 // 違反檔在 lint-fixtures/（正式 lint 忽略它們）；3.1 的 src/lint.test.ts 不動，這裡另開一個檔。
 import { fileURLToPath } from "node:url";

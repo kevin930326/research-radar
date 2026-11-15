@@ -10,7 +10,7 @@ context:
   - '{project-root}/AGENTS.md'
   - '{project-root}/_bmad-output/implementation-artifacts/epic-3-context.md'
   - '{project-root}/docs/adr/0010-frontend-stack.md'
-  - '{project-root}/docs/adr/0029-frontend-serving-security-headers-and-web-ci.md'
+  - '{project-root}/docs/adr/0036-frontend-serving-security-headers-and-web-ci.md'
   - '{project-root}/_bmad-output/planning-artifacts/ux-designs/ux-research-radar-2026-11-12/DESIGN.md'
 warnings: ['oversized']
 deferred:
@@ -94,7 +94,7 @@ deferred:
 - `web/e2e/reduced-motion.spec.ts` -- 開發站示範頁：沒設定時抽查元素有過場；`emulateMedia({ reducedMotion: "reduce" })` 後同一批元素 `transition-duration`、`animation-name` 都是關掉的。
 - `web/e2e/dev-components.spec.ts` -- 示範頁列出六種元件、說明框點開有完整說法／模型／日期、Esc 關閉；1440／1000／500 量位置（左右留白、沒有橫向捲動）；三張截圖 `web/e2e/screenshots/dev-components-<寬>.png`（chromium，先點開一個說明框）。
 - `web/e2e/dev-only.spec.ts` -- `dist`、`dist-demo` 沒有 `/dev/components`、示範頁元件名、`dev.json` 的文字；成員版 preview 打開 `/dev/components` 是「找不到這一頁」。
-- `docs/adr/0030-design-tokens-guard-and-a11y-floor.md`、`docs/adr/README.md` -- 狀態「提議」。
+- `docs/adr/0037-design-tokens-guard-and-a11y-floor.md`、`docs/adr/README.md` -- 狀態「提議」。
 - `docs/glossary.md` -- 檔尾加新名詞。
 - `_bmad-output/implementation-artifacts/sprint-status.yaml` -- 3.2 → `review`。
 
@@ -143,7 +143,7 @@ deferred:
   - `[low]` `[reject]` （Edge）`generatedAt` 沒有時區會被當成本地時間 — API 慣例一律 ISO 8601 UTC（帶 Z），由後端模型保證。
   - `[low]` `[reject]` （Edge）`verified` 收到字串 "false" 會顯示已核對 — 型別由 openapi 產生、後端 Pydantic 驗證為布林，前端不再重驗。
   - `[low]` `[reject]` （Edge）StatusTag 的 info 是空字串會打開空說明框 — 呼叫端傳 i18n 文字，空字串在日常不會出現。
-  - `[medium]` `[patch]` （Edge）`content-type`、`z-index`、`border-box` 這類小寫資料字串會讓建置失敗，3.6 的 API 標頭就會踩到 — 已修：資料來源層不在建置檢查範圍（沒有畫面）；其他地方遇到時錯誤訊息會列出字串（ADR-0030 取捨已記）。
+  - `[medium]` `[patch]` （Edge）`content-type`、`z-index`、`border-box` 這類小寫資料字串會讓建置失敗，3.6 的 API 標頭就會踩到 — 已修：資料來源層不在建置檢查範圍（沒有畫面）；其他地方遇到時錯誤訊息會列出字串（ADR-0037 取捨已記）。
   - `[low]` `[reject]` （Edge）`display:block` 這類字串會被當成未知斷點 — 同一個機制才抓得到 `lg:flex`；程式不寫 CSS 字串，遇到時訊息清楚。
   - `[false]` `[reject]` （Edge）Windows 路徑讓建置檢查失效 — 開發在 Mac、CI 在 Linux，Vite 的 id 是 POSIX 絕對路徑，`isCheckedFile` 對得到。
   - `[low]` `[reject]` （Edge）`styles.css` 之後加 `@plugin`／`@config` 會讓設計系統載入失敗 — 目前沒有；真的加了會在建置時立刻失敗，不是默默放過。
@@ -181,7 +181,7 @@ deferred:
   - `[medium]` `[reject]` WebKit 在 Linux 按 Alt+Tab 會跳過連結 — 不同意：CI 實測（run 43669129810、43669362436 的 web job）webkit 的 a11y-floor 全過，包括有「回首頁」連結的 member `/no/such/page`；不改。
   - `[low]` `[patch]` 顏色名稱規則 `[a-z]+` 誤擋 `color="primary"`；`width: "2em"` 被當字級擋 — 已修：改用 CSS 標準 148 個顏色名稱清單（transparent、currentColor、inherit、none 本來就不在清單）；單獨的 rem／em／pt 當成物件屬性或 JSX 屬性的值時只在字級屬性擋；`AllowedStyles.tsx` 補 `color="primary"`、`width: "2em"`。
   - `[low]` `[patch]` 漏網寫法（`shadow-[0_0_4px_red]`、`bg-[color:red]`、`[color:red]`、`[background:white]`、`text-body/[20px]`、style 的 lineHeight／letterSpacing；styles.css 以外的 CSS 檔沒人管） — 已修：任意值方括號裡的顏色名稱一律擋（取代原本只看顏色類工具的規則）；`text-…/[…]`、`text-…/(…)` 與 lineHeight／letterSpacing 寫死併進字級規則；`design-tokens.test.ts` 斷言 `src/` 只有 `styles.css` 一個 CSS 檔；補違反檔 `ArbitraryColor.tsx`、`HardcodedLineHeight.tsx`。
-  - `[low]` `[patch]` `inline-start`、`flex-start`、`order-desc` 這類非類別字串會讓建置失敗，沒有例外機制 — 已修：`tailwind-guard.ts` 加例外清單 `NOT_CLASSES`（14 項，每項附理由；只比對整個字，加了 variant 照樣擋）；測試確認每項有理由、不放清單就會被擋；寫進 ADR-0030。
+  - `[low]` `[patch]` `inline-start`、`flex-start`、`order-desc` 這類非類別字串會讓建置失敗，沒有例外機制 — 已修：`tailwind-guard.ts` 加例外清單 `NOT_CLASSES`（14 項，每項附理由；只比對整個字，加了 variant 照樣擋）；測試確認每項有理由、不放清單就會被擋；寫進 ADR-0037。
   - `[low]` `[patch]` `outline-none`、`outline-0`、`focus:outline-none`、`transition-all`、`transition` 能通過 — 已修：ESLint 擋 `outline-none`／`outline-0`／`outline-hidden`、`focus:`／`focus-visible:`／`focus-within:` 後面的 `outline-…`／`ring-…`，以及整組的 `transition`、`transition-all`；補違反檔 `FocusOutlineRemoved.tsx`。
   - `[low]` `[patch]` lang 檢查只看 PaperText 自己加的屬性，永遠不會失敗；中文論文傳 zh-Hant 會誤報 — 已修：改成每個 `[data-paper-text]` 自己的 lang 要和內容語言一致（英文剛好是 `en`，和原本的斷言一樣嚴；有中日韓文字的要 `zh` 開頭）；加反例測試（注入沒有 lang、空 lang、不一致的元素要被抓到，`zh-Hant` 的中文標題不誤報）。
   - `[low]` `[patch]` 說明框是 role=dialog 但沒有名稱；axe 只在說明框關著時跑 — 已修：Popup 用 `aria-labelledby` 指向觸發按鈕（名稱就是按鈕上 EXPERIENCE.md 既有的字，例如「AI 整理」「追蹤範圍外」，不另寫文字）；開發站加「每個說明框點開、淡入結束後跑 axe」；e2e 斷言說明框的無障礙名稱。
@@ -212,7 +212,7 @@ Status: done
 - `web/src/pages/DevComponentsPage.tsx`、`dev-showcase.ts`、`web/src/routes/member.tsx`、`web/src/i18n/{index.ts,zh-TW/ai.json,zh-TW/dev.json,expected/notice.zh-TW.json}` -- 示範頁、開發限定路由與文字。
 - 3.1 既有檔：`MessageBar.tsx`、`states/LoadFailed.tsx`、`states/NotFound.tsx`、`NoticePage.tsx` -- 換掉清掉主題後不產生 CSS 的類別（`m-0`、`p-0`、`split:mb-0`），「重新整理」「回首頁」改用共用的文字連結樣式；`expected/notice.zh-TW.json` 只新增 AI 標章四條文字，3.1 的測試斷言都沒改。
 - `web/e2e/{a11y-floor,dev-components,dev-only,reduced-motion,notice-spacing}.spec.ts`、`pages.ts`、`sites.ts`、`web/playwright.config.ts`、`web/e2e/screenshots/*` -- e2e、開發伺服器 webServer、截圖（使用須知兩張是代幣補齊後重新產生的細微像素差異、示範頁三張新增）。
-- `docs/adr/0030-...md`（提議）、`docs/adr/README.md`、`docs/glossary.md`、`sprint-status.yaml`（3.2 → review）。
+- `docs/adr/0037-...md`（提議）、`docs/adr/README.md`、`docs/glossary.md`、`sprint-status.yaml`（3.2 → review）。
 
 **和規格不同的地方：** 規格寫字級 24、間距 19，DESIGN.md 實際是 21／17，實作照 DESIGN.md；PageLoading 不用改（本來就沒有不產生 CSS 的類別）；示範頁標籤比規格列的 7 條多（每條都有測試逐字比對 EXPERIENCE.md 或只在 dev.json）；按鈕的過場只做 transform 與 border-color，避免焦點外框在 Tab 時淡入。
 

@@ -21,7 +21,7 @@ function securityHeaders(): Record<string, string> {
 export default defineConfig(({ command, isPreview }) => {
   const target = resolveBuildTarget(process.env.VITE_BUILD_TARGET, command === "build");
   return {
-    // tailwindGuard：用到不產生 CSS 的類別（例如 bg-red-500）時建置與開發伺服器失敗（ADR-0030）。
+    // tailwindGuard：用到不產生 CSS 的類別（例如 bg-red-500）時建置與開發伺服器失敗（ADR-0037）。
     plugins: [tailwindGuard(), react(), tailwindcss()],
     resolve: {
       alias: {

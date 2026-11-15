@@ -1,4 +1,4 @@
-// 設計代幣（Story 3.2、ADR-0030）：DESIGN.md 開頭 YAML 的代幣和 styles.css 的 Tailwind 主題逐項相等，
+// 設計代幣（Story 3.2、ADR-0037）：DESIGN.md 開頭 YAML 的代幣和 styles.css 的 Tailwind 主題逐項相等，
 // 不能少也不能多；斷點只有 DESIGN.md 內文的四個值；元件示範頁列出每個顏色與字級代幣，
 // 字級用的字體對到 DESIGN.md 的 fontFamily。
 // YAML 用這裡的小解析器讀（只認 DESIGN.md 用到的兩層「名稱: 值」），不另裝套件。

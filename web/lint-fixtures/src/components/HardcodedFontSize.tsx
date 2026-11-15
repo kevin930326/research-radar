@@ -1,4 +1,4 @@
-// 故意違反：寫死的字級（ADR-0030）。
+// 故意違反：寫死的字級（ADR-0037）。
 const SIZE = "1.2rem";
 
 export function HardcodedFontSize({ label }: { label: string }) {

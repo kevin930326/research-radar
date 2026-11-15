@@ -1,4 +1,4 @@
-// 共用元件（Story 3.2）：用 react-dom/server 靜態渲染（ADR-0029 第 7 點，不另裝 jsdom）。
+// 共用元件（Story 3.2）：用 react-dom/server 靜態渲染（ADR-0036 第 7 點，不另裝 jsdom）。
 // 說明框的開合、Esc、焦點交給 Playwright（e2e/dev-components.spec.ts）。
 import "../i18n";
 

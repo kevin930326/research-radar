@@ -1,4 +1,4 @@
-// 故意違反：寫死的行高與字距（ADR-0030）。
+// 故意違反：寫死的行高與字距（ADR-0037）。
 export function HardcodedLineHeight({ label }: { label: string }) {
   return (
     <div>

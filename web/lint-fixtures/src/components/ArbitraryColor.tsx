@@ -1,4 +1,4 @@
-// 故意違反：任意值方括號裡與 style 的 CSS 顏色名稱（ADR-0030）。
+// 故意違反：任意值方括號裡與 style 的 CSS 顏色名稱（ADR-0037）。
 export function ArbitraryColor() {
   return (
     <div>

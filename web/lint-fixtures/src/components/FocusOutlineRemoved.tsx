@@ -1,4 +1,4 @@
-// 故意違反：拿掉或改寫焦點外框、用整組過場（ADR-0030、UX-DR7）。
+// 故意違反：拿掉或改寫焦點外框、用整組過場（ADR-0037、UX-DR7）。
 export function FocusOutlineRemoved({ label }: { label: string }) {
   return (
     <div>

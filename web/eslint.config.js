@@ -7,7 +7,7 @@
 //    TanStack Query 的 query.fetch()，到時在該資料夾開例外。
 // 2. 介面文字只走 i18n：JSX 裡不得有寫死的文字（i18next/no-literal-string），
 //    src/ 與 e2e/ 的字串裡不得有寫死的中文。
-// 3. 樣式只用 DESIGN.md 的代幣（Story 3.2、ADR-0030）：src/（資料來源層與測試檔除外）不得寫死色碼
+// 3. 樣式只用 DESIGN.md 的代幣（Story 3.2、ADR-0037）：src/（資料來源層與測試檔除外）不得寫死色碼
 //    （#xxxxxx、rgb()／hsl() 等色彩函式；CSS 標準顏色名稱寫在任意值方括號裡（bg-[red]、shadow-[0_0_4px_red]、
 //    [color:red]）或 style／fill／stroke／color 的值）與字級（text-[13px]、text-body/[20px]、leading-[…]、
 //    tracking-[…]、font-[…]、[font-size:…]、style 或 JSX 屬性的 fontSize／font／lineHeight／letterSpacing
@@ -57,9 +57,9 @@ const NON_LITERAL_IMPORT_SELECTORS = [
   { selector: "ImportExpression > TemplateLiteral.source[expressions.length>0]", message: NON_LITERAL_IMPORT_MESSAGE },
 ];
 const XHR_MESSAGE = "頁面與元件不得用 XMLHttpRequest，請經過 datasource（ADR-0010 第 1 點）。";
-// 寫死的色碼與字級（ADR-0030）：字串、樣板字串、JSX 屬性都算。
-const COLOR_MESSAGE = "顏色只用 DESIGN.md 的代幣（Tailwind 類別或 var(--color-…)），不得寫死色碼（ADR-0030）。";
-const FONT_SIZE_MESSAGE = "字級只用 DESIGN.md 的代幣（text-body 這類類別），不得寫死字級（ADR-0030）。";
+// 寫死的色碼與字級（ADR-0037）：字串、樣板字串、JSX 屬性都算。
+const COLOR_MESSAGE = "顏色只用 DESIGN.md 的代幣（Tailwind 類別或 var(--color-…)），不得寫死色碼（ADR-0037）。";
+const FONT_SIZE_MESSAGE = "字級只用 DESIGN.md 的代幣（text-body 這類類別），不得寫死字級（ADR-0037）。";
 // CSS 標準的顏色名稱（CSS Color Module Level 4 的 148 個）。transparent、currentColor、inherit、none
 // 不是寫死的顏色，不在清單裡；用清單而不是「任何英文字」，元件的 color="primary" 這類屬性才不會被誤擋。
 const CSS_COLOR_NAMES = [
@@ -88,9 +88,9 @@ const COLOR_NAME_GROUP = `(?:${CSS_COLOR_NAMES.join("|")})`;
 // 整個值就是一個顏色名稱（style 的 color: "red"、JSX 的 fill="white"）。
 const NAMED_COLOR = `^\\s*${COLOR_NAME_GROUP}\\s*$`;
 const OUTLINE_MESSAGE =
-  "焦點外框只用 styles.css 的全站規則（1px 金色、外擴 4px），不得拿掉或改寫（ADR-0030、UX-DR7）。";
+  "焦點外框只用 styles.css 的全站規則（1px 金色、外擴 4px），不得拿掉或改寫（ADR-0037、UX-DR7）。";
 const TRANSITION_MESSAGE =
-  "過場只寫要動的屬性（transition-transform、transition-opacity 這類），不得用 transition／transition-all：會連焦點外框一起淡入（ADR-0030）。";
+  "過場只寫要動的屬性（transition-transform、transition-opacity 這類），不得用 transition／transition-all：會連焦點外框一起淡入（ADR-0037）。";
 // 單獨一個長度（"1.2rem"、"0.9em"、"12pt"）。
 const STANDALONE_LENGTH = "^\\s*-?(?:\\d+\\.?\\d*|\\.\\d+)(?:rem|em|pt)\\s*$";
 // 寫死就算字級的 style 屬性與 JSX 屬性。
