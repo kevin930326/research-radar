@@ -134,10 +134,18 @@ function isForbiddenVariant(variant: string): boolean {
   return bare === "dark" || /^(?:@?(?:min|max)-\[|@\[|\[@(?:media|container))/.test(bare);
 }
 
+/** 任意屬性（[屬性:值]）裡不准直接寫的字體屬性，以及不准就地改寫的主題變數前綴。 */
+const TYPE_PROPERTIES = new Set(["font", "font-size", "line-height", "letter-spacing"]);
+const THEME_VARIABLE = /^--(?:text|leading|tracking|font|color)-/;
+
 /**
- * 本體是尺度以外的行高或字距（ADR-0038）：leading-…／tracking-… 的值必須是主題裡 --leading-…／--tracking-… 的名稱。
- * Tailwind 的 leading-4 會退而拿間距代幣（--spacing-4）當行高、-tracking-004 是負的字距、
- * leading-[1.7] 與 leading-(--x) 是任意值：都會產生 CSS，但不在 DESIGN.md 的尺度裡。
+ * 本體繞過了字級、行高、字距的尺度（ADR-0038）：
+ * - leading-…／tracking-… 的值必須是主題裡 --leading-…／--tracking-… 的名稱。Tailwind 的 leading-4 會退而拿
+ *   間距代幣（--spacing-4）當行高、-tracking-004 是負的字距、leading-[1.7] 與 leading-(--x) 是任意值。
+ * - text-[…]／text-(…)：任意值的字級或顏色（text-(length:--x) 可以把任何變數當字級）。
+ * - 任意屬性 [line-height:1.7]、[letter-spacing:0.02em]、[font-size:27px]、[font:…]。
+ * - 任意屬性就地改寫主題變數：[--text-s15:30px]、[--leading-185:3]、[--color-…:…]。
+ * 這些都會產生 CSS，但不在 DESIGN.md 裡。
  */
 function isOffScale({ theme }: GuardSystems, body: string): boolean {
   const bare = body.replace(/^!/, "").replace(/!$/, "");
@@ -148,8 +156,14 @@ function isOffScale({ theme }: GuardSystems, body: string): boolean {
     return false;
   }
   return candidates.some((candidate) => {
+    if (candidate.kind === "arbitrary") {
+      return TYPE_PROPERTIES.has(candidate.property) || THEME_VARIABLE.test(candidate.property);
+    }
     if (candidate.kind !== "functional" || candidate.value === null) {
       return false;
+    }
+    if (candidate.root === "text") {
+      return candidate.value.kind === "arbitrary";
     }
     const root = candidate.root.replace(/^-/, "");
     if (root !== "leading" && root !== "tracking") {
@@ -165,7 +179,7 @@ function isOffScale({ theme }: GuardSystems, body: string): boolean {
 
 /**
  * 回傳建置不准的類別（不重複、照出現順序）：看起來像 Tailwind 類別、但不產生 CSS 的，
- * 用了任意值斷點、自訂 @media／@container 或 dark: 的，以及尺度以外的行高、字距。
+ * 用了任意值斷點、自訂 @media／@container 或 dark: 的，以及繞過字級、行高、字距尺度的寫法。
  */
 export function findInvalidClasses(systems: GuardSystems, tokens: Iterable<string>): string[] {
   const suspects: string[] = [];

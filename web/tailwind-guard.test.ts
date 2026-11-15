@@ -135,6 +135,27 @@ describe("tailwind guard", () => {
     ]);
   });
 
+  it("blocks arbitrary properties and variables that bypass the scales", () => {
+    const bypasses = [
+      "[line-height:1.7]",
+      "[letter-spacing:0.02em]",
+      "[font-size:27px]",
+      "[font:300_27px/1.7_serif]",
+      "md:[line-height:1.7]",
+      "text-(length:--x)",
+      "text-(--x)",
+      "text-[27px]",
+      "[--text-s15:30px]",
+      "[--leading-185:3]",
+      "[--tracking-004:1em]",
+      "[--color-text-primary:red]",
+      "[--font-serif:Arial]",
+    ];
+    expect(findInvalidClasses(design, bypasses)).toEqual(bypasses);
+    // 版面用的任意屬性與自訂變數不受影響。
+    expect(findInvalidClasses(design, ["[--x:27px]", "[grid-template-columns:1fr_2fr]", "w-(--x)"])).toEqual([]);
+  });
+
   it("allows token classes, layout arbitrary values, i18n keys, URLs, sentences and component props", () => {
     expect(checkFile(path.join(FIXTURES, "AllowedStyles.tsx"))).toEqual([]);
   });
