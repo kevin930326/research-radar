@@ -1,5 +1,5 @@
 # CI（ADR-0017）：固定檢查 → 兩種架構各自建映像並冒煙 → 合併成多架構標籤推到 GHCR。
-# 前端檢查是另一個和 checks 平行的 web job（ADR-0029）；映像的建置本身也會建前端。
+# 前端檢查是另一個和 checks 平行的 web job（ADR-0036）；映像的建置本身也會建前端。
 # - 不用任何 repo secret；推 GHCR 用內建的 github.token。
 # - 第三方 action 一律釘 40 碼 commit SHA，註解寫版本。
 # - 只有 push 事件推映像：pull_request 的 github.sha 是 GitHub 暫時產生的合併 commit。
@@ -108,7 +108,7 @@ jobs:
           uv run --no-sync pip-audit --disable-pip --strict --progress-spinner off \
             --requirement "${RUNNER_TEMP}/requirements.txt"
 
-  # 前端（Story 3.1、ADR-0029）：和 checks 平行；步驟和本機 web/ 的 npm scripts 同一組。
+  # 前端（Story 3.1、ADR-0036）：和 checks 平行；步驟和本機 web/ 的 npm scripts 同一組。
   # Playwright 在 CI 跑 chromium、firefox、webkit 三種引擎（CI=true 時 playwright.config.ts 會打開）。
   web:
     name: web
