@@ -44,6 +44,7 @@
 | [0035](0035-judgment-events-and-effective-values.md) | 人工判斷事件與有效值：`judgment_event` 只新增、`kind` 四個，形狀由 domain 型別＋CHECK 各擋一次（key 排序只在 domain），對象與成員不設外鍵，處理結果用 `INSERT … SELECT` 確認指到同一筆回報、一筆回報最多一筆處理結果；`audit_event` 只建表；兩張事件表收回 UPDATE／DELETE；三個 `effective_*` view（有效分類以（論文, `field`）為單位、最新人工修正優先，已核對／修正人數／意見不同同一個 view 算；研究模型的數字轉文字）收回寫入；`repo/ai_blocks.find_ai_block` 照 ADR-0015 順序判定八種狀態，`services/ai_blocks.get_ai_blocks` 組現在的 prompt 版本、模型、設定檔版本與預算；遷移 0014；保守解讀列給 Kevin 決定 | 提議 | AD-7、AD-10、AD-26、AD-30 |
 | [0036](0036-frontend-serving-security-headers-and-web-ci.md) | （0029～0035 由 Epic 2 的 PR 使用）成員版前端由 api 送出：全站安全標頭只有一份（`radar/entrypoints/api/security_headers.json`，api 與 `vite preview` 都讀），每個回應都帶（含 404、500、`/healthz`）；建置資料夾裡的檔案照送、其餘非 `/api/` 的 GET／HEAD 回頁面殼、`/api/` 維持 404 JSON、擋路徑穿越；建置結果固定在工作目錄下的 `web/dist`；HSTS 不在應用程式設；CI 另開和 `checks` 平行的 `web` job（Playwright 三種引擎）；示範站的「找不到這一頁」不放回首頁連結 | 提議 | AD-21、AD-22、AD-24 |
 | [0037](0037-design-tokens-guard-and-a11y-floor.md) | 設計代幣與無障礙底線：`styles.css` 主題放 `DESIGN.md` YAML 的全部代幣＋五個字體＋四個斷點，測試逐項比對；Vite 外掛用 Tailwind 自己的設計系統讓「不產生 CSS 的類別」建置失敗；ESLint 擋寫死的色碼與字級（版面任意值不擋）；焦點外框與減少動態各一條 base 層規則，程式只能用 `use-reduced-motion.ts` 判斷；無障礙六項檢查跑正式頁面清單＋開發伺服器的元件示範頁 | 提議 | AD-21、AD-22 |
+| [0038](0038-design-reference-and-visual-compare.md) | 前端畫面以 `docs/ux/reference/screens/` 的設計稿為準；做完用 `web/scripts/design-compare.mjs` 量差異（字級、行高、顏色、字重、字距、距離、髮線），報告貼 PR、差異要有原因，是合併門檻；`DESIGN.md` 加字級、行高、字距三組尺度（另一個 PR 實作）；沒有設計稿的畫面先問 Kevin | 提議 | AD-21 |
 
 「提議」表示還沒經過 Kevin 確認；PR 合併後改成「已接受」。
 
