@@ -11,14 +11,15 @@ const CAVEATS = ["rare", "supported", "evidenceMap", "trendLag"] as const;
 
 const SECTION_CLASS =
   "border-t border-hairline py-12 split:grid split:grid-cols-[240px_minmax(0,680px)] split:gap-x-[40px] wide:grid-cols-[320px_minmax(0,680px)] wide:gap-x-16";
-const HEADING_CLASS = "m-0 mb-4 font-title-zh text-section-title-zh text-text-primary split:mb-0";
-const PARAGRAPH_CLASS = "m-0 text-reading-zh text-text-reading";
+// 外距歸零交給 Tailwind 的 preflight（m-0 不是代幣，不產生 CSS）；只有上下排時標題下方留 16px。
+const HEADING_CLASS = "font-title-zh text-section-title-zh text-text-primary max-split:mb-4";
+const PARAGRAPH_CLASS = "text-reading-zh text-text-reading";
 
 export function NoticePage() {
   const { t } = useTranslation(["notice", "caveat"]);
   return (
     <article>
-      <h1 className="m-0 pb-12 font-title-zh text-page-title-zh text-text-primary">{t("notice:notice.page.title")}</h1>
+      <h1 className="pb-12 font-title-zh text-page-title-zh text-text-primary">{t("notice:notice.page.title")}</h1>
 
       <section aria-labelledby="notice-limits" className={SECTION_CLASS}>
         <h2 id="notice-limits" className={HEADING_CLASS}>
@@ -36,7 +37,7 @@ export function NoticePage() {
         <div className="flex flex-col gap-8">
           {CAVEATS.map((key) => (
             <div key={key} data-caveat={key}>
-              <p className="m-0 text-body text-text-primary">{t(`caveat:caveat.${key}.warning`)}</p>
+              <p className="text-body text-text-primary">{t(`caveat:caveat.${key}.warning`)}</p>
               <p className={PARAGRAPH_CLASS}>{t(`caveat:caveat.${key}.explanation`)}</p>
             </div>
           ))}

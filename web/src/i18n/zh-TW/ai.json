@@ -1,0 +1,10 @@
+{
+  "ai": {
+    "badge": {
+      "short": "AI 整理",
+      "full": "AI 生成・未經人工核對",
+      "verified": "已核對",
+      "verifiedFull": "AI 生成・已核對"
+    }
+  }
+}

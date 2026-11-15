@@ -2,7 +2,8 @@
   "source": "_bmad-output/planning-artifacts/ux-designs/ux-research-radar-2026-11-12/EXPERIENCE.md",
   "screens": [
     "17. 使用須知（標題、第 3 段、第 4 段）",
-    "State Patterns 全站共用（載入失敗、沒有網路、找不到這一頁）"
+    "State Patterns 全站共用（載入失敗、沒有網路、找不到這一頁）",
+    "Component Patterns AI 標章（AI 整理、AI 生成・未經人工核對、已核對、AI 生成・已核對）"
   ],
   "strings": {
     "notice:notice.page.title": "使用須知",
@@ -22,7 +23,11 @@
     "common:states.loadFailed.action": "重新整理",
     "common:states.offline.message": "目前沒有網路連線",
     "common:states.notFound.message": "找不到這一頁",
-    "common:states.notFound.home": "回首頁"
+    "common:states.notFound.home": "回首頁",
+    "ai:ai.badge.short": "AI 整理",
+    "ai:ai.badge.full": "AI 生成・未經人工核對",
+    "ai:ai.badge.verified": "已核對",
+    "ai:ai.badge.verifiedFull": "AI 生成・已核對"
   },
   "absent": [
     "問答的資料怎麼處理",

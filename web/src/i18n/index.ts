@@ -3,6 +3,7 @@
 import i18n from "i18next";
 import { initReactI18next } from "react-i18next";
 
+import ai from "./zh-TW/ai.json";
 import caveat from "./zh-TW/caveat.json";
 import common from "./zh-TW/common.json";
 import notice from "./zh-TW/notice.json";
@@ -10,10 +11,10 @@ import notice from "./zh-TW/notice.json";
 export const LANGUAGE = "zh-TW";
 
 export const resources = {
-  [LANGUAGE]: { common, notice, caveat },
+  [LANGUAGE]: { common, notice, caveat, ai },
 } as const;
 
-export const NAMESPACES = ["common", "notice", "caveat"] as const;
+export const NAMESPACES = ["common", "notice", "caveat", "ai"] as const;
 
 void i18n.use(initReactI18next).init({
   lng: LANGUAGE,

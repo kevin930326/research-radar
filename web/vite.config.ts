@@ -7,6 +7,7 @@ import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
 
 import { OUT_DIRS, resolveBuildTarget } from "./build-target.ts";
+import { tailwindGuard } from "./tailwind-guard.ts";
 
 const here = (relative: string): string => fileURLToPath(new URL(relative, import.meta.url));
 
@@ -20,7 +21,8 @@ function securityHeaders(): Record<string, string> {
 export default defineConfig(({ command, isPreview }) => {
   const target = resolveBuildTarget(process.env.VITE_BUILD_TARGET, command === "build");
   return {
-    plugins: [react(), tailwindcss()],
+    // tailwindGuard：用到不產生 CSS 的類別（例如 bg-red-500）時建置與開發伺服器失敗（ADR-0030）。
+    plugins: [tailwindGuard(), react(), tailwindcss()],
     resolve: {
       alias: {
         // 資料來源層（ADR-0010 第 1～3 點）：頁面只 import src/datasource（入口），

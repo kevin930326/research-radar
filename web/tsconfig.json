@@ -23,5 +23,5 @@
       "#route-tree": ["./src/routes/member.tsx"]
     }
   },
-  "include": ["src", "e2e", "build-target.ts", "build-target.test.ts", "vite.config.ts", "playwright.config.ts"]
+  "include": ["src", "e2e", "build-target.ts", "build-target.test.ts", "tailwind-guard.ts", "tailwind-guard.test.ts", "vite.config.ts", "playwright.config.ts"]
 }
