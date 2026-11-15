@@ -5,7 +5,9 @@
   `DATA_NOT_INSTRUCTIONS`（防 prompt injection）。不給工具。
 - `LlmBatchRequest`：Batch 裡的一筆（`custom_id`＋`LlmRequest`，Story 2.9）。
 - `Completion`：adapter 從供應商的回應取出的中立形狀；`interpret_completion` 把它判讀成
-  `LlmResult`，或丟有型別的錯誤。替身也走同一個函式，所以兩邊丟的是同一批類別。
+  `LlmResult`，或丟有型別的錯誤。替身也走同一個函式，所以兩邊丟的是同一批類別。Batch 結果匯入
+  沒有 `LlmRequest`，用同一套判讀的 `interpret_message`（Story 2.11）。
+- `LlmBatchStatus`、`LlmBatchResult`：查批次狀態與下載結果時 adapter 回的中立形狀（Story 2.11）。
 - 錯誤分三大類（2.2 的閘門只看類別）：
   - `LlmRejectedError`（拒收）：拒答、長度截斷、回應格式不對、請求不合法 → 寫 `rejected`，
     不自動重試。由完整回應得出的（拒答、截斷、格式不對）帶 `usage` 與 ids，照樣記帳。
@@ -20,7 +22,8 @@ import math
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from enum import Enum
+from datetime import datetime
+from enum import Enum, StrEnum
 from types import MappingProxyType, ModuleType
 from typing import Any, ClassVar, Final, Literal, cast, final, get_args
 
@@ -591,10 +594,21 @@ def _reject_constant(name: str) -> object:
 
 
 def interpret_completion(request: LlmRequest, completion: Completion) -> LlmResult:
-    """把回應判讀成結果，或丟有型別的錯誤。
+    """把回應判讀成結果，或丟有型別的錯誤（`interpret_message`；請求有 `output_schema` 時要求
+    JSON）。
+
+    Raises:
+        LlmRefusalError, LlmTruncatedError, LlmMalformedResponseError: 同 `interpret_message`。
+    """
+    return interpret_message(completion, expects_json=request.output_schema is not None)
+
+
+def interpret_message(completion: Completion, *, expects_json: bool) -> LlmResult:
+    """把回應判讀成結果，或丟有型別的錯誤。互動（`interpret_completion`）與 Batch 結果匯入
+    （Story 2.11：手上沒有 `LlmRequest`，看 run 的 prompt 有沒有 schema）共用這一套判讀。
 
     順序：拒答 → 長度截斷 → 其他不是 `end_turn` 的（格式不對）→ 沒有 `text` 區塊（格式不對）
-    → 文字全是空白（格式不對）→ 有 `output_schema` 時文字必須解析成 JSON 物件（否則格式不對；
+    → 文字全是空白（格式不對）→ `expects_json` 時文字必須解析成 JSON 物件（否則格式不對；
     `NaN`／`Infinity` 也不收）。
 
     Raises:
@@ -627,7 +641,7 @@ def interpret_completion(request: LlmRequest, completion: Completion) -> LlmResu
         raise LlmMalformedResponseError("回應的 text 區塊是空的", **ids)
 
     parsed: dict[str, Any] | None = None
-    if request.output_schema is not None:
+    if expects_json:
         try:
             value = json.loads(text, parse_constant=_reject_constant)
         except ValueError, RecursionError:
@@ -648,3 +662,79 @@ def interpret_completion(request: LlmRequest, completion: Completion) -> LlmResu
         stop_reason=stop_reason,
         raw=completion.raw,
     )
+
+
+# --- Batch 的狀態與結果（Story 2.11、ADR-0043） -------------------------------------------------
+
+
+class BatchProcessingStatus(StrEnum):
+    """供應商那邊批次的 `processing_status`：`in_progress` → `ended`；取消後先是 `canceling`、最後
+    也是 `ended`（可能有部分結果；docs/runs/epic-2b/api-reference.md 第一節）。"""
+
+    IN_PROGRESS = "in_progress"
+    CANCELING = "canceling"
+    ENDED = "ended"
+
+
+@dataclass(frozen=True, slots=True)
+class LlmBatchStatus:
+    """查一個批次得到的狀態（adapter 驗過形狀）。
+
+    - `created_at`／`expires_at`：供應商的建立時間與處理期限（建立＋24 小時）；`ended_at` 結束前是
+      None。都帶時區。
+    - `results_available`：供應商有給 `results_url`（結束了而且結果還在；建立 29 天後就沒有）。
+
+    Raises:
+        ValueError: 時間沒有時區。
+    """
+
+    provider_batch_id: str
+    processing_status: BatchProcessingStatus
+    created_at: datetime
+    expires_at: datetime
+    ended_at: datetime | None
+    results_available: bool
+
+    def __post_init__(self) -> None:
+        for moment in (self.created_at, self.expires_at, self.ended_at):
+            if moment is not None and (moment.tzinfo is None or moment.utcoffset() is None):
+                raise ValueError("LlmBatchStatus 的時間要帶時區")
+
+
+class LlmBatchResultKind(StrEnum):
+    """結果裡一行的種類：供應商的四種 `result.type`，加上看不懂的兩種（`malformed`、
+    `unreadable`）。"""
+
+    SUCCEEDED = "succeeded"  # 有訊息（`completion`，含 usage）
+    ERRORED = "errored"  # 沒產生訊息、不計費；`error_type` 是錯誤類型（例如 invalid_request_error）
+    CANCELED = "canceled"  # 送進模型前被取消，不計費
+    EXPIRED = "expired"  # 24 小時內沒送進模型，不計費
+    # succeeded 但訊息形狀不對（讀得到 usage 時帶 `usage`，照樣記帳）
+    MALFORMED = "malformed"
+    # 整行讀不懂：不是 JSON 物件，或 `result.type` 不認得
+    UNREADABLE = "unreadable"
+
+
+@dataclass(frozen=True, slots=True)
+class LlmBatchResult:
+    """結果的一行（adapter 驗過形狀，還沒判讀）。
+
+    - `custom_id`：這一行的 `custom_id`；連它都讀不到時是 None（呼叫端只計數）。不保證是這批的、
+      也不保證是 32 hex，呼叫端自己對。
+    - `completion`：只有 `succeeded` 有。
+    - `error_type`：只有 `errored` 有（供應商的 `error.type`，只收 `^[a-z_]{1,64}$`，其他是 None）。
+    - `usage`：`succeeded` 時同 `completion.usage`；`malformed` 時是讀得到的 usage（可能是 None）。
+
+    Raises:
+        ValueError: `succeeded` 沒有 `completion`，或別的種類帶了 `completion`。
+    """
+
+    custom_id: str | None
+    kind: LlmBatchResultKind
+    completion: Completion | None = field(default=None, repr=False)
+    error_type: str | None = None
+    usage: LlmUsage | None = None
+
+    def __post_init__(self) -> None:
+        if (self.kind is LlmBatchResultKind.SUCCEEDED) != (self.completion is not None):
+            raise ValueError("只有 succeeded 有 completion，而且一定有")

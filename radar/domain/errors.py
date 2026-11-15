@@ -130,3 +130,26 @@ class ErrorCode(StrEnum):
     BATCH_BUDGET_CANNOT_FIT = "batch_budget_cannot_fit"
     # 送出時等全域 Batch 預算鎖逾時（規劃的長交易拿著）：不動、不送，列維持 queued，sweep 之後補排
     BATCH_BUDGET_LOCK_BUSY = "batch_budget_lock_busy"
+
+    # Batch 結果匯入（`radar/services/llm_batches.py`、`llm_gateway.import_llm_batch_result`，
+    # Story 2.11、ADR-0043）：寫進 `derivation_run.failure_reason` 或
+    # `batch_submission.failure_reason`。
+    # 結果裡這一筆是 `errored`、錯誤類型不是 `invalid_request_error`（供應商那邊出錯，沒有產生訊息、
+    # 不計費）：run 改 failed，下一次 `radar batches create` 會再送（`invalid_request_error` 沿用
+    # `llm_invalid_request` 寫成 rejected）
+    BATCH_ITEM_ERRORED = "batch_item_errored"
+    BATCH_ITEM_CANCELED = "batch_item_canceled"  # 這一筆在送進模型前被取消（不計費）：run 改 failed
+    BATCH_ITEM_EXPIRED = "batch_item_expired"  # 24 小時內沒送進模型（不計費）：run 改 failed
+    # 結果下載完，這一批還有項目沒出現在結果裡：那些 run 改 failed
+    BATCH_RESULT_MISSING = "batch_result_missing"
+    # 結果這一行看不懂（不是 JSON 物件，或 result 的 type 不認得）：run 改 failed
+    # （succeeded 但訊息形狀不對是 llm_malformed_response、寫拒收）
+    BATCH_RESULT_UNREADABLE = "batch_result_unreadable"
+    # 批次結束了但結果已經拿不到（建立超過 29 天，或供應商沒給 results_url）：還在跑的 run 改 failed
+    BATCH_RESULTS_UNAVAILABLE = "batch_results_unavailable"
+    # 查批次狀態時供應商回 404：批次 `submitted` → `needs_attention`，要人工確認（`radar batches
+    # resolve`）
+    BATCH_PROVIDER_NOT_FOUND = "batch_provider_not_found"
+    # `radar batches resolve --fail`：人工把 `needs_attention` 的批次標失敗，還在跑的 run 一起改
+    # failed
+    BATCH_RESOLVED_FAILED = "batch_resolved_failed"

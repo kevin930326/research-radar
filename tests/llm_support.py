@@ -6,7 +6,7 @@ prompt 的內容全部是測試自己編的（不是正式的 prompt）。登記
 
 import threading
 import uuid
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -20,7 +20,14 @@ from radar.domain import prompt_hashes
 from radar.domain.ai_outputs import CallMode, GatewayConfig, LlmTask
 from radar.domain.budget import BudgetConfig
 from radar.domain.fingerprints import prompt_sha256, schema_sha256
-from radar.domain.llm import LlmBatchRequest, LlmRequest, LlmResult, frozen_schema_json
+from radar.domain.llm import (
+    LlmBatchRequest,
+    LlmBatchResult,
+    LlmBatchStatus,
+    LlmRequest,
+    LlmResult,
+    frozen_schema_json,
+)
 from radar.domain.papers import PaperOrigin, ParsedPaper
 from radar.domain.policy import CloudPolicy
 from radar.domain.pricing import ModelsConfig
@@ -218,6 +225,14 @@ class GatedProvider:
     def submit_batch(self, requests: Sequence[LlmBatchRequest]) -> str:
         """`LlmProvider` 的 Batch 送出（Story 2.9）：直接交給包著的替身，不經閘門。"""
         return self.inner.submit_batch(requests)
+
+    def retrieve_batch(self, provider_batch_id: str) -> LlmBatchStatus:
+        """`LlmProvider` 的 Batch 查詢（Story 2.11）：直接交給包著的替身，不經閘門。"""
+        return self.inner.retrieve_batch(provider_batch_id)
+
+    def batch_results(self, provider_batch_id: str) -> Iterator[LlmBatchResult]:
+        """`LlmProvider` 的 Batch 結果（Story 2.11）：直接交給包著的替身，不經閘門。"""
+        return self.inner.batch_results(provider_batch_id)
 
 
 # --- 預算（Story 2.3）：設定與假帳本 -----------------------------------------------------------

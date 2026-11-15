@@ -2,10 +2,14 @@
 Story 2.9）。
 
 - `batch_submission` 的狀態（`BatchSubmissionStatus`）：`queued` → `submitting` → `submitted` →
-  `ended` → `imported`；`failed`；`needs_attention`（需要人工處理）。2.9 只走到 `submitted`，
+  `ended` → `imported`；`failed`；`needs_attention`（需要人工處理）。2.9 走到 `submitted`，
   `ended`／`imported` 由結果匯入（2.11）推進。狀態只經 `services/llm_batches.py` 改。
 - 設定 `config/llm_batches.yaml`（`LlmBatchConfig`，只經 `radar/config.py` 讀）：每批最多幾個請求、
-  台北每月 1 日幾點以前整次規劃延後（`in_month_start_hold`）。
+  台北每月 1 日幾點以前整次規劃延後（`in_month_start_hold`）、`radar batches wait` 多久查一次。
+- 結果匯入（Story 2.11、ADR-0043）：供應商的保留與處理期限（`PROVIDER_RESULTS_RETENTION`、
+  `PROVIDER_PROCESSING_WINDOW`）、每週更新進 `ai_done` 的時限（`AI_DONE_AFTER`）、一項的匯入結果
+  （`BatchItemOutcome`）、一次 poll 的結果與要印的字（`LlmBatchPollResult`、`render_poll_*`）、
+  `radar batches create` 的預估（`LlmBatchEstimate`）與 `resolve` 的結果。
 - `SUBMITTING_STALE_AFTER`：停在 `submitting` 而且沒有供應商 batch ID 超過這麼久，就判定送出的
   工作已經不在了（送出不重試，最久約一次 `RADAR_ANTHROPIC_TIMEOUT`），標 `needs_attention`、
   不重送；sweep 的 `submitting` 那一列用同一個常數。
@@ -25,9 +29,11 @@ from typing import Final
 from pydantic import BaseModel, ConfigDict, Field
 
 from radar.domain.ai_outputs import InputKind, LlmTask, PaperLlmSource, RunKey, RunStatus
-from radar.domain.budget import BUDGET_TIMEZONE, BudgetConfig
+from radar.domain.budget import BUDGET_TIMEZONE, BudgetConfig, BudgetStatus, format_usd
 from radar.domain.errors import ErrorCode
+from radar.domain.llm import BatchProcessingStatus, LlmBatchStatus
 from radar.domain.processing import ProcessingFacts
+from radar.domain.text_table import render_table
 
 # 停在 `submitting` 沒有 batch ID 多久算送出的工作已經不在（ADR-0041）。
 SUBMITTING_STALE_AFTER: Final = timedelta(minutes=30)
@@ -44,6 +50,14 @@ MAX_REQUESTS_PER_BATCH: Final = 1_000
 SUBMIT_BUDGET_LOCK_TIMEOUT_MS: Final = 2_000
 # 供應商 batch ID 的格式（和資料庫的 CHECK 一樣）。
 PROVIDER_BATCH_ID_PATTERN: Final = r"^[A-Za-z0-9_-]{1,128}$"
+# Anthropic 的結果從建立批次起保留 29 天，之後批次還查得到、結果不能下載；24 小時內沒處理完的請求
+# 過期（`expires_at`＝`created_at`＋24 小時）。來源：https://platform.claude.com/docs/en/
+# build-with-claude/batch-processing（2026-11-15 讀，docs/runs/epic-2b/api-reference.md 第一節）。
+PROVIDER_RESULTS_RETENTION: Final = timedelta(days=29)
+PROVIDER_PROCESSING_WINDOW: Final = timedelta(hours=24)
+# 每週更新發佈後滿這麼久，就算這一週的 Batch 還沒都結束也進 `ai_done`（AD-14「這一週的 Batch 都結束
+# 了，或發佈後已滿 24 小時」、ADR-0004 決定第 10 點）。
+AI_DONE_AFTER: Final = timedelta(hours=24)
 
 
 class BatchSubmissionStatus(StrEnum):
@@ -67,6 +81,7 @@ class LlmBatchConfig(BaseModel):
       官方上限 100,000）。一批在一個交易裡建，每筆拿一把 advisory lock，所以不能太大（ADR-0041）。
     - `month_start_hold_hours`：台北時間每月 1 日 00:00 到這個鐘點以前，整次規劃延後（Anthropic
       的 workspace 上限可能還在用 UTC 的上個月，ADR-0031 取捨）；0 表示不延後。
+    - `poll_interval_minutes`：`radar batches wait` 每幾分鐘查一次供應商（預設 10）。
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -74,6 +89,9 @@ class LlmBatchConfig(BaseModel):
     weekly_planning_enabled: bool = Field(strict=True)
     max_requests_per_batch: int = Field(ge=1, le=MAX_REQUESTS_PER_BATCH, strict=True)
     month_start_hold_hours: int = Field(ge=0, le=24, strict=True)
+    # `radar batches wait` 每幾分鐘查一次（1～1,440；Story 2.11）。有預設值，舊的設定檔照樣讀得
+    # 進來。
+    poll_interval_minutes: int = Field(default=10, ge=1, le=1440, strict=True)
 
 
 def in_month_start_hold(now: datetime, hours: int) -> bool:
@@ -267,3 +285,240 @@ class LlmBatchSubmitResult:
 
 # 會走 Batch 的三個工作（有表頭、`plan_for` 會回答的 LLM 工作；ADR-0004 決定第 8 點）。
 BATCH_TASKS: Final = (LlmTask.ZH_SUMMARY, LlmTask.CLASSIFY, LlmTask.EXTRACT_MODEL)
+
+
+# --- 結果匯入（Story 2.11、ADR-0043） --------------------------------------------------------
+
+
+def results_expired(status: LlmBatchStatus, now: datetime) -> bool:
+    """供應商的結果是不是已經過了保留期（`now` 晚於建立時間＋29 天）。過了就不下載，還在跑的項目
+    改 `failed`（`batch_results_unavailable`）。
+
+    Raises:
+        ValueError: `now` 沒有時區。
+    """
+    if now.tzinfo is None or now.utcoffset() is None:
+        raise ValueError("now 要帶時區（不能是 naive datetime）")
+    return now > status.created_at + PROVIDER_RESULTS_RETENTION
+
+
+def batch_overdue(status: LlmBatchStatus, now: datetime) -> bool:
+    """還沒結束、但已經過了供應商的處理期限（`expires_at`）：照文件應該要結束了，標「逾期」。
+
+    Raises:
+        ValueError: `now` 沒有時區。
+    """
+    if now.tzinfo is None or now.utcoffset() is None:
+        raise ValueError("now 要帶時區（不能是 naive datetime）")
+    return status.processing_status is not BatchProcessingStatus.ENDED and now > status.expires_at
+
+
+class BatchItemOutcome(StrEnum):
+    """結果裡一項匯入完的樣子（`llm_gateway.import_llm_batch_result` 回的）。值會寫進日誌。"""
+
+    ACTIVE = "active"  # 表頭 active
+    SUPERSEDED = "superseded"  # 表頭 superseded（prompt 升版、換模型、論文被排除或輸入種類變了）
+    REJECTED = "rejected"  # 表頭 rejected（拒答、截斷、格式、驗證不過、請求不合法）
+    # run failed：errored（非 invalid_request）、canceled、expired、看不懂的一行；不寫表頭
+    FAILED = "failed"
+    INPUT_CHANGED = "input_changed"  # 等待期間輸入變了：記帳、run failed，不寫表頭
+    ALREADY_DONE = "already_done"  # run 已經不是 running（匯入過、別人匯入中）：什麼都不寫
+    # 驗證時出了非預期的錯：帳照記，run 改 failed（llm_result_pending，之後由互動接續）
+    ERROR = "error"
+
+
+@dataclass
+class BatchImportCounts:
+    """一批這次匯入的計數（單位是「結果裡的一項」）。
+
+    - `outcomes`：照 `BatchItemOutcome` 計。
+    - `unknown_custom_ids`：custom_id 不屬於這批（或不是 32 hex）；`unreadable_lines`：連
+      custom_id 都讀不到的行。兩者都只計數、不寫任何列。
+    - `missing`：結果下載完、這批還沒出現（改 `batch_result_missing`）的項目；`unavailable`：結果
+      拿不到時改 `batch_results_unavailable` 的項目。
+    """
+
+    outcomes: dict[BatchItemOutcome, int] = field(default_factory=dict)
+    unknown_custom_ids: int = 0
+    unreadable_lines: int = 0
+    missing: int = 0
+    unavailable: int = 0
+
+    def add(self, outcome: BatchItemOutcome) -> None:
+        self.outcomes[outcome] = self.outcomes.get(outcome, 0) + 1
+
+    def count(self, outcome: BatchItemOutcome) -> int:
+        return self.outcomes.get(outcome, 0)
+
+    @property
+    def imported(self) -> int:
+        """這次寫了表頭或結束了 run 的項目數（不含 `already_done`）。"""
+        return sum(
+            n
+            for outcome, n in self.outcomes.items()
+            if outcome is not BatchItemOutcome.ALREADY_DONE
+        )
+
+
+@dataclass
+class BatchPollRow:
+    """一次 poll 裡一個批次的結果。
+
+    - `status`：做完之後這筆 `batch_submission` 的狀態（就我們所知）。
+    - `provider_status`：供應商那邊的 `processing_status`（沒查到時是 None）。
+    - `overdue`：還沒結束、但已經過了 `expires_at`。
+    - `error`：這批出錯時的錯誤類別（與狀態碼），不含訊息；沒有是 None。
+    """
+
+    batch_submission_id: uuid.UUID
+    status: BatchSubmissionStatus
+    provider_status: BatchProcessingStatus | None = None
+    counts: BatchImportCounts = field(default_factory=BatchImportCounts)
+    overdue: bool = False
+    error: str | None = None
+
+
+@dataclass
+class LlmBatchPollResult:
+    """一次 `poll_llm_batches` 的結果。
+
+    - `rows`：這次查的每個批次（`submitted`／`ended`）。
+    - `needs_attention`：做完之後全庫 `needs_attention` 的批次數。
+    - `ai_done`：這次進 `ai_done` 的 `weekly_run`。
+    """
+
+    rows: list[BatchPollRow] = field(default_factory=list)
+    needs_attention: int = 0
+    ai_done: list[uuid.UUID] = field(default_factory=list)
+
+    @property
+    def errors(self) -> int:
+        """出錯的批次數，加上驗證時出非預期錯誤（`error`）的項目數。"""
+        return sum(
+            (row.error is not None) + row.counts.count(BatchItemOutcome.ERROR) for row in self.rows
+        )
+
+    @property
+    def healthy(self) -> bool:
+        """沒有錯誤、也沒有 `needs_attention`：worker 才送 `poll-batches` 心跳。"""
+        return self.errors == 0 and self.needs_attention == 0
+
+
+_FINISHED: Final = frozenset({BatchSubmissionStatus.IMPORTED, BatchSubmissionStatus.FAILED})
+
+
+def is_finished(status: BatchSubmissionStatus) -> bool:
+    """`imported`／`failed`：`radar batches wait` 不用再等的批次。"""
+    return status in _FINISHED
+
+
+def render_poll_row(row: BatchPollRow) -> str:
+    """`radar batches poll` 每個批次一行：批次 id、狀態、供應商狀態、這次匯入的各結果計數、逾期。"""
+    provider = "—" if row.provider_status is None else row.provider_status.value
+    parts = [f"{row.batch_submission_id}  {row.status.value}  供應商 {provider}"]
+    counts = row.counts
+    shown = [
+        f"{outcome.value} {counts.count(outcome)}"
+        for outcome in BatchItemOutcome
+        if counts.count(outcome)
+    ]
+    for label, value in (
+        ("missing", counts.missing),
+        ("unavailable", counts.unavailable),
+        ("不認得的 custom_id", counts.unknown_custom_ids),
+        ("讀不懂的行", counts.unreadable_lines),
+    ):
+        if value:
+            shown.append(f"{label} {value}")
+    if shown:
+        parts.append("、".join(shown))
+    if row.overdue:
+        parts.append("逾期")
+    if row.error is not None:
+        parts.append(f"錯誤：{row.error}")
+    return "  ".join(parts)
+
+
+def render_poll_summary(result: LlmBatchPollResult) -> list[str]:
+    """`radar batches poll` 最後的幾行：needs_attention 數、這次進 `ai_done` 的每週更新。"""
+    lines: list[str] = []
+    if not result.rows:
+        lines.append("沒有要查的批次（submitted／ended）")
+    lines.append(f"needs_attention：{result.needs_attention} 批")
+    if result.needs_attention:
+        lines.append(
+            "要人工確認：radar batches resolve <批次 id> --provider-batch-id <ID> 或 --fail"
+        )
+    for weekly_run_id in result.ai_done:
+        lines.append(f"每週更新 {weekly_run_id} → ai_done")
+    return lines
+
+
+def render_wait_progress(finished: int, running: int) -> str:
+    """`radar batches wait` 每次檢查印的一行。"""
+    return f"已結束 {finished} 批、還在跑 {running} 批"
+
+
+@dataclass
+class LlmBatchEstimate:
+    """`radar batches create --estimate`：照規劃同樣的檢查，現在會排幾筆（不寫任何列）。
+
+    - `by_task`：各工作會排的筆數；`estimated_max_cost_usd`：它們的保守上限（Batch 價）合計。
+    - `skipped`：已經有 running、`active` 或平常流程的 `rejected`；`resumable`：有可接續的
+      `llm_result_pending`（留給互動接續）；`no_input`／`blocked`／`too_large`：組請求時擋下。
+    預估不看預算（規劃時放不下的會計 `deferred_budget`）。
+    """
+
+    by_task: dict[LlmTask, int] = field(default_factory=dict)
+    estimated_max_cost_usd: Decimal = Decimal(0)
+    skipped: int = 0
+    resumable: int = 0
+    no_input: int = 0
+    blocked: int = 0
+    too_large: int = 0
+
+    @property
+    def planned(self) -> int:
+        return sum(self.by_task.values())
+
+
+def render_batch_estimate(estimate: LlmBatchEstimate, status: BudgetStatus) -> list[str]:
+    """`radar batches create` 送出前印的預估：各工作筆數、Batch 價的保守上限合計、本月預算剩餘。"""
+    body = [[task.value, f"{estimate.by_task.get(task, 0):,}"] for task in BATCH_TASKS]
+    body.append(["合計", f"{estimate.planned:,}"])
+    lines = ["預估要排的 Batch（每篇論文的每個工作一筆）", ""]
+    lines += render_table(["工作", "筆數"], body, align="lr")
+    lines += [
+        "",
+        f"保守上限（Batch 價）：{format_usd(estimate.estimated_max_cost_usd)} 美元",
+        f"略過（已有結果或在跑）：{estimate.skipped:,}；留給互動接續：{estimate.resumable:,}",
+        f"擋下：沒有輸入 {estimate.no_input:,}、放行擋下 {estimate.blocked:,}、"
+        f"太長 {estimate.too_large:,}",
+        f"本月（{status.window.label}，台北時間）：已花 {format_usd(status.total_usd)}、"
+        f"Batch 預留 {format_usd(status.reserved_usd)}、離熔斷線 {format_usd(status.remaining_usd)}"
+        f"（熔斷線 {format_usd(status.breaker_usd)}）",
+    ]
+    if status.breaker_tripped:
+        lines.append("已熔斷：規劃不會排任何批次")
+    elif estimate.estimated_max_cost_usd > status.remaining_usd:
+        lines.append("保守上限超過離熔斷線的金額：放不下的會計 deferred_budget，這次不排")
+    return lines
+
+
+class ResolveOutcome(StrEnum):
+    """`radar batches resolve` 的結果。"""
+
+    RESUMED = "resumed"  # needs_attention → submitted（記下 batch ID）
+    FAILED = "failed"  # needs_attention → failed，還在跑的 run 改 failed
+    NOT_NEEDS_ATTENTION = "not_needs_attention"  # 這批不是 needs_attention：不改
+    ID_IN_USE = "id_in_use"  # 這個供應商 batch ID 已經是別批的：不改
+
+
+@dataclass(frozen=True)
+class BatchResolveResult:
+    """一次 `resolve_llm_batch` 的結果：`status` 是做完之後這批的狀態；`released_runs` 是 `--fail`
+    改成 failed 的 run 數。"""
+
+    outcome: ResolveOutcome
+    status: BatchSubmissionStatus
+    released_runs: int = 0

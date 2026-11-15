@@ -28,6 +28,7 @@ from radar.domain.ai_outputs import CallMode
 from radar.domain.jobs import (
     EMBED_PAPERS,
     PLAN_LLM_BATCHES,
+    POLL_BATCHES,
     RUN_WEEKLY_UPDATE,
     SUBMIT_LLM_BATCH,
     SWEEP,
@@ -48,8 +49,14 @@ from radar.entrypoints.bootstrap import (
 )
 from radar.ports import LlmProvider
 from radar.services.embeddings import embed_papers
-from radar.services.llm_batches import LlmBatchSetup, plan_llm_batches, submit_llm_batch
+from radar.services.llm_batches import (
+    LlmBatchSetup,
+    plan_llm_batches,
+    poll_llm_batches,
+    submit_llm_batch,
+)
 from radar.services.llm_gateway import expire_stale_runs
+from radar.services.scheduled import run_checked_scheduled_job
 from radar.services.sweep import sweep
 from radar.services.weekly_update import (
     WeeklyFetchSetup,
@@ -208,6 +215,41 @@ def register_tasks(app: procrastinate.App, parts: WorkerParts, settings: Setting
                 clock=lambda: datetime.now(UTC),
             )
 
+    def open_llm_provider(stack: ExitStack) -> LlmProvider:
+        """建 Anthropic 的 provider 並交給 `stack` 關。`ConfigError`（缺金鑰；訊息只列變數名稱）
+        原樣往上丟；其他錯誤換成 `AdapterSetupError`（不串原例外）。"""
+        error_type: str | None = None
+        try:
+            provider = build_llm_provider(settings)
+        except ConfigError:
+            raise
+        except Exception as exc:
+            error_type = type(exc).__name__
+        if error_type is not None:
+            raise AdapterSetupError(error_type)
+        return stack.enter_context(provider)
+
+    def poll_batches_job() -> None:
+        # cron 每 15 分鐘排入（Story 2.11、ADR-0043）。查 submitted／ended 的批次、匯入已結束的；
+        # provider 只在有要查的批次時才建（open_provider），沒有批次時缺金鑰也做得完。沒有錯誤、
+        # 也沒有 needs_attention 才送 poll-batches 心跳（不健康時 service 已記錯誤日誌）。不做工作層
+        # 的重試：供應商的暫時性錯誤 adapter 已重試過，下一次 cron 會接著做（匯入是冪等的）。
+        setup = load_batch_setup()
+        with ExitStack() as stack:
+            run_checked_scheduled_job(
+                POLL_BATCHES.check,
+                partial(
+                    poll_llm_batches,
+                    SystemViewer(),
+                    parts.database,
+                    partial(open_llm_provider, stack),
+                    setup,
+                    clock=lambda: datetime.now(UTC),
+                ),
+                lambda result: result.healthy,
+                parts.send_heartbeat,
+            )
+
     def load_scope() -> ScopeSettings:
         # 執行時才讀 config/journals.yaml：抓完後才改設定也照新的追蹤範圍算 in_scope。
         return load_domain_config().journals.scope_settings()
@@ -261,4 +303,8 @@ def register_tasks(app: procrastinate.App, parts: WorkerParts, settings: Setting
         submit_llm_batch_job,
         max_retries=0,
         retry_wait=settings.job_retry_wait,
+    )
+    # 查結果不做工作層的重試：下一次 cron（15 分鐘後）接著做，匯入是冪等的。
+    register_job(
+        app, POLL_BATCHES, poll_batches_job, max_retries=0, retry_wait=settings.job_retry_wait
     )

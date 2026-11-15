@@ -33,6 +33,25 @@ Batch（Story 2.9、ADR-0041）共用第 1、3、4 步（`prepare_llm_request`�
 有可接續的 `llm_result_pending` 時不新增，留給互動接續）；送出只經 `send_llm_batch`（唯一呼叫
 `provider.submit_batch` 的地方）。批次的狀態轉移與預算預留在 `services/llm_batches.py`。
 
+Batch 結果（Story 2.11、ADR-0043）：查狀態只經 `fetch_llm_batch`、下載結果只經
+`iter_llm_batch_results`；一項結果的匯入是 `import_llm_batch_result`（每步自己的短交易，不開著交易
+呼叫供應商）：
+
+1. `succeeded` → `interpret_message`（看 run 的 prompt 版本有沒有 schema）→ 文字，或拒收代碼
+   （拒答、截斷、格式不對、文字存不進資料庫）；`malformed`（訊息形狀不對）
+   → `llm_malformed_response`。
+2. 鎖住 run：已經不是 `running` → `ALREADY_DONE`、什麼都不寫。有 usage 就記帳
+   （`create_batch_llm_call`：同一筆 run 已有 Batch 帳就不再記；五折價；`created_at` 是匯入時間）。
+3. 用**現在的**論文內容與設定版本重算輸入指紋，對不上（或沒有輸入了）→ run `failed`
+   （`batch_input_changed`）、不寫表頭。
+4. 有文字就用 run 的 prompt 版本驗證（Pydantic → domain 驗證 → 存得進資料庫），不過就是拒收。
+   驗證丟了非預期的例外 → run 改 `failed`（有帳所以是 `llm_result_pending`，留給互動接續）、
+   回 `ERROR`；`BaseException` 原樣往上丟（run 留 `running`，重跑接著做，帳不會重記）。
+5. 經 `ai_results.record_batch_llm_result` 寫表頭（run 已經不是 `running` 時不寫）。
+
+`errored` 的 `invalid_request_error` 直接寫 `rejected`（`llm_invalid_request`，不記帳、不看輸入）；
+其他 `errored`、`canceled`、`expired`、整行讀不懂（`unreadable`）→ run `failed`（各自的代碼）。
+
 預算檢查是「呼叫前看帳本＋尚未結束的 Batch 預留」（ADR-0041），帳在第 7 步才記，所以同時在途的
 呼叫彼此看不到（熔斷線與每個功能預算都一樣）：超支上限＝同時在途的呼叫數（worker 與所有呼叫閘門的
 CLI 等行程加起來）× 單次最大費用（約 0.042 美元；只在帳都記得進去、沒有工作打開
@@ -40,7 +59,7 @@ CLI 等行程加起來）× 單次最大費用（約 0.042 美元；只在帳都
 """
 
 import uuid
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import timedelta
 from decimal import Decimal
@@ -66,6 +85,7 @@ from radar.domain.ai_outputs import (
     PaperLlmSource,
     ResultStatus,
     RunKey,
+    RunStatus,
     SavedLlmOutput,
     build_llm_input,
     check_output_storable,
@@ -76,14 +96,19 @@ from radar.domain.errors import ErrorCode
 from radar.domain.fingerprints import input_sha256, run_lock_key
 from radar.domain.llm import (
     LlmBatchRequest,
+    LlmBatchResult,
+    LlmBatchResultKind,
+    LlmBatchStatus,
     LlmConfigurationError,
     LlmRejectedError,
     LlmRequest,
     LlmTransientError,
     LlmUsage,
     frozen_schema_json,
+    interpret_message,
     system_prompt,
 )
+from radar.domain.llm_batches import BatchItemOutcome, BatchItemRun
 from radar.domain.permissions import Action, require
 from radar.domain.policy import CloudClearanceError, CloudSafeText, clear_for_cloud, cloud_text
 from radar.domain.pricing import estimate_input_tokens, llm_call_cost
@@ -95,8 +120,10 @@ from radar.ports import LlmProvider
 from radar.repo.ai_outputs import find_blocking_ai_result
 from radar.repo.db import Database, DbConnection
 from radar.repo.llm_ledger import (
+    create_batch_llm_call,
     create_derivation_run,
     create_llm_call,
+    find_derivation_run,
     find_llm_call_output,
     find_resumable_derivation_run_id,
     find_running_derivation_run_id,
@@ -106,7 +133,11 @@ from radar.repo.llm_ledger import (
     update_expired_derivation_runs,
 )
 from radar.repo.papers import find_paper_llm_source
-from radar.services.ai_results import record_llm_result
+from radar.services.ai_results import (
+    ResultTargetNotFoundError,
+    record_batch_llm_result,
+    record_llm_result,
+)
 from radar.services.prompt_loader import LoadedPrompt, current_prompt_version, load_prompt
 
 # `GatewayConfig` 定義在 domain（bootstrap 不能 import services），從這裡也拿得到。
@@ -121,6 +152,9 @@ __all__ = [
     "PreparedLlmRequest",
     "claim_batch_run",
     "expire_stale_runs",
+    "fetch_llm_batch",
+    "import_llm_batch_result",
+    "iter_llm_batch_results",
     "prepare_llm_request",
     "run_llm_job",
     "send_llm_batch",
@@ -489,6 +523,244 @@ def send_llm_batch(
     """
     require(actor, Action.RUN_AI_JOBS, None)
     return provider.submit_batch(requests)
+
+
+def fetch_llm_batch(actor: Viewer, provider: LlmProvider, provider_batch_id: str) -> LlmBatchStatus:
+    """查供應商那邊一個批次的狀態（`radar/` 裡唯一呼叫 `retrieve_batch` 的地方）。
+
+    Raises:
+        PermissionDeniedError: `actor` 不是系統工作（不呼叫供應商）。
+        LlmError: 供應商的錯誤原樣丟出（找不到是 `status=404` 的 `LlmConfigurationError`）。
+    """
+    require(actor, Action.RUN_AI_JOBS, None)
+    return provider.retrieve_batch(provider_batch_id)
+
+
+def iter_llm_batch_results(
+    actor: Viewer, provider: LlmProvider, provider_batch_id: str
+) -> Iterator[LlmBatchResult]:
+    """下載一個已結束批次的結果，一行一個（`radar/` 裡唯一呼叫 `batch_results` 的地方）。
+
+    Raises:
+        PermissionDeniedError: `actor` 不是系統工作（不呼叫供應商）。
+        LlmError: 供應商的錯誤（下載前或下載途中）原樣丟出。
+    """
+    require(actor, Action.RUN_AI_JOBS, None)
+    return provider.batch_results(provider_batch_id)
+
+
+_ITEM_FAILURES: Mapping[LlmBatchResultKind, ErrorCode] = {
+    LlmBatchResultKind.CANCELED: ErrorCode.BATCH_ITEM_CANCELED,
+    LlmBatchResultKind.EXPIRED: ErrorCode.BATCH_ITEM_EXPIRED,
+    LlmBatchResultKind.UNREADABLE: ErrorCode.BATCH_RESULT_UNREADABLE,
+}
+
+_ITEM_OUTCOME = {
+    ResultStatus.ACTIVE: BatchItemOutcome.ACTIVE,
+    ResultStatus.SUPERSEDED: BatchItemOutcome.SUPERSEDED,
+    ResultStatus.REJECTED: BatchItemOutcome.REJECTED,
+}
+
+
+def import_llm_batch_result(
+    actor: Viewer,
+    database: Database,
+    config: GatewayConfig,
+    job: LlmJob,
+    item: BatchItemRun,
+    result: LlmBatchResult,
+) -> BatchItemOutcome:
+    """匯入一項 Batch 結果（見模組說明「Batch 結果」）。`job` 是這項 run 的論文、工作、輸入種類，
+    帶**現在**的設定（語言、驗證、分類表與情境值清單）。
+
+    Raises:
+        PermissionDeniedError: `actor` 不是系統工作（不碰資料庫）。
+        ValueError: `config.call_mode` 不是 Batch，或 `job` 和 `item` 對不起來（不碰資料庫）。
+        PromptIntegrityError, PromptFormatError: run 的 prompt 版本讀不出來（還沒寫任何列）。
+        ResultTargetNotFoundError: run 或論文不見了。
+        BaseException: 資料庫錯誤與中斷原樣丟出（run 留 `running`；寫表頭失敗時盡量改成
+            `llm_result_pending`）。
+    """
+    require(actor, Action.RUN_AI_JOBS, None)
+    if config.call_mode is not CallMode.BATCH:
+        raise ValueError("import_llm_batch_result 要用 call_mode=batch 的閘門設定")
+    if (
+        job.paper_id != item.key.paper_id
+        or LlmTask(job.task) is not item.key.task
+        or job.input_kind is not item.input_kind
+    ):
+        raise ValueError("job 和 batch item 不是同一篇論文、同一個工作、同一種輸入")
+    kind = result.kind
+    if kind is LlmBatchResultKind.ERRORED:
+        if result.error_type == "invalid_request_error":
+            # 請求本身不合法：再送也一樣，記拒收（不計費、不看輸入）。
+            return _record_batch_result(
+                actor, database, config, job, item, ErrorCode.LLM_INVALID_REQUEST, None, None
+            )
+        return _fail_batch_item(database, item, ErrorCode.BATCH_ITEM_ERRORED)
+    failure = _ITEM_FAILURES.get(kind)
+    if failure is not None:
+        return _fail_batch_item(database, item, failure)
+
+    prompt = load_prompt(config.prompts_root, item.key.task, version=item.key.prompt_version)
+    saved, usage = _batch_saved_output(result, prompt)
+
+    # 2. 鎖 run → 記帳（冪等）。
+    with database.transaction() as connection:
+        run = find_derivation_run(SystemViewer(), connection, item.run_id, for_update=True)
+        if run is None:
+            raise ResultTargetNotFoundError("找不到 batch item 的 derivation_run")
+        if run.status is not RunStatus.RUNNING:
+            return BatchItemOutcome.ALREADY_DONE
+        if usage is not None:
+            completion = result.completion
+            cost = llm_call_cost(config.models, item.key.model, usage, is_batch=True)
+            raw = None if completion is None else completion.raw
+            create_batch_llm_call(
+                connection,
+                NewLlmCall(
+                    run_id=item.run_id,
+                    input_tokens=usage.input_tokens,
+                    output_tokens=usage.output_tokens,
+                    cache_creation_input_tokens=usage.cache_creation_input_tokens,
+                    cache_read_input_tokens=usage.cache_read_input_tokens,
+                    cost_usd=cost.cost_usd,
+                    price_tier=cost.price_tier.value,
+                    is_batch=True,
+                    response_id=None if completion is None else completion.response_id,
+                    request_id=None if completion is None else completion.request_id,
+                    stop_reason=None if completion is None else completion.stop_reason,
+                    raw_response=raw if raw is not None and is_storable_json(dict(raw)) else None,
+                    output=saved,
+                ),
+            )
+
+    # 3. 用現在的論文內容與設定重算輸入指紋。
+    llm_input = _current_batch_input(database, job, item)
+    if llm_input is None:
+        return _fail_batch_item(database, item, ErrorCode.BATCH_INPUT_CHANGED)
+
+    # 4. 用 run 的 prompt 版本驗證。
+    reject_reason = saved.reject_reason
+    output: BaseModel | str | None = None
+    if saved.text is not None:
+        try:
+            output = _validated_output(prompt, saved.text, job, llm_input)
+        except OutputRejectedError as exc:
+            reject_reason = exc.code
+        except Exception as exc:
+            _try_fail_run(database, item.run_id)
+            log.error(
+                "驗證 Batch 結果時出了非預期的錯",
+                task=item.key.task.value,
+                run_id=str(item.run_id),
+                error_type=type(exc).__name__,
+            )
+            return BatchItemOutcome.ERROR
+
+    # 5. 寫表頭。
+    return _record_batch_result(
+        actor, database, config, job, item, reject_reason, output, llm_input
+    )
+
+
+def _batch_saved_output(
+    result: LlmBatchResult, prompt: LoadedPrompt
+) -> tuple[SavedLlmOutput, LlmUsage | None]:
+    """`succeeded`／`malformed` 的結果 → 要存的輸出（文字或拒收代碼）與要記帳的 usage。"""
+    completion = result.completion
+    if completion is None:  # malformed：訊息形狀不對
+        return SavedLlmOutput(
+            text=None, reject_reason=ErrorCode.LLM_MALFORMED_RESPONSE
+        ), result.usage
+    try:
+        interpreted = interpret_message(completion, expects_json=prompt.schema_class is not None)
+    except LlmRejectedError as exc:
+        return SavedLlmOutput(text=None, reject_reason=exc.code), completion.usage
+    if not is_storable_json(interpreted.text):
+        return (
+            SavedLlmOutput(text=None, reject_reason=ErrorCode.LLM_OUTPUT_UNSTORABLE),
+            completion.usage,
+        )
+    return SavedLlmOutput(text=interpreted.text, reject_reason=None), completion.usage
+
+
+def _current_batch_input(database: Database, job: LlmJob, item: BatchItemRun) -> LlmInput | None:
+    """（唯讀交易）用現在的論文內容與 `job` 的設定版本組輸入；指紋和 run 的一樣才回，否則（或沒有
+    輸入了、論文不見了）回 None。"""
+    with database.transaction() as connection:
+        source = find_paper_llm_source(
+            SystemViewer(), connection, item.key.paper_id, for_update=False
+        )
+    if source is None:
+        return None
+    try:
+        llm_input = build_llm_input(source, item.input_kind)
+    except NoLlmInputError:
+        return None
+    fingerprint = input_sha256(
+        llm_input.blocks,
+        item.key.task,
+        taxonomy_version=job.taxonomy_version,
+        context_values_version=job.context_values_version,
+    )
+    return llm_input if fingerprint == item.key.input_sha256 else None
+
+
+def _fail_batch_item(database: Database, item: BatchItemRun, reason: ErrorCode) -> BatchItemOutcome:
+    """這項的 run 改 `failed`（條件式：已經不是 `running` 就不改、回 `ALREADY_DONE`）。"""
+    with database.transaction() as connection:
+        changed = update_derivation_run_failed(connection, item.run_id, reason)
+    if not changed:
+        return BatchItemOutcome.ALREADY_DONE
+    return (
+        BatchItemOutcome.INPUT_CHANGED
+        if reason is ErrorCode.BATCH_INPUT_CHANGED
+        else BatchItemOutcome.FAILED
+    )
+
+
+def _record_batch_result(
+    actor: Viewer,
+    database: Database,
+    config: GatewayConfig,
+    job: LlmJob,
+    item: BatchItemRun,
+    reject_reason: ErrorCode | None,
+    output: BaseModel | str | None,
+    llm_input: LlmInput | None,
+) -> BatchItemOutcome:
+    """經 `ai_results.record_batch_llm_result` 寫表頭。`Exception` 時盡量把 run 改成 `failed`
+    （有帳就是 `llm_result_pending`）後原樣丟出；`BaseException`（中斷）不動 run，重跑接著做。"""
+    try:
+        status = record_batch_llm_result(
+            actor,
+            database,
+            config,
+            paper_id=item.key.paper_id,
+            run_id=item.run_id,
+            lang=job.lang,
+            abstract_id=item.abstract_id,
+            reject_reason=reject_reason,
+            taxonomy_version=job.taxonomy_version,
+            context_values_version=job.context_values_version,
+            output=output,
+            taxonomy=job.taxonomy,
+            context_values=job.context_values,
+            llm_input=llm_input,
+        )
+    except Exception as exc:
+        _try_fail_run(database, item.run_id)
+        log.error(
+            "寫 Batch 結果失敗",
+            task=item.key.task.value,
+            run_id=str(item.run_id),
+            error_type=type(exc).__name__,
+        )
+        raise
+    if status is None:
+        return BatchItemOutcome.ALREADY_DONE
+    return _ITEM_OUTCOME[status]
 
 
 # --- 各步驟 ---------------------------------------------------------------------------------

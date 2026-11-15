@@ -160,6 +160,7 @@ def test_env_radar_example_lists_only_radar_secrets_without_values() -> None:
         "RADAR_OBJECT_STORE_SECRET_ACCESS_KEY",
         "RADAR_HEARTBEAT_URL_SWEEP",
         "RADAR_HEARTBEAT_URL_WEEKLY_UPDATE",
+        "RADAR_HEARTBEAT_URL_POLL_BATCHES",
     ):
         assert name in entries, name
 

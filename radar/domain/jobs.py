@@ -95,6 +95,12 @@ EMBED_PAPERS = JobSpec("embed_papers", Queue.AI, lock="embed_papers")
 PLAN_LLM_BATCHES = JobSpec("plan_llm_batches", Queue.AI, lock="plan_llm_batches")
 SUBMIT_LLM_BATCH = JobSpec("submit_llm_batch", Queue.AI, lock="llm_batches")
 
+# Batch 結果（Story 2.11、ADR-0043）：cron 每 15 分鐘排入 `poll_batches`，查 `submitted`／`ended`
+# 的批次、匯入已結束的（和 `radar batches poll`／`wait` 共用 `poll_llm_batches`）。帶
+# `poll_batches` 這把鎖，同時只跑一個；兩個同時匯入也靠資料層擋（唯一索引、條件式更新）。
+# 沒有錯誤、也沒有 `needs_attention` 的批次才送 `poll-batches` 心跳。
+POLL_BATCHES = JobSpec("poll_batches", Queue.AI, schedule="poll-batches", lock="poll_batches")
+
 JOBS: tuple[JobSpec, ...] = (
     SWEEP,
     WEEKLY_UPDATE,
@@ -102,6 +108,7 @@ JOBS: tuple[JobSpec, ...] = (
     EMBED_PAPERS,
     PLAN_LLM_BATCHES,
     SUBMIT_LLM_BATCH,
+    POLL_BATCHES,
 )
 
 # 排入一個工作：（工作, 參數）→ True＝新排入；False＝同一件事已經在排隊，沒有再排一筆。

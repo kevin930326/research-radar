@@ -14,3 +14,18 @@ def run_scheduled_job[T](
     result = work()
     send_heartbeat(check)
     return result
+
+
+def run_checked_scheduled_job[T](
+    check: str,
+    work: Callable[[], T],
+    healthy: Callable[[T], bool],
+    send_heartbeat: Callable[[str], None],
+) -> T:
+    """同 `run_scheduled_job`，但 `work` 正常結束也要 `healthy(結果)` 為真才送心跳（例如
+    `poll-batches`：有錯誤或有批次卡在 `needs_attention` 時不送，Story 2.11）。不健康時由 `work`
+    自己記錯誤日誌。"""
+    result = work()
+    if healthy(result):
+        send_heartbeat(check)
+    return result

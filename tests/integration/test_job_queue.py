@@ -168,7 +168,7 @@ def test_migration_creates_queue_objects_without_extensions(fresh_database: Test
     assert _admin_rows(fresh_database, "SELECT extname FROM pg_extension ORDER BY 1") == (
         extensions_before
     )
-    assert fresh_database.revisions() == {"0016"}
+    assert fresh_database.revisions() == {"0017"}
 
 
 def test_downgrade_to_0001_removes_every_queue_object(fresh_database: TestDatabase) -> None:
@@ -280,7 +280,7 @@ def test_unknown_job_exits_2_without_database() -> None:
     result = _radar("enqueue", "nope", env={"DATABASE_URL": "postgresql://radar_app@127.0.0.1:1/x"})
 
     assert result.returncode == 2
-    assert "可用的工作：sweep" in result.stderr
+    assert "可用的工作：poll-batches、sweep" in result.stderr
 
 
 # --- pdf 的鎖 -----------------------------------------------------------------------------

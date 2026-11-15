@@ -3,7 +3,8 @@
 
 - `batch_submission`：狀態 `queued` → `submitting` → `submitted` → `ended` → `imported`；`failed`；
   `needs_attention`。`queued`／`submitting` 時一定沒有供應商 batch ID，`submitted` 以後一定有；
-  非空的 batch ID 唯一。狀態只由 `services/llm_batches.py` 改，每個轉移都是條件式 UPDATE（只在
+  非空的 batch ID 唯一。`ended`／`imported` 一定有 `ended_at`，`imported` 一定有 `imported_at`
+  （遷移 0017、Story 2.11）。狀態只由 `services/llm_batches.py` 改，每個轉移都是條件式 UPDATE（只在
   預期的起始狀態才改，回有沒有改到），並行時靠資料庫擋。
 - `batch_item`：不是狀態表（沒有 `status`），進度跟著它的 `derivation_run`（`run_id` 唯一）；
   `custom_id` 就是它的 `id.hex`。`estimated_max_cost_usd` 是送出前的保守上限，run 還是 `running`
@@ -13,6 +14,7 @@
 """
 
 import uuid
+from collections.abc import Iterable
 from datetime import datetime, timedelta
 from decimal import Decimal
 
@@ -36,9 +38,9 @@ from sqlalchemy import (
 from radar.domain.ai_outputs import InputKind, LlmTask, RunKey, RunStatus
 from radar.domain.errors import ErrorCode
 from radar.domain.llm_batches import BatchItemRun, BatchSubmission, BatchSubmissionStatus
-from radar.domain.viewer import SystemViewer
+from radar.domain.viewer import SystemViewer, Viewer
 from radar.repo.models import Base
-from radar.repo.visibility import visible_to_system_only
+from radar.repo.visibility import visible_papers, visible_to_system_only
 
 # --- 表的定義（`alembic check` 拿來和資料庫比對；遷移 0016 建表） -----------------------------
 
@@ -58,6 +60,9 @@ batch_submission_table = Table(
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
     Column("updated_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
     Column("submitted_at", DateTime(timezone=True)),
+    # 遷移 0017（Story 2.11）：看到供應商 `ended` 的時間、匯入做完的時間。
+    Column("ended_at", DateTime(timezone=True)),
+    Column("imported_at", DateTime(timezone=True)),
     Index(
         "uq_batch_submission_provider_batch_id",
         "provider_batch_id",
@@ -92,6 +97,12 @@ batch_submission_table = Table(
     CheckConstraint(
         "failure_reason IS NULL OR failure_reason ~ '^[a-z][a-z0-9_]*$'",
         name="failure_reason_format",
+    ),
+    CheckConstraint(
+        "status NOT IN ('ended', 'imported') OR ended_at IS NOT NULL", name="ended_at_once_ended"
+    ),
+    CheckConstraint(
+        "status <> 'imported' OR imported_at IS NOT NULL", name="imported_at_once_imported"
     ),
     CheckConstraint("item_count >= 0", name="item_count_not_negative"),
     CheckConstraint("estimated_max_cost_usd >= 0", name="estimated_max_cost_usd_not_negative"),
@@ -159,6 +170,98 @@ def find_batch_submission(
         .one_or_none()
     )
     return None if row is None else _submission(row)
+
+
+def list_batch_submissions(
+    viewer: SystemViewer,
+    connection: Connection,
+    statuses: Iterable[BatchSubmissionStatus],
+    ids: Iterable[uuid.UUID] | None = None,
+) -> list[BatchSubmission]:
+    """狀態在 `statuses` 裡的批次（有給 `ids` 時只看這幾筆），依建立順序（`created_at`, `id`）。
+
+    Raises:
+        TypeError: `viewer` 不是 `SystemViewer`。
+    """
+    visible = visible_to_system_only(viewer)
+    wanted = [BatchSubmissionStatus(status).value for status in statuses]
+    only = "" if ids is None else " AND id = ANY(:ids)"
+    rows = (
+        connection.execute(
+            text(
+                f"SELECT {_SUBMISSION_COLUMNS} FROM batch_submission"
+                f" WHERE {visible} AND status = ANY(:statuses){only}"
+                " ORDER BY created_at, id"
+            ),
+            {"statuses": wanted, "ids": None if ids is None else list(ids)},
+        )
+        .mappings()
+        .all()
+    )
+    return [_submission(row) for row in rows]
+
+
+def count_batch_submissions(
+    viewer: SystemViewer, connection: Connection, status: BatchSubmissionStatus
+) -> int:
+    """這個狀態的批次有幾筆（例如 `needs_attention`）。
+
+    Raises:
+        TypeError: `viewer` 不是 `SystemViewer`。
+    """
+    visible = visible_to_system_only(viewer)
+    value = connection.execute(
+        text(f"SELECT count(*) FROM batch_submission WHERE {visible} AND status = :status"),
+        {"status": BatchSubmissionStatus(status).value},
+    ).scalar_one()
+    return int(value)
+
+
+def count_batch_running_runs(
+    viewer: SystemViewer, connection: Connection, batch_submission_id: uuid.UUID
+) -> int:
+    """這個批次裡還是 `running` 的 run 有幾筆（`radar batches resolve --fail` 確認前印）。
+
+    Raises:
+        TypeError: `viewer` 不是 `SystemViewer`。
+    """
+    visible = visible_to_system_only(viewer)
+    value = connection.execute(
+        text(
+            "SELECT count(*) FROM batch_item AS i JOIN derivation_run AS r ON r.id = i.run_id"
+            f" WHERE {visible} AND i.batch_submission_id = :id AND r.status = 'running'"
+        ),
+        {"id": batch_submission_id},
+    ).scalar_one()
+    return int(value)
+
+
+def find_batch_attention_run(viewer: Viewer, connection: Connection, key: RunKey) -> bool:
+    """這組鍵有沒有平常流程的 `running` run，屬於卡在 `needs_attention` 的批次（AI 區塊判定
+    `failed` 用，ADR-0004 決定第 4 點、ADR-0015）。論文不存在或 `viewer` 看不到時回 False。
+    """
+    visible = visible_papers(viewer, alias="paper")
+    value = connection.execute(
+        text(
+            "SELECT EXISTS (SELECT 1 FROM derivation_run AS r"
+            " JOIN paper ON paper.id = r.paper_id"
+            " JOIN batch_item AS i ON i.run_id = r.id"
+            " JOIN batch_submission AS s ON s.id = i.batch_submission_id"
+            f" WHERE {visible}"
+            " AND r.paper_id = :paper_id AND r.task = :task AND r.prompt_version = :prompt_version"
+            " AND r.model = :model AND r.input_sha256 = :input_sha256"
+            " AND r.status = 'running' AND r.eval_run_id IS NULL"
+            " AND s.status = 'needs_attention')"
+        ),
+        {
+            "paper_id": key.paper_id,
+            "task": LlmTask(key.task).value,
+            "prompt_version": key.prompt_version,
+            "model": key.model,
+            "input_sha256": key.input_sha256,
+        },
+    ).scalar_one()
+    return bool(value)
 
 
 def list_batch_items(
@@ -465,5 +568,92 @@ def update_batch_submission_needs_attention(
             f" WHERE id = :id AND status = 'submitting' AND provider_batch_id IS NULL{stale}"
         ),
         {"id": batch_submission_id, "reason": ErrorCode(reason).value, "stale_after": stale_after},
+    )
+    return result.rowcount == 1
+
+
+def update_batch_submission_ended(connection: Connection, batch_submission_id: uuid.UUID) -> bool:
+    """`submitted` → `ended`（供應商那邊處理完了），記 `ended_at`；不是 `submitted` 就不改、回
+    False（Story 2.11）。"""
+    result = connection.execute(
+        text(
+            "UPDATE batch_submission SET status = 'ended', ended_at = clock_timestamp(),"
+            " updated_at = clock_timestamp()"
+            " WHERE id = :id AND status = 'submitted'"
+        ),
+        {"id": batch_submission_id},
+    )
+    return result.rowcount == 1
+
+
+def update_batch_submission_imported(
+    connection: Connection, batch_submission_id: uuid.UUID
+) -> bool:
+    """`ended` → `imported`，記 `imported_at`；只在這批已經沒有 `running` 的 run 時才改（同一句
+    判斷），
+    不符就不改、回 False（Story 2.11）。"""
+    result = connection.execute(
+        text(
+            "UPDATE batch_submission SET status = 'imported', imported_at = clock_timestamp(),"
+            " updated_at = clock_timestamp()"
+            " WHERE id = :id AND status = 'ended' AND NOT EXISTS ("
+            " SELECT 1 FROM batch_item AS i JOIN derivation_run AS r ON r.id = i.run_id"
+            " WHERE i.batch_submission_id = batch_submission.id AND r.status = 'running')"
+        ),
+        {"id": batch_submission_id},
+    )
+    return result.rowcount == 1
+
+
+def update_batch_submission_attention_on_not_found(
+    connection: Connection, batch_submission_id: uuid.UUID, reason: ErrorCode
+) -> bool:
+    """`submitted`／`ended` → `needs_attention`，記原因代碼（例如供應商回 404）；`ended` 是匯入到
+    一半中斷、之後供應商找不到的情況。不是這兩種狀態就不改、回 False（Story 2.11）。供應商 batch ID
+    留著，人工確認時查得到。"""
+    result = connection.execute(
+        text(
+            "UPDATE batch_submission SET status = 'needs_attention', failure_reason = :reason,"
+            " updated_at = clock_timestamp()"
+            " WHERE id = :id AND status IN ('submitted', 'ended')"
+        ),
+        {"id": batch_submission_id, "reason": ErrorCode(reason).value},
+    )
+    return result.rowcount == 1
+
+
+def update_batch_submission_resumed(
+    connection: Connection, batch_submission_id: uuid.UUID, provider_batch_id: str
+) -> bool:
+    """`needs_attention` → `submitted`（`radar batches resolve --provider-batch-id`）：記人工查到的
+    供應商 batch ID、清掉原因代碼、沒有送出時間的補上。這個 ID 已經是別批的（同一句判斷）或這批不是
+    `needs_attention` 就不改、回 False（Story 2.11）。"""
+    result = connection.execute(
+        text(
+            "UPDATE batch_submission SET status = 'submitted', provider_batch_id = :batch_id,"
+            " failure_reason = NULL, submitted_at = COALESCE(submitted_at, clock_timestamp()),"
+            " updated_at = clock_timestamp()"
+            " WHERE id = :id AND status = 'needs_attention' AND NOT EXISTS ("
+            " SELECT 1 FROM batch_submission AS other"
+            " WHERE other.provider_batch_id = :batch_id AND other.id <> :id)"
+        ),
+        {"id": batch_submission_id, "batch_id": provider_batch_id},
+    )
+    return result.rowcount == 1
+
+
+def update_batch_submission_resolved_failed(
+    connection: Connection, batch_submission_id: uuid.UUID
+) -> bool:
+    """`needs_attention` → `failed`（`radar batches resolve --fail`，原因
+    `batch_resolved_failed`）；
+    不是 `needs_attention` 就不改、回 False（Story 2.11）。"""
+    result = connection.execute(
+        text(
+            "UPDATE batch_submission SET status = 'failed', failure_reason = :reason,"
+            " updated_at = clock_timestamp()"
+            " WHERE id = :id AND status = 'needs_attention'"
+        ),
+        {"id": batch_submission_id, "reason": ErrorCode.BATCH_RESOLVED_FAILED.value},
     )
     return result.rowcount == 1

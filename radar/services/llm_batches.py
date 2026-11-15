@@ -1,9 +1,10 @@
-"""Batch 的規劃與送出（AD-8、AD-14、ADR-0004 決定第 2、4 點、ADR-0031 決定 15、ADR-0041、
-Story 2.9）。`batch_submission` 的狀態只在這裡改。
+"""Batch 的規劃、送出與結果匯入（AD-8、AD-14、ADR-0004 決定第 2、4 點、ADR-0031 決定 15、
+ADR-0041、ADR-0043、Story 2.9、2.11）。`batch_submission` 的狀態只在這裡改。
 
-規劃（`plan_llm_batches`，每週更新發佈快照後排入）：
+規劃（`plan_llm_batches`，每週更新發佈快照後排入；`radar batches create` 以 `manual=True` 呼叫）：
 
-0. 設定 `weekly_planning_enabled` 是 false：不排、不寫任何列（Story 2.11 的手動試跑以前）。
+0. 不是手動、而且設定 `weekly_planning_enabled` 是 false：不排、不寫任何列（先維持 false 的保守
+   做法，待 Kevin 決定；全庫第一次由 `radar batches create` 手動送）。
 1. 台北時間每月 1 日 00:00～`month_start_hold_hours` 點以前：整次延後，不寫任何列、不算失敗；
    每一批開始前再看一次，途中跨進窗口就停（已 commit 的批次留著）。
 2. 已熔斷：整次不排。
@@ -45,12 +46,39 @@ Story 2.9）。`batch_submission` 的狀態只在這裡改。
   重讀狀態、照實回報（`LOST_RACE`）；重讀一律在那個交易結束之後（連線池只有一條時不會等自己）。
   寫回本身失敗時不重送，下一次看到 `submitting` 走過期規則。
 
-日誌與錯誤只帶 id、計數、原因代碼與錯誤類別，不帶金鑰與文件內容。
+預估（`estimate_llm_batches`，`radar batches create` 送出前印）：照規劃同樣的候選（`_candidates`），
+每 200 筆開一個交易（只讀不寫）查會不會被略過（running → 表頭 → 可接續，和取得資格的順序一樣），加總
+Batch 價的保守上限。不寫任何列、不建 provider、不看預算。
+
+結果匯入（`poll_llm_batches`，worker 的 `poll_batches` 工作與 `radar batches poll`／`wait` 共用）：
+
+- 列出 `submitted`／`ended` 的批次（可限定 id）；有要查的才呼叫 `open_provider()`（一次）。
+- 每批經閘門的 `fetch_llm_batch` 查狀態：
+  - 找不到（404）：`submitted`／`ended` → `needs_attention`（`batch_provider_not_found`），不丟。
+  - 其他供應商錯誤：這批不動、記錯誤、繼續下一批（結果的 `errors` 加一）。
+  - `in_progress`／`canceling`：不動；過了 `expires_at` 標「逾期」並記警告。
+  - `ended`：條件式 `submitted` → `ended`（記 `ended_at`；上次中斷已經是 `ended` 的照樣往下做）。
+    過了 29 天保留期或沒有結果檔 → 還 `running` 的 run 全部 `failed`
+    （`batch_results_unavailable`）；
+    否則串流結果，用 `custom_id` 對回 item，逐項經閘門的 `import_llm_batch_result` 匯入（不認得的
+    custom_id 與讀不到 custom_id 的行只計數）；串流讀完後還 `running` 的 → `batch_result_missing`。
+    最後條件式 `ended` → `imported`（同一句確認這批已經沒有 `running` 的 run）。串流途中斷線：記成
+    這批的錯誤，批次留 `ended`，下一次接著做（已匯入的項目 run 已經不是 `running`，不重記帳）。
+  - 單一批次裡的非預期錯誤（例如 prompt 版本讀不出來）：記錯誤類別、這批留在原狀態、繼續下一批
+    （結果的 `errors` 加一）。
+- 最後 `weekly_update.mark_weekly_runs_ai_done`、讀全庫 `needs_attention` 的筆數。
+
+人工確認（`resolve_llm_batch`，`radar batches resolve`）：只對 `needs_attention`。給供應商 batch ID
+→ `submitted`（記 ID、清原因；ID 已經是別批的就不改）；`fail` → `failed`
+（`batch_resolved_failed`），
+同一個交易把這批還 `running` 的 run 改 `failed`（同代碼，釋放預留）。不呼叫供應商。
+
+日誌與錯誤只帶 id、計數、原因代碼與錯誤類別，不帶金鑰、文件內容與模型輸出。
 """
 
 import re
 import uuid
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Collection, Iterator
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -72,6 +100,7 @@ from radar.domain.errors import ErrorCode, LockWaitTimeoutError
 from radar.domain.fingerprints import LLM_BATCH_BUDGET_LOCK_KEY
 from radar.domain.jobs import SUBMIT_LLM_BATCH, Enqueue
 from radar.domain.llm import (
+    BatchProcessingStatus,
     LlmBatchRequest,
     LlmConfigurationError,
     LlmError,
@@ -83,15 +112,26 @@ from radar.domain.llm_batches import (
     PROVIDER_BATCH_ID_PATTERN,
     SUBMIT_BUDGET_LOCK_TIMEOUT_MS,
     SUBMITTING_STALE_AFTER,
+    BatchImportCounts,
+    BatchItemOutcome,
+    BatchItemRun,
+    BatchPollRow,
+    BatchResolveResult,
+    BatchSubmission,
     BatchSubmissionStatus,
     BatchSubmitUncertainError,
     LlmBatchConfig,
+    LlmBatchEstimate,
     LlmBatchPlanResult,
+    LlmBatchPollResult,
     LlmBatchSubmitResult,
     PlanStop,
+    ResolveOutcome,
     SubmitOutcome,
     batch_never_fits,
+    batch_overdue,
     in_month_start_hold,
+    results_expired,
 )
 from radar.domain.permissions import Action, require
 from radar.domain.pricing import max_call_cost
@@ -102,22 +142,36 @@ from radar.domain.validators.research_model import ResearchModelValidator
 from radar.domain.validators.zh_summary import ZhSummaryRules, ZhSummaryValidator
 from radar.domain.viewer import SystemViewer, Viewer
 from radar.ports import LlmProvider
+from radar.repo.ai_outputs import find_blocking_ai_result
 from radar.repo.db import Database, DbConnection
 from radar.repo.llm_batches import (
+    count_batch_running_runs,
+    count_batch_submissions,
     create_batch_item,
     create_batch_submission,
     find_batch_submission,
     list_batch_items,
     list_batch_reservations_ahead_by_task,
+    list_batch_submissions,
+    update_batch_submission_attention_on_not_found,
+    update_batch_submission_ended,
     update_batch_submission_failed,
+    update_batch_submission_imported,
     update_batch_submission_late_batch_id,
     update_batch_submission_needs_attention,
     update_batch_submission_requeued,
+    update_batch_submission_resolved_failed,
+    update_batch_submission_resumed,
     update_batch_submission_submitted,
     update_batch_submission_submitting,
     update_batch_submission_totals,
 )
-from radar.repo.llm_ledger import update_derivation_run_failed
+from radar.repo.llm_ledger import (
+    find_resumable_derivation_run_id,
+    find_running_derivation_run_id,
+    update_derivation_run_failed,
+    update_derivation_runs_failed_for_batch,
+)
 from radar.repo.papers import (
     find_paper_llm_source,
     find_paper_processing_facts,
@@ -131,10 +185,14 @@ from radar.services.llm_gateway import (
     LlmJob,
     PreparedLlmRequest,
     claim_batch_run,
+    fetch_llm_batch,
+    import_llm_batch_result,
+    iter_llm_batch_results,
     prepare_llm_request,
     send_llm_batch,
 )
 from radar.services.prompt_loader import LoadedPrompt, load_prompt
+from radar.services.weekly_update import mark_weekly_runs_ai_done
 
 log = structlog.get_logger(__name__)
 
@@ -231,8 +289,10 @@ def plan_llm_batches(
     weekly_run_id: uuid.UUID | None,
     clock: Callable[[], datetime],
     enqueue: Enqueue,
+    manual: bool = False,
 ) -> LlmBatchPlanResult:
-    """把 `plan_for` 要做、`should_run` 說要跑的 AI 工作排成 Batch（見模組說明）。
+    """把 `plan_for` 要做、`should_run` 說要跑的 AI 工作排成 Batch（見模組說明）。`manual` 是
+    `radar batches create` 手動規劃：不看 `weekly_planning_enabled`（月初窗口、熔斷照樣看）。
 
     Raises:
         PermissionDeniedError: `actor` 不是系統工作（不碰資料庫）。
@@ -242,7 +302,7 @@ def plan_llm_batches(
     """
     require(actor, Action.RUN_AI_JOBS, None)
     result = LlmBatchPlanResult()
-    if not setup.batches.weekly_planning_enabled:
+    if not manual and not setup.batches.weekly_planning_enabled:
         result.stop = PlanStop.DISABLED
         log.info("每週 Batch 規劃沒有開（Story 2.11），不排", weekly_run_id=_id_text(weekly_run_id))
         return result
@@ -352,6 +412,63 @@ def _candidates(
                     _count_blocked(prepared, result)
                 else:
                     yield prepared
+
+
+def estimate_llm_batches(
+    actor: Viewer, database: Database, setup: LlmBatchSetup
+) -> LlmBatchEstimate:
+    """現在規劃的話會排幾筆、保守上限多少（見模組說明「預估」）。不寫任何列。
+
+    Raises:
+        PermissionDeniedError: `actor` 不是系統工作（不碰資料庫）。
+        PromptIntegrityError, PromptFormatError: prompt 檔或登記不對。
+    """
+    require(actor, Action.RUN_AI_JOBS, None)
+    prompts = {task: load_prompt(setup.gateway.prompts_root, task) for task in BATCH_TASKS}
+    blocked = LlmBatchPlanResult()
+    estimate = LlmBatchEstimate()
+    chunk: list[PreparedLlmRequest] = []
+    for prepared in _candidates(database, setup, prompts, blocked):
+        chunk.append(prepared)
+        if len(chunk) >= PAGE_SIZE:
+            _estimate_chunk(database, setup, chunk, estimate)
+            chunk = []
+    if chunk:
+        _estimate_chunk(database, setup, chunk, estimate)
+    estimate.no_input = blocked.no_input
+    estimate.blocked = blocked.blocked
+    estimate.too_large = blocked.too_large
+    return estimate
+
+
+def _estimate_chunk(
+    database: Database,
+    setup: LlmBatchSetup,
+    chunk: list[PreparedLlmRequest],
+    estimate: LlmBatchEstimate,
+) -> None:
+    """（只讀不寫的交易）這幾筆會不會被略過，會排的計進各工作的筆數與保守上限。"""
+    viewer = SystemViewer()
+    with database.transaction() as connection:
+        for prepared in chunk:
+            key = prepared.key
+            if (
+                find_running_derivation_run_id(viewer, connection, key, None) is not None
+                or find_blocking_ai_result(viewer, connection, key) is not None
+            ):
+                estimate.skipped += 1
+                continue
+            if find_resumable_derivation_run_id(viewer, connection, key, None) is not None:
+                estimate.resumable += 1
+                continue
+            estimate.by_task[key.task] = estimate.by_task.get(key.task, 0) + 1
+            estimate.estimated_max_cost_usd += max_call_cost(
+                setup.gateway.models,
+                key.model,
+                prepared.estimated_input_tokens,
+                prepared.request.max_tokens,
+                is_batch=True,
+            )
 
 
 def _count_blocked(blocked: GatewayResult, result: LlmBatchPlanResult) -> None:
@@ -998,6 +1115,332 @@ def _send_failed(
         provider_batch_id_recorded=recorded,
     )
     raise BatchSubmitUncertainError(batch_submission_id, error_type)
+
+
+# --- 查詢（CLI 用） ------------------------------------------------------------------------
+
+
+def list_llm_batches(
+    actor: Viewer,
+    database: Database,
+    statuses: Collection[BatchSubmissionStatus],
+    ids: Collection[uuid.UUID] | None = None,
+) -> list[BatchSubmission]:
+    """狀態在 `statuses` 裡的批次（有給 `ids` 時只看這幾筆），依建立順序。
+
+    Raises:
+        PermissionDeniedError: `actor` 不是系統工作（不碰資料庫）。
+    """
+    require(actor, Action.RUN_AI_JOBS, None)
+    with database.transaction() as connection:
+        return list_batch_submissions(SystemViewer(), connection, statuses, ids)
+
+
+def count_llm_batch_running_runs(
+    actor: Viewer, database: Database, batch_submission_id: uuid.UUID
+) -> int:
+    """這批還是 `running` 的 run 有幾筆（`radar batches resolve --fail` 確認前印）。
+
+    Raises:
+        PermissionDeniedError: `actor` 不是系統工作（不碰資料庫）。
+    """
+    require(actor, Action.RUN_AI_JOBS, None)
+    with database.transaction() as connection:
+        return count_batch_running_runs(SystemViewer(), connection, batch_submission_id)
+
+
+# --- 結果匯入 -------------------------------------------------------------------------------
+
+
+def poll_llm_batches(
+    actor: Viewer,
+    database: Database,
+    open_provider: Callable[[], LlmProvider],
+    setup: LlmBatchSetup,
+    *,
+    clock: Callable[[], datetime],
+    ids: Collection[uuid.UUID] | None = None,
+) -> LlmBatchPollResult:
+    """查 `submitted`／`ended` 的批次（有給 `ids` 時只看這幾筆）、匯入已結束的（見模組說明「結果
+    匯入」）。`open_provider` 只在有要查的批次時呼叫一次。
+
+    Raises:
+        PermissionDeniedError: `actor` 不是系統工作（不碰資料庫）。
+        ValueError: 時鐘回了沒有時區的時間。
+        Exception: `open_provider` 丟的錯（例如缺金鑰的 `ConfigError`）、列批次與最後計數時的資料庫
+            錯誤原樣丟出。單一批次裡的非預期錯誤（例如 run 的 prompt 版本讀不出來的
+            `PromptIntegrityError`／`PromptFormatError`）不丟：記 log（只有錯誤類別）、這批的列標
+            `error`、繼續查下一批。
+    """
+    require(actor, Action.RUN_AI_JOBS, None)
+    viewer = SystemViewer()
+    with database.transaction() as connection:
+        rows = list_batch_submissions(
+            viewer,
+            connection,
+            (BatchSubmissionStatus.SUBMITTED, BatchSubmissionStatus.ENDED),
+            ids,
+        )
+    result = LlmBatchPollResult()
+    if rows:
+        provider = open_provider()
+        for row in rows:
+            try:
+                polled = _poll_one(actor, database, provider, setup, row, clock)
+            except Exception as exc:  # 一批出錯不擋後面的批次與 ai_done、needs_attention 的計數
+                log.error(
+                    "Batch 匯入時出了非預期的錯，這批先停在原狀態",
+                    batch_submission_id=str(row.id),
+                    error_type=type(exc).__name__,
+                )
+                polled = BatchPollRow(
+                    row.id, _current_status(database, row.id), error=type(exc).__name__
+                )
+            result.rows.append(polled)
+    result.ai_done = mark_weekly_runs_ai_done(actor, database, now=_aware(clock()))
+    with database.transaction() as connection:
+        result.needs_attention = count_batch_submissions(
+            viewer, connection, BatchSubmissionStatus.NEEDS_ATTENTION
+        )
+    log.info(
+        "Batch 結果查詢完成",
+        batches=len(result.rows),
+        errors=result.errors,
+        needs_attention=result.needs_attention,
+        ai_done=len(result.ai_done),
+    )
+    if result.needs_attention:
+        log.error(
+            "有 Batch 卡在 needs_attention，要人工確認", needs_attention=result.needs_attention
+        )
+    return result
+
+
+def _aware(now: datetime) -> datetime:
+    if now.tzinfo is None or now.utcoffset() is None:
+        raise ValueError("時鐘要回帶時區的時間")
+    return now
+
+
+def _poll_one(
+    actor: Viewer,
+    database: Database,
+    provider: LlmProvider,
+    setup: LlmBatchSetup,
+    row: BatchSubmission,
+    clock: Callable[[], datetime],
+) -> BatchPollRow:
+    """查一批、結束了就匯入。供應商的錯誤記在回傳的列上，不丟。"""
+    out = BatchPollRow(row.id, row.status)
+    provider_batch_id = row.provider_batch_id
+    if provider_batch_id is None:  # submitted 以後一定有（資料庫的 CHECK 守著）
+        raise RuntimeError("submitted／ended 的批次沒有供應商 batch ID")
+    try:
+        status = fetch_llm_batch(actor, provider, provider_batch_id)
+    except LlmConfigurationError as exc:
+        if exc.status == 404 and _mark_not_found(database, row.id):
+            out.status = BatchSubmissionStatus.NEEDS_ATTENTION
+            return out
+        out.error = _error_text(exc)
+        _log_provider_error(row.id, "查狀態", exc)
+        return out
+    except LlmError as exc:
+        out.error = _error_text(exc)
+        _log_provider_error(row.id, "查狀態", exc)
+        return out
+    out.provider_status = status.processing_status
+    now = _aware(clock())
+    if status.processing_status is not BatchProcessingStatus.ENDED:
+        out.overdue = batch_overdue(status, now)
+        if out.overdue:
+            log.warning(
+                "Batch 已過供應商的處理期限還沒結束",
+                batch_submission_id=str(row.id),
+                provider_status=status.processing_status.value,
+            )
+        return out
+
+    with database.transaction() as connection:
+        update_batch_submission_ended(connection, row.id)
+    if results_expired(status, now) or not status.results_available:
+        with database.transaction() as connection:
+            out.counts.unavailable = update_derivation_runs_failed_for_batch(
+                connection, row.id, ErrorCode.BATCH_RESULTS_UNAVAILABLE
+            )
+        log.warning(
+            "Batch 的結果已經拿不到",
+            batch_submission_id=str(row.id),
+            released_runs=out.counts.unavailable,
+        )
+    else:
+        try:
+            _import_results(actor, database, provider, setup, row.id, provider_batch_id, out.counts)
+        except LlmError as exc:
+            # 下載途中斷線：批次留 ended，下一次接著做（匯入過的不會重記帳）。
+            out.error = _error_text(exc)
+            _log_provider_error(row.id, "下載結果", exc)
+            out.status = _current_status(database, row.id)
+            return out
+        with database.transaction() as connection:
+            out.counts.missing = update_derivation_runs_failed_for_batch(
+                connection, row.id, ErrorCode.BATCH_RESULT_MISSING
+            )
+        if out.counts.missing:
+            log.warning(
+                "Batch 結果少了幾項",
+                batch_submission_id=str(row.id),
+                missing=out.counts.missing,
+            )
+    with database.transaction() as connection:
+        update_batch_submission_imported(connection, row.id)
+    out.status = _current_status(database, row.id)
+    counts = out.counts
+    log.info(
+        "Batch 結果匯入完成",
+        batch_submission_id=str(row.id),
+        status=out.status.value,
+        **{outcome.value: counts.count(outcome) for outcome in BatchItemOutcome},
+        unknown_custom_ids=counts.unknown_custom_ids,
+        unreadable_lines=counts.unreadable_lines,
+        missing=counts.missing,
+        unavailable=counts.unavailable,
+    )
+    return out
+
+
+def _import_results(
+    actor: Viewer,
+    database: Database,
+    provider: LlmProvider,
+    setup: LlmBatchSetup,
+    batch_submission_id: uuid.UUID,
+    provider_batch_id: str,
+    counts: BatchImportCounts,
+) -> None:
+    """串流這批的結果，逐項匯入。不認得的 custom_id 與讀不到 custom_id 的行只計數。
+
+    Raises:
+        LlmError: 下載前或下載途中供應商的錯誤。
+    """
+    with database.transaction() as connection:
+        items = list_batch_items(SystemViewer(), connection, batch_submission_id)
+    by_custom_id: dict[str, BatchItemRun] = {item.custom_id: item for item in items}
+    results = iter_llm_batch_results(actor, provider, provider_batch_id)
+    try:
+        for line in results:
+            if line.custom_id is None:
+                counts.unreadable_lines += 1
+                continue
+            item = by_custom_id.get(line.custom_id)
+            if item is None:
+                counts.unknown_custom_ids += 1
+                continue
+            job = llm_job(setup, item.key.paper_id, item.key.task, item.input_kind)
+            counts.add(import_llm_batch_result(actor, database, setup.gateway, job, item, line))
+    finally:
+        close = getattr(results, "close", None)
+        if callable(close):
+            close()
+    if counts.unknown_custom_ids or counts.unreadable_lines:
+        log.warning(
+            "Batch 結果裡有對不上的行",
+            batch_submission_id=str(batch_submission_id),
+            unknown_custom_ids=counts.unknown_custom_ids,
+            unreadable_lines=counts.unreadable_lines,
+        )
+
+
+def _mark_not_found(database: Database, batch_submission_id: uuid.UUID) -> bool:
+    """供應商找不到這批：`submitted`／`ended` → `needs_attention`。已經不是這兩種狀態（例如別的
+    poll 剛匯入完）時不改、回 False（當成一般錯誤）。"""
+    with database.transaction() as connection:
+        changed = update_batch_submission_attention_on_not_found(
+            connection, batch_submission_id, ErrorCode.BATCH_PROVIDER_NOT_FOUND
+        )
+    if changed:
+        log.error(
+            "供應商找不到這個 Batch，標 needs_attention（要人工確認）",
+            batch_submission_id=str(batch_submission_id),
+        )
+    return changed
+
+
+def _error_text(exc: LlmError) -> str:
+    """錯誤只顯示類別與狀態碼（不帶訊息）。"""
+    name = type(exc).__name__
+    return name if exc.status is None else f"{name}（HTTP {exc.status}）"
+
+
+def _log_provider_error(batch_submission_id: uuid.UUID, step: str, exc: LlmError) -> None:
+    log.error(
+        f"Batch {step}時供應商出錯，這批先不動",
+        batch_submission_id=str(batch_submission_id),
+        error_type=type(exc).__name__,
+        status=exc.status,
+        request_id=exc.request_id,
+    )
+
+
+# --- 人工確認 -------------------------------------------------------------------------------
+
+
+def resolve_llm_batch(
+    actor: Viewer,
+    database: Database,
+    batch_submission_id: uuid.UUID,
+    *,
+    provider_batch_id: str | None = None,
+    fail: bool = False,
+) -> BatchResolveResult:
+    """人工確認一個 `needs_attention` 的批次（見模組說明「人工確認」）。不呼叫供應商。
+
+    Raises:
+        PermissionDeniedError: `actor` 不是系統工作（不碰資料庫）。
+        ValueError: `provider_batch_id` 與 `fail` 沒有剛好給一個，或 batch ID 格式不對（不碰
+            資料庫）。
+        LookupError: 沒有這個 `batch_submission`。
+    """
+    require(actor, Action.RUN_AI_JOBS, None)
+    if (provider_batch_id is None) == (not fail):
+        raise ValueError("provider_batch_id 與 fail 要剛好給一個")
+    if provider_batch_id is not None and not _BATCH_ID.fullmatch(provider_batch_id):
+        raise ValueError("供應商 batch ID 的格式不對")
+    status = _current_status(database, batch_submission_id)
+    if status is not BatchSubmissionStatus.NEEDS_ATTENTION:
+        return BatchResolveResult(ResolveOutcome.NOT_NEEDS_ATTENTION, status)
+    if provider_batch_id is not None:
+        with database.transaction() as connection:
+            resumed = update_batch_submission_resumed(
+                connection, batch_submission_id, provider_batch_id
+            )
+        if resumed:
+            log.info(
+                "Batch 人工確認：繼續等",
+                batch_submission_id=str(batch_submission_id),
+                provider_batch_id=provider_batch_id,
+            )
+            return BatchResolveResult(ResolveOutcome.RESUMED, BatchSubmissionStatus.SUBMITTED)
+        status = _current_status(database, batch_submission_id)
+        if status is BatchSubmissionStatus.NEEDS_ATTENTION:
+            return BatchResolveResult(ResolveOutcome.ID_IN_USE, status)
+        return BatchResolveResult(ResolveOutcome.NOT_NEEDS_ATTENTION, status)
+    released = 0
+    with database.transaction() as connection:
+        failed = update_batch_submission_resolved_failed(connection, batch_submission_id)
+        if failed:
+            released = update_derivation_runs_failed_for_batch(
+                connection, batch_submission_id, ErrorCode.BATCH_RESOLVED_FAILED
+            )
+    if not failed:
+        return BatchResolveResult(
+            ResolveOutcome.NOT_NEEDS_ATTENTION, _current_status(database, batch_submission_id)
+        )
+    log.info(
+        "Batch 人工確認：標失敗",
+        batch_submission_id=str(batch_submission_id),
+        released_runs=released,
+    )
+    return BatchResolveResult(ResolveOutcome.FAILED, BatchSubmissionStatus.FAILED, released)
 
 
 def _id_text(value: uuid.UUID | None) -> str | None:

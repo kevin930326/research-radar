@@ -10,7 +10,9 @@ ADR-0030）。
   （`uq_derivation_run_embed_running`）。依鍵查的讀取函式都帶 LLM 的工作代碼，讀不到 embed 的列；
   依 id 讀的 `find_derivation_run` 只給閘門讀自己建的 run。
 - `llm_call`：一次呼叫的 tokens、費用（`numeric(12,6)`，美元）與存下的輸出；`run_id` 唯一。應用
-  程式角色對它沒有 UPDATE、DELETE（遷移 0010 收回）：帳只能新增。
+  程式角色對它沒有 UPDATE、DELETE（遷移 0010 收回）：帳只能新增。Batch 結果的帳用
+  `create_batch_llm_call`（`ON CONFLICT ... DO NOTHING`，遷移 0017 的部分唯一索引）：同一筆 run
+  匯入幾次都只記一次（Story 2.11）。
 - 兩張表都由 services 用自己的短交易寫、立刻 commit（Conventions 的例外：主交易回滾時帳照記）。
 - 寫入一律用 `text()` SQL；函式收呼叫端開好的交易連線，不 commit。
 - 讀取函式第一個參數是 `viewer`，只給系統工作（`visible_to_system_only`）；AI 區塊用的
@@ -174,6 +176,14 @@ llm_call_table = Table(
     Column("output_reject_reason", Text),
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
     UniqueConstraint("run_id"),
+    # Batch 一筆 run 一筆帳（遷移 0017、ADR-0043）：匯入用 `ON CONFLICT (run_id) WHERE is_batch`
+    # 記帳，兩個 poller 同時匯入、重跑、中斷再跑都只記一次。
+    Index(
+        "uq_llm_call_batch_run_id",
+        "run_id",
+        unique=True,
+        postgresql_where=text("is_batch"),
+    ),
     CheckConstraint(
         "input_tokens >= 0 AND output_tokens >= 0 AND cache_creation_input_tokens >= 0"
         " AND cache_read_input_tokens >= 0",
@@ -596,6 +606,81 @@ def update_expired_derivation_runs(connection: Connection, older_than: timedelta
         },
     )
     return int(result.rowcount)
+
+
+def update_derivation_runs_failed_for_batch(
+    connection: Connection, batch_submission_id: uuid.UUID, reason: ErrorCode
+) -> int:
+    """這個批次裡還是 `running` 的 run 全部改 `failed`，回改了幾筆（Story 2.11：結果拿不到、結果
+    裡缺了、人工標失敗）。已經存下輸出的 `llm_call`（之前匯入到一半中斷）記 `llm_result_pending`，
+    下一次接續、不用再付一次錢；否則記 `reason`。已經不是 `running` 的不改。"""
+    result = connection.execute(
+        text(
+            "UPDATE derivation_run SET status = 'failed',"
+            f" failure_reason = CASE WHEN {_HAS_SAVED_OUTPUT} THEN :pending ELSE :reason END,"
+            " finished_at = clock_timestamp(), updated_at = clock_timestamp()"
+            " WHERE status = 'running' AND id IN ("
+            " SELECT run_id FROM batch_item WHERE batch_submission_id = :batch_submission_id)"
+        ),
+        {
+            "batch_submission_id": batch_submission_id,
+            "reason": ErrorCode(reason).value,
+            "pending": ErrorCode.LLM_RESULT_PENDING.value,
+        },
+    )
+    return int(result.rowcount)
+
+
+def create_batch_llm_call(connection: Connection, call: NewLlmCall) -> bool:
+    """記一筆 Batch 結果的帳（Story 2.11、ADR-0043），回有沒有新增。
+
+    這筆 run 已經有帳（之前匯入過、別的 poller 剛記了）就什麼都不寫、回 False
+    （`ON CONFLICT (run_id) WHERE is_batch DO NOTHING`，遷移 0017 的部分唯一索引）。在呼叫端開好的
+    交易裡做，不 commit。
+
+    Raises:
+        ValueError: `call.is_batch` 不是 True。
+    """
+    if call.is_batch is not True:
+        raise ValueError("create_batch_llm_call 只記 Batch 的帳（is_batch=True）")
+    output = call.output
+    raw = (
+        None if call.raw_response is None else json.dumps(dict(call.raw_response), allow_nan=False)
+    )
+    value = connection.execute(
+        text(
+            "INSERT INTO llm_call"
+            " (run_id, input_tokens, output_tokens, cache_creation_input_tokens,"
+            " cache_read_input_tokens, cost_usd, price_tier, is_batch, response_id, request_id,"
+            " stop_reason, raw_response, output_text, output_reject_reason)"
+            " VALUES (:run_id, :input_tokens, :output_tokens, :cache_creation_input_tokens,"
+            " :cache_read_input_tokens, :cost_usd, :price_tier, true, :response_id,"
+            " :request_id, :stop_reason, CAST(:raw_response AS jsonb), :output_text,"
+            " :output_reject_reason)"
+            " ON CONFLICT (run_id) WHERE is_batch DO NOTHING"
+            " RETURNING id"
+        ),
+        {
+            "run_id": call.run_id,
+            "input_tokens": call.input_tokens,
+            "output_tokens": call.output_tokens,
+            "cache_creation_input_tokens": call.cache_creation_input_tokens,
+            "cache_read_input_tokens": call.cache_read_input_tokens,
+            "cost_usd": call.cost_usd,
+            "price_tier": call.price_tier,
+            "response_id": call.response_id,
+            "request_id": call.request_id,
+            "stop_reason": call.stop_reason,
+            "raw_response": raw,
+            "output_text": None if output is None else output.text,
+            "output_reject_reason": (
+                None
+                if output is None or output.reject_reason is None
+                else ErrorCode(output.reject_reason).value
+            ),
+        },
+    ).scalar_one_or_none()
+    return value is not None
 
 
 def create_llm_call(connection: Connection, call: NewLlmCall) -> uuid.UUID:

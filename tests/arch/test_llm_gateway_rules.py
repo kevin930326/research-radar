@@ -37,7 +37,7 @@ HASHLIB_ALLOWED = frozenset(
     }
 )
 # 呼叫模型的 provider 方法：互動與 Batch 送出（Story 2.9）。
-PROVIDER_CALLS = frozenset({"complete", "submit_batch"})
+PROVIDER_CALLS = frozenset({"complete", "submit_batch", "retrieve_batch", "batch_results"})
 FINGERPRINT_FUNCTIONS = frozenset(
     {"input_sha256", "prompt_sha256", "schema_sha256", "run_lock_key"}
 )
