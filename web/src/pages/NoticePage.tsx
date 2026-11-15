@@ -9,7 +9,7 @@ import { useTranslation } from "react-i18next";
 //
 // 字級、行高、字距、段落之間的距離照設計稿（docs/ux/reference/screens/login-account.html 的「使用須知（已登入）」），
 // 用 DESIGN.md 的尺度組出來（ADR-0038）；900px 以上是桌機的值，899px 以下是手機的值。
-// 頁面標題先維持 page-title-zh（設計稿是 44／34px，等 Kevin 決定）。
+// 頁面標題用 page-title-zh（40px，手機 28px）；設計稿是 44／34px，Kevin 2026-11-15 決定頁面標題統一 40px。
 
 const CAVEATS = ["rare", "supported", "evidenceMap", "trendLag"] as const;
 
