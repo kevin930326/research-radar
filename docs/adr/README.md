@@ -47,6 +47,7 @@
 | [0038](0038-design-reference-and-visual-compare.md) | 前端畫面以 `docs/ux/reference/screens/` 的設計稿為準；做完用 `web/scripts/design-compare.mjs` 量差異（字級、行高、顏色、字重、字距、距離、髮線），報告貼 PR、差異要有原因，是合併門檻；`DESIGN.md` 加字級、行高、字距三組尺度（另一個 PR 實作）；沒有設計稿的畫面先問 Kevin | 提議 | AD-21 |
 | [0039](0039-extract-model-v2-magnitudes-and-result-quotes.md) | （第四輪 0-A，Kevin 2026-11-15 對 2.6 決定 13、14 都選 B）研究模型擷取 prompt 升 v2（v1 不動）：規則 5 量級寫成完整的數、`12M`／`10k` 這類字母縮寫填 null，`structured_numbers` 把字母縮寫的量級當成讀不懂；結果原文對得上這條關係放寬成四種（因或果的名稱、縮寫、原句唯一的假設代號、全部假設而原句是假設），研究問題後面另一個子句寫了明確結果也算；驗證器不分 prompt 版本；不確定的一律不判 | 提議 | AD-7、AD-8 |
 | [0040](0040-embeddings-workers-ai-and-backfill.md) | 向量與全庫向量化：Workers AI adapter（文件送 `documents`、查詢送 `queries`＋指示文字，一次最多 32 段，維度與信封嚴格檢查，account id 與 token 用 `SecretStr`）；`embedding_model` 模型登錄（只由遷移寫）＋`embedding`（halfvec、維度外鍵＋CHECK）＋每個模型一個 HNSW 部分索引，查詢一定帶 `model_id`；`derivation_run` 收 `embed`（prompt 欄位為 NULL）；`api_call` 收 `workers_ai` 與自己估的 token（回應沒有用量）；今天（UTC）的估計用量到每日免費額度 9 成就停、不算失敗、下次續跑；每週更新發佈後排入 `embed_papers`；`radar embeddings backfill`（`--limit`、`--estimate`）；遷移 0015 | 提議 | AD-9、AD-11、AD-12、AD-29、AD-30 |
+| [0060](0060-license-mit.md) | 這個 repo 用 MIT 授權；BMAD、各 skill、字體、設計稿裡的 CC BY 摘要、OpenAlex 書目照各自的授權（編號跳到 0060，避開兩條線保留的 0039～0059） | 已接受 | AR-48 |
 
 「提議」表示還沒經過 Kevin 確認；PR 合併後改成「已接受」。
 
@@ -66,9 +67,8 @@
 
 ## 還沒寫的 ADR
 
-addendum 列的待寫清單裡，下面兩份留到之後：
+addendum 列的待寫清單裡，下面一份留到之後（授權條款已寫成 ADR-0060）：
 
 - **夜間代理人（/goal）的隔離規則**（FR-47）：等真的要啟用夜間代理人時寫。
-- **授權條款（MIT 或 Apache-2.0）**：要 Kevin 決定，repo 公開之前寫。
 
 addendum 清單裡的其他項目已經併入上面的 ADR：「主機只做服務層、重運算在桌機」在 0003；「GitHub Actions 只做 CI、排程放主機」與「不引入 Redis、用 Procrastinate」在 0004；「資料來源先不做註冊表、LLM 與 embedding 可以先做」在 0001；「模型選擇」在 0009；「部署拓撲」在 0003；「試用環境的資料怎麼搬到正式環境」在 0003。
