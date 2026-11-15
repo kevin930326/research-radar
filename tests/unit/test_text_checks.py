@@ -163,3 +163,79 @@ def test_long_adversarial_scientific_text_is_quick(unit: str) -> None:
     structured_numbers(text)
 
     assert time.perf_counter() - started < 2
+
+
+# --- 0-A（2.6 決定 13 選 B，Kevin 2026-11-15）：字母縮寫的量級讀不懂 ---------------------------
+
+
+@pytest.mark.parametrize(
+    ("text", "unreadable"),
+    [
+        ("12M users", ("12", "12000000")),
+        ("12m users", ("12", "12000000")),
+        ("12 M users", ("12", "12000000")),
+        ("12 m users", ("12", "12000000")),
+        ("10k users", ("10", "10000")),
+        ("10K users", ("10", "10000")),
+        ("10 k users", ("10", "10000")),
+        ("10 K users", ("10", "10000")),
+        ("3.5K users", ("3.5", "3500")),
+        ("3.5k users", ("3.5", "3500")),
+        ("3.5 K users", ("3.5", "3500")),
+        ("2B transactions", ("2", "2000000000")),
+        ("2b transactions", ("2", "2000000000")),
+        ("2 B transactions", ("2", "2000000000")),
+        ("5bn transactions", ("5", "5000000000")),
+        ("5 BN transactions", ("5", "5000000000")),
+        ("1,200K users", ("1200", "1200000", "200")),
+        ("$.5M in funding", ("0.5", "500000", "5")),
+        ("a $12M fund (N = 12M).", ("12", "12000000")),
+    ],
+)
+def test_structured_numbers_skip_abbreviated_magnitudes(
+    text: str, unreadable: tuple[str, ...]
+) -> None:
+    # 讀不出量級：不留縮寫前面的數字，也不猜成乘開的值（整段不取，同科學記號）。
+    found = structured_numbers(check_copy(text))
+
+    for value in unreadable:
+        assert _n(value) not in found, value
+
+
+@pytest.mark.parametrize(
+    ("text", "value"),
+    [
+        ("12 months", "12"),  # m 後面還有字母：不是縮寫
+        ("5 MB of data", "5"),
+        ("Study 2 B2B firms", "2"),
+        ("H2b was supported in 200 firms", "200"),
+        ("H2b was supported", "2"),  # 代號裡的 2 照舊讀得到（前面接字母，不是縮寫）
+        ("B2B firms", "2"),
+        ("N = 12 million", "12000000"),
+        ("12M users and 12 other firms", "12"),  # 同一個數字在別處寫得清楚就照常
+        ("p < .05 in 300 firms", "300"),
+        ("312 K-12 teachers", "312"),  # 字母後面接連字號：不是縮寫
+        ("200 M-Turk workers", "200"),
+    ],
+)
+def test_structured_numbers_still_read_ordinary_numbers_next_to_letters(
+    text: str, value: str
+) -> None:
+    assert _n(value) in structured_numbers(check_copy(text))
+
+
+def test_abbreviated_magnitude_does_not_change_the_zh_summary_vocabulary() -> None:
+    # 只影響研究模型的結構化數值；中文重點的字彙（`numbers(keep_unscaled=True)`）照舊。
+    vocabulary = InputVocabulary.build(check_copy("12M users"))
+
+    assert _n("12") in vocabulary.numbers
+
+
+@pytest.mark.parametrize("unit", ["1k", "1 k ", "1,000K ", ".5M ", "9" * 50 + "M "])
+def test_long_abbreviated_magnitude_text_is_quick(unit: str) -> None:
+    text = check_copy(unit * 16_000)
+    started = time.perf_counter()
+
+    structured_numbers(text)
+
+    assert time.perf_counter() - started < 2
