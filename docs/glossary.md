@@ -807,3 +807,4 @@
 - **平方時間**：輸入變成兩倍長、處理時間變成約四倍的寫法；故意塞很長的文字就能拖慢系統，所以驗證器要避免（ADR-0039）。
 - **嚴格首字母**：縮寫剛好是名稱裡每個實詞的第一個字母（`system satisfaction` → SS、`perceived ease of use` → PEOU）；輸入寫「名稱 (縮寫)」時，有嚴格首字母對得上的較長名稱優先，免得 SS 被算成只有 satisfaction（ADR-0039）。
 - **子句開頭**：一個小句的起點，例如段落開頭、逗號或分號後面；`H1 was supported` 這類直接陳述要在子句開頭，前面接 `We dispute that`、`Other researchers report that` 這種別人的說法就不算（ADR-0039）。
+- **研究問題的前置語**：句子裡 `we examine whether` 前面的那段字（例如 `In this study, `）；要是這篇研究自己的說法，換成 `Other researchers report that` 這種別人的說法，後面的結果就不算（ADR-0039）。

@@ -927,30 +927,82 @@ class _ResultContext:
 _MAX_QUOTE_OCCURRENCES: Final = 20
 
 
+# 研究問題前面的前置語（從來源句子開頭到第一個研究問題）：空的，或以 `,` `;` `:` 結尾、而且沒有外層
+# 說法的字（that、according、per、view、their、his、her、put(s)、report、claim、argue、say、
+# state、note、believe、assert、dispute、deny、suggest、contend、allege）也沒有還沒有結果的字
+# （`_UNSETTLED`）時，研究問題和後面的結果才算這篇研究自己說的（Codex 第四輪複查 X1：`Other
+# researchers report that we examine whether …, and we find that H1 was supported`、`According to
+# Smith (2020), we examine whether …`、`In their study, we examine whether …` 不算）。
+# `In this study, `、`Using survey data, ` 算；`Building on prior work, ` 因為有 prior 不算，錯在
+# 少判。清單外的轉述寫法擋不到（`In Smith's (2020) words, `；ADR-0039 取捨）。
+_LEAD_IN_CLAIM: Final = re.compile(
+    r"(?<![a-z])(?:that|according|per|view|their|his|her|puts?|claims?|claimed|reports?|reported"
+    r"|argues?|argued|says?|said|states?|stated|notes?|noted|believes?|believed|asserts?|asserted"
+    r"|disputes?|disputed|denies|denied|suggests?|suggested|contends?|contended|alleges?|alleged)"
+    r"(?![a-z])"
+)
+
+
+def _own_lead_in(lead_in: str) -> bool:
+    """研究問題前面的前置語沒有把研究問題變成別人的說法（見 `_LEAD_IN_CLAIM` 上面的說明）。"""
+    lead_in = lead_in.strip()
+    return not lead_in or (
+        lead_in[-1] in ",;:"
+        and _LEAD_IN_CLAIM.search(lead_in) is None
+        and _UNSETTLED.search(lead_in) is None
+    )
+
+
 def _result_contexts(
     quote: str, reported: _ReportedPart, segments: tuple[str, ...]
 ) -> list[_ResultContext]:
-    """寫出結果的那段（`reported`，`quote` 裡的位置）在輸入裡的上下文（Opus 第三輪 H1）。
+    """寫出結果的那段（`reported`，`quote` 裡的位置）在輸入裡的上下文（Opus 第三輪 H1、Codex 第四輪
+    複查 X1）：看結果原文在**輸入裡**每一處（最多 `_MAX_QUOTE_OCCURRENCES` 處）所在的來源句子，任何
+    一處是直接陳述就算。上下文從「子句的開頭」到來源句子結尾：子句開頭、還沒有結果的字從子句開頭看到
+    那段結尾，範圍符號與全部假設的例外字看到句子結尾。子句的開頭：
 
-    - 那段從結果原文開頭算起（沒有研究問題，或統計量在研究問題前面）：看它在**輸入裡**每一處
-      （最多 `_MAX_QUOTE_OCCURRENCES` 處）所在的來源句子，子句開頭、還沒有結果的字從句子開頭看到那段
-      結尾，範圍符號與全部假設的例外字看整句。模型只抄外層說法裡面的一小段（`We dispute that H1
-      was supported.` 只抄 `H1 was supported`）時，外層說法仍然算數；任何一處是直接陳述就算。
-    - 那段從研究問題後面的斷點算起：斷點本身就在結果原文裡，那段就是上下文（和以前一樣）。"""
-    if reported.start > 0:
-        part = quote[reported.start : reported.end].strip(_QUOTE_TRIM)
-        return [_ResultContext(part, 0, len(part))]
-    length = len(quote[: reported.end].rstrip(_QUOTE_TRIM))
+    - 來源句子在那段前面沒有研究問題：句子開頭。模型只抄外層說法裡面的一小段（`We dispute that H1
+      was supported.` 只抄 `H1 was supported`）時，外層說法仍然算數。
+    - 有研究問題（結果原文自己寫了研究問題，或結果原文只抄了研究問題後面那段）：研究問題前面的前置語
+      要是這篇研究自己的（`_own_lead_in`），不是的這一處不算；子句開頭是研究問題後面的斷點——結果
+      原文自己寫了研究問題時是 `reported.start`，否則是研究問題結尾到那段開頭之間最後一個斷點（沒有
+      斷點表示那段還在研究問題裡，這一處不算）。所以 `We examine whether …, and we find that H1 was
+      supported.` 抄整句、只抄 `we find that H1 was supported` 或 `H1 was supported` 都算，`Other
+      researchers report that we examine whether …` 不算；`… supported except H2.` 只抄到
+      `supported` 也看得到 except。"""
+    end_offset = len(quote[: reported.end].rstrip(_QUOTE_TRIM))
     contexts: list[_ResultContext] = []
     for index, start, end in itertools.islice(
         _quote_locations(quote, segments), _MAX_QUOTE_OCCURRENCES
     ):
         segment = segments[index]
         begin, finish = _sentence_bounds(segment, start, end)
-        while begin < start and segment[begin].isspace():
+        reported_start = start + reported.start
+        questions = list(_RESEARCH_QUESTION.finditer(segment, begin, reported_start))
+        if questions:
+            if not _own_lead_in(segment[begin : questions[0].start()]):
+                continue
+            if reported.question is not None:
+                begin = reported_start
+            else:
+                breaks = [
+                    match.end()
+                    for match in _CLAUSE_BREAK.finditer(
+                        segment, questions[-1].end(), reported_start
+                    )
+                ]
+                if not breaks:
+                    continue
+                begin = breaks[-1]
+        # 子句開頭的空白不算（`reported.start` 是斷點的結尾，後面通常接一個空白）。
+        while begin < finish and segment[begin].isspace():
             begin += 1
         contexts.append(
-            _ResultContext(segment[begin:finish], start - begin, start - begin + length)
+            _ResultContext(
+                segment[begin:finish],
+                max(reported_start - begin, 0),
+                start + end_offset - begin,
+            )
         )
     return contexts
 

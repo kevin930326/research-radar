@@ -2908,3 +2908,183 @@ def test_label_after_an_unlisted_lead_in_stays_not_stated(result_quote: str) -> 
     hypothesis = _labelled(H1_SENTENCE, result_quote, abstract=f"{SHORT_ABSTRACT} {result_quote}.")
 
     assert hypothesis.support is SupportLevel.NOT_STATED
+
+
+# --- Codex 第四輪複查（PR #68）X1 ---------------------------------------------------------------
+# 結果寫在研究問題後面時，也看結果原文在輸入裡的來源句子：研究問題前面有外層說法（不是這篇研究自己
+# 的前置語）就不算；全部假設的例外字看到來源句尾。研究問題講的是另一條關係（satisfaction →
+# loyalty），所以不會靠代名詞那條路通過。
+
+_OWN_QUESTION = "we examine whether satisfaction affects loyalty"
+_OWN_QUESTION_THEN_H1 = f"{_OWN_QUESTION}, and we find that H1 was supported"
+_OWN_QUESTION_THEN_ALL = f"{_OWN_QUESTION}, and we find that all hypotheses were supported"
+
+
+@pytest.mark.parametrize(
+    ("input_sentence", "result_quote"),
+    [
+        # Codex 的兩個反例。
+        (f"Other researchers report that {_OWN_QUESTION_THEN_H1}.", _OWN_QUESTION_THEN_H1),
+        (
+            "We examine whether satisfaction affects loyalty, and we find that all hypotheses"
+            " were supported except H2.",
+            "We examine whether satisfaction affects loyalty, and we find that all hypotheses"
+            " were supported",
+        ),
+        # 外層說法整句抄進來、或只抄研究問題後面那段，也一樣。
+        (
+            f"Other researchers report that {_OWN_QUESTION_THEN_H1}.",
+            f"Other researchers report that {_OWN_QUESTION_THEN_H1}",
+        ),
+        (f"Other researchers report that {_OWN_QUESTION_THEN_H1}.", "H1 was supported"),
+        (
+            f"Other researchers report that {_OWN_QUESTION_THEN_ALL}.",
+            "we find that all hypotheses were supported",
+        ),
+        (
+            "We examine whether satisfaction affects loyalty, and we find that all hypotheses"
+            " were supported except H2.",
+            "we find that all hypotheses were supported",
+        ),
+        # 同類寫法（自己試的）：其他外層主詞、沒有 that 的轉述、引用、前置語裡有外層說法。
+        (f"Smith (2020) reports that {_OWN_QUESTION_THEN_H1}.", _OWN_QUESTION_THEN_H1),
+        (f"They claim {_OWN_QUESTION_THEN_H1}.", _OWN_QUESTION_THEN_H1),
+        (f"According to Smith (2020), {_OWN_QUESTION_THEN_H1}.", _OWN_QUESTION_THEN_H1),
+        (
+            f"Other researchers report that, in this study, {_OWN_QUESTION_THEN_H1}.",
+            "H1 was supported",
+        ),
+        (f"In their study, {_OWN_QUESTION_THEN_H1}.", _OWN_QUESTION_THEN_H1),
+        # 不是本研究的研究問題寫法（examined、Smith examines）：沒有研究問題，照句子開頭看，whether
+        # 與 prior 擋下。
+        (
+            "Prior work examined whether satisfaction affects loyalty, and we find that H1 was"
+            " supported.",
+            "we find that H1 was supported",
+        ),
+        (
+            "Smith (2020) examines whether satisfaction affects loyalty and finds that H1 was"
+            " supported.",
+            "H1 was supported",
+        ),
+        # 研究問題後面的結果子句是別人說的。
+        (
+            f"{_OWN_QUESTION}, and other researchers report that we find that H1 was supported.",
+            "H1 was supported",
+        ),
+        # 那段還在研究問題裡（中間沒有斷點）。
+        ("We examine whether H1 was supported.", "H1 was supported"),
+    ],
+)
+def test_result_after_a_research_question_inside_an_outer_claim_becomes_not_stated(
+    input_sentence: str, result_quote: str
+) -> None:
+    hypothesis = _labelled(H1_SENTENCE, result_quote, abstract=f"{SHORT_ABSTRACT} {input_sentence}")
+
+    assert hypothesis.support is SupportLevel.NOT_STATED
+    assert hypothesis.result_quote is None
+
+
+@pytest.mark.parametrize(
+    ("input_sentence", "result_quote"),
+    [
+        # 成對的正例：抄整句或只抄研究問題後面那段，照樣 supported。
+        (
+            "We examine whether satisfaction affects loyalty, and we find that H1 was supported.",
+            None,
+        ),
+        (
+            "We examine whether satisfaction affects loyalty, and we find that H1 was supported.",
+            "we find that H1 was supported",
+        ),
+        (
+            "We examine whether satisfaction affects loyalty, and we find that H1 was supported.",
+            "H1 was supported",
+        ),
+        (
+            "We examine whether satisfaction affects loyalty, and we find that all hypotheses were"
+            " supported.",
+            None,
+        ),
+        (
+            "We examine whether satisfaction affects loyalty, and we find that all hypotheses were"
+            " supported.",
+            "we find that all hypotheses were supported",
+        ),
+        # 這篇研究自己的前置語。
+        (f"In this study, {_OWN_QUESTION_THEN_H1}.", _OWN_QUESTION_THEN_H1),
+        (f"Using survey data, {_OWN_QUESTION_THEN_H1}.", _OWN_QUESTION_THEN_H1),
+        (f"Others found mixed effects; {_OWN_QUESTION_THEN_H1}.", _OWN_QUESTION_THEN_H1),
+    ],
+)
+def test_result_after_a_research_question_stated_by_the_study_is_kept(
+    input_sentence: str, result_quote: str | None
+) -> None:
+    quote = result_quote or input_sentence.rstrip(".")
+    hypothesis = _labelled(H1_SENTENCE, quote, abstract=f"{SHORT_ABSTRACT} {input_sentence}")
+
+    assert hypothesis.support is SupportLevel.SUPPORTED
+    assert hypothesis.result_quote == quote
+
+
+@pytest.mark.parametrize(
+    "input_sentence",
+    [
+        # 剩下擋不到的（ADR-0039 取捨有寫），鎖住現在的行為：清單外的轉述前置語、句尾的轉述、結果
+        # 原文後面才出現的還沒有結果的字。
+        f"In Smith's (2020) words, {_OWN_QUESTION_THEN_H1}.",
+        f"{_OWN_QUESTION_THEN_H1}, Smith (2020) claims.",
+        f"{_OWN_QUESTION_THEN_H1} in prior studies.",
+    ],
+)
+def test_result_after_a_research_question_with_an_unlisted_outer_claim_is_still_kept(
+    input_sentence: str,
+) -> None:
+    hypothesis = _labelled(
+        H1_SENTENCE, _OWN_QUESTION_THEN_H1, abstract=f"{SHORT_ABSTRACT} {input_sentence}"
+    )
+
+    assert hypothesis.support is SupportLevel.SUPPORTED
+
+
+@pytest.mark.parametrize(
+    "result_quote",
+    [
+        # 這篇研究自己的前置語但有 prior：錯在少判，鎖住現在的行為（ADR-0039 取捨）。
+        f"Building on prior work, {_OWN_QUESTION_THEN_H1}",
+    ],
+)
+def test_result_after_a_research_question_with_an_unsettled_lead_in_stays_not_stated(
+    result_quote: str,
+) -> None:
+    hypothesis = _labelled(H1_SENTENCE, result_quote, abstract=f"{SHORT_ABSTRACT} {result_quote}.")
+
+    assert hypothesis.support is SupportLevel.NOT_STATED
+
+
+def _seconds_for_question_copies(repeats: int) -> float:
+    # 只抄研究問題後面那段、在同一句裡重複很多次、每一處都不是直接陳述：每一處都要找研究問題與
+    # 斷點，不設上限就是平方時間（同 `_seconds_for_copies`）。
+    quote = "h1 was supported"
+    segments = (
+        quote_key(
+            "We examine whether satisfaction affects loyalty, and we dispute that "
+            + "H1 was supported " * repeats
+            + "too."
+        ),
+    )
+    reported = _reported_part(quote)
+    assert reported is not None
+    best = float("inf")
+    for _ in range(3):
+        started = time.perf_counter()
+        assert not _matches_label(_result_contexts(quote, reported, segments), H1_SENTENCE)
+        best = min(best, time.perf_counter() - started)
+    return best
+
+
+def test_many_copies_after_a_research_question_is_quick() -> None:
+    small = _seconds_for_question_copies(2_000)
+    large = _seconds_for_question_copies(16_000)
+
+    assert large < small * 20 + 0.01
