@@ -17,6 +17,8 @@ const member = SITES[0]!;
 const SCREENSHOT_DIR = fileURLToPath(new URL("./screenshots/", import.meta.url));
 const TAGS = ["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"];
 const NAME = MEMBERS[0]!.display_name;
+const LOGIN = TEXT["login:login.button.idle"];
+const EXPIRED = TEXT["errors:not_authenticated"];
 const ACCOUNT = TEXT["nav:nav.account.trigger"];
 const NOTICE = TEXT["nav:nav.account.notice"];
 const LOGOUT = TEXT["nav:nav.account.logout"];
@@ -31,6 +33,33 @@ async function openNotice(page: Page, size: { width: number; height: number }): 
   await page.setViewportSize(size);
   await page.goto(`${member.baseURL}/notice`);
   await expect(page.locator("h1")).toHaveText(TEXT["notice:notice.page.title"]);
+}
+
+/** 可以點的元素（和 a11y-floor.spec.ts 同一組，另加選單項目）。 */
+const INTERACTIVE = "a[href], button, [role=button], [role=menuitem], summary, input, select, textarea";
+
+/** 看得到、但小於 44×44 的可點元素（ADR-0037 第 5 點）；Base UI 的焦點守衛不算（看不到、不能點）。 */
+async function smallTapTargets(page: Page): Promise<string[]> {
+  return page.evaluate((selector) => {
+    return [...document.querySelectorAll<HTMLElement>(selector)]
+      .filter((element) => !element.hasAttribute("data-base-ui-focus-guard"))
+      .filter((element) => getComputedStyle(element).visibility !== "hidden")
+      .map((element) => ({ element, rect: element.getBoundingClientRect() }))
+      .filter(({ rect }) => rect.width > 0 && rect.height > 0)
+      .filter(({ rect }) => rect.width < 43.5 || rect.height < 43.5)
+      .map(({ element, rect }) => `${element.outerHTML.slice(0, 80)} ${rect.width}×${rect.height}`);
+  }, INTERACTIVE);
+}
+
+/** 換頁時不重新載入整頁的記號：記憶體裡的快取還在，才測得到「有沒有清掉」。 */
+async function markDocument(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    (window as unknown as { __sameDocument?: boolean }).__sameDocument = true;
+  });
+}
+
+async function isSameDocument(page: Page): Promise<boolean> {
+  return page.evaluate(() => (window as unknown as { __sameDocument?: boolean }).__sameDocument === true);
 }
 
 async function axeViolations(page: Page): Promise<string[]> {
@@ -145,17 +174,105 @@ test.describe("desktop nav bar", () => {
     await expect(page.locator("h1")).toHaveText(TEXT["notice:notice.page.title"]);
   });
 
-  test("logout success goes to the login page; back there needs signing in again", async ({ page }) => {
-    await openNotice(page, DESKTOP);
+  test("logout success goes to the login page; the back button there needs signing in again", async ({ page }) => {
+    await page.setViewportSize(DESKTOP);
+    await page.goto(`${member.baseURL}/notice?from=start`);
+    await expect(page.locator("h1")).toHaveText(TEXT["notice:notice.page.title"]);
+    await markDocument(page);
+    // 先在站內走一步（多一筆瀏覽紀錄），再登出。
+    await page.getByRole("button", { name: ACCOUNT }).click();
+    await page.getByRole("menuitem", { name: NOTICE }).click();
+    await expect(page).toHaveURL(`${member.baseURL}/notice`);
     await page.getByRole("button", { name: ACCOUNT }).click();
     await page.getByRole("menuitem", { name: LOGOUT }).click();
     await expect(page).toHaveURL(`${member.baseURL}/login`);
-    await expect(page.getByRole("button", { name: TEXT["login:login.button.idle"] })).toBeVisible();
+    await expect(page.getByRole("button", { name: LOGIN })).toBeVisible();
     // 登出不是「登入過期」。
     await expect(page.locator("[data-login-note]")).toHaveCount(0);
 
-    await page.goto(`${member.baseURL}/notice`);
-    await expect(page).toHaveURL(/\/login\?next=/);
+    // 按返回鍵（不重新載入整頁，記憶體裡的快取還在）：回到上一頁要先登入，看不到上一位的名稱。
+    await page.goBack();
+    await expect(page).toHaveURL(/\/login\?/);
+    const url = new URL(page.url());
+    expect(url.searchParams.get("next")).toBe("/notice?from=start");
+    expect(url.searchParams.get("expired")).toBeNull();
+    await expect(page.getByRole("button", { name: LOGIN })).toBeVisible();
+    await expect(page.locator("header")).toHaveCount(0);
+    await expect(page.getByText(NAME)).toHaveCount(0);
+    await expect(page.locator("[data-login-note]")).toHaveCount(0);
+    await expect(page.getByText(EXPIRED, { exact: true })).toHaveCount(0);
+    expect(await isSameDocument(page)).toBe(true);
+  });
+
+  test("A logs out and B logs in in the same tab: nothing of A is left", async ({ page, apiMock }) => {
+    const [first, second] = [MEMBERS[0]!, MEMBERS[1]!];
+    await openNotice(page, DESKTOP);
+    await markDocument(page);
+    await page.getByRole("button", { name: ACCOUNT }).click();
+    await expect(page.getByRole("menu").getByText(first.display_name, { exact: true })).toBeVisible();
+    await page.getByRole("menuitem", { name: LOGOUT }).click();
+    await expect(page).toHaveURL(`${member.baseURL}/login`);
+
+    // 下一位登入（假登入清單的第一位換成 B）：同一個分頁、沒有重新載入。
+    apiMock.loginList = [second];
+    apiMock.requests.length = 0;
+    await page.getByRole("button", { name: LOGIN }).click();
+    await expect(page).toHaveURL(`${member.baseURL}/notice`);
+    const post = apiMock.requests.find((request) => request.method === "POST");
+    expect(post?.body).toEqual({ member_id: second.member_id, next: null });
+    await page.getByRole("button", { name: ACCOUNT }).click();
+    await expect(page.getByRole("menu").getByText(second.display_name, { exact: true })).toBeVisible();
+    await expect(page.getByText(first.display_name)).toHaveCount(0);
+    // 「我是誰」重新問過（不是用上一位留在快取裡的）。
+    expect(apiMock.requests.filter((request) => request.path === "/api/v1/me").length).toBeGreaterThan(0);
+    expect(await isSameDocument(page)).toBe(true);
+  });
+
+  test("the account menu closes when the window becomes phone width; focus moves to the menu button", async ({
+    page,
+  }) => {
+    await openNotice(page, DESKTOP);
+    const trigger = page.getByRole("button", { name: ACCOUNT });
+    await trigger.focus();
+    await page.keyboard.press("Enter");
+    await expect(page.getByRole("menu").getByRole("menuitem").first()).toBeFocused();
+
+    await page.setViewportSize(PHONE);
+    await expect(page.getByRole("menu")).toHaveCount(0);
+    await expect(page.getByRole("button", { name: ACCOUNT, includeHidden: true })).toHaveAttribute("aria-expanded", "false");
+    await expect(page.getByRole("button", { name: MENU })).toBeFocused();
+
+    // 縮回桌機寬度也不會再出現。
+    await page.setViewportSize(DESKTOP);
+    await expect(trigger).toBeVisible();
+    await expect(page.getByRole("menu")).toHaveCount(0);
+    await expect(trigger).toHaveAttribute("aria-expanded", "false");
+  });
+
+  test("a width that only flashes by does not close the account menu", async ({ page, browserName }) => {
+    // 只有 Chromium 拍整頁截圖時會把視窗一閃縮成 1×1；WebKit 拍整頁截圖會塞一段行內樣式，被 CSP 擋下來（測試框架的副作用）。
+    test.skip(browserName !== "chromium", "only Chromium shrinks the window for a full-page screenshot");
+    await openNotice(page, DESKTOP);
+    await page.getByRole("button", { name: ACCOUNT }).click();
+    await expect(page.getByRole("menu")).toBeVisible();
+    // Chromium 拍整頁截圖時視窗會先縮成 1×1 再變回來（設計稿比對就是這樣拍的）：選單要留著。
+    await page.screenshot({ fullPage: true });
+    await page.waitForTimeout(400);
+    await expect(page.getByRole("menu")).toBeVisible();
+    await expect(page.getByRole("button", { name: ACCOUNT })).toHaveAttribute("aria-expanded", "true");
+  });
+
+  test("with the account menu open, every clickable item is at least 44×44", async ({ page, apiMock }) => {
+    await openNotice(page, DESKTOP);
+    await page.getByRole("button", { name: ACCOUNT }).click();
+    await expect(page.getByRole("menu").getByRole("menuitem")).toHaveCount(2);
+    expect(await smallTapTargets(page)).toEqual([]);
+
+    // 登出失敗、選單裡多一行時也一樣。
+    apiMock.logout = "failed";
+    await page.getByRole("menuitem", { name: LOGOUT }).click();
+    await expect(page.getByRole("menu").getByText(LOGOUT_FAILED, { exact: true })).toBeVisible();
+    expect(await smallTapTargets(page)).toEqual([]);
   });
 
   test("no axe violations with the account menu open", async ({ page }) => {
@@ -220,12 +337,73 @@ test.describe("phone menu", () => {
     await page.getByRole("button", { name: MENU }).click();
     const dialog = page.getByRole("dialog", { name: MENU });
     await dialog.getByRole("button", { name: LOGOUT }).click();
-    await expect(dialog.getByRole("alert")).toBeVisible();
+    await expect(dialog.locator("[aria-hidden=true]", { hasText: LOGOUT_FAILED })).toBeVisible();
     await dialog.getByRole("link", { name: NOTICE }).click();
     await expect(dialog).toBeHidden();
     await page.getByRole("button", { name: MENU }).click();
     await expect(dialog.getByRole("button", { name: LOGOUT })).toBeVisible();
-    await expect(dialog.getByRole("alert")).toHaveCount(0);
+    // alert 區一直都在（和桌機一樣），清掉的是裡面的字與看得到的那一行。
+    await expect(dialog.locator("[aria-hidden=true]", { hasText: LOGOUT_FAILED })).toHaveCount(0);
+    await expect(dialog.getByRole("alert")).toHaveText("");
+    await expect(dialog.getByRole("button", { name: LOGOUT })).not.toHaveAttribute("aria-describedby");
+  });
+
+  test("phone menu labels: one name for the dialog, no expanded state on close, logout failure read like desktop", async ({
+    page,
+    apiMock,
+  }) => {
+    apiMock.logout = "failed";
+    await openNotice(page, PHONE);
+    await page.getByRole("button", { name: MENU }).click();
+    const dialog = page.getByRole("dialog", { name: MENU });
+    await expect(dialog).toBeVisible();
+    // 對話框叫「選單」，裡面的 nav 不再同名（報讀器不念兩次）。
+    await expect(dialog.getByRole("navigation")).toHaveCount(1);
+    await expect(dialog.getByRole("navigation")).not.toHaveAttribute("aria-label");
+    await expect(page.getByRole("navigation", { name: MENU })).toHaveCount(0);
+    // 「關閉選單」不是展開類的按鈕。
+    await expect(dialog.getByRole("button", { name: CLOSE_MENU })).not.toHaveAttribute("aria-expanded");
+
+    // 登出失敗：看得到的那一行 aria-hidden，「登出」的說明是那句話，對話框裡一直都在的 alert 區念出來。
+    const alert = dialog.getByRole("alert");
+    await expect(alert).toHaveText("");
+    await dialog.getByRole("button", { name: LOGOUT }).click();
+    await expect(alert).toHaveText(LOGOUT_FAILED);
+    const line = dialog.locator("[aria-hidden=true]", { hasText: LOGOUT_FAILED });
+    await expect(line).toBeVisible();
+    await expect(dialog.getByRole("button", { name: LOGOUT })).toHaveAccessibleDescription(LOGOUT_FAILED);
+    expect(await axeViolations(page)).toEqual([]);
+  });
+
+  test("with the phone menu open, every clickable item is at least 44×44", async ({ page, apiMock }) => {
+    await openNotice(page, PHONE);
+    await page.getByRole("button", { name: MENU }).click();
+    const dialog = page.getByRole("dialog", { name: MENU });
+    await expect(dialog.getByRole("button", { name: LOGOUT })).toBeVisible();
+    expect(await smallTapTargets(page)).toEqual([]);
+
+    apiMock.logout = "failed";
+    await dialog.getByRole("button", { name: LOGOUT }).click();
+    await expect(dialog.locator("[aria-hidden=true]", { hasText: LOGOUT_FAILED })).toBeVisible();
+    expect(await smallTapTargets(page)).toEqual([]);
+  });
+
+  test("the phone menu closes at desktop width; focus moves to the account button and it does not come back", async ({
+    page,
+  }) => {
+    await openNotice(page, PHONE);
+    await page.getByRole("button", { name: MENU }).click();
+    const dialog = page.getByRole("dialog", { name: MENU });
+    await expect(dialog).toBeVisible();
+    await page.keyboard.press("Tab");
+    await page.setViewportSize(DESKTOP);
+    await expect(dialog).toHaveCount(0);
+    await expect(page.getByRole("button", { name: ACCOUNT })).toBeFocused();
+
+    await page.setViewportSize(PHONE);
+    await expect(page.getByRole("button", { name: MENU })).toBeVisible();
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+    await expect(page.locator("main")).toBeVisible();
   });
 
   test("the menu closes when the window becomes desktop width", async ({ page }) => {

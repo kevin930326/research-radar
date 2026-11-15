@@ -141,6 +141,48 @@ test.describe("signing in is required", () => {
     }
   });
 
+  // 網址上的 next（Codex 審查第 5 條）：瀏覽器解析網址、路由解析參數之後才檢查，所以要在瀏覽器裡跑。
+  // 第一層解開就是站外、反斜線、控制字元，或有兩個 next：前端不送（next 是 null），登入後到使用須知。
+  for (const query of [
+    "next=/%2F%2Fevil.example",
+    "next=/%5Cevil.example",
+    "next=/%09/evil.example",
+    "next=/%0A/evil.example",
+    "next=/notice&next=//evil.example",
+    "next=//evil.example&next=/notice",
+  ]) {
+    test(`next from the address bar is rejected after parsing: ${query}`, async ({ page, apiMock }) => {
+      apiMock.member = null;
+      const pageErrors: string[] = [];
+      page.on("pageerror", (error) => pageErrors.push(error.message));
+      await page.goto(`${member.baseURL}/login?${query}`);
+      await page.getByRole("button", { name: LOGIN }).click();
+      await expect(page).toHaveURL(`${member.baseURL}/notice`);
+      await expect(page.locator("h1")).toHaveText(NOTICE_TITLE);
+      const posts = apiMock.requests.filter((request) => request.method === "POST");
+      expect(posts.map((request) => request.body)).toEqual([{ member_id: MEMBERS[0]!.member_id, next: null }]);
+      expect(pageErrors).toEqual([]);
+    });
+  }
+
+  // 編碼兩層（%25xx）：解開一層後是「/ 加上 %xx」，照後端 safe_next_path 的規則是站內路徑，原樣送出。
+  // 登入後停在本站的那個路徑（找不到這一頁），瀏覽器不會把 %2F、%5C、%09、%0A 解成分隔符而跑到站外，也不回登入頁。
+  for (const next of ["/%2F%2Fevil.example", "/%5Cevil.example", "/%09/evil.example", "/%0A/evil.example"]) {
+    test(`next encoded twice stays an on-site path: ${next}`, async ({ page, apiMock }) => {
+      apiMock.member = null;
+      const pageErrors: string[] = [];
+      page.on("pageerror", (error) => pageErrors.push(error.message));
+      await page.goto(`${member.baseURL}/login?next=${encodeURIComponent(next)}`);
+      await page.getByRole("button", { name: LOGIN }).click();
+      await expect(page).toHaveURL(`${member.baseURL}${next}`);
+      await expect(page.getByText(TEXT["common:states.notFound.message"], { exact: true })).toBeVisible();
+      await expect(page.getByRole("button", { name: LOGIN })).toHaveCount(0);
+      const posts = apiMock.requests.filter((request) => request.method === "POST");
+      expect(posts.map((request) => request.body)).toEqual([{ member_id: MEMBERS[0]!.member_id, next }]);
+      expect(pageErrors).toEqual([]);
+    });
+  }
+
   test("expired: back to login with one line, then back to the page after signing in", async ({ page, apiMock }) => {
     await page.goto(`${member.baseURL}/notice`);
     await expect(page.locator("h1")).toHaveText(NOTICE_TITLE);

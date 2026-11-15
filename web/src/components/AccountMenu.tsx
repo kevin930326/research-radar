@@ -1,9 +1,10 @@
 import { Menu } from "@base-ui/react/menu";
 import { Link } from "@tanstack/react-router";
-import { useId } from "react";
+import { useId, useRef, useState, type RefObject } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { Member } from "../datasource/types";
+import { PHONE_QUERY, useCloseAcrossBreakpoint } from "../hooks/use-close-across-breakpoint";
 import { useLogOut } from "../hooks/use-log-out";
 import { LINE_HEIGHT_NORMAL } from "./Brand";
 
@@ -15,6 +16,7 @@ import { LINE_HEIGHT_NORMAL } from "./Brand";
 // 和設計稿不同的兩處（報告裡寫明）：
 // - 設計稿的選單有 6px 的背景模糊；DESIGN.md 寫「不用毛玻璃」，說明框（3.2）也沒有，這裡照 DESIGN.md 不加。
 // - 項目滑過時的底色 rgba(239,234,224,0.06) 不在代幣裡（token-gaps.md「Story 3.5」），先不做，只換字色。
+// - 項目高 44px（設計稿 42px）：ADR-0037 第 5 點，看得到的按鈕與連結至少 44×44，無障礙底線優先於設計稿。
 
 /** 選單的上緣在「帳號」所在那一格頂端往下 44px（設計稿 .amenu 的 top: 44px）。 */
 const MENU_TOP = 44;
@@ -24,7 +26,7 @@ const TRIGGER_CLASS =
 const POPUP_CLASS = "w-[232px] border border-border bg-popover-surface py-[6px]";
 const NAME_CLASS = "mb-[6px] border-b border-hairline px-[18px] pt-[10px] pb-[12px] text-nav text-text-secondary";
 const ITEM_CLASS =
-  "flex h-[42px] w-full cursor-pointer items-center px-[18px] text-left text-nav text-text-reading no-underline transition-[color] duration-200 hover:not-data-[disabled]:text-text-primary data-[highlighted]:not-data-[disabled]:text-text-primary data-[disabled]:cursor-default data-[disabled]:text-text-tertiary";
+  "flex h-tap-target w-full cursor-pointer items-center px-[18px] text-left text-nav text-text-reading no-underline transition-[color] duration-200 hover:not-data-[disabled]:text-text-primary data-[highlighted]:not-data-[disabled]:text-text-primary data-[disabled]:cursor-default data-[disabled]:text-text-tertiary";
 const ERROR_CLASS = "px-[18px] pt-[8px] pb-[4px] text-s13 leading-160 tracking-004 text-danger";
 
 /** 「帳號」右邊的小箭頭：選單打開時轉 180 度。 */
@@ -43,18 +45,33 @@ function Caret() {
   );
 }
 
-export function AccountMenu({ member }: { member: Member }) {
+interface AccountMenuProps {
+  member: Member;
+  /** 「帳號」按鈕（手機的滿版選單跨到桌機寬度關上時，焦點移到這裡）。 */
+  triggerRef: RefObject<HTMLButtonElement | null>;
+  /** 選單打開時視窗縮到手機寬度：選單關上、焦點移到這裡（手機的「選單」按鈕；「帳號」已經看不到）。 */
+  phoneFocusRef: RefObject<HTMLButtonElement | null>;
+}
+
+export function AccountMenu({ member, triggerRef, phoneFocusRef }: AccountMenuProps) {
   const { t } = useTranslation("nav");
   const logOut = useLogOut();
   const errorId = useId();
+  const [open, setOpen] = useState(false);
+  const closedByBreakpoint = useRef(false);
+  // 打開與關掉時都清掉上一次的錯誤（登出中關掉、之後才失敗的，下次打開也不留）；登出中不清。
+  const changeOpen = (next: boolean) => {
+    if (!logOut.isPending) logOut.reset();
+    setOpen(next);
+  };
+  // 視窗縮到手機寬度時真的關掉（不只 CSS 藏起來），縮回桌機寬度也不會再出現。
+  useCloseAcrossBreakpoint(open, PHONE_QUERY, () => {
+    closedByBreakpoint.current = true;
+    changeOpen(false);
+  });
   return (
-    <Menu.Root
-      onOpenChange={() => {
-        // 打開與關掉時都清掉上一次的錯誤（登出中關掉、之後才失敗的，下次打開也不留）；登出中不清。
-        if (!logOut.isPending) logOut.reset();
-      }}
-    >
-      <Menu.Trigger className={TRIGGER_CLASS} style={LINE_HEIGHT_NORMAL}>
+    <Menu.Root open={open} onOpenChange={changeOpen}>
+      <Menu.Trigger ref={triggerRef} className={TRIGGER_CLASS} style={LINE_HEIGHT_NORMAL}>
         {t("nav.account.trigger")}
         <Caret />
       </Menu.Trigger>
@@ -63,10 +80,18 @@ export function AccountMenu({ member }: { member: Member }) {
           side="bottom"
           align="end"
           sideOffset={({ anchor }) => MENU_TOP - anchor.height}
-          // 視窗縮到手機寬度時「帳號」藏起來，選單也一起藏（手機用滿版選單）。
+          // 視窗縮到手機寬度時選單會關上（上面，寬度停 150ms 才算）；等著關上與淡出的期間也不顯示。
           className="z-10 max-split:hidden"
         >
-          <Menu.Popup className={POPUP_CLASS} style={LINE_HEIGHT_NORMAL}>
+          <Menu.Popup
+            className={POPUP_CLASS}
+            style={LINE_HEIGHT_NORMAL}
+            finalFocus={() => {
+              if (!closedByBreakpoint.current) return true;
+              closedByBreakpoint.current = false;
+              return phoneFocusRef.current;
+            }}
+          >
             <Menu.Group>
               <Menu.GroupLabel className={NAME_CLASS}>
                 {member.display_name}

@@ -1,10 +1,11 @@
 import { Button } from "@base-ui/react/button";
 import { Dialog } from "@base-ui/react/dialog";
 import { Link } from "@tanstack/react-router";
-import { useEffect } from "react";
+import { useId, useRef, type RefObject } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { Member } from "../datasource/types";
+import { DESKTOP_QUERY, useCloseAcrossBreakpoint } from "../hooks/use-close-across-breakpoint";
 import { useLogOut } from "../hooks/use-log-out";
 import { BrandLink, HEADER_CLASS, LINE_HEIGHT_NORMAL } from "./Brand";
 
@@ -16,12 +17,15 @@ import { BrandLink, HEADER_CLASS, LINE_HEIGHT_NORMAL } from "./Brand";
 // 下面是帳號那一塊（上方 36px、1px 框色的線、線下 22px）。設計稿帳號那一塊上面還有導覽連結的那一塊
 // （每個連結上方一條髮線、最後一條在下方）；這一輪沒有導覽連結，那一塊整個不畫，也就沒有它的髮線。
 // 設計稿的滿版選單沒有畫「目前所在的頁面右邊的金點」（EXPERIENCE.md 18 有寫）：照設計稿不畫，報告裡寫明。
-
-/** 跨過這個寬度就換成桌機的導覽列（DESIGN.md 斷點 split），選單要關掉。 */
-const DESKTOP_QUERY = "(min-width: 900px)";
+// 和設計稿不同的地方（ADR-0037）：
+// - 「登出」滿寬（設計稿只有字那麼寬，31px）：看得到的按鈕與連結至少 44×44（第 5 點）。
+// - 「關閉選單」不帶 aria-expanded（設計稿有）：它不是展開類的按鈕，帶了會被念成「已展開」。
+// - 裡面的 nav 不另取名字：對話框已經叫「選單」，同名會念兩次（EXPERIENCE.md 沒有別的字可用）。
+// - 登出失敗的報讀和桌機的帳號選單同一種做法：看得到的那一行 aria-hidden，「登出」掛 aria-describedby，
+//   另外一個一直都在的 alert 區（放在對話框裡；對話框打開時外面的東西報讀器讀不到）。
 
 const ITEM_CLASS =
-  "flex min-h-[46px] cursor-pointer items-center p-[0px] text-left text-s15 tracking-004 text-text-reading no-underline";
+  "flex min-h-[46px] w-full cursor-pointer items-center p-[0px] text-left text-s15 tracking-004 text-text-reading no-underline";
 
 function MenuIcon() {
   return (
@@ -46,11 +50,17 @@ interface MobileMenuProps {
   member: Member;
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  /** 「選單」按鈕（桌機的帳號選單跨到手機寬度關上時，焦點移到這裡）。 */
+  triggerRef: RefObject<HTMLButtonElement | null>;
+  /** 選單打開時視窗變寬到桌機版：選單關上、焦點移到這裡（桌機的「帳號」；「選單」已經看不到）。 */
+  desktopFocusRef: RefObject<HTMLButtonElement | null>;
 }
 
-export function MobileMenu({ member, open, onOpenChange }: MobileMenuProps) {
+export function MobileMenu({ member, open, onOpenChange, triggerRef, desktopFocusRef }: MobileMenuProps) {
   const { t } = useTranslation("nav");
   const logOut = useLogOut();
+  const errorId = useId();
+  const closedByBreakpoint = useRef(false);
   // 打開、關掉都經過這裡（Dialog、品牌與使用須知的連結、視窗變寬）：登出中以外都清掉上一次的錯誤。
   const changeOpen = (next: boolean) => {
     if (!logOut.isPending) logOut.reset();
@@ -59,35 +69,33 @@ export function MobileMenu({ member, open, onOpenChange }: MobileMenuProps) {
   const close = () => changeOpen(false);
 
   // 視窗變寬到桌機版時關掉（桌機版沒有這個選單，頁面也要顯示回來）。
-  useEffect(() => {
-    if (!open) return undefined;
-    const query = window.matchMedia(DESKTOP_QUERY);
-    const onChange = () => {
-      if (query.matches) close();
-    };
-    onChange();
-    query.addEventListener("change", onChange);
-    return () => query.removeEventListener("change", onChange);
+  useCloseAcrossBreakpoint(open, DESKTOP_QUERY, () => {
+    closedByBreakpoint.current = true;
+    close();
   });
 
   return (
     <Dialog.Root open={open} onOpenChange={changeOpen}>
-      <Dialog.Trigger aria-label={t("nav.menu.open")} className={`${ICON_BUTTON_CLASS} split:hidden`}>
+      <Dialog.Trigger ref={triggerRef} aria-label={t("nav.menu.open")} className={`${ICON_BUTTON_CLASS} split:hidden`}>
         <MenuIcon />
       </Dialog.Trigger>
       <Dialog.Portal>
         <Dialog.Popup
           aria-label={t("nav.menu.open")}
           className="fixed inset-[0px] z-10 flex flex-col overflow-y-auto bg-background split:hidden"
+          finalFocus={() => {
+            if (!closedByBreakpoint.current) return true;
+            closedByBreakpoint.current = false;
+            return desktopFocusRef.current;
+          }}
         >
           <div className={HEADER_CLASS}>
             <BrandLink onClick={close} />
-            <Dialog.Close aria-label={t("nav.menu.close")} aria-expanded="true" className={ICON_BUTTON_CLASS}>
+            <Dialog.Close aria-label={t("nav.menu.close")} className={ICON_BUTTON_CLASS}>
               <CloseIcon />
             </Dialog.Close>
           </div>
           <nav
-            aria-label={t("nav.menu.open")}
             className="flex-1 px-gutter-mobile pt-[28px] pb-[40px] tablet:px-gutter-tablet"
             style={LINE_HEIGHT_NORMAL}
           >
@@ -97,11 +105,12 @@ export function MobileMenu({ member, open, onOpenChange }: MobileMenuProps) {
                 {t("nav.account.notice")}
               </Link>
               {logOut.isError ? (
-                <div role="alert" className="pt-[8px] pb-[2px] text-s13 leading-160 tracking-0 text-danger">
+                <div id={errorId} aria-hidden="true" className="pt-[8px] pb-[2px] text-s13 leading-160 tracking-0 text-danger">
                   {t("nav.account.logoutFailed")}
                 </div>
               ) : null}
               <Button
+                aria-describedby={logOut.isError ? errorId : undefined}
                 focusableWhenDisabled
                 disabled={logOut.isPending}
                 aria-busy={logOut.isPending || undefined}
@@ -112,6 +121,9 @@ export function MobileMenu({ member, open, onOpenChange }: MobileMenuProps) {
               </Button>
             </div>
           </nav>
+          <span role="alert" className="sr-only">
+            {logOut.isError ? t("nav.account.logoutFailed") : null}
+          </span>
         </Dialog.Popup>
       </Dialog.Portal>
     </Dialog.Root>

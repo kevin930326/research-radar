@@ -1,7 +1,8 @@
 // 登入後要回去的路徑（next）只收站內路徑：規則和後端的 safe_next_path 一樣，另外不收登入頁自己。
+import { QueryClient } from "@tanstack/react-query";
 import { describe, expect, it } from "vitest";
 
-import { safeNextPath, validateLoginSearch } from "./session";
+import { clearMemberQueries, safeNextPath, validateLoginSearch } from "./session";
 
 describe("safeNextPath", () => {
   it.each(["/", "/notice", "/notice?from=a&b=1", "/notice#top", `/${"a".repeat(2047)}`])("keeps %s", (value) => {
@@ -57,5 +58,30 @@ describe("validateLoginSearch", () => {
 
   it("drops an unsafe next, a non-true expired and an empty member", () => {
     expect(validateLoginSearch({ next: "//evil.example", expired: "true", member: "" })).toEqual({});
+  });
+});
+
+// 登出、登入過期、登入成功時（Codex 審查第 1 條）：不只「我是誰」，所有查詢快取都清掉。
+describe("clearMemberQueries", () => {
+  it("removes every cached query, not only who-am-i", async () => {
+    const queryClient = new QueryClient();
+    queryClient.setQueryData(["session", "me"], { member_id: "a", display_name: "A" });
+    queryClient.setQueryData(["papers", "list"], ["paper of A"]);
+    queryClient.setQueryData(["library"], { owner: "a" });
+    await clearMemberQueries(queryClient);
+    expect(queryClient.getQueryCache().getAll()).toEqual([]);
+  });
+
+  it("cancels a query still in flight, so its answer does not come back into the cache", async () => {
+    const queryClient = new QueryClient();
+    let answer: (value: string) => void = () => {};
+    const pending = queryClient
+      .fetchQuery({ queryKey: ["library"], queryFn: () => new Promise<string>((resolve) => (answer = resolve)) })
+      .catch(() => "cancelled");
+    await clearMemberQueries(queryClient);
+    answer("data of A");
+    await expect(pending).resolves.toBe("cancelled");
+    expect(queryClient.getQueryData(["library"])).toBeUndefined();
+    expect(queryClient.getQueryCache().getAll()).toEqual([]);
   });
 });

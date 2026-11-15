@@ -1,11 +1,11 @@
 import { Button } from "@base-ui/react/button";
-import { useMutation } from "@tanstack/react-query";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import { useTranslation } from "react-i18next";
 
 import { BrandName, LINE_HEIGHT_NORMAL, RadarIcon } from "../components/Brand";
 import { Offline } from "../components/states/Offline";
-import { FIRST_PAGE, memberSession, safeNextPath, type LoginSearch } from "../routes/session";
+import { FIRST_PAGE, clearMemberQueries, memberSession, safeNextPath, type LoginSearch } from "../routes/session";
 
 // 畫面 10「登入」（State Patterns「10. 登入」、Story 3.5）：開發與試用期間是假登入頁（AR-67、ADR-0046）。
 // 沒有導覽列。品牌、一句說明、主要按鈕「用 Google 帳號登入」。按下去變「登入中…」並停用；
@@ -61,10 +61,13 @@ const BUTTON_CLASS =
 export function LoginPage({ search }: { search: LoginSearch }) {
   const { t } = useTranslation("login");
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const login = useMutation({
     mutationFn: () => memberSession().logIn({ memberId: search.member, next: search.next }),
     onSuccess: async (outcome) => {
       if (outcome.kind === "signedIn") {
+        // 可能換了一個人（已登入時用 ?member= 換測試成員）：先清掉上一位的查詢快取。
+        await clearMemberQueries(queryClient);
         // 後端已經只收站內路徑；這裡再檢查一次（也不回登入頁自己）。
         await navigate({ href: safeNextPath(outcome.next) ?? FIRST_PAGE, replace: true });
         // 換頁後又被送回登入頁（例如 cookie 沒存進去）時，按鈕不能停在「登入中…」。

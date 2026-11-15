@@ -1,5 +1,5 @@
 // 成員版的登入狀態（Story 3.5、ADR-0046）：路由的登入檢查、登入頁、帳號選單共用。
-import { queryOptions } from "@tanstack/react-query";
+import { queryOptions, type QueryClient } from "@tanstack/react-query";
 
 import { datasource } from "../datasource";
 import type { MemberSession } from "../datasource/types";
@@ -22,10 +22,20 @@ export const meQuery = queryOptions({
   queryFn: () => memberSession().me(),
   staleTime: 0,
   // 沒有元件訂閱這筆資料（外框讀的是路由的 context），預設 5 分鐘就會被清掉；
-  // 那樣在同一頁停久了才過期的人會被當成「還沒登入」，所以一直留著（登出、401 時才清）。
+  // 那樣在同一頁停久了才過期的人會被當成「還沒登入」，所以一直留著（登出、401、登入成功時才清，見 clearMemberQueries）。
   gcTime: Infinity,
   retry: false,
 });
+
+/**
+ * 換人或沒有人的時候（登出成功、發現登入過期、登入成功）：取消進行中的查詢、清掉所有查詢快取。
+ * 成員版的查詢都是某一位成員的資料，下一位登入的人不能看到上一位的（只清「我是誰」不夠）。
+ * 先取消再清：還在路上的回應不會在清掉之後又寫回快取。
+ */
+export async function clearMemberQueries(queryClient: QueryClient): Promise<void> {
+  await queryClient.cancelQueries();
+  queryClient.removeQueries();
+}
 
 /** 登入後的第一頁（3.14 之前是使用須知，AR-67）。 */
 export const FIRST_PAGE = "/notice";

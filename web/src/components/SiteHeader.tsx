@@ -1,3 +1,5 @@
+import { useRef } from "react";
+
 import type { Member } from "../datasource/types";
 import { AccountMenu } from "./AccountMenu";
 import { BrandLink, HEADER_CLASS } from "./Brand";
@@ -12,13 +14,22 @@ import { MobileMenu } from "./MobileMenu";
 // 照 epics.md Story 3.5（品牌先連到使用須知）做成連結。
 
 export function SiteHeader({ member, onMobileMenuChange, mobileMenuOpen }: SiteHeaderProps) {
+  // 選單打開時跨過 899px 斷點會關上，焦點移到另一邊看得到的按鈕（「帳號」⇄「選單」）。
+  const accountTriggerRef = useRef<HTMLButtonElement>(null);
+  const menuTriggerRef = useRef<HTMLButtonElement>(null);
   return (
     <header className={HEADER_CLASS}>
       <BrandLink />
       <nav className="hidden items-center split:flex">
-        <AccountMenu member={member} />
+        <AccountMenu member={member} triggerRef={accountTriggerRef} phoneFocusRef={menuTriggerRef} />
       </nav>
-      <MobileMenu member={member} open={mobileMenuOpen} onOpenChange={onMobileMenuChange} />
+      <MobileMenu
+        member={member}
+        open={mobileMenuOpen}
+        onOpenChange={onMobileMenuChange}
+        triggerRef={menuTriggerRef}
+        desktopFocusRef={accountTriggerRef}
+      />
     </header>
   );
 }

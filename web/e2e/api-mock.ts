@@ -27,6 +27,8 @@ export interface ApiMockState {
   /** 目前登入的成員；null 是沒登入（/me 回 401）。 */
   member: MemberResponse | null;
   mode: FakeLoginMode;
+  /** 假登入清單（GET /auth/fake-login 回的 members）；登入頁沒指定成員時用第一位。 */
+  loginList: MemberResponse[];
   /** 登入：成功／伺服器錯誤／不在名單裡（403 login_rejected）。 */
   login: "ok" | "failed" | "denied";
   /** 登出：成功（204）／伺服器錯誤。 */
@@ -45,6 +47,7 @@ export function createApiState(): ApiMockState {
   return {
     member: MEMBERS[0]!,
     mode: "pick_member",
+    loginList: MEMBERS,
     login: "ok",
     logout: "ok",
     meFails: false,
@@ -98,7 +101,7 @@ export async function installApiMock(page: Page, state: ApiMockState): Promise<v
     }
     if (method === "GET" && path === "/api/v1/auth/fake-login") {
       state.requests.push({ method, path, body });
-      const options: FakeLoginOptionsResponse = { mode: state.mode, members: state.mode === "pick_member" ? MEMBERS : [] };
+      const options: FakeLoginOptionsResponse = { mode: state.mode, members: state.mode === "pick_member" ? state.loginList : [] };
       return json(route, options);
     }
     if (method === "POST" && path === "/api/v1/auth/fake-login") {

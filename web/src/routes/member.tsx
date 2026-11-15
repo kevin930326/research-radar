@@ -8,7 +8,7 @@ import { PageLoading } from "../components/states/PageLoading";
 import { LoginPage } from "../pages/LoginPage";
 import { NoticePage } from "../pages/NoticePage";
 import { PlainMain, rootRoute } from "./root";
-import { FIRST_PAGE, meQuery, validateLoginSearch } from "./session";
+import { FIRST_PAGE, clearMemberQueries, meQuery, validateLoginSearch } from "./session";
 
 // 成員版的路由表（Story 3.5）：
 // - /login：登入頁（開發與試用期間是假登入頁），不用登入。
@@ -52,7 +52,8 @@ const appRoute = createRoute({
     const wasSignedIn = queryClient.getQueryData(meQuery.queryKey) != null;
     const member = await queryClient.fetchQuery(meQuery);
     if (member === null) {
-      queryClient.removeQueries({ queryKey: meQuery.queryKey });
+      // 登入過期（或還沒登入）：清掉所有查詢快取，再登入的可能是另一個人。
+      await clearMemberQueries(queryClient);
       throw redirect({
         to: "/login",
         search: { next: location.href, ...(wasSignedIn ? { expired: true as const } : {}) },
