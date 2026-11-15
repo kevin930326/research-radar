@@ -1,0 +1,15 @@
+{
+  "nav": {
+    "account": {
+      "trigger": "帳號",
+      "notice": "使用須知",
+      "logout": "登出",
+      "loggingOut": "登出中…",
+      "logoutFailed": "沒有登出成功，再試一次"
+    },
+    "menu": {
+      "open": "選單",
+      "close": "關閉選單"
+    }
+  }
+}

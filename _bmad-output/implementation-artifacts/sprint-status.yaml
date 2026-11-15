@@ -115,7 +115,7 @@ actual_hours:
   - {round: "epic-2a＋epic-3a", stories: "2.1～2.7、3.1～3.2", estimate_h: 28.5, elapsed_h: 13, kevin_h_low: 1, kevin_h_high: 2, rough: true}
 
 generated: 11-14-2026 03:46
-last_updated: 11-15-2026 06:40
+last_updated: 11-16-2026 01:42
 project: research-radar
 project_key: NOKEY
 tracking_system: file-system
@@ -156,7 +156,7 @@ development_status:
   3-2-設計代幣-無障礙底線與減少動態: review
   3-3-假登入與-session: review
   3-4-權限測試的框架: review
-  3-5-導覽列與帳號選單: backlog
+  3-5-導覽列與帳號選單: review
   3-6-論文頁的-api: backlog
   3-7-示範站匯出的骨架: backlog
   3-8-論文頁成員版: backlog

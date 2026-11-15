@@ -51,8 +51,9 @@ test("member: notice shows only paragraphs 3 and 4, word for word", async ({ pag
   for (const text of ABSENT) {
     expect(bodyText).not.toContain(text.replace(/\s+/g, ""));
   }
-  // 沒有導覽列、頁尾（3.5、3.15 才接）。
-  await expect(page.locator("nav, header, footer")).toHaveCount(0);
+  // 導覽列在 3.5 接上（內容由 nav.spec.ts 檢查）；頁尾還沒有。
+  await expect(page.locator("header")).toHaveCount(1);
+  await expect(page.locator("footer")).toHaveCount(0);
 });
 
 test("member: page language is Traditional Chinese", async ({ page }) => {
