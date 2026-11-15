@@ -228,11 +228,13 @@ def test_finished_run_builds_no_adapter_and_applies(
         "每週更新已經抓完，不再抓",
         "這個排程沒有設定心跳網址，不送",
         "每週更新發佈後排入向量化失敗",
+        # Story 2.9：接著排入 Batch 規劃，一樣排不進去、只記警告。
+        "每週更新發佈後排入 Batch 規劃失敗",
         "這次每週更新沒有任何暫存論文",
         "每週更新已套用並發佈快照",
     ]
     assert logs[1]["check"] == "weekly-update"
-    assert logs[3]["log_level"] == "warning"
+    assert logs[4]["log_level"] == "warning"
 
 
 def test_broken_journals_yaml_after_fetch_fails_to_prepare_the_apply(

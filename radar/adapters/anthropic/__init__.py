@@ -21,22 +21,31 @@
 - 重試：只重試 `LlmTransientError`，最多 `attempts` 次（含第一次）；帶 `Retry-After` 時不超過
   `retry_after_max` 秒就照它等，超過就不再重試、丟出最後一次的錯誤（不提早重送）。
   `deadline`（秒）是含所有重試的總時限（交給 stamina 的 `timeout`），預設 None 不限。
+- Batch（`submit_batch`，Story 2.9、ADR-0041）：`POST {base_url}/v1/messages/batches`，每筆
+  `{"custom_id", "params"}`，`params` 和 `complete` 送的一樣（同一份系統提示、訊息、思考與輸出
+  設定）。**只送一次、不重試**（建立批次沒有冪等鍵）；錯誤沿用 `to_llm_error`；回應用 Pydantic 驗
+  `id`（`^[A-Za-z0-9_-]{1,128}$`）與 `type`（`message_batch`），驗不過丟
+  `LlmMalformedResponseError`（id 的格式對時帶在 `response_id`，給人工確認用）。
 """
 
 import json
+from collections.abc import Sequence
 from types import TracebackType
-from typing import Final, Self
+from typing import Final, Literal, Self
 
 import anthropic
 import httpx2
 import stamina
-from anthropic.types import OutputConfigParam, TextBlockParam
+from anthropic.types import MessageParam, OutputConfigParam, TextBlockParam
+from anthropic.types.message_create_params import MessageCreateParamsNonStreaming
+from anthropic.types.messages.batch_create_params import Request as BatchRequestParam
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from radar.adapters.heartbeat import parse_retry_after
 from radar.domain.llm import (
     Completion,
     CompletionBlock,
+    LlmBatchRequest,
     LlmConfigurationError,
     LlmConnectionError,
     LlmError,
@@ -50,12 +59,15 @@ from radar.domain.llm import (
     LlmTransientError,
     LlmUsage,
     interpret_completion,
+    snapshot_llm_batch_request,
     snapshot_llm_request,
     system_prompt,
 )
 from radar.domain.policy import cloud_text
 
 ANTHROPIC_BASE_URL: Final = "https://api.anthropic.com"
+# 一批最多 100,000 個請求（官方上限；docs/runs/epic-2b/api-reference.md 第一節）。
+MAX_BATCH_REQUESTS: Final = 100_000
 CONFIGURATION_STATUSES: Final = frozenset({401, 403, 404})
 SERVER_STATUSES: Final = frozenset({409})
 
@@ -165,6 +177,51 @@ def _best_effort_usage(value: object) -> LlmUsage | None:
         return _Usage.model_validate(value).to_domain()
     except ValidationError:
         return None
+
+
+class _MessageBatch(BaseModel):
+    """建立批次的回應：只取 `id` 與 `type`（其餘忽略）。"""
+
+    model_config = ConfigDict(extra="ignore", strict=True, frozen=True)
+
+    id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,128}$")
+    type: Literal["message_batch"]
+
+
+def to_batch_id(body: bytes, request_id: str | None) -> str:
+    """把建立批次的 200 回應轉成供應商的 batch ID。
+
+    Raises:
+        LlmMalformedResponseError: 不是合法 JSON、不是物件、`id` 格式不對或 `type` 不是
+            `message_batch`。`id` 本身格式對時帶在 `response_id`（批次可能已經建好，給人工確認）。
+            訊息只有欄位路徑與錯誤種類，不含內容。
+    """
+    try:
+        data = json.loads(body)
+    except ValueError, RecursionError:
+        raise LlmMalformedResponseError("回應不是合法的 JSON", request_id=request_id) from None
+    if not isinstance(data, dict):
+        raise LlmMalformedResponseError("回應不是 JSON 物件", request_id=request_id)
+    try:
+        batch = _MessageBatch.model_validate(data)
+    except ValidationError as exc:
+        problems = "、".join(
+            f"{'.'.join(str(part) for part in error['loc']) or '（最上層）'}：{error['type']}"
+            for error in exc.errors(include_input=False, include_url=False, include_context=False)
+        )
+        candidate = data.get("id")
+        try:
+            response_id = _MessageBatch.model_validate(
+                {"id": candidate, "type": "message_batch"}
+            ).id
+        except ValidationError:
+            response_id = None
+        raise LlmMalformedResponseError(
+            f"建立批次的回應格式不對（{problems}）",
+            request_id=request_id,
+            response_id=response_id,
+        ) from None
+    return batch.id
 
 
 # --- SDK 例外 → domain 錯誤 ------------------------------------------------------------------
@@ -297,24 +354,42 @@ class AnthropicLlmProvider:
             return False
         return error.retry_after
 
+    def submit_batch(self, requests: Sequence[LlmBatchRequest]) -> str:
+        """建一個 Message Batch，回供應商的 batch ID（錯誤見
+        `radar.ports.LlmProvider.submit_batch`）。只送一次，不重試。"""
+        if isinstance(requests, (str, bytes, bytearray)) or not isinstance(requests, Sequence):
+            raise TypeError("submit_batch 收 LlmBatchRequest 的序列")
+        # 檢查後重建每一筆的副本，之後只讀副本（檢查與送出之間沒有時間差）。
+        checked = [snapshot_llm_batch_request(item) for item in requests]
+        if not checked:
+            raise ValueError("submit_batch 至少要有一筆請求")
+        if len(checked) > MAX_BATCH_REQUESTS:
+            raise ValueError(f"一批最多 {MAX_BATCH_REQUESTS} 個請求")
+        if len({item.custom_id for item in checked}) != len(checked):
+            raise ValueError("同一批的 custom_id 不能重複")
+        body: list[BatchRequestParam] = [
+            {"custom_id": item.custom_id, "params": _batch_params(item.request)} for item in checked
+        ]
+        try:
+            raw = self._client.messages.batches.with_raw_response.create(requests=body)
+            data = raw.read()
+        except anthropic.AnthropicError as exc:
+            raise to_llm_error(exc) from None
+        except httpx2.TimeoutException:
+            raise LlmTimeoutError("讀取回應逾時") from None
+        except httpx2.HTTPError as exc:
+            raise LlmConnectionError(f"連線錯誤（{type(exc).__name__}）") from None
+        return to_batch_id(data, raw.request_id)
+
     def _create_once(self, request: LlmRequest) -> Completion:
         """送一次請求並轉成 `Completion`；失敗時丟 domain 的錯誤。"""
-        output_config: OutputConfigParam = {}
-        if request.effort is not None:
-            output_config["effort"] = request.effort
-        schema = request.output_json_schema()
-        if schema is not None:
-            output_config["format"] = {"type": "json_schema", "schema": schema}
-        # 文字一律經 policy 的 cloud_text 拿：號碼不在放行登記裡（被硬改過）就丟錯、不送出。
-        content: list[TextBlockParam] = [
-            {"type": "text", "text": cloud_text(block)} for block in request.content
-        ]
+        output_config = _output_config(request)
         try:
             raw = self._client.messages.with_raw_response.create(
                 model=request.model,
                 max_tokens=request.max_tokens,
                 system=system_prompt(request),
-                messages=[{"role": "user", "content": content}],
+                messages=_messages(request),
                 output_config=output_config if output_config else anthropic.omit,
                 thinking={"type": "disabled"} if request.disable_thinking else anthropic.omit,
             )
@@ -328,3 +403,42 @@ class AnthropicLlmProvider:
             # 讀本文時才斷線之類（SDK 沒有包起來的）：當成連線錯誤，可以重試。
             raise LlmConnectionError(f"連線錯誤（{type(exc).__name__}）") from None
         return to_completion(body, raw.request_id)
+
+
+# --- 請求本體（`complete` 與 `submit_batch` 共用） ---------------------------------------------
+
+
+def _output_config(request: LlmRequest) -> OutputConfigParam:
+    """effort 與結構化輸出（沒有就是空的）。"""
+    output_config: OutputConfigParam = {}
+    if request.effort is not None:
+        output_config["effort"] = request.effort
+    schema = request.output_json_schema()
+    if schema is not None:
+        output_config["format"] = {"type": "json_schema", "schema": schema}
+    return output_config
+
+
+def _messages(request: LlmRequest) -> list[MessageParam]:
+    """單一 user 訊息，每個 `CloudSafeText` 一個 text 區塊。"""
+    # 文字一律經 policy 的 cloud_text 拿：號碼不在放行登記裡（被硬改過）就丟錯、不送出。
+    content: list[TextBlockParam] = [
+        {"type": "text", "text": cloud_text(block)} for block in request.content
+    ]
+    return [{"role": "user", "content": content}]
+
+
+def _batch_params(request: LlmRequest) -> MessageCreateParamsNonStreaming:
+    """Batch 每一筆的 `params`：和 `complete` 送的一樣；沒有的設定不放鍵（不送 `stream`）。"""
+    params: MessageCreateParamsNonStreaming = {
+        "model": request.model,
+        "max_tokens": request.max_tokens,
+        "system": system_prompt(request),
+        "messages": _messages(request),
+    }
+    output_config = _output_config(request)
+    if output_config:
+        params["output_config"] = output_config
+    if request.disable_thinking:
+        params["thinking"] = {"type": "disabled"}
+    return params

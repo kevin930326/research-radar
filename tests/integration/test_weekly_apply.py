@@ -37,7 +37,7 @@ from radar.domain.domain_config import (
     JournalsConfig,
     OpenAlexQuota,
 )
-from radar.domain.jobs import EMBED_PAPERS, JobSpec
+from radar.domain.jobs import EMBED_PAPERS, PLAN_LLM_BATCHES, JobSpec
 from radar.domain.papers import KeywordSource, PaperOrigin
 from radar.domain.parsers.openalex import parse_openalex_work
 from radar.domain.permissions import PermissionDeniedError
@@ -1817,8 +1817,12 @@ def test_publish_enqueues_embeddings_after_commit_and_heartbeat(
         )
 
     assert result.snapshot_number == 1
-    assert queue.queued == [QueuedJob(EMBED_PAPERS, {})]
-    assert queue.seen == [(0, ["weekly-update"])]
+    # Story 2.9：向量化之後接著排入 Batch 規劃（帶這次的 weekly_run_id）。
+    assert queue.queued == [
+        QueuedJob(EMBED_PAPERS, {}),
+        QueuedJob(PLAN_LLM_BATCHES, {"weekly_run_id": run_id}),
+    ]
+    assert queue.seen == [(0, ["weekly-update"]), (0, ["weekly-update"])]
     [done] = [log for log in logs if log["event"] == "每週更新發佈後已排入向量化"]
     assert (done["weekly_run_id"], done["queued"]) == (str(run_id), True)
 
@@ -1898,4 +1902,8 @@ def test_advance_passes_enqueue_to_the_apply(
 
     assert result.apply is not None
     assert result.apply.snapshot_number == 1
-    assert queue.queued == [QueuedJob(EMBED_PAPERS, {})]
+    # Story 2.9：向量化之後接著排入 Batch 規劃。
+    assert queue.queued == [
+        QueuedJob(EMBED_PAPERS, {}),
+        QueuedJob(PLAN_LLM_BATCHES, {"weekly_run_id": run_id}),
+    ]

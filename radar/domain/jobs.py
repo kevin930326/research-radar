@@ -87,7 +87,22 @@ RUN_WEEKLY_UPDATE = JobSpec("run_weekly_update", Queue.INGEST, lock="weekly_upda
 # 的 running 唯一索引避免重送同一篇）。
 EMBED_PAPERS = JobSpec("embed_papers", Queue.AI, lock="embed_papers")
 
-JOBS: tuple[JobSpec, ...] = (SWEEP, WEEKLY_UPDATE, RUN_WEEKLY_UPDATE, EMBED_PAPERS)
+# Batch（Story 2.9、ADR-0041）：每週更新發佈快照、commit 之後，在向量化之後排入
+# `plan_llm_batches(weekly_run_id)`：照 `plan_for` 與 `should_run` 把 AI 工作排成一個個
+# `batch_submission`（帶 `plan_llm_batches` 這把鎖，同時只跑一個；兩個同時跑也靠資料層擋）。
+# 每建好一批排入 `submit_llm_batch(batch_submission_id)`（帶 `llm_batches` 這把鎖、不重試：
+# batch create 沒有冪等鍵）；停在 `queued`／`submitting` 的由 sweep 補排。
+PLAN_LLM_BATCHES = JobSpec("plan_llm_batches", Queue.AI, lock="plan_llm_batches")
+SUBMIT_LLM_BATCH = JobSpec("submit_llm_batch", Queue.AI, lock="llm_batches")
+
+JOBS: tuple[JobSpec, ...] = (
+    SWEEP,
+    WEEKLY_UPDATE,
+    RUN_WEEKLY_UPDATE,
+    EMBED_PAPERS,
+    PLAN_LLM_BATCHES,
+    SUBMIT_LLM_BATCH,
+)
 
 # 排入一個工作：（工作, 參數）→ True＝新排入；False＝同一件事已經在排隊，沒有再排一筆。
 # 參數只有 ID（名稱 `*_id`、值是 UUID）。

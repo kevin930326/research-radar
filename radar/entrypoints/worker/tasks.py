@@ -13,8 +13,26 @@ from functools import partial
 import procrastinate
 
 from radar.adapters.jobs import register_job
-from radar.config import ConfigError, load_domain_config, load_embedding_config
-from radar.domain.jobs import EMBED_PAPERS, RUN_WEEKLY_UPDATE, SWEEP, WEEKLY_UPDATE
+from radar.config import (
+    ConfigError,
+    load_budget_config,
+    load_context_values,
+    load_domain_config,
+    load_embedding_config,
+    load_llm_batch_config,
+    load_models_config,
+    load_taxonomy,
+    load_zh_summary_rules,
+)
+from radar.domain.ai_outputs import CallMode
+from radar.domain.jobs import (
+    EMBED_PAPERS,
+    PLAN_LLM_BATCHES,
+    RUN_WEEKLY_UPDATE,
+    SUBMIT_LLM_BATCH,
+    SWEEP,
+    WEEKLY_UPDATE,
+)
 from radar.domain.scope import ScopeSettings
 from radar.domain.settings import Settings
 from radar.domain.sweep import SWEEP_REGISTRY
@@ -22,11 +40,14 @@ from radar.domain.viewer import SystemViewer
 from radar.entrypoints.bootstrap import (
     WorkerParts,
     build_embedding_provider,
+    build_gateway_config,
+    build_llm_provider,
     build_object_store,
     build_paper_source,
     code_version,
 )
 from radar.services.embeddings import embed_papers
+from radar.services.llm_batches import LlmBatchSetup, plan_llm_batches, submit_llm_batch
 from radar.services.llm_gateway import expire_stale_runs
 from radar.services.sweep import sweep
 from radar.services.weekly_update import (
@@ -133,6 +154,47 @@ def register_tasks(app: procrastinate.App, parts: WorkerParts, settings: Setting
             reason = "" if result.failure_reason is None else result.failure_reason.value
             raise EmbeddingJobFailedError(reason)
 
+    def load_batch_setup() -> LlmBatchSetup:
+        # 執行時才讀 AI 設定（AD-18；啟動時 check_ai_config 已檢查過一次）：改設定不用重開 worker。
+        return LlmBatchSetup(
+            gateway=build_gateway_config(settings, load_models_config(), call_mode=CallMode.BATCH),
+            budget=load_budget_config(),
+            batches=load_llm_batch_config(),
+            zh_summary_rules=load_zh_summary_rules(),
+            taxonomy=load_taxonomy(),
+            context_values=load_context_values(),
+        )
+
+    def plan_llm_batches_job(weekly_run_id: uuid.UUID) -> None:
+        # 每週更新發佈快照後排入（Story 2.9、ADR-0041）。只排批次、不呼叫供應商（不建 provider）；
+        # 每建好一批排入 submit_llm_batch。月初窗口、熔斷都正常結束（不算失敗）。
+        plan_llm_batches(
+            SystemViewer(),
+            parts.database,
+            load_batch_setup(),
+            weekly_run_id=weekly_run_id,
+            clock=lambda: datetime.now(UTC),
+            enqueue=parts.enqueue,
+        )
+
+    def submit_llm_batch_job(batch_submission_id: uuid.UUID) -> None:
+        # 送出一個 queued 的批次（Story 2.9、ADR-0041）。建 provider 時 ConfigError（缺金鑰）
+        # 原樣丟出，列維持 queued，sweep 1 小時後補排；不確定有沒有建好時丟
+        # BatchSubmitUncertainError。
+        setup = load_batch_setup()
+        error_type: str | None = None
+        try:
+            provider = build_llm_provider(settings)
+        except ConfigError:
+            raise
+        except Exception as exc:
+            error_type = type(exc).__name__
+        if error_type is not None:
+            # 在 except 外面丟，不串原例外（見 AdapterSetupError）。
+            raise AdapterSetupError(error_type)
+        with provider:
+            submit_llm_batch(SystemViewer(), parts.database, provider, setup, batch_submission_id)
+
     def load_scope() -> ScopeSettings:
         # 執行時才讀 config/journals.yaml：抓完後才改設定也照新的追蹤範圍算 in_scope。
         return load_domain_config().journals.scope_settings()
@@ -176,4 +238,14 @@ def register_tasks(app: procrastinate.App, parts: WorkerParts, settings: Setting
     # 停下的部分由下一次排入或 `radar embeddings backfill` 接著做（用輸入指紋挑，不會漏）。
     register_job(
         app, EMBED_PAPERS, embed_papers_job, max_retries=0, retry_wait=settings.job_retry_wait
+    )
+    register_job(app, PLAN_LLM_BATCHES, plan_llm_batches_job, **retry)
+    # 送出不做工作層的重試：batch create 沒有冪等鍵，不確定有沒有建好時重送可能付兩次錢
+    # （ADR-0041）；429 退回 queued、設定錯留在 queued，都由 sweep 補排。
+    register_job(
+        app,
+        SUBMIT_LLM_BATCH,
+        submit_llm_batch_job,
+        max_retries=0,
+        retry_wait=settings.job_retry_wait,
     )

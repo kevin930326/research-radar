@@ -31,6 +31,7 @@ from radar.domain.jobs import WORKER_HEARTBEAT_SECONDS, Queue
 from radar.domain.settings import Settings
 from radar.entrypoints.bootstrap import build_worker
 from radar.entrypoints.logging_config import configure_logging
+from radar.entrypoints.startup import check_ai_config
 from radar.entrypoints.worker.tasks import register_tasks
 
 log = structlog.get_logger(__name__)
@@ -150,6 +151,9 @@ def main() -> int:
     try:
         # 領域設定（config/*.yaml）錯了也不啟動（AD-18）。
         load_domain_config()
+        # AI 設定（prompt 登記、models、budget、zh_summary、分類表、情境值清單、llm_batches）錯了
+        # 也不啟動（Story 2.9）。
+        check_ai_config()
         settings = load_settings()
         connections = worker_connection_split(settings)
     except ConfigError as exc:

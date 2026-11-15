@@ -23,7 +23,7 @@ from radar.adapters.fake import FakeEmbeddingProvider, FakeHeartbeat
 from radar.adapters.fake.jobs import FakeJobQueue, QueuedJob
 from radar.config import ConfigError
 from radar.domain.embeddings import EmbeddingRequestError, EmbeddingResponseError
-from radar.domain.jobs import EMBED_PAPERS, RUN_WEEKLY_UPDATE
+from radar.domain.jobs import EMBED_PAPERS, PLAN_LLM_BATCHES, RUN_WEEKLY_UPDATE
 from radar.domain.policy import CloudSafeText, cloud_text
 from radar.domain.settings import Settings
 from radar.entrypoints.bootstrap import WorkerParts, build_worker
@@ -216,7 +216,11 @@ def test_weekly_apply_in_the_worker_enqueues_embeddings(
 
     task(weekly_run_id=str(run_id))
 
-    assert queue.queued == [QueuedJob(EMBED_PAPERS, {})]
+    # Story 2.9：向量化之後接著排入 Batch 規劃。
+    assert queue.queued == [
+        QueuedJob(EMBED_PAPERS, {}),
+        QueuedJob(PLAN_LLM_BATCHES, {"weekly_run_id": run_id}),
+    ]
 
 
 def test_embed_task_is_not_retried_by_the_queue(

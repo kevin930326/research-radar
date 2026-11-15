@@ -1,0 +1,14 @@
+# Batch 送出的設定（AD-8、AD-14，ADR-0004 決定第 4 點、ADR-0031、ADR-0041；Story 2.9）。
+# Batch 規劃的工作（plan_llm_batches）讀這份（radar/config.py 驗證）；worker 與 CLI 啟動時也檢查。
+#
+# 數字的來源（2026-11-15 讀 Anthropic 官方文件，docs/runs/epic-2b/api-reference.md 第一節）：
+# - 一批最多 100,000 個請求或 256 MB（先到者為準）。
+
+# 一個 batch_submission 最多幾個請求（1～100,000）。一批在一個資料庫交易裡建，每筆拿一把
+# advisory lock（PostgreSQL 共用鎖表預設約 6,400 格），所以取小：500 筆約一兩秒、請求量約 10 MB，
+# 一批出事的範圍也小（ADR-0041）。
+max_requests_per_batch: 500
+# 台北時間每月 1 日 00:00 到這個鐘點以前，整次 Batch 規劃延後、不寫任何列（0～24；0＝不延後）。
+# 我們的帳用台北月份，Anthropic workspace 上限可能還在用 UTC 的上個月（台北 08:00＝UTC 00:00；
+# ADR-0031 取捨）。延後的那一次不會自己再排，等下一次每週更新（ADR-0041）。
+month_start_hold_hours: 8

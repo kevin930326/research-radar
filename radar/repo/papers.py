@@ -39,6 +39,7 @@ from sqlalchemy.dialects.postgresql import ARRAY
 
 from radar.domain.ai_outputs import CurrentAbstract, PaperLlmSource
 from radar.domain.identifiers import ExternalId, IdentifierScheme
+from radar.domain.llm_batches import PaperAiSource
 from radar.domain.papers import (
     ABSTRACT_SOURCE_PRIORITY,
     AbstractSource,
@@ -53,10 +54,10 @@ from radar.domain.papers import (
 )
 from radar.domain.processing import ProcessingFacts
 from radar.domain.scope import ScopeSettings, is_in_scope
-from radar.domain.viewer import Viewer
+from radar.domain.viewer import SystemViewer, Viewer
 from radar.repo.db import Database
 from radar.repo.models import Base
-from radar.repo.visibility import visible_papers
+from radar.repo.visibility import visible_papers, visible_to_system_only
 
 log = structlog.get_logger(__name__)
 
@@ -301,6 +302,59 @@ def find_paper_processing_facts(
         excluded_reason=row["excluded_reason"],
         abstract=row["abstract_content"],
     )
+
+
+def list_paper_ai_sources(
+    viewer: SystemViewer, connection: Connection, *, after_id: uuid.UUID | None, limit: int
+) -> list[PaperAiSource]:
+    """依論文 id 順序讀一頁論文（`after_id` 之後、最多 `limit` 篇）：處理事實（`plan_for` 用）、
+    標題與目前的摘要（組 LLM 輸入用）。全部論文都讀（要不要做由 `plan_for` 判斷，這裡不篩）；
+    Batch 規劃用（Story 2.9）。
+
+    Raises:
+        TypeError: `viewer` 不是 `SystemViewer`。
+        ValueError: `limit` 不是正整數。
+    """
+    if type(limit) is not int or limit < 1:
+        raise ValueError("limit 要是正整數")
+    visible_to_system_only(viewer)
+    visible = visible_papers(viewer, alias="paper")
+    after = "" if after_id is None else " AND paper.id > :after_id"
+    rows = (
+        connection.execute(
+            text(
+                "SELECT paper.id, paper.title, paper.origin, paper.excluded_reason,"
+                " a.id AS abstract_id, a.source AS abstract_source,"
+                " a.content AS abstract_content"
+                " FROM paper LEFT JOIN paper_abstract AS a"
+                " ON a.paper_id = paper.id AND a.is_current"
+                f" WHERE {visible}{after} ORDER BY paper.id LIMIT :limit"
+            ),
+            {"after_id": after_id, "limit": limit},
+        )
+        .mappings()
+        .all()
+    )
+    sources: list[PaperAiSource] = []
+    for row in rows:
+        abstract = None
+        if row["abstract_id"] is not None:
+            abstract = CurrentAbstract(
+                id=row["abstract_id"],
+                source=AbstractSource(row["abstract_source"]),
+                content=row["abstract_content"],
+            )
+        sources.append(
+            PaperAiSource(
+                facts=ProcessingFacts(
+                    origin=PaperOrigin(row["origin"]),
+                    excluded_reason=row["excluded_reason"],
+                    abstract=row["abstract_content"],
+                ),
+                source=PaperLlmSource(paper_id=row["id"], title=row["title"], abstract=abstract),
+            )
+        )
+    return sources
 
 
 def find_known_external_ids(

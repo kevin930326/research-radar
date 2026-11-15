@@ -101,3 +101,14 @@ class ErrorCode(StrEnum):
     EMBED_QUOTA_REACHED = "embed_quota_reached"
     # 寫入前等論文那一列的鎖超過 lock_timeout：這篇不寫，下一次重算
     EMBED_LOCK_TIMEOUT = "embed_lock_timeout"
+
+    # Batch 送出（`radar/services/llm_batches.py`，Story 2.9、ADR-0041）
+    # 送出前重建請求，和規劃時記的 run 鍵對不上（摘要、prompt 版本、模型或設定版本變了，或論文
+    # 沒了）：那筆 run 改 failed、不送（`derivation_run.failure_reason`）；整批都對不上時批次
+    # 也記這個
+    BATCH_INPUT_CHANGED = "batch_input_changed"
+    # 送出時逾時、斷線、5xx、回應看不懂或非預期的例外：不知道供應商有沒有建好批次，標
+    # `needs_attention`、不自動重送（沒有冪等鍵）；停在 submitting 太久也記這個
+    BATCH_SUBMIT_UNCERTAIN = "batch_submit_uncertain"
+    # 供應商明確回了 4xx（429、401、403、404 以外）：一定沒有建立，批次與 run 都改 failed
+    BATCH_SUBMIT_REJECTED = "batch_submit_rejected"

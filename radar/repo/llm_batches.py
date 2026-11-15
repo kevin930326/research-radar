@@ -1,0 +1,404 @@
+"""`batch_submission`（Batch 的狀態表）與 `batch_item`（批次裡的一筆）兩張表：表的定義與唯一的寫入者
+（AD-14、ADR-0004 決定第 2、4 點、ADR-0041、Story 2.9）。
+
+- `batch_submission`：狀態 `queued` → `submitting` → `submitted` → `ended` → `imported`；`failed`；
+  `needs_attention`。`queued`／`submitting` 時一定沒有供應商 batch ID，`submitted` 以後一定有；
+  非空的 batch ID 唯一。狀態只由 `services/llm_batches.py` 改，每個轉移都是條件式 UPDATE（只在
+  預期的起始狀態才改，回有沒有改到），並行時靠資料庫擋。
+- `batch_item`：不是狀態表（沒有 `status`），進度跟著它的 `derivation_run`（`run_id` 唯一）；
+  `custom_id` 就是它的 `id.hex`。`estimated_max_cost_usd` 是送出前的保守上限，run 還是 `running`
+  的加總就是「尚未結束的 Batch 預留」。
+- 寫入一律用 `text()` SQL；函式收呼叫端開好的交易連線，不 commit。
+- 讀取函式第一個參數是 `viewer`，只給系統工作（`visible_to_system_only`）。
+"""
+
+import uuid
+from datetime import timedelta
+from decimal import Decimal
+
+from sqlalchemy import (
+    CheckConstraint,
+    Column,
+    Connection,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    Numeric,
+    RowMapping,
+    Table,
+    Text,
+    UniqueConstraint,
+    Uuid,
+    text,
+)
+
+from radar.domain.ai_outputs import InputKind, LlmTask, RunKey, RunStatus
+from radar.domain.errors import ErrorCode
+from radar.domain.llm_batches import BatchItemRun, BatchSubmission, BatchSubmissionStatus
+from radar.domain.viewer import SystemViewer
+from radar.repo.models import Base
+from radar.repo.visibility import visible_to_system_only
+
+# --- 表的定義（`alembic check` 拿來和資料庫比對；遷移 0016 建表） -----------------------------
+
+_STATUSES = ", ".join(f"'{status.value}'" for status in BatchSubmissionStatus)
+
+batch_submission_table = Table(
+    "batch_submission",
+    Base.metadata,
+    Column("id", Uuid, primary_key=True, server_default=text("uuidv7()")),
+    # 屬於哪一次每週更新；手動補跑的可以沒有（ADR-0004 決定第 4 點）。
+    Column("weekly_run_id", Uuid, ForeignKey("weekly_run.id"), index=True),
+    Column("status", Text, nullable=False),
+    Column("provider_batch_id", Text),
+    Column("item_count", Integer, nullable=False),
+    Column("estimated_max_cost_usd", Numeric(12, 6), nullable=False),
+    Column("failure_reason", Text),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
+    Column("submitted_at", DateTime(timezone=True)),
+    Index(
+        "uq_batch_submission_provider_batch_id",
+        "provider_batch_id",
+        unique=True,
+        postgresql_where=text("provider_batch_id IS NOT NULL"),
+    ),
+    CheckConstraint(f"status IN ({_STATUSES})", name="status"),
+    CheckConstraint(
+        "provider_batch_id IS NULL OR provider_batch_id ~ '^[A-Za-z0-9_-]{1,128}$'",
+        name="provider_batch_id_format",
+    ),
+    CheckConstraint(
+        "status NOT IN ('queued', 'submitting') OR provider_batch_id IS NULL",
+        name="no_provider_batch_id_before_submitted",
+    ),
+    CheckConstraint(
+        "status NOT IN ('submitted', 'ended', 'imported') OR provider_batch_id IS NOT NULL",
+        name="provider_batch_id_once_submitted",
+    ),
+    CheckConstraint(
+        "status NOT IN ('submitted', 'ended', 'imported') OR submitted_at IS NOT NULL",
+        name="submitted_at_once_submitted",
+    ),
+    CheckConstraint(
+        "submitted_at IS NULL OR provider_batch_id IS NOT NULL",
+        name="submitted_at_needs_provider_batch_id",
+    ),
+    CheckConstraint(
+        "(status IN ('failed', 'needs_attention')) = (failure_reason IS NOT NULL)",
+        name="failure_reason_iff_failed_or_needs_attention",
+    ),
+    CheckConstraint(
+        "failure_reason IS NULL OR failure_reason ~ '^[a-z][a-z0-9_]*$'",
+        name="failure_reason_format",
+    ),
+    CheckConstraint("item_count >= 0", name="item_count_not_negative"),
+    CheckConstraint("estimated_max_cost_usd >= 0", name="estimated_max_cost_usd_not_negative"),
+)
+
+batch_item_table = Table(
+    "batch_item",
+    Base.metadata,
+    Column("id", Uuid, primary_key=True, server_default=text("uuidv7()")),
+    Column(
+        "batch_submission_id",
+        Uuid,
+        ForeignKey("batch_submission.id"),
+        nullable=False,
+        index=True,
+    ),
+    Column("run_id", Uuid, ForeignKey("derivation_run.id"), nullable=False),
+    # 和表頭的 `abstract_id` 一樣不設外鍵（摘要列會被換掉，紀錄要留著）。
+    Column("abstract_id", Uuid),
+    Column("estimated_max_cost_usd", Numeric(12, 6), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
+    # 一筆 run 只屬於一個 batch_item（也當外鍵的索引）。
+    UniqueConstraint("run_id"),
+    CheckConstraint("estimated_max_cost_usd >= 0", name="estimated_max_cost_usd_not_negative"),
+)
+
+_SUBMISSION_COLUMNS = (
+    "id, weekly_run_id, status, provider_batch_id, item_count, estimated_max_cost_usd,"
+    " failure_reason"
+)
+
+
+def _submission(row: RowMapping) -> BatchSubmission:
+    return BatchSubmission(
+        id=row["id"],
+        weekly_run_id=row["weekly_run_id"],
+        status=BatchSubmissionStatus(row["status"]),
+        provider_batch_id=row["provider_batch_id"],
+        item_count=row["item_count"],
+        estimated_max_cost_usd=Decimal(row["estimated_max_cost_usd"]),
+        failure_reason=row["failure_reason"],
+    )
+
+
+# --- 讀取 ---------------------------------------------------------------------------------
+
+
+def find_batch_submission(
+    viewer: SystemViewer, connection: Connection, batch_submission_id: uuid.UUID
+) -> BatchSubmission | None:
+    """一筆 `batch_submission`；不存在回 None。
+
+    Raises:
+        TypeError: `viewer` 不是 `SystemViewer`。
+    """
+    visible = visible_to_system_only(viewer)
+    row = (
+        connection.execute(
+            text(
+                f"SELECT {_SUBMISSION_COLUMNS} FROM batch_submission WHERE {visible} AND id = :id"
+            ),
+            {"id": batch_submission_id},
+        )
+        .mappings()
+        .one_or_none()
+    )
+    return None if row is None else _submission(row)
+
+
+def list_batch_items(
+    viewer: SystemViewer, connection: Connection, batch_submission_id: uuid.UUID
+) -> list[BatchItemRun]:
+    """這個批次的每一筆 `batch_item` 與它的 `derivation_run`（鍵、`input_kind`、狀態），依
+    `batch_item.id` 排序。
+
+    Raises:
+        TypeError: `viewer` 不是 `SystemViewer`。
+    """
+    visible = visible_to_system_only(viewer)
+    rows = (
+        connection.execute(
+            text(
+                "SELECT i.id AS item_id, i.run_id, i.abstract_id, i.estimated_max_cost_usd,"
+                " r.paper_id, r.task, r.prompt_version, r.model, r.input_sha256, r.input_kind,"
+                " r.status AS run_status"
+                " FROM batch_item AS i JOIN derivation_run AS r ON r.id = i.run_id"
+                f" WHERE {visible} AND i.batch_submission_id = :id"
+                " ORDER BY i.id"
+            ),
+            {"id": batch_submission_id},
+        )
+        .mappings()
+        .all()
+    )
+    return [
+        BatchItemRun(
+            item_id=row["item_id"],
+            run_id=row["run_id"],
+            key=RunKey(
+                paper_id=row["paper_id"],
+                task=LlmTask(row["task"]),
+                prompt_version=row["prompt_version"],
+                model=row["model"],
+                input_sha256=row["input_sha256"],
+            ),
+            input_kind=InputKind(row["input_kind"]),
+            run_status=RunStatus(row["run_status"]),
+            abstract_id=row["abstract_id"],
+            estimated_max_cost_usd=Decimal(row["estimated_max_cost_usd"]),
+        )
+        for row in rows
+    ]
+
+
+def list_batch_reservations_by_task(
+    viewer: SystemViewer, connection: Connection
+) -> dict[LlmTask, Decimal]:
+    """尚未結束的 Batch 預留：`batch_item.estimated_max_cost_usd` 中 run 還是 `running` 的，依工作
+    加總（沒有預留的工作不在結果裡）。結果匯入把 run 改掉就自然釋放（ADR-0041）。
+
+    Raises:
+        TypeError: `viewer` 不是 `SystemViewer`。
+    """
+    visible = visible_to_system_only(viewer)
+    rows = connection.execute(
+        text(
+            "SELECT r.task, sum(i.estimated_max_cost_usd)"
+            " FROM batch_item AS i JOIN derivation_run AS r ON r.id = i.run_id"
+            f" WHERE {visible} AND r.status = 'running'"
+            " GROUP BY r.task"
+        )
+    ).all()
+    return {LlmTask(row[0]): Decimal(row[1]) for row in rows}
+
+
+# --- 寫入 ---------------------------------------------------------------------------------
+
+
+def create_batch_submission(connection: Connection, weekly_run_id: uuid.UUID | None) -> uuid.UUID:
+    """新增一筆 `queued` 的 `batch_submission`（筆數與預留先是 0，寫完 item 再更新），回它的 id。"""
+    value = connection.execute(
+        text(
+            "INSERT INTO batch_submission (weekly_run_id, status, item_count,"
+            " estimated_max_cost_usd)"
+            " VALUES (:weekly_run_id, 'queued', 0, 0) RETURNING id"
+        ),
+        {"weekly_run_id": weekly_run_id},
+    ).scalar_one()
+    return uuid.UUID(str(value))
+
+
+def create_batch_item(
+    connection: Connection,
+    batch_submission_id: uuid.UUID,
+    run_id: uuid.UUID,
+    abstract_id: uuid.UUID | None,
+    estimated_max_cost_usd: Decimal,
+) -> uuid.UUID:
+    """新增一筆 `batch_item`，回它的 id（`custom_id` 用它的 `.hex`）。"""
+    value = connection.execute(
+        text(
+            "INSERT INTO batch_item (batch_submission_id, run_id, abstract_id,"
+            " estimated_max_cost_usd)"
+            " VALUES (:batch_submission_id, :run_id, :abstract_id, :cost) RETURNING id"
+        ),
+        {
+            "batch_submission_id": batch_submission_id,
+            "run_id": run_id,
+            "abstract_id": abstract_id,
+            "cost": estimated_max_cost_usd,
+        },
+    ).scalar_one()
+    return uuid.UUID(str(value))
+
+
+def update_batch_submission_totals(
+    connection: Connection,
+    batch_submission_id: uuid.UUID,
+    item_count: int,
+    estimated_max_cost_usd: Decimal,
+) -> bool:
+    """規劃寫完 item 後記下筆數與預留合計；只在 `queued` 時改，回有沒有改到。"""
+    result = connection.execute(
+        text(
+            "UPDATE batch_submission SET item_count = :item_count, estimated_max_cost_usd = :cost,"
+            " updated_at = clock_timestamp()"
+            " WHERE id = :id AND status = 'queued'"
+        ),
+        {"id": batch_submission_id, "item_count": item_count, "cost": estimated_max_cost_usd},
+    )
+    return result.rowcount == 1
+
+
+def update_batch_submission_submitting(
+    connection: Connection, batch_submission_id: uuid.UUID, item_count: int
+) -> bool:
+    """`queued` → `submitting`，同一句把 `item_count` 改成實際要送的筆數；不是 `queued`
+    （別人先改走）就不改、回 False。"""
+    result = connection.execute(
+        text(
+            "UPDATE batch_submission SET status = 'submitting', item_count = :item_count,"
+            " updated_at = clock_timestamp()"
+            " WHERE id = :id AND status = 'queued'"
+        ),
+        {"id": batch_submission_id, "item_count": item_count},
+    )
+    return result.rowcount == 1
+
+
+def update_batch_submission_submitted(
+    connection: Connection, batch_submission_id: uuid.UUID, provider_batch_id: str
+) -> bool:
+    """`submitting`（還沒有 batch ID）→ `submitted`，記供應商 batch ID 與送出時間；已經不是（例如被
+    sweep 標成 `needs_attention`）就不改、回 False。"""
+    result = connection.execute(
+        text(
+            "UPDATE batch_submission SET status = 'submitted', provider_batch_id = :batch_id,"
+            " submitted_at = clock_timestamp(), updated_at = clock_timestamp()"
+            " WHERE id = :id AND status = 'submitting' AND provider_batch_id IS NULL"
+        ),
+        {"id": batch_submission_id, "batch_id": provider_batch_id},
+    )
+    return result.rowcount == 1
+
+
+def update_batch_submission_late_batch_id(
+    connection: Connection, batch_submission_id: uuid.UUID, provider_batch_id: str
+) -> bool:
+    """已經標成 `needs_attention`、還沒有 batch ID 的批次，補記慢一步拿到的供應商 batch ID
+    （狀態不變，給人工確認用）；不符就不改、回 False。"""
+    result = connection.execute(
+        text(
+            "UPDATE batch_submission SET provider_batch_id = :batch_id,"
+            " updated_at = clock_timestamp()"
+            " WHERE id = :id AND status = 'needs_attention' AND provider_batch_id IS NULL"
+        ),
+        {"id": batch_submission_id, "batch_id": provider_batch_id},
+    )
+    return result.rowcount == 1
+
+
+def update_batch_submission_requeued(
+    connection: Connection, batch_submission_id: uuid.UUID
+) -> bool:
+    """`submitting`（還沒有 batch ID）→ `queued`（供應商回 429，一定沒有建立）；不符就不改。"""
+    result = connection.execute(
+        text(
+            "UPDATE batch_submission SET status = 'queued', updated_at = clock_timestamp()"
+            " WHERE id = :id AND status = 'submitting' AND provider_batch_id IS NULL"
+        ),
+        {"id": batch_submission_id},
+    )
+    return result.rowcount == 1
+
+
+def update_batch_submission_failed(
+    connection: Connection,
+    batch_submission_id: uuid.UUID,
+    reason: ErrorCode,
+    *,
+    from_status: BatchSubmissionStatus,
+) -> bool:
+    """`from_status`（`queued` 或還沒有 batch ID 的 `submitting`）→ `failed`，記原因代碼；
+    不符就不改。
+
+    Raises:
+        ValueError: `from_status` 不是 `queued` 或 `submitting`。
+    """
+    if from_status not in (BatchSubmissionStatus.QUEUED, BatchSubmissionStatus.SUBMITTING):
+        raise ValueError("只有 queued 或 submitting 可以改成 failed")
+    result = connection.execute(
+        text(
+            "UPDATE batch_submission SET status = 'failed', failure_reason = :reason,"
+            " updated_at = clock_timestamp()"
+            " WHERE id = :id AND status = :from_status AND provider_batch_id IS NULL"
+        ),
+        {
+            "id": batch_submission_id,
+            "reason": ErrorCode(reason).value,
+            "from_status": BatchSubmissionStatus(from_status).value,
+        },
+    )
+    return result.rowcount == 1
+
+
+def update_batch_submission_needs_attention(
+    connection: Connection,
+    batch_submission_id: uuid.UUID,
+    reason: ErrorCode,
+    *,
+    stale_after: timedelta | None,
+) -> bool:
+    """還沒有 batch ID 的 `submitting` → `needs_attention`，記原因代碼；`stale_after` 有值時還要
+    `updated_at` 早於「現在減 `stale_after`」（送出的工作已經不在）。不符就不改、回 False。
+
+    Raises:
+        ValueError: `stale_after` 不是正的時間長度。
+    """
+    if stale_after is not None and stale_after <= timedelta(0):
+        raise ValueError("stale_after 要大於 0")
+    stale = "" if stale_after is None else " AND updated_at < clock_timestamp() - :stale_after"
+    result = connection.execute(
+        text(
+            "UPDATE batch_submission SET status = 'needs_attention', failure_reason = :reason,"
+            " updated_at = clock_timestamp()"
+            f" WHERE id = :id AND status = 'submitting' AND provider_batch_id IS NULL{stale}"
+        ),
+        {"id": batch_submission_id, "reason": ErrorCode(reason).value, "stale_after": stale_after},
+    )
+    return result.rowcount == 1

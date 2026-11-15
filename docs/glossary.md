@@ -823,3 +823,12 @@
 - **下溢（underflow）**：數字太接近 0，換成精度較低的格式時被捨成 0；例如 0.000000001 存成 halfvec 會變成 0（ADR-0040）。
 - **半精度（half precision）**：每個數字只用 2 個位元組存的浮點數格式（halfvec 用的就是它），能表示的最小非 0 數字約 0.00000006（ADR-0040）。
 - **ContextVar**：Python 標準庫的「目前情境變數」，同一個執行緒裡設一次、底下呼叫的函式都讀得到，不同執行緒各自一份；向量化用它把每次嘗試的回呼交給 adapter，不必改 port 的方法簽名（ADR-0040）。
+- **保守上限（批次預留）**：每筆 Batch 請求「最多可能花多少」：輸入估多一點、輸出算滿 `max_tokens`；還沒有結果的 Batch 先把這個數字從剩餘預算扣掉，像訂位（ADR-0041）。
+- **`batch_submission`（Batch 的狀態表）**：一次送給 Anthropic 的一批請求的紀錄，狀態從 `queued`（排好）→ `submitting`（送出中）→ `submitted`（對方收下、拿到 batch ID）→ `ended` → `imported`；出事是 `failed` 或 `needs_attention`（ADR-0041）。
+- **`batch_item`（批次裡的一筆）**：批次裡的一個請求，對到一筆 `derivation_run`；它的 id 就是送給 Anthropic 的 `custom_id`（ADR-0041）。
+- **`needs_attention`（要人工處理）**：批次停下來等人處理的狀態；不確定 Anthropic 有沒有建好批次時用，系統不自動重送，免得付兩次錢（ADR-0041）。
+- **月初窗口**：台北時間每月 1 日 00:00 到 08:00（可設定）；這段時間不排 Batch，因為 Anthropic 的月份可能還沒換（ADR-0041）。
+- **條件式 UPDATE**：只在資料還是預期的樣子時才改的更新，例如「狀態還是 queued 才改成 submitting」；兩個人同時改時只有一個會成功，另一個知道自己慢了（ADR-0041）。
+- **Batch 規劃（`plan_llm_batches`）**：每週更新發佈後跑的工作，找出要做 AI 的論文、排成一個個批次，但不送出（ADR-0041）。
+- **Batch 送出（`submit_llm_batch`）**：把一個排好的批次送給 Anthropic 的工作；不重試，送出結果不確定就停下來等人確認（ADR-0041）。
+- **啟動時檢查 AI 設定（`check_ai_config`）**：worker 與 CLI 一開始就把 prompt 登記與 AI 設定檔全部檢查一遍，有錯就列出來、拒絕啟動（ADR-0041）。

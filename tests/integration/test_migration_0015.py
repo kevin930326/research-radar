@@ -155,7 +155,7 @@ def test_downgrade_to_0014_and_upgrade_again(db: TestDatabase, paper_id: uuid.UU
 
     migrate(db)
 
-    assert db.revisions() == {"0015"}
+    assert db.revisions() == {"0016"}
     assert execute(db, "SELECT model_id, provider, dimensions FROM embedding_model") == [
         (QWEN, "workers_ai", 1024)
     ]
