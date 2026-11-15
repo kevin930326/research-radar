@@ -32,7 +32,7 @@ from radar.domain.auth import FakeLoginRequest, LoginRejectedError, LoginRejecti
 from radar.entrypoints.logging_config import configure_logging
 
 TEAM = "testteam.cloudflareaccess.com"
-AUDIENCE = "aud-0123456789abcdef"
+AUDIENCE = "test-audience"
 ADMIN = "admin@example.com"
 NOW = datetime(2026, 11, 15, 12, 0, tzinfo=UTC)
 KID = "test-key-1"

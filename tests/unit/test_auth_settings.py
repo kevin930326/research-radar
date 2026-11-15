@@ -32,7 +32,7 @@ TRIAL = {
     "RADAR_ENVIRONMENT": "trial",
     "RADAR_FAKE_LOGIN": "true",
     "RADAR_ACCESS_TEAM_DOMAIN": "testteam.cloudflareaccess.com",
-    "RADAR_ACCESS_AUDIENCE": "aud-0123456789abcdef",
+    "RADAR_ACCESS_AUDIENCE": "test-audience",
     "RADAR_ADMIN_EMAIL": ADMIN_EMAIL,
     "RADAR_SITE_ORIGIN": "https://radar.example.com",
 }

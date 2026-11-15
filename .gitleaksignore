@@ -1,0 +1,4 @@
+# Story 3.3 第一個 commit 的單元測試用了自己編的假 Cloudflare Access audience（aud- 加 16 碼十六進位），
+# 變數名稱含 ACCESS，預設的 generic-api-key 規則把它當成金鑰。它不是秘密；之後的 commit 已改成低熵的
+# test-audience。CI 掃整段歷史，不能改寫歷史，所以只放行那一個 commit 的那一行。
+c5d15bb83d3588a1da255377525f0ff501f29ef2:tests/unit/test_auth_settings.py:generic-api-key:34

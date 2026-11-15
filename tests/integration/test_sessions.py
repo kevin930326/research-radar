@@ -47,7 +47,7 @@ from tests.llm_support import create_paper, execute
 DEV_ORIGIN = "http://localhost:8000"
 TRIAL_ORIGIN = "https://radar.example.com"
 TEAM = "testteam.cloudflareaccess.com"
-AUDIENCE = "aud-0123456789abcdef"
+AUDIENCE = "test-audience"
 ADMIN_EMAIL = "lab.admin@example.com"
 KID = "test-key-1"
 START = datetime(2026, 11, 15, 12, 0, tzinfo=UTC)

@@ -226,6 +226,8 @@ deferred:
 - `tests/integration/test_members.py` 三個案例失敗：email 格式錯誤訊息裡的範例 `name@example.com` 讓「輸出不帶 @」的斷言失敗。訊息改成「email 的格式不對」（`radar/domain/auth.py`、`radar/domain/auth_settings.py`），`tests/unit/test_auth_domain.py` 裡固定訊息的集合跟著改（這個 Story 新寫的測試）。
 - `tests/integration/test_sessions.py::test_dev_fake_login_lists_members_and_starts_a_session` 失敗：成員清單照顯示名稱排序，順序跟著資料庫定序變（CI 是逐碼位，「乙」排在「甲」前面）。改成照成員 ID（UUIDv7，即加入先後）排序，測試沒改。
 
+**CI 第一、二輪的 gitleaks 失敗（兩輪都有，第一輪先被整合測試的失敗蓋過）：** 單元測試的假 audience `aud-0123456789abcdef` 寫在 `"RADAR_ACCESS_AUDIENCE": ...` 這一行，變數名稱含 ACCESS，被預設的 generic-api-key 規則當成金鑰。三個測試檔的假值改成低熵的 `test-audience`；CI 掃整段歷史而且不能改寫歷史，所以新增 `.gitleaksignore`，只放行 c5d15bb 那一個 commit 的那一行（`tests/arch/test_ci_workflow.py` 規定 `.gitleaks.toml` 只能有一條放行規則，所以不改它）。
+
 **followup_review_recommended：true**：這一輪修了 4 組 medium（其中兩組改到驗證邏輯：JWT `nbf` 容許值、站台來源的連接埠檢查），這兩處安全相關的驗證改動沒有經過第二輪獨立審查。
 
 **驗證：** `ruff check`、`ruff format --check`（320 檔）、`mypy`（312 檔）、`lint-imports`（19 條）全過；`pytest -m unit` 2920 passed、1 xfailed；`pytest -m arch` 297 passed、9 errors（都是本機連不到資料庫）；整合測試以 CI 為準。
