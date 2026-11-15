@@ -53,6 +53,7 @@ from radar.domain.ai_outputs import (
 )
 from radar.domain.embeddings import EMBED_TASK, NewEmbedRun
 from radar.domain.errors import ErrorCode
+from radar.domain.trial_runs import LlmCallDiagnostics
 from radar.domain.viewer import SystemViewer, Viewer
 from radar.repo.models import Base
 from radar.repo.visibility import visible_papers, visible_to_system_only
@@ -357,6 +358,49 @@ def find_llm_call_output(
     reason = row["output_reject_reason"]
     return SavedLlmOutput(
         text=row["output_text"], reject_reason=None if reason is None else ErrorCode(reason)
+    )
+
+
+def find_llm_call_diagnostics(
+    viewer: SystemViewer, connection: Connection, run_id: uuid.UUID
+) -> LlmCallDiagnostics | None:
+    """這筆 run 的 `llm_call` 診斷欄位（tokens、`stop_reason`、`price_tier`、識別碼、原始回應、
+    存下的輸出）；同一個 run 有多筆時取最新的，沒有帳回 None。`radar runs trial --verbose`／
+    `--show-output` 用（Story 2.10）；呼叫端不得把 `output_text` 寫進日誌。
+
+    Raises:
+        TypeError: `viewer` 不是 `SystemViewer`。
+    """
+    visible = visible_to_system_only(viewer)
+    row = (
+        connection.execute(
+            text(
+                "SELECT input_tokens, output_tokens, cache_creation_input_tokens,"
+                " cache_read_input_tokens, stop_reason, price_tier, response_id, request_id,"
+                " raw_response, output_text, output_reject_reason"
+                f" FROM llm_call WHERE {visible} AND run_id = :run_id"
+                " ORDER BY created_at DESC, id DESC LIMIT 1"
+            ),
+            {"run_id": run_id},
+        )
+        .mappings()
+        .one_or_none()
+    )
+    if row is None:
+        return None
+    raw = row["raw_response"]
+    return LlmCallDiagnostics(
+        input_tokens=row["input_tokens"],
+        output_tokens=row["output_tokens"],
+        cache_creation_input_tokens=row["cache_creation_input_tokens"],
+        cache_read_input_tokens=row["cache_read_input_tokens"],
+        stop_reason=row["stop_reason"],
+        price_tier=row["price_tier"],
+        response_id=row["response_id"],
+        request_id=row["request_id"],
+        raw_response=raw if isinstance(raw, dict) else None,
+        output_text=row["output_text"],
+        output_reject_reason=row["output_reject_reason"],
     )
 
 

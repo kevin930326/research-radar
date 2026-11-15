@@ -54,6 +54,7 @@ from radar.domain.papers import (
 )
 from radar.domain.processing import ProcessingFacts
 from radar.domain.scope import ScopeSettings, is_in_scope
+from radar.domain.trial_runs import TrialCandidate
 from radar.domain.viewer import SystemViewer, Viewer
 from radar.repo.db import Database
 from radar.repo.models import Base
@@ -355,6 +356,99 @@ def list_paper_ai_sources(
             )
         )
     return sources
+
+
+def find_paper_ids_by_dois(
+    viewer: Viewer, connection: Connection, dois: Iterable[str]
+) -> dict[str, uuid.UUID]:
+    """正規化後的 DOI → 掛著它的論文 id（`viewer` 看得到的）；找不到的不在結果裡。
+    `radar runs trial` 用 DOI 指定論文時用（Story 2.10）。"""
+    visible = visible_papers(viewer, alias="paper")
+    wanted = sorted(set(dois))
+    if not wanted:
+        return {}
+    rows = connection.execute(
+        text(
+            "SELECT external_id.value_norm, external_id.paper_id FROM external_id"
+            " JOIN paper ON paper.id = external_id.paper_id"
+            " WHERE external_id.scheme = :scheme"
+            " AND external_id.value_norm = ANY(CAST(:values AS text[]))"
+            f" AND {visible}"
+        ),
+        {"scheme": IdentifierScheme.DOI.value, "values": wanted},
+    )
+    return {value_norm: uuid.UUID(str(paper_id)) for value_norm, paper_id in rows}
+
+
+def list_paper_dois(
+    viewer: Viewer, connection: Connection, paper_ids: Iterable[uuid.UUID]
+) -> dict[uuid.UUID, tuple[str, ...]]:
+    """這些論文（`viewer` 看得到、存在的）各自的 DOI（正規化後、排好序；沒有 DOI 是空的）；
+    不存在的論文不在結果裡。調整組／測試組只看 DOI（Story 2.10）。"""
+    visible = visible_papers(viewer, alias="paper")
+    wanted = sorted(set(paper_ids))
+    if not wanted:
+        return {}
+    rows = connection.execute(
+        text(
+            "SELECT paper.id, COALESCE(array_agg(external_id.value_norm"
+            " ORDER BY external_id.value_norm)"
+            " FILTER (WHERE external_id.value_norm IS NOT NULL), '{}') AS dois"
+            " FROM paper LEFT JOIN external_id"
+            " ON external_id.paper_id = paper.id AND external_id.scheme = :scheme"
+            f" WHERE paper.id = ANY(CAST(:ids AS uuid[])) AND {visible}"
+            " GROUP BY paper.id"
+        ),
+        {"scheme": IdentifierScheme.DOI.value, "ids": wanted},
+    )
+    return {uuid.UUID(str(paper_id)): tuple(dois) for paper_id, dois in rows}
+
+
+def list_trial_candidates(
+    viewer: SystemViewer, connection: Connection, *, after_id: uuid.UUID | None, limit: int
+) -> list[TrialCandidate]:
+    """依論文 id 順序讀一頁抽樣候選（`after_id` 之後、最多 `limit` 篇）：id、DOI 與
+    `plan_for` 要看的處理事實（組成 `TrialCandidate` 後就不留摘要內容）。全部論文都讀，要不要抽由
+    domain 判斷；`radar runs trial --sample` 用（Story 2.10）。
+
+    Raises:
+        TypeError: `viewer` 不是 `SystemViewer`。
+        ValueError: `limit` 不是正整數。
+    """
+    if type(limit) is not int or limit < 1:
+        raise ValueError("limit 要是正整數")
+    visible_to_system_only(viewer)
+    visible = visible_papers(viewer, alias="paper")
+    after = "" if after_id is None else " AND paper.id > :after_id"
+    rows = (
+        connection.execute(
+            text(
+                "SELECT paper.id, paper.origin, paper.excluded_reason,"
+                " a.content AS abstract_content,"
+                " ARRAY(SELECT e.value_norm FROM external_id AS e"
+                " WHERE e.paper_id = paper.id AND e.scheme = :scheme"
+                " ORDER BY e.value_norm) AS dois"
+                " FROM paper LEFT JOIN paper_abstract AS a"
+                " ON a.paper_id = paper.id AND a.is_current"
+                f" WHERE {visible}{after} ORDER BY paper.id LIMIT :limit"
+            ),
+            {"scheme": IdentifierScheme.DOI.value, "after_id": after_id, "limit": limit},
+        )
+        .mappings()
+        .all()
+    )
+    return [
+        TrialCandidate.from_facts(
+            row["id"],
+            row["dois"],
+            ProcessingFacts(
+                origin=PaperOrigin(row["origin"]),
+                excluded_reason=row["excluded_reason"],
+                abstract=row["abstract_content"],
+            ),
+        )
+        for row in rows
+    ]
 
 
 def find_known_external_ids(
