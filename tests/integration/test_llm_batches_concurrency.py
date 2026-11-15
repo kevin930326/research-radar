@@ -184,7 +184,7 @@ def test_two_submitters_at_once_call_the_provider_once(db: TestDatabase) -> None
 
     def submit() -> LlmBatchSubmitResult:
         return submit_llm_batch(
-            SYSTEM, _database(db), provider, setup, submission_id, clock=lambda: NOW
+            SYSTEM, _database(db), lambda: provider, setup, submission_id, clock=lambda: NOW
         )
 
     first = _Worker(submit, gate)

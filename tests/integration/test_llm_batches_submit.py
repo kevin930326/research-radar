@@ -5,9 +5,12 @@ provider 是 `FakeLlmProvider`（batch ID 是編的，不是真的錄的，形�
 測試自己編的。
 """
 
+import dataclasses
 import uuid
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import pytest
 from structlog.testing import capture_logs
@@ -16,6 +19,7 @@ import radar.services.llm_batches as llm_batches
 from radar.adapters.fake import FakeLlmProvider
 from radar.domain.ai_outputs import LlmTask
 from radar.domain.errors import ErrorCode
+from radar.domain.fingerprints import LLM_BATCH_BUDGET_LOCK_KEY
 from radar.domain.llm import (
     LlmConfigurationError,
     LlmConnectionError,
@@ -45,7 +49,7 @@ from tests.batch_support import (
     items,
 )
 from tests.database import TestDatabase, migrate
-from tests.llm_support import create_paper, execute, insert_ledger, set_abstract
+from tests.llm_support import budget_config, create_paper, execute, insert_ledger, set_abstract
 
 SYSTEM = SystemViewer()
 
@@ -103,7 +107,8 @@ def _submit(
     **kwargs: Any,
 ) -> LlmBatchSubmitResult:
     kwargs.setdefault("clock", lambda: NOW)
-    return submit_llm_batch(SYSTEM, database, provider, setup, submission_id, **kwargs)
+    # provider 由 service 在確定要送時才要（Codex 主審查第 4 條改成傳建立函式）。
+    return submit_llm_batch(SYSTEM, database, lambda: provider, setup, submission_id, **kwargs)
 
 
 def _run_states(db: TestDatabase, submission_id: uuid.UUID) -> set[tuple[str, str | None]]:
@@ -587,3 +592,222 @@ def test_errors_and_logs_carry_no_document_text_or_key(
         )
 
     assert "SECRET-ABSTRACT-MARKER" not in str(logs) + str(caught.value)
+
+
+# --- Codex 主審查的修正 -----------------------------------------------------------------------
+
+TAIPEI = ZoneInfo("Asia/Taipei")
+
+
+def _no_provider() -> LlmProvider:
+    raise AssertionError("這條路不該建 provider")
+
+
+def _reserved(db: TestDatabase) -> Decimal:
+    value = execute(db, "SELECT sum(estimated_max_cost_usd) FROM batch_item")[0][0]
+    assert isinstance(value, Decimal)
+    return value
+
+
+# 第 1 條：送出前在預算鎖裡確認「帳本＋全部預留」。
+
+
+def test_spending_after_planning_that_overcommits_the_breaker_holds_the_batch(
+    db: TestDatabase, database: Database, setup: LlmBatchSetup
+) -> None:
+    submission_id = _planned(database, setup)
+    [paper_id] = execute(db, "SELECT id FROM paper")[0]
+    # 規劃之後互動又花了：帳本還沒到熔斷線，但帳本＋這批的預留超過 50。
+    insert_ledger(db, paper_id, LlmTask.QA_ANSWER, str(50 - _reserved(db) + Decimal("1e-6")), NOW)
+
+    with capture_logs() as logs:
+        result = submit_llm_batch(
+            SYSTEM, database, _no_provider, setup, submission_id, clock=lambda: NOW
+        )
+
+    assert result == LlmBatchSubmitResult(
+        SubmitOutcome.HELD,
+        BatchSubmissionStatus.QUEUED,
+        reason=ErrorCode.BATCH_BUDGET_EXCEEDED,
+    )
+    assert batch_status(db, submission_id)[:3] == ("queued", None, None)
+    assert _run_states(db, submission_id) == {("running", None)}
+    assert [log["reason"] for log in logs if log["event"].startswith("Batch 送出延後")] == [
+        "batch_budget_exceeded"
+    ]
+
+
+def test_batch_that_exactly_fills_the_breaker_is_still_sent(
+    db: TestDatabase, database: Database, setup: LlmBatchSetup
+) -> None:
+    submission_id = _planned(database, setup)
+    [paper_id] = execute(db, "SELECT id FROM paper")[0]
+    # 帳本＋預留剛好等於熔斷線：規劃時就是這樣排的，不能擋住自己。
+    insert_ledger(db, paper_id, LlmTask.QA_ANSWER, str(50 - _reserved(db)), NOW)
+    provider = FakeLlmProvider(batch_replies=[BATCH_ID])
+
+    result = _submit(database, provider, setup, submission_id)
+
+    assert result.outcome is SubmitOutcome.SUBMITTED
+    assert len(provider.batch_requests) == 1
+
+
+def test_spending_after_planning_that_overcommits_a_task_budget_holds_the_batch(
+    db: TestDatabase, database: Database
+) -> None:
+    setup = batch_setup(budget=budget_config(zh_summary="1"))
+    submission_id = _planned(database, setup)
+    [paper_id] = execute(db, "SELECT id FROM paper")[0]
+    [(zh_reserved,)] = execute(
+        db,
+        "SELECT i.estimated_max_cost_usd FROM batch_item AS i"
+        " JOIN derivation_run AS r ON r.id = i.run_id WHERE r.task = 'zh_summary'",
+    )
+    insert_ledger(db, paper_id, LlmTask.ZH_SUMMARY, str(1 - zh_reserved + Decimal("1e-6")), NOW)
+
+    result = submit_llm_batch(
+        SYSTEM, database, _no_provider, setup, submission_id, clock=lambda: NOW
+    )
+
+    assert result.reason is ErrorCode.BATCH_BUDGET_EXCEEDED
+    assert batch_status(db, submission_id)[0] == "queued"
+
+
+def test_overcommit_check_runs_under_the_batch_budget_lock(
+    db: TestDatabase, database: Database, setup: LlmBatchSetup, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    submission_id = _planned(database, setup)
+    taken: list[int] = []
+    original = Database.transaction_lock
+
+    def record(connection: Any, key: int) -> None:
+        taken.append(key)
+        original(connection, key)
+
+    monkeypatch.setattr(Database, "transaction_lock", staticmethod(record))
+
+    result = _submit(database, FakeLlmProvider(batch_replies=[BATCH_ID]), setup, submission_id)
+
+    assert result.outcome is SubmitOutcome.SUBMITTED
+    assert taken == [LLM_BATCH_BUDGET_LOCK_KEY]
+
+
+# 第 2 條：查核途中跨過台北午夜。
+
+
+def test_check_that_crosses_midnight_into_the_hold_window_does_not_send(
+    db: TestDatabase, database: Database, setup: LlmBatchSetup, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    submission_id = _planned(database, setup)
+    now = [datetime(2026, 11, 30, 23, 59, tzinfo=TAIPEI)]
+    original = llm_batches._check_items
+
+    def slow_check(*args: Any) -> Any:
+        checked = original(*args)
+        now[0] = datetime(2026, 12, 1, 0, 30, tzinfo=TAIPEI)  # 重建請求花了 31 分鐘
+        return checked
+
+    monkeypatch.setattr(llm_batches, "_check_items", slow_check)
+
+    result = submit_llm_batch(
+        SYSTEM, database, _no_provider, setup, submission_id, clock=lambda: now[0]
+    )
+
+    assert result == LlmBatchSubmitResult(
+        SubmitOutcome.HELD,
+        BatchSubmissionStatus.QUEUED,
+        reason=ErrorCode.BATCH_MONTH_START_HOLD,
+    )
+    assert batch_status(db, submission_id)[:3] == ("queued", None, None)
+    assert _run_states(db, submission_id) == {("running", None)}
+
+
+# 第 3 條：條件式更新沒套用時，連線池只有一條也重讀得到狀態。
+
+
+@pytest.mark.parametrize("all_changed", [False, True])
+def test_lost_race_with_a_single_connection_pool_reports_the_real_status(
+    db: TestDatabase,
+    database: Database,
+    setup: LlmBatchSetup,
+    monkeypatch: pytest.MonkeyPatch,
+    all_changed: bool,
+) -> None:
+    submission_id = _planned(database, setup)
+    single = Database(db.app_url, connect_timeout=2, pool_size=1)
+    original = llm_batches._check_items
+
+    def check_then_lose(*args: Any) -> Any:
+        checked = original(*args)
+        # 查核途中別的送出者已經把這批改走（用另一條連線）。
+        execute(
+            db,
+            "UPDATE batch_submission SET status = 'failed',"
+            " failure_reason = 'batch_submit_rejected' WHERE id = %s",
+            submission_id,
+        )
+        if not all_changed:
+            return checked
+        return dataclasses.replace(
+            checked,
+            requests=[],
+            sent_run_ids=[],
+            sent_tasks=frozenset(),
+            changed=[(run_id, ErrorCode.BATCH_INPUT_CHANGED) for run_id in checked.sent_run_ids],
+        )
+
+    monkeypatch.setattr(llm_batches, "_check_items", check_then_lose)
+
+    result = submit_llm_batch(SYSTEM, single, _no_provider, setup, submission_id, clock=lambda: NOW)
+
+    assert result == LlmBatchSubmitResult(SubmitOutcome.LOST_RACE, BatchSubmissionStatus.FAILED)
+    # 搶輸的一方不改 run。
+    assert _run_states(db, submission_id) == {("running", None)}
+
+
+# 第 4 條：只碰資料庫的路不建 provider。
+
+
+def test_db_only_paths_never_build_the_provider(
+    db: TestDatabase, database: Database, setup: LlmBatchSetup
+) -> None:
+    held = _planned(database, setup)
+
+    def bare(status: str, extra: str = "") -> uuid.UUID:
+        [(submission_id,)] = execute(
+            db,
+            "INSERT INTO batch_submission (status, item_count, estimated_max_cost_usd,"
+            f" failure_reason, updated_at) VALUES (%s, 0, 0, %s, now(){extra}) RETURNING id",
+            status,
+            "batch_submit_rejected" if status == "failed" else None,
+        )
+        return uuid.UUID(str(submission_id))
+
+    stale = bare("submitting", " - interval '31 minutes'")
+    done = bare("failed")
+    hold_at = datetime(2026, 12, 1, 0, 30, tzinfo=TAIPEI)
+
+    def submit(submission_id: uuid.UUID, at: datetime = NOW) -> SubmitOutcome:
+        return submit_llm_batch(
+            SYSTEM, database, _no_provider, setup, submission_id, clock=lambda: at
+        ).outcome
+
+    assert submit(held, hold_at) is SubmitOutcome.HELD
+    assert submit(stale) is SubmitOutcome.NEEDS_ATTENTION
+    assert submit(done) is SubmitOutcome.NOTHING_TO_DO
+    assert batch_status(db, stale)[:3] == ("needs_attention", None, "batch_submit_uncertain")
+
+
+def test_provider_setup_error_keeps_the_batch_queued(
+    db: TestDatabase, database: Database, setup: LlmBatchSetup
+) -> None:
+    submission_id = _planned(database, setup)
+
+    def missing_key() -> LlmProvider:
+        raise RuntimeError("缺金鑰")
+
+    with pytest.raises(RuntimeError, match="缺金鑰"):
+        submit_llm_batch(SYSTEM, database, missing_key, setup, submission_id, clock=lambda: NOW)
+
+    assert batch_status(db, submission_id)[:3] == ("queued", None, None)
+    assert _run_states(db, submission_id) == {("running", None)}

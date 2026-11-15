@@ -46,6 +46,7 @@ from radar.entrypoints.bootstrap import (
     build_paper_source,
     code_version,
 )
+from radar.ports import LlmProvider
 from radar.services.embeddings import embed_papers
 from radar.services.llm_batches import LlmBatchSetup, plan_llm_batches, submit_llm_batch
 from radar.services.llm_gateway import expire_stale_runs
@@ -178,25 +179,30 @@ def register_tasks(app: procrastinate.App, parts: WorkerParts, settings: Setting
         )
 
     def submit_llm_batch_job(batch_submission_id: uuid.UUID) -> None:
-        # 送出一個 queued 的批次（Story 2.9、ADR-0041）。建 provider 時 ConfigError（缺金鑰）
-        # 原樣丟出，列維持 queued，sweep 1 小時後補排；不確定有沒有建好時丟
-        # BatchSubmitUncertainError。月初窗口或已熔斷時不動（列維持 queued，sweep 補排）。
+        # 送出一個 queued 的批次（Story 2.9、ADR-0041）。provider 由 service 在確定要送出時才建
+        # （open_provider）：過期的 submitting 標 needs_attention、已結束、延後這些只碰資料庫的路
+        # 不建，所以缺金鑰時也做得完。真的要送才建：缺金鑰的 ConfigError 原樣丟出，列維持 queued，
+        # sweep 1 小時後補排；不確定有沒有建好時丟 BatchSubmitUncertainError。送完關掉 provider。
         setup = load_batch_setup()
-        error_type: str | None = None
-        try:
-            provider = build_llm_provider(settings)
-        except ConfigError:
-            raise
-        except Exception as exc:
-            error_type = type(exc).__name__
-        if error_type is not None:
-            # 在 except 外面丟，不串原例外（見 AdapterSetupError）。
-            raise AdapterSetupError(error_type)
-        with provider:
+        with ExitStack() as stack:
+
+            def open_provider() -> LlmProvider:
+                error_type: str | None = None
+                try:
+                    provider = build_llm_provider(settings)
+                except ConfigError:
+                    raise
+                except Exception as exc:
+                    error_type = type(exc).__name__
+                if error_type is not None:
+                    # 在 except 外面丟，不串原例外（見 AdapterSetupError）。
+                    raise AdapterSetupError(error_type)
+                return stack.enter_context(provider)
+
             submit_llm_batch(
                 SystemViewer(),
                 parts.database,
-                provider,
+                open_provider,
                 setup,
                 batch_submission_id,
                 clock=lambda: datetime.now(UTC),

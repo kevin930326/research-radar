@@ -242,3 +242,24 @@ def test_swept_stale_submitting_batch_becomes_needs_attention_without_sending(
         "batch_submit_uncertain",
     )
     assert provider.batch_requests == []
+
+
+def test_stale_submitting_batch_becomes_needs_attention_even_without_api_key(
+    db: TestDatabase, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Codex 主審查第 4 條：過期判定只碰資料庫，worker 缺金鑰也要標得上 needs_attention。
+    queue = FakeJobQueue()
+    parts, submission_id = _planned(db, monkeypatch, queue)  # 沒設 RADAR_ANTHROPIC_API_KEY
+    execute(
+        db,
+        "UPDATE batch_submission SET status = 'submitting',"
+        " updated_at = now() - interval '31 minutes'",
+    )
+
+    _task(parts, SUBMIT_LLM_BATCH.name)(batch_submission_id=submission_id)
+
+    assert batch_status(db, uuid.UUID(submission_id))[:3] == (
+        "needs_attention",
+        None,
+        "batch_submit_uncertain",
+    )

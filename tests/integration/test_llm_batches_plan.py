@@ -20,6 +20,7 @@ import radar.services.llm_batches as llm_batches
 from radar.adapters.fake import FakeLlmProvider, fake_completion
 from radar.adapters.fake.jobs import FakeJobQueue, QueuedJob
 from radar.domain.ai_outputs import LlmTask
+from radar.domain.fingerprints import LLM_BATCH_BUDGET_LOCK_KEY
 from radar.domain.jobs import SUBMIT_LLM_BATCH, JobSpec
 from radar.domain.llm import LlmUsage
 from radar.domain.llm_batches import LlmBatchPlanResult, PlanStop
@@ -632,3 +633,51 @@ def test_keys_done_by_the_interactive_services_are_not_batched_again(
     assert (result.planned, result.skipped) == (0, 3)
     assert _counts(db)["batch_item"] == 0
     assert submissions(db) == []
+
+
+def test_waiting_for_the_budget_lock_across_midnight_writes_nothing(
+    db: TestDatabase, database: Database, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Codex 主審查第 2 條：開始時還在 11/30 23:59，等全域預算鎖等到台北 12/1 00:30（月初窗口）。
+    _paper(database, 1)
+    now = [datetime(2026, 11, 30, 23, 59, tzinfo=TAIPEI)]
+    original = Database.transaction_lock
+
+    def slow_lock(connection: Any, key: int) -> None:
+        original(connection, key)
+        if key == LLM_BATCH_BUDGET_LOCK_KEY:
+            now[0] = datetime(2026, 12, 1, 0, 30, tzinfo=TAIPEI)
+
+    monkeypatch.setattr(Database, "transaction_lock", staticmethod(slow_lock))
+    queue = FakeJobQueue()
+
+    result = plan_llm_batches(
+        SYSTEM,
+        database,
+        batch_setup(),
+        weekly_run_id=None,
+        clock=lambda: now[0],
+        enqueue=queue.enqueue,
+    )
+
+    assert result.stop is PlanStop.HELD_MONTH_START
+    assert (result.planned, result.deferred_budget) == (0, 0)
+    assert _counts(db) == {"derivation_run": 0, "batch_submission": 0, "batch_item": 0}
+    assert queue.queued == []
+
+
+def test_reservations_that_reach_the_breaker_stop_planning_up_front(
+    db: TestDatabase, database: Database
+) -> None:
+    # 第 1 條：規劃一開始的熔斷檢查也算預留（和互動的 BudgetGuard 同一個計算）。
+    setup = batch_setup()
+    first = _paper(database, 1)
+    _plan(database, setup)
+    reserved = execute(db, "SELECT sum(estimated_max_cost_usd) FROM batch_item")[0][0]
+    insert_ledger(db, first, LlmTask.QA_ANSWER, str(Decimal(50) - reserved), NOW)
+    _paper(database, 2)
+
+    result = _plan(database, setup)
+
+    assert result.stop is PlanStop.BUDGET_TRIPPED
+    assert (result.planned, result.deferred_budget) == (0, 0)

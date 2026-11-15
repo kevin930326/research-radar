@@ -13,7 +13,7 @@
 """
 
 import uuid
-from datetime import timedelta
+from datetime import datetime, timedelta
 from decimal import Decimal
 
 from sqlalchemy import (
@@ -206,25 +206,50 @@ def list_batch_items(
     ]
 
 
-def list_batch_reservations_by_task(
-    viewer: SystemViewer, connection: Connection
-) -> dict[LlmTask, Decimal]:
-    """尚未結束的 Batch 預留：`batch_item.estimated_max_cost_usd` 中 run 還是 `running` 的，依工作
-    加總（沒有預留的工作不在結果裡）。結果匯入把 run 改掉就自然釋放（ADR-0041）。
+def list_llm_spending_and_reservations_by_task(
+    viewer: SystemViewer, connection: Connection, start: datetime, end: datetime
+) -> tuple[dict[LlmTask, Decimal], dict[LlmTask, Decimal]]:
+    """預算的兩個來源，**同一句 SQL** 讀（同一個快照）：回（帳本, 尚未結束的 Batch 預留），各依
+    工作加總，沒有的工作不在結果裡。
+
+    - 帳本：`llm_call.created_at` 在 [`start`, `end`) 之間的費用，依 `derivation_run.task` 加總
+      （含評估與 Batch）。`radar costs` 也用這一句。
+    - 預留：`batch_item.estimated_max_cost_usd` 中 run 還是 `running` 的（不分月份）。結果匯入
+      把 run 改掉就自然釋放（ADR-0041）。
+
+    同一句讀，結果匯入（2.11）在同一個交易裡「記帳＋把 run 改掉」時，這裡不會兩邊都沒看到
+    （分兩句讀時，剛好在兩句之間 commit 就會少算一份）。互動的 `BudgetGuard` 與 Batch 的規劃、
+    送出都經 `services/budget.read_budget_status` 用這一句。
 
     Raises:
         TypeError: `viewer` 不是 `SystemViewer`。
+        ValueError: `start`、`end` 沒有時區，或 `start` 不早於 `end`。
     """
     visible = visible_to_system_only(viewer)
+    for moment in (start, end):
+        if moment.tzinfo is None or moment.utcoffset() is None:
+            raise ValueError("start、end 要帶時區（不能是 naive datetime）")
+    if start >= end:
+        raise ValueError("start 要早於 end")
     rows = connection.execute(
         text(
-            "SELECT r.task, sum(i.estimated_max_cost_usd)"
+            "SELECT kind, task, sum(amount) FROM ("
+            " SELECT 'spent' AS kind, r.task AS task, c.cost_usd AS amount"
+            " FROM llm_call AS c JOIN derivation_run AS r ON r.id = c.run_id"
+            f" WHERE {visible} AND c.created_at >= :start AND c.created_at < :end"
+            " UNION ALL"
+            " SELECT 'reserved', r.task, i.estimated_max_cost_usd"
             " FROM batch_item AS i JOIN derivation_run AS r ON r.id = i.run_id"
             f" WHERE {visible} AND r.status = 'running'"
-            " GROUP BY r.task"
-        )
+            ") AS usage GROUP BY kind, task"
+        ),
+        {"start": start, "end": end},
     ).all()
-    return {LlmTask(row[0]): Decimal(row[1]) for row in rows}
+    spent: dict[LlmTask, Decimal] = {}
+    reserved: dict[LlmTask, Decimal] = {}
+    for kind, task, amount in rows:
+        (spent if kind == "spent" else reserved)[LlmTask(task)] = Decimal(amount)
+    return spent, reserved
 
 
 # --- 寫入 ---------------------------------------------------------------------------------

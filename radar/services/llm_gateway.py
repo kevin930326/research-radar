@@ -33,10 +33,10 @@ Batch（Story 2.9、ADR-0041）共用第 1、3、4 步（`prepare_llm_request`�
 有可接續的 `llm_result_pending` 時不新增，留給互動接續）；送出只經 `send_llm_batch`（唯一呼叫
 `provider.submit_batch` 的地方）。批次的狀態轉移與預算預留在 `services/llm_batches.py`。
 
-預算檢查是「呼叫前看帳本」，帳在第 7 步才記，所以同時在途的呼叫彼此看不到（熔斷線與每個功能預算
-都一樣）：超支上限＝同時在途的呼叫數（worker 與所有呼叫閘門的 CLI 等行程加起來）× 單次最大費用
-（約 0.042 美元；只在帳都記得進去、沒有工作打開 `allow_over_input_limit` 時成立，ADR-0031 決定 6）。
-Anthropic workspace 的每月上限是第二道。
+預算檢查是「呼叫前看帳本＋尚未結束的 Batch 預留」（ADR-0041），帳在第 7 步才記，所以同時在途的
+呼叫彼此看不到（熔斷線與每個功能預算都一樣）：超支上限＝同時在途的呼叫數（worker 與所有呼叫閘門的
+CLI 等行程加起來）× 單次最大費用（約 0.042 美元；只在帳都記得進去、沒有工作打開
+`allow_over_input_limit` 時成立，ADR-0031 決定 6）。Anthropic workspace 的每月上限是第二道。
 """
 
 import uuid

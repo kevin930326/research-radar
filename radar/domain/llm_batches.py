@@ -184,7 +184,7 @@ class SubmitOutcome(StrEnum):
     NOTHING_TO_DO = "nothing_to_do"  # 已經送過、已失敗或已標 needs_attention：不做事
     LOST_RACE = "lost_race"  # 另一個送出者先把 queued 改走了
     NOT_STALE = "not_stale"  # 停在 submitting、還沒過時限：不動、不送
-    # 月初窗口或已熔斷：不動（維持 queued）、不送，sweep 之後補排
+    # 月初窗口、已熔斷，或帳本＋預留超過預算：不動（維持 queued）、不送，sweep 之後補排
     HELD = "held"
     NEEDS_ATTENTION = "needs_attention"  # 停在 submitting 已過時限：標 needs_attention、不送
     REQUEUED = "requeued"  # 429：退回 queued，sweep 之後補排

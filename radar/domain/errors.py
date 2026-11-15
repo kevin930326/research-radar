@@ -121,3 +121,6 @@ class ErrorCode(StrEnum):
     BATCH_MONTH_START_HOLD = "batch_month_start_hold"
     # 送出時本月已熔斷：不動、不送，列維持 queued，sweep 之後補排
     BATCH_BUDGET_TRIPPED = "batch_budget_tripped"
+    # 送出前最後確認（全域 Batch 預算鎖裡）：本月帳＋全部尚未結束的 Batch 預留超過熔斷線或這批工作的
+    # 功能預算（規劃之後互動又花了、或預算調低）：不動、不送，列維持 queued，sweep 之後補排
+    BATCH_BUDGET_EXCEEDED = "batch_budget_exceeded"
