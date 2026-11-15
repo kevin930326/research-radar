@@ -2,6 +2,8 @@
 
 外部 API 的每次 HTTP 嘗試（含重試）記一列：花了多少（`cost_usd`）、對方回報的剩餘與上限。
 抓取時用來算今天的用量，到設定的比例就停下。
+向量化（`workers_ai`，Story 2.8、ADR-0040）每次請求記一列：Workers AI 不回報用量，記自己估的輸入
+token（`estimated_input_tokens`），`cost_usd` 記 0（免費額度內，到設定的比例就停）。
 
 - 寫入一律用 `text()` SQL；函式收呼叫端開好的交易連線，不 commit（Conventions 的例外：
   services 用自己的短交易立刻 commit，抓取失敗也留得下紀錄）。
@@ -26,6 +28,7 @@ from sqlalchemy import (
     text,
 )
 
+from radar.domain.embeddings import WORKERS_AI_SOURCE, EmbeddingApiCall
 from radar.domain.raw_records import ApiCall, ApiUsage, RawSource
 from radar.domain.viewer import SystemViewer
 from radar.repo.models import Base
@@ -44,14 +47,25 @@ api_call_table = Table(
     Column("remaining_usd", Numeric(12, 6)),
     Column("limit_usd", Numeric(12, 6)),
     Column("called_at", DateTime(timezone=True), nullable=False),
+    # 向量化（`workers_ai`）自己估的輸入 token：Workers AI 的回應沒有用量欄位
+    # （遷移 0015、ADR-0040）。
+    Column("estimated_input_tokens", Integer),
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
     Index("ix_api_call_source_called_at", "source", "called_at"),
-    CheckConstraint("source IN ('openalex')", name="source"),
+    CheckConstraint("source IN ('openalex', 'workers_ai')", name="source"),
     CheckConstraint("operation ~ '^[a-z][a-z0-9_]*$'", name="operation_format"),
     CheckConstraint(
         "http_status IS NULL OR http_status BETWEEN 100 AND 599", name="http_status_range"
     ),
     CheckConstraint("cost_usd >= 0", name="cost_usd_not_negative"),
+    CheckConstraint(
+        "estimated_input_tokens IS NULL OR estimated_input_tokens >= 0",
+        name="estimated_input_tokens_not_negative",
+    ),
+    CheckConstraint(
+        "(source = 'workers_ai') = (estimated_input_tokens IS NOT NULL)",
+        name="estimated_input_tokens_iff_workers_ai",
+    ),
 )
 
 
@@ -102,6 +116,27 @@ def get_api_usage_since(
     )
 
 
+def get_embedding_tokens_since(
+    viewer: SystemViewer, connection: Connection, since: datetime
+) -> int:
+    """`since`（含）之後向量化（`workers_ai`）記的估計輸入 token 總和（Story 2.8、ADR-0040）。
+
+    額度判斷用：Workers AI 不回報用量，只能加總自己估的數字（失敗的請求也算，保守）。
+
+    Raises:
+        TypeError: `viewer` 不是 `SystemViewer`。
+    """
+    visible = visible_to_system_only(viewer)
+    value = connection.execute(
+        text(
+            "SELECT COALESCE(sum(estimated_input_tokens), 0) FROM api_call"
+            f" WHERE {visible} AND source = :source AND called_at >= :since"
+        ),
+        {"source": WORKERS_AI_SOURCE, "since": since},
+    ).scalar_one()
+    return int(value)
+
+
 # --- 寫入 ---------------------------------------------------------------------------------
 
 
@@ -130,3 +165,24 @@ def create_api_calls(connection: Connection, calls: Sequence[ApiCall]) -> int:
         ],
     )
     return len(calls)
+
+
+def create_embedding_api_call(connection: Connection, call: EmbeddingApiCall) -> None:
+    """記一次向量化請求（`source`＝`workers_ai`、`cost_usd`＝0、估計的輸入 token）。
+
+    在呼叫端開好的交易裡做，不 commit（services 用自己的短交易立刻 commit）。
+    """
+    connection.execute(
+        text(
+            "INSERT INTO api_call"
+            " (source, operation, http_status, cost_usd, estimated_input_tokens, called_at)"
+            " VALUES (:source, :operation, :http_status, 0, :estimated_input_tokens, :called_at)"
+        ),
+        {
+            "source": WORKERS_AI_SOURCE,
+            "operation": call.operation,
+            "http_status": call.http_status,
+            "estimated_input_tokens": call.estimated_input_tokens,
+            "called_at": call.called_at,
+        },
+    )

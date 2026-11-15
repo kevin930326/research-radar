@@ -46,6 +46,7 @@
 | [0037](0037-design-tokens-guard-and-a11y-floor.md) | 設計代幣與無障礙底線：`styles.css` 主題放 `DESIGN.md` YAML 的全部代幣＋五個字體＋四個斷點，測試逐項比對；Vite 外掛用 Tailwind 自己的設計系統讓「不產生 CSS 的類別」建置失敗；ESLint 擋寫死的色碼與字級（版面任意值不擋）；焦點外框與減少動態各一條 base 層規則，程式只能用 `use-reduced-motion.ts` 判斷；無障礙六項檢查跑正式頁面清單＋開發伺服器的元件示範頁 | 提議 | AD-21、AD-22 |
 | [0038](0038-design-reference-and-visual-compare.md) | 前端畫面以 `docs/ux/reference/screens/` 的設計稿為準；做完用 `web/scripts/design-compare.mjs` 量差異（字級、行高、顏色、字重、字距、距離、髮線），報告貼 PR、差異要有原因，是合併門檻；`DESIGN.md` 加字級、行高、字距三組尺度（另一個 PR 實作）；沒有設計稿的畫面先問 Kevin | 提議 | AD-21 |
 | [0039](0039-extract-model-v2-magnitudes-and-result-quotes.md) | （第四輪 0-A，Kevin 2026-11-15 對 2.6 決定 13、14 都選 B）研究模型擷取 prompt 升 v2（v1 不動）：規則 5 量級寫成完整的數、`12M`／`10k` 這類字母縮寫填 null，`structured_numbers` 把字母縮寫的量級當成讀不懂；結果原文對得上這條關係放寬成四種（因或果的名稱、縮寫、原句唯一的假設代號、全部假設而原句是假設），研究問題後面另一個子句寫了明確結果也算；驗證器不分 prompt 版本；不確定的一律不判 | 提議 | AD-7、AD-8 |
+| [0040](0040-embeddings-workers-ai-and-backfill.md) | 向量與全庫向量化：Workers AI adapter（文件送 `documents`、查詢送 `queries`＋指示文字，一次最多 32 段，維度與信封嚴格檢查，account id 與 token 用 `SecretStr`）；`embedding_model` 模型登錄（只由遷移寫）＋`embedding`（halfvec、維度外鍵＋CHECK）＋每個模型一個 HNSW 部分索引，查詢一定帶 `model_id`；`derivation_run` 收 `embed`（prompt 欄位為 NULL）；`api_call` 收 `workers_ai` 與自己估的 token（回應沒有用量）；今天（UTC）的估計用量到每日免費額度 9 成就停、不算失敗、下次續跑；每週更新發佈後排入 `embed_papers`；`radar embeddings backfill`（`--limit`、`--estimate`）；遷移 0015 | 提議 | AD-9、AD-11、AD-12、AD-29、AD-30 |
 
 「提議」表示還沒經過 Kevin 確認；PR 合併後改成「已接受」。
 

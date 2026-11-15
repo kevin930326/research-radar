@@ -17,7 +17,7 @@ OpenAlex 內容只用錄好的回應（`tests/openalex_cassette.py`，CC0）與�
 import re
 import threading
 import uuid
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -29,7 +29,7 @@ from sqlalchemy import Connection, event
 from structlog.testing import capture_logs
 
 from radar.adapters.fake import FakeHeartbeat, FakeObjectStore, FakePaperSource
-from radar.adapters.fake.jobs import FakeJobQueue
+from radar.adapters.fake.jobs import FakeJobQueue, QueuedJob
 from radar.domain.domain_config import (
     ExclusionRule,
     ExclusionRulesConfig,
@@ -37,6 +37,7 @@ from radar.domain.domain_config import (
     JournalsConfig,
     OpenAlexQuota,
 )
+from radar.domain.jobs import EMBED_PAPERS, JobSpec
 from radar.domain.papers import KeywordSource, PaperOrigin
 from radar.domain.parsers.openalex import parse_openalex_work
 from radar.domain.permissions import PermissionDeniedError
@@ -1779,3 +1780,122 @@ def test_bad_max_failures_is_rejected_before_touching_anything(
     assert source.requests == []
     assert opener.opened == 0
     assert heartbeat.sent == []
+
+
+# --- 發佈後排入向量化（Story 2.8） --------------------------------------------------------------
+
+
+class _RecordingQueue(FakeJobQueue):
+    """排入時記下當下開著的交易數與已送的心跳（要在 commit、心跳之後才排）。"""
+
+    def __init__(self, database: TrackingDatabase, heartbeat: FakeHeartbeat) -> None:
+        super().__init__()
+        self.database = database
+        self.heartbeat = heartbeat
+        self.seen: list[tuple[int, list[str]]] = []
+
+    def enqueue(self, job: JobSpec, ids: Mapping[str, uuid.UUID]) -> bool:
+        self.seen.append((self.database.open_transactions, list(self.heartbeat.sent)))
+        return super().enqueue(job, ids)
+
+
+def test_publish_enqueues_embeddings_after_commit_and_heartbeat(
+    weekly_db: TestDatabase, database: TrackingDatabase
+) -> None:
+    run_id = _fetched_run(database)
+    heartbeat = FakeHeartbeat()
+    queue = _RecordingQueue(database, heartbeat)
+
+    with capture_logs() as logs:
+        result = apply_weekly_update(
+            SYSTEM,
+            database,
+            run_id,
+            scope=SCOPE,
+            send_heartbeat=heartbeat,
+            enqueue=queue.enqueue,
+        )
+
+    assert result.snapshot_number == 1
+    assert queue.queued == [QueuedJob(EMBED_PAPERS, {})]
+    assert queue.seen == [(0, ["weekly-update"])]
+    [done] = [log for log in logs if log["event"] == "每週更新發佈後已排入向量化"]
+    assert (done["weekly_run_id"], done["queued"]) == (str(run_id), True)
+
+
+def test_skipped_apply_does_not_enqueue_embeddings(
+    weekly_db: TestDatabase, database: TrackingDatabase
+) -> None:
+    run_id = _fetched_run(database)
+    _apply(database, run_id)
+    queue = FakeJobQueue()
+
+    result = apply_weekly_update(
+        SYSTEM,
+        database,
+        run_id,
+        scope=SCOPE,
+        send_heartbeat=FakeHeartbeat(),
+        enqueue=queue.enqueue,
+    )
+
+    assert result.skipped
+    assert queue.queued == []
+
+
+def test_enqueue_failure_only_warns_and_keeps_the_snapshot(
+    weekly_db: TestDatabase, database: TrackingDatabase
+) -> None:
+    run_id = _fetched_run(database)
+
+    def broken(_job: JobSpec, _ids: Mapping[str, uuid.UUID]) -> bool:
+        raise RuntimeError("queue down postgresql://secret@host/db")
+
+    with capture_logs() as logs:
+        result = apply_weekly_update(
+            SYSTEM,
+            database,
+            run_id,
+            scope=SCOPE,
+            send_heartbeat=FakeHeartbeat(),
+            enqueue=broken,
+        )
+
+    assert result.snapshot_number == 1
+    assert _run_row(weekly_db, run_id)[0] == "published"
+    [warning] = [log for log in logs if log["event"] == "每週更新發佈後排入向量化失敗"]
+    assert warning["log_level"] == "warning"
+    assert warning["error"] == "RuntimeError"
+    assert "secret" not in str(logs)
+
+
+def test_advance_passes_enqueue_to_the_apply(
+    weekly_db: TestDatabase, database: TrackingDatabase
+) -> None:
+    run_id = _start(database)
+    source = FakePaperSource({MISQ_ISSN: _misq_book(), ISSN_L: _cassette_book()}, clock=lambda: NOW)
+    opener = _Opener(
+        WeeklyFetchSetup(
+            source=source,
+            store=FakeObjectStore(),
+            journals=JOURNALS,
+            exclusion_rules=RULES,
+            quota=QUOTA,
+        )
+    )
+    queue = FakeJobQueue()
+
+    result = advance_weekly_update(
+        SYSTEM,
+        database,
+        opener,
+        lambda: SCOPE,
+        FakeHeartbeat(),
+        run_id,
+        clock=lambda: NOW,
+        enqueue=queue.enqueue,
+    )
+
+    assert result.apply is not None
+    assert result.apply.snapshot_number == 1
+    assert queue.queued == [QueuedJob(EMBED_PAPERS, {})]

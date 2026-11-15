@@ -13,6 +13,7 @@ from radar.adapters.jobs import JobApp, create_job_app, defer_job, retry_stalled
 from radar.config import ConfigError, env_name
 from radar.domain.ai_outputs import CallMode, GatewayConfig
 from radar.domain.domain_config import OpenAlexConfig
+from radar.domain.embeddings import EmbeddingConfig
 from radar.domain.jobs import Enqueue
 from radar.domain.pricing import ModelsConfig
 from radar.domain.schema import SchemaState
@@ -27,6 +28,7 @@ if TYPE_CHECKING:
     from radar.adapters.anthropic import AnthropicLlmProvider
     from radar.adapters.object_store import S3ObjectStore
     from radar.adapters.openalex import OpenAlexSource
+    from radar.adapters.workers_ai import WorkersAiEmbeddingProvider
 
 # 入口不能直接 import radar.repo，這個例外從這裡轉出去給入口攔。
 from radar.repo.migrations import MigrationsNotFoundError as MigrationsNotFoundError
@@ -171,6 +173,50 @@ def build_paper_source(settings: Settings, openalex_config: OpenAlexConfig) -> O
     from radar.adapters.openalex import OpenAlexSource
 
     return OpenAlexSource(settings.openalex_api_key.get_secret_value(), openalex_config)
+
+
+def build_embedding_provider(
+    settings: Settings, embedding_config: EmbeddingConfig
+) -> WorkersAiEmbeddingProvider:
+    """Cloudflare Workers AI 的 `EmbeddingProvider`（模型、維度、端點來自 embeddings.yaml）。
+
+    用完要 `close()`（或用 `with`）。不連線。
+
+    Raises:
+        ConfigError: 缺少 `RADAR_CLOUDFLARE_ACCOUNT_ID` 或 `RADAR_CLOUDFLARE_API_TOKEN`（訊息只列
+            環境變數名稱）；或一次請求最久要等的時間（逾時與重試等待加總）不小於
+            `RADAR_LLM_RUN_STALE_AFTER`（還在等回應的 run 會被 sweep 誤判逾時收掉）。
+    """
+    worst_case = embedding_config.api.worst_case_seconds
+    if worst_case >= settings.llm_run_stale_after:
+        raise ConfigError(
+            [
+                "config/embeddings.yaml 的 api（逾時 × 嘗試次數＋重試等待）最久約"
+                f" {worst_case:g} 秒，要小於 {env_name('llm_run_stale_after')}"
+                f"（{settings.llm_run_stale_after} 秒）"
+            ]
+        )
+    account_id = settings.cloudflare_account_id
+    api_token = settings.cloudflare_api_token
+    if account_id is None or api_token is None:
+        required = {"cloudflare_account_id": account_id, "cloudflare_api_token": api_token}
+        raise ConfigError(
+            [
+                f"缺少環境變數 {env_name(field)}"
+                for field, value in required.items()
+                if value is None
+            ]
+        )
+    from radar.adapters.workers_ai import WorkersAiEmbeddingProvider
+
+    return WorkersAiEmbeddingProvider(
+        account_id,
+        api_token,
+        embedding_config.api,
+        model_id=embedding_config.model_id,
+        dimensions=embedding_config.dimensions,
+        query_instruction=embedding_config.query_instruction,
+    )
 
 
 def build_object_store(settings: Settings) -> S3ObjectStore:

@@ -77,3 +77,13 @@ class ErrorCode(StrEnum):
     RESEARCH_MODEL_UNSUPPORTED_CONTENT = "research_model_unsupported_content"
     # 同一句、同一條關係給了互相衝突的值（證據類型、支持與否或統計數字不同）
     RESEARCH_MODEL_CONFLICTING_HYPOTHESIS = "research_model_conflicting_hypothesis"
+
+    # 向量化（`radar/services/embeddings.py`、`radar/adapters/workers_ai/`，Story 2.8、ADR-0040）：
+    # 寫進 `derivation_run.failure_reason`（task＝embed）；向量化沒有「拒收」，都是 failed
+    EMBED_TRANSIENT = "embed_transient"  # 重試用完仍是逾時、限流、服務端錯誤或連線錯誤
+    EMBED_CONFIGURATION = "embed_configuration"  # 401、403、404：token、帳號或模型設定不對
+    EMBED_REQUEST_INVALID = "embed_request_invalid"  # 400、413、422 等：請求本身不合法
+    # 回應的信封、筆數、維度或數字不對（例如不是 1,024 維、有 NaN）：整批不寫
+    EMBED_RESPONSE_INVALID = "embed_response_invalid"
+    EMBED_INPUT_CHANGED = "embed_input_changed"  # 寫入前核對：送出後標題或摘要又變了，這篇不寫
+    EMBED_FAILED = "embed_failed"  # 向量化服務自己出錯（例如寫入的交易失敗），run 改 failed

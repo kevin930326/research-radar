@@ -92,6 +92,15 @@ def _jobs(database: TestDatabase) -> list[dict[str, object]]:
         return [dict(zip(names, row, strict=True)) for row in cursor.fetchall()]
 
 
+def _weekly_jobs(database: TestDatabase) -> list[dict[str, object]]:
+    """每週更新的工作（不含發佈後排入的 `embed_papers`，Story 2.8）。"""
+    return [job for job in _jobs(database) if job["task_name"] != "embed_papers"]
+
+
+def _embed_jobs(database: TestDatabase) -> list[dict[str, object]]:
+    return [job for job in _jobs(database) if job["task_name"] == "embed_papers"]
+
+
 def _wait_until(condition: Callable[[], bool], what: str, timeout: float = WAIT_SECONDS) -> None:
     deadline = time.monotonic() + timeout
     while not condition():
@@ -155,7 +164,7 @@ def test_migration_creates_queue_objects_without_extensions(fresh_database: Test
     assert _admin_rows(fresh_database, "SELECT extname FROM pg_extension ORDER BY 1") == (
         extensions_before
     )
-    assert fresh_database.revisions() == {"0014"}
+    assert fresh_database.revisions() == {"0015"}
 
 
 def test_downgrade_to_0001_removes_every_queue_object(fresh_database: TestDatabase) -> None:
@@ -1205,7 +1214,7 @@ def test_enqueue_weekly_update_runs_both_jobs_on_worker(
 
         _wait_until(
             lambda: (
-                [(job["task_name"], job["status"]) for job in _jobs(migrated_fresh)]
+                [(job["task_name"], job["status"]) for job in _weekly_jobs(migrated_fresh)]
                 == [("weekly_update", "succeeded"), ("run_weekly_update", "succeeded")]
             ),
             "weekly_update 排入的 run_weekly_update 也執行成功",
@@ -1214,7 +1223,10 @@ def test_enqueue_weekly_update_runs_both_jobs_on_worker(
         code, records, err = _stop(worker)
 
     assert code == 0, err
-    scheduled, run = _jobs(migrated_fresh)
+    # Story 2.8：發佈快照後排入一筆 embed_papers（沒有 Cloudflare 設定，在 worker 裡會失敗，
+    # 不影響每週更新）；上面只看每週更新的工作。
+    assert [job["queue_name"] for job in _embed_jobs(migrated_fresh)] == ["ai"]
+    scheduled, run = _weekly_jobs(migrated_fresh)
     assert (scheduled["queue_name"], scheduled["lock"], scheduled["args"]) == ("ingest", None, {})
     assert scheduled["queueing_lock"] == "weekly_update"
     [(weekly_run_id, status, finished_at)] = _admin_rows(
@@ -1310,23 +1322,26 @@ def test_weekly_update_runs_never_overlap_with_two_worker_slots(
         with job_app.opened() as app:
             assert defer_job(app, RUN_WEEKLY_UPDATE, {"weekly_run_id": weekly_run_id}) is True
             _wait_until(
-                lambda: [job["status"] for job in _jobs(migrated_fresh)] == ["doing"],
+                lambda: [job["status"] for job in _weekly_jobs(migrated_fresh)] == ["doing"],
                 "第一筆開始執行",
             )
             # 排隊鎖只擋排隊中的，第一筆執行中時第二筆排得進去（像 sweep 補排或手動再排）。
             assert defer_job(app, RUN_WEEKLY_UPDATE, {"weekly_run_id": weekly_run_id}) is True
             # worker 還有一個空位，第二筆仍在排隊：擋住它的是佇列鎖。
             time.sleep(1.0)
-            assert [job["status"] for job in _jobs(migrated_fresh)] == ["doing", "todo"]
+            assert [job["status"] for job in _weekly_jobs(migrated_fresh)] == ["doing", "todo"]
         _wait_until(
-            lambda: [job["status"] for job in _jobs(migrated_fresh)] == ["succeeded"] * 2,
+            lambda: [job["status"] for job in _weekly_jobs(migrated_fresh)] == ["succeeded"] * 2,
             "兩筆都執行成功",
         )
     finally:
         code, records, err = _stop(worker)
 
     assert code == 0, err
-    first, second = _jobs(migrated_fresh)
+    # Story 2.8：發佈快照後排入一筆 embed_papers（沒有 Cloudflare 設定，在 worker 裡會失敗，
+    # 不影響每週更新）；上面只看每週更新的工作。
+    assert [job["queue_name"] for job in _embed_jobs(migrated_fresh)] == ["ai"]
+    first, second = _weekly_jobs(migrated_fresh)
     assert first["lock"] == second["lock"] == "weekly_update"
     events = _job_events(migrated_fresh)
     first_started = events[(first["id"], "started")]
@@ -1393,7 +1408,7 @@ def test_weekly_update_resumes_after_retry_applies_and_reports(
 
         _wait_until(
             lambda: (
-                [(job["task_name"], job["status"]) for job in _jobs(migrated_fresh)]
+                [(job["task_name"], job["status"]) for job in _weekly_jobs(migrated_fresh)]
                 == [("weekly_update", "succeeded"), ("run_weekly_update", "succeeded")]
             ),
             "run_weekly_update 重試後續跑、套用成功",
@@ -1403,7 +1418,10 @@ def test_weekly_update_resumes_after_retry_applies_and_reports(
         code, records, err = _stop(worker)
 
     assert code == 0, err
-    _scheduled, run = _jobs(migrated_fresh)
+    # Story 2.8：發佈快照後排入一筆 embed_papers（沒有 Cloudflare 設定，在 worker 裡會失敗，
+    # 不影響每週更新）；上面只看每週更新的工作。
+    assert [job["queue_name"] for job in _embed_jobs(migrated_fresh)] == ["ai"]
+    _scheduled, run = _weekly_jobs(migrated_fresh)
     # 第 1 次在 I&O 第 2 頁失敗，第 2 次從那一頁續跑、抓完並套用。
     assert run["attempts"] == 2
     [(weekly_run_id, status)] = _admin_rows(migrated_fresh, "SELECT id, status FROM weekly_run")

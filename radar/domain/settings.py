@@ -1,5 +1,6 @@
 """設定的型別。值只由 `radar/config.py` 從環境變數讀進來，services 從參數收。"""
 
+import re
 from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationInfo, field_validator
@@ -14,6 +15,9 @@ HEARTBEAT_URL_SCHEMES = frozenset({"https", "http"})
 OBJECT_STORE_URL_SCHEMES = frozenset({"https", "http"})
 # 心跳網址的設定欄位：`heartbeat_url_` 加上排程名稱（連字號換成底線），一個排程一個（AD-15）。
 HEARTBEAT_URL_FIELD_PREFIX = "heartbeat_url_"
+# Cloudflare 的帳號 ID：32 個十六進位字元；API token：不含空白的 ASCII 可見字元。
+_CLOUDFLARE_ACCOUNT_ID = re.compile(r"[0-9a-fA-F]{32}")
+_HEADER_TOKEN = re.compile(r"[!-~]+")
 
 
 def check_database_url(value: SecretStr) -> SecretStr:
@@ -158,6 +162,11 @@ class Settings(BaseModel):
     # （`llm_run_expired`；已經存下輸出的記 `llm_result_pending`，下一次接續）。
     # 要比上面說的最壞時間長，否則還在跑的呼叫會被誤判。
     llm_run_stale_after: int = Field(default=900, ge=60, le=86_400)
+    # Cloudflare Workers AI（向量化，Story 2.8、ADR-0040）：帳號 ID 與 API token。只有向量化的工作與
+    # `radar embeddings backfill` 需要；缺了由 bootstrap 在組裝時回報。帳號 ID 會出現在請求網址裡，
+    # 也當秘密處理（不印、不寫進日誌與錯誤訊息）。模型、維度、額度等設定在 config/embeddings.yaml。
+    cloudflare_account_id: SecretStr | None = Field(default=None, min_length=1)
+    cloudflare_api_token: SecretStr | None = Field(default=None, min_length=1)
 
     @property
     def cloud_policy(self) -> CloudPolicy:
@@ -171,6 +180,23 @@ class Settings(BaseModel):
         # 在讀設定時擋下。訊息是固定句子，不帶值。
         if value is not None and any(ch.isspace() for ch in value.get_secret_value()):
             raise ValueError("不能含空白或換行")
+        return value
+
+    @field_validator("cloudflare_account_id")
+    @classmethod
+    def _check_cloudflare_account_id(cls, value: SecretStr | None) -> SecretStr | None:
+        # 帳號 ID 會接進網址的路徑：只收 32 個十六進位字元，夾帶 `/`、`?` 之類的值改不了網址。
+        # 訊息是固定句子，不帶值。
+        if value is not None and not _CLOUDFLARE_ACCOUNT_ID.fullmatch(value.get_secret_value()):
+            raise ValueError("要是 32 個十六進位字元（Cloudflare 後台的 Account ID）")
+        return value
+
+    @field_validator("cloudflare_api_token")
+    @classmethod
+    def _check_cloudflare_api_token(cls, value: SecretStr | None) -> SecretStr | None:
+        # 帶空白、換行或非 ASCII 的 token 會變成不合法的 HTTP 標頭；在讀設定時擋下，訊息不帶值。
+        if value is not None and not _HEADER_TOKEN.fullmatch(value.get_secret_value()):
+            raise ValueError("只能是不含空白的 ASCII 可見字元")
         return value
 
     @field_validator("llm_run_stale_after")

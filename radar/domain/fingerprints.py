@@ -12,6 +12,8 @@
   `domain/context_values_hashes.py`（Story 2.6、ADR-0034）。
 - `hypothesis_sentence_sha256`：假設原句（正規化後）的雜湊，存在 `hypothesis.sentence_sha256`，
   「不同原句」數得出來（FR-3 擷取規則 3、Story 2.6）。
+- `embedding_input_sha256`：送去向量化的文字的指紋，存在 `embedding.input_sha256` 與
+  `derivation_run.input_sha256`（task＝embed）；變了才重算（AD-12、Story 2.8）。
 
 ## source_hash
 
@@ -232,3 +234,26 @@ def hypothesis_sentence_sha256(normalized_sentence: str) -> str:
     if not isinstance(normalized_sentence, str) or not normalized_sentence:
         raise ValueError("hypothesis_sentence_sha256 要收正規化後、不是空的原句")
     return _canonical_sha256({"v": HYPOTHESIS_SENTENCE_VERSION, "sentence": normalized_sentence})
+
+
+# --- 向量化（Story 2.8、AD-12、ADR-0040） --------------------------------------------------------
+
+# 算法版本：改了算進指紋的欄位或序列化方式時加一（全部向量都會重算）。
+EMBEDDING_INPUT_VERSION: Final = 1
+
+
+def embedding_input_sha256(text: str, input_kind: str) -> str:
+    """送去向量化的文字的指紋（64 位小寫十六進位 SHA-256）。
+
+    算進：算法版本、工作代碼 `embed`、`input_kind`（`title`／`abstract`）與實際送出的文字
+    （「標題＋空行＋摘要」接好之後）。模型不算進來：`embedding` 的主鍵已經帶 `model_id`，
+    各模型各自比對。摘要的來源不算：同樣的文字得到同樣的向量。
+
+    Raises:
+        ValueError: `text` 是空的或只有空白。
+    """
+    if not isinstance(text, str) or not text.strip():
+        raise ValueError("embedding_input_sha256 要收不是空白的文字")
+    return _canonical_sha256(
+        {"v": EMBEDDING_INPUT_VERSION, "task": "embed", "input_kind": str(input_kind), "text": text}
+    )

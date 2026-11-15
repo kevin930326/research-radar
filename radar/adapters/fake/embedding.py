@@ -3,8 +3,10 @@
 - 入口先檢查每段都是 `CloudSafeText`（`str` 本身當序列傳進來也擋），丟 `NotCloudSafeError`。
 - 同一段文字永遠得到同一個向量（長度 1）；`embed_documents` 與 `embed_query` 對同一段文字給
   不同的向量（真實的模型查詢會加指令前綴），測試可以藉此發現兩者被互換。
+- 和真的 adapter 一樣一次最多 32 段（`MAX_BATCH_SIZE`），超過丟 `ValueError`：服務沒切批，
+  測試就會發現。
 - 每次呼叫記在 `document_calls`、`query_calls`。
-真正的 Workers AI adapter 在 Story 2.8。
+真正的 Workers AI adapter 是 `radar.adapters.workers_ai`（Story 2.8）。
 """
 
 import hashlib
@@ -12,6 +14,7 @@ import math
 import struct
 from collections.abc import Sequence
 
+from radar.domain.embeddings import MAX_BATCH_SIZE
 from radar.domain.llm import check_cloud_safe_text, check_cloud_safe_texts
 from radar.domain.policy import CloudSafeText, cloud_text
 
@@ -36,6 +39,8 @@ class FakeEmbeddingProvider:
 
     def embed_documents(self, texts: Sequence[CloudSafeText]) -> list[list[float]]:
         checked = check_cloud_safe_texts(texts)
+        if len(checked) > MAX_BATCH_SIZE:
+            raise ValueError(f"一次最多 {MAX_BATCH_SIZE} 段（收到 {len(checked)} 段）")
         self.document_calls.append(checked)
         return [self._vector(_DOCUMENT, text) for text in checked]
 

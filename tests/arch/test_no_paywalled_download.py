@@ -44,6 +44,7 @@ NETWORK_ALLOWED: dict[str, str] = {
     "radar.adapters.heartbeat": "排程成功後對監看服務送心跳 GET",
     "radar.adapters.object_store": "自己的物件儲存（R2／RustFS，存原始資料）",
     "radar.adapters.anthropic": "Anthropic Messages API（只送已放行的 CloudSafeText）",
+    "radar.adapters.workers_ai": "Cloudflare Workers AI 向量化（只送已放行的 CloudSafeText）",
 }
 # 會送出請求的 HTTP client 方法。
 REQUEST_METHODS = frozenset(
