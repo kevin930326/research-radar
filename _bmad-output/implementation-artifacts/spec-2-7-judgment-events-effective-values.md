@@ -196,7 +196,7 @@ deferred:
 
 **建議再審一次：** true。修了 6 組中等問題，修正本身只經過涵蓋測試，沒有獨立審查：view 改寫的人工值整理與意見比較 SQL、反向架構規則的掃描式、FR-4 真流程測試。
 
-**驗證：** ruff、format、mypy（含 tests，289 檔）、lint-imports（19 契約）、`alembic check`（No new upgrade operations）全部通過。arch 299 passed；unit 2391 passed、1 failed、1 xfailed（失敗的是 2.6 的 `test_constructs.py::test_normalized_name_has_no_case_or_outer_or_double_spaces`，反例 `'ὐ'`，2.6 另行修正，這裡沒動）；integration（radar-ci 資料庫）743 passed、1 xfailed。沒有呼叫真的模型。
+**驗證：**（合併 2.6 的 `8e90dcb` 之後）ruff、format、mypy（含 tests，290 檔）、lint-imports（19 契約）、`alembic check`（No new upgrade operations）全部通過。unit 2570 passed、1 xfailed；arch 299 passed；integration（radar-ci 資料庫）753 passed、1 xfailed。合併前 unit 唯一的失敗是 2.6 的 `test_constructs.py::test_normalized_name_has_no_case_or_outer_or_double_spaces`（反例 `'ὐ'`），2.6 修正帶進來後消失，這裡沒動。沒有呼叫真的模型。
 
 **剩下的風險：**
 - `needs_attention` → `failed` 未接（2.9）；2.12 的 retry 期間會顯示 `failed`。
