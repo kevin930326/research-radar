@@ -39,7 +39,10 @@ from radar.domain.prompts import (
 # 工作時在這裡加一列；每個類別都要 `extra="forbid"`（`tests/unit/test_prompt_loader.py` 守著）。
 # `LlmRequest` 執行期再核對類別在凍結的 schema 登記表裡。
 OUTPUT_SCHEMAS: Final[Mapping[str, type[BaseModel]]] = MappingProxyType(
-    {"FakeResearchQuestion": llm_schemas.FakeResearchQuestion}
+    {
+        "FakeResearchQuestion": llm_schemas.FakeResearchQuestion,
+        "ZhSummaryOutput": llm_schemas.ZhSummaryOutput,
+    }
 )
 # prompt 檔最大的位元組數（系統提示不該這麼長；擋下誤放的大檔）。
 MAX_PROMPT_BYTES: Final = 256 * 1024
@@ -162,6 +165,9 @@ def registry_problems(root: Path) -> list[str]:
     - 每個工作的目前版本都有登記；登記的每個版本都讀得出來、雜湊對得上（`load_prompt`）。
     - `<工作代碼>/v<N>.md` 每個檔都有登記；資料夾名稱是工作代碼；檔名是 `v<N>.md`。
     """
+    if not root.is_dir():
+        # 資料夾不在時每個登記的版本都會讀不到，只回這一條（不逐一列出找不到的檔）。
+        return [f"{root}：prompt 資料夾不存在"]
     problems: list[str] = []
     codes = {task.value: task for task in LlmTask}
     for code, current in sorted(prompt_hashes.CURRENT_PROMPT_VERSIONS.items()):
@@ -181,9 +187,6 @@ def registry_problems(root: Path) -> list[str]:
                 load_prompt(root, task, version)
             except (PromptIntegrityError, PromptFormatError, ValueError) as exc:
                 problems.append(str(exc))
-    if not root.is_dir():
-        problems.append(f"{root}：prompt 資料夾不存在")
-        return problems
     for directory in sorted(path for path in root.iterdir() if path.is_dir()):
         task_code = codes.get(directory.name)
         if task_code is None:

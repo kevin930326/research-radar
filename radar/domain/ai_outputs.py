@@ -1,8 +1,9 @@
 """AI 產出與 LLM 閘門的 domain 形狀（AD-7、AD-8、ADR-0009、ADR-0015、Story 2.2）。
 
 - 工作代碼只有六個（`LlmTask`）；要加新的工作要改架構文件的 AD-8（架構測試守著）。
-- 會產生「表頭」的工作對應到哪一張表頭表（`HEADER_TABLES`）。2.2 只建表頭欄位，內容欄位由
-  2.4～2.6 加；`merge_judge` 的 `merge_judgment` 在 Epic 10（它的對象表還不存在）。
+- 會產生「表頭」的工作對應到哪一張表頭表（`HEADER_TABLES`）。2.2 只建表頭欄位；2.4 加了
+  中文重點的四欄內容（`ZhSummaryContent`），分類與研究模型的內容由 2.5、2.6 加；
+  `merge_judge` 的 `merge_judgment` 在 Epic 10（它的對象表還不存在）。
 - 要送給模型的文字一律由 `build_llm_input` 從資料列（`paper.title`、`paper_abstract`）推出，
   來源（`ContentSource`）也由資料列決定；呼叫端只指定論文、工作、`input_kind`，不能自己給文字
   或來源（ADR-0029：不能讓自由輸入決定來源）。
@@ -179,8 +180,50 @@ class NewLlmCall:
 
 
 @dataclass(frozen=True, slots=True)
+class ZhSummaryContent:
+    """中文重點的四欄內容（`zh_summary` 的內容欄位，Story 2.4、ADR-0032）。
+
+    只由 `domain/validators/zh_summary.normalize_zh_summary` 從驗證過的模型輸出做出來，再經
+    `services/ai_results.py` 寫入；摘要沒提到的欄位是 None（「摘要未提及」由畫面的 i18n 出）。
+    定義在這裡（不在 validators）：`NewAiResult` 要用它，validators 又要 import 這個模組。
+
+    Raises:
+        ValueError: 有值的欄位只有空白，或存不進資料庫（NUL、單獨的代理字元）。
+    """
+
+    research_question: str | None
+    method: str | None
+    theory: str | None
+    findings: str | None
+
+    def __post_init__(self) -> None:
+        for name, value in self.fields().items():
+            if value is None:
+                continue
+            if not value.strip():
+                raise ValueError(f"{name} 有值時不能只有空白")
+            check_storable_text(value, name)
+
+    def fields(self) -> dict[str, str | None]:
+        """欄位名稱（和資料表欄位同名）→ 值，順序固定。"""
+        return {
+            "research_question": self.research_question,
+            "method": self.method,
+            "theory": self.theory,
+            "findings": self.findings,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class NewAiResult:
-    """要新增的一列表頭（2.2 只有表頭欄位；內容欄位由 2.4～2.6 加）。"""
+    """要新增的一列表頭。
+
+    `zh_summary`：中文重點的內容（只有 `zh_summary` 工作、而且不是 `rejected` 時可以有值；
+    分類與研究模型的內容由 2.5、2.6 加）。
+
+    Raises:
+        ValueError: `rejected` 與原因代碼對不上，或 `rejected` 帶了內容。
+    """
 
     paper_id: uuid.UUID
     run_id: uuid.UUID
@@ -190,10 +233,13 @@ class NewAiResult:
     lang: OutputLang
     status: ResultStatus
     reject_reason: ErrorCode | None
+    zh_summary: ZhSummaryContent | None = None
 
     def __post_init__(self) -> None:
         if (self.status is ResultStatus.REJECTED) != (self.reject_reason is not None):
             raise ValueError("只有 rejected 帶原因代碼，而且 rejected 一定要帶")
+        if self.status is ResultStatus.REJECTED and self.zh_summary is not None:
+            raise ValueError("rejected 不寫內容")
 
 
 @dataclass(frozen=True, slots=True)
@@ -270,6 +316,26 @@ def escape_document_text(text: str) -> str:
 def wrap_document(document_type: DocumentType, text: str) -> str:
     """包成 `<document type="…">…</document>`（先跳脫）。"""
     return f'<document type="{document_type.value}">{escape_document_text(text)}</document>'
+
+
+_ESCAPED_CLOSING_TAG: Final = re.compile(r"&lt;(\s*/\s*document)", re.IGNORECASE)
+
+
+def unwrap_document(block: LlmInputBlock) -> str:
+    """`wrap_document` 的反向：拿掉 `<document type="…">` 包裝、把跳脫的 `&lt;/document` 換回來，
+    回原本的文字（domain 驗證拿輸入比對輸出時用）。
+
+    原文本來就寫著 `&lt;/document` 時也會被換成 `<`；只影響比對用的字彙，不影響送出的內容。
+
+    Raises:
+        ValueError: 區塊不是 `wrap_document` 包出來的形狀。
+    """
+    prefix = f'<document type="{block.document_type.value}">'
+    suffix = "</document>"
+    if not (block.text.startswith(prefix) and block.text.endswith(suffix)):
+        raise ValueError("不是 wrap_document 包出來的文件區塊")
+    inner = block.text[len(prefix) : len(block.text) - len(suffix)]
+    return _ESCAPED_CLOSING_TAG.sub(r"<\1", inner)
 
 
 def abstract_content_source(source: AbstractSource) -> ContentSource:

@@ -1,8 +1,9 @@
 """三張 AI 表頭表 `zh_summary`、`classification`、`research_model`：表的定義與唯一的讀寫者
 （AD-7、ADR-0015、ADR-0030）。
 
-- 2.2 只建表頭欄位（`paper_id`、`run_id`、`input_kind`、`input_sha256`、`abstract_id`、`lang`、
-  `status`、`reject_reason`、`created_at`）；內容欄位由 2.4～2.6 加。
+- 2.2 建表頭欄位（`paper_id`、`run_id`、`input_kind`、`input_sha256`、`abstract_id`、`lang`、
+  `status`、`reject_reason`、`created_at`）；2.4 在 `zh_summary` 加四個內容欄位（遷移 0011，
+  `rejected` 沒有內容、有值時不是空白，CHECK 擋）；分類與研究模型的內容由 2.5、2.6 加。
 - 同一篇論文、同一種語言最多一筆 `active`（部分唯一索引）。內容不 UPDATE：重跑就新增一列，
   舊的 `active` 標成 `superseded`（只改 `status`）。
 - 結果只經 `services/ai_results.py` 寫入；`repo` 裡除了這個模組，其他查詢不直接讀這三張表
@@ -15,7 +16,7 @@
 import uuid
 from collections.abc import Mapping
 from types import MappingProxyType
-from typing import Final
+from typing import Any, Final
 
 from sqlalchemy import (
     CheckConstraint,
@@ -47,8 +48,9 @@ from radar.repo.visibility import visible_to_system_only
 # --- 表的定義（`alembic check` 拿來和資料庫比對；遷移 0010 建表） -----------------------------
 
 
-def _header_table(name: str) -> Table:
-    """一張表頭表：四張表的表頭欄位都一樣（ADR-0015 決定第 2 點）。"""
+def _header_table(name: str, *content: Column[Any] | CheckConstraint) -> Table:
+    """一張表頭表：四張表的表頭欄位都一樣（ADR-0015 決定第 2 點）；`content` 是這張表自己的
+    內容欄位與約束。"""
     return Table(
         name,
         Base.metadata,
@@ -88,10 +90,29 @@ def _header_table(name: str) -> Table:
             "reject_reason IS NULL OR reject_reason ~ '^[a-z][a-z0-9_]*$'",
             name="reject_reason_format",
         ),
+        *content,
     )
 
 
-zh_summary_table = _header_table("zh_summary")
+# 中文重點的四欄內容（Story 2.4、ADR-0032）：沒提到的欄位是 NULL。
+ZH_SUMMARY_CONTENT_COLUMNS: Final = ("research_question", "method", "theory", "findings")
+
+zh_summary_table = _header_table(
+    "zh_summary",
+    *(Column(column, Text) for column in ZH_SUMMARY_CONTENT_COLUMNS),
+    CheckConstraint(
+        "status <> 'rejected' OR (research_question IS NULL AND method IS NULL"
+        " AND theory IS NULL AND findings IS NULL)",
+        name="rejected_has_no_content",
+    ),
+    CheckConstraint(
+        "(research_question IS NULL OR research_question ~ '[^[:space:]]')"
+        " AND (method IS NULL OR method ~ '[^[:space:]]')"
+        " AND (theory IS NULL OR theory ~ '[^[:space:]]')"
+        " AND (findings IS NULL OR findings ~ '[^[:space:]]')",
+        name="content_not_blank",
+    ),
+)
 classification_table = _header_table("classification")
 research_model_table = _header_table("research_model")
 
@@ -105,7 +126,12 @@ _INSERT_COLUMNS = (
 
 _INSERT: Final[Mapping[LlmTask, TextClause]] = MappingProxyType(
     {
-        LlmTask.ZH_SUMMARY: text("INSERT INTO zh_summary" + _INSERT_COLUMNS),
+        LlmTask.ZH_SUMMARY: text(
+            "INSERT INTO zh_summary (paper_id, run_id, input_kind, input_sha256, abstract_id,"
+            " lang, status, reject_reason, research_question, method, theory, findings)"
+            " VALUES (:paper_id, :run_id, :input_kind, :input_sha256, :abstract_id, :lang, :status,"
+            " :reject_reason, :research_question, :method, :theory, :findings) RETURNING id"
+        ),
         LlmTask.CLASSIFY: text("INSERT INTO classification" + _INSERT_COLUMNS),
         LlmTask.EXTRACT_MODEL: text("INSERT INTO research_model" + _INSERT_COLUMNS),
     }
@@ -192,26 +218,30 @@ def find_blocking_ai_result(
 
 
 def create_ai_result(connection: Connection, task: LlmTask, result: NewAiResult) -> uuid.UUID:
-    """新增一列表頭，回它的 id。`active` 之前要先 `update_ai_results_superseded`
-    （部分唯一索引擋第二筆 `active`）。在呼叫端開好的交易裡做，不 commit。
+    """新增一列表頭（`zh_summary` 連同四欄內容），回它的 id。`active` 之前要先
+    `update_ai_results_superseded`（部分唯一索引擋第二筆 `active`）。在呼叫端開好的交易裡做，
+    不 commit。
 
     Raises:
-        ValueError: 這個工作沒有表頭表。
+        ValueError: 這個工作沒有表頭表，或不是 `zh_summary` 卻帶了中文重點的內容。
     """
     task = _check_task(task)
-    value = connection.execute(
-        _INSERT[task],
-        {
-            "paper_id": result.paper_id,
-            "run_id": result.run_id,
-            "input_kind": result.input_kind.value,
-            "input_sha256": result.input_sha256,
-            "abstract_id": result.abstract_id,
-            "lang": result.lang.value,
-            "status": result.status.value,
-            "reject_reason": None if result.reject_reason is None else result.reject_reason.value,
-        },
-    ).scalar_one()
+    params: dict[str, object] = {
+        "paper_id": result.paper_id,
+        "run_id": result.run_id,
+        "input_kind": result.input_kind.value,
+        "input_sha256": result.input_sha256,
+        "abstract_id": result.abstract_id,
+        "lang": result.lang.value,
+        "status": result.status.value,
+        "reject_reason": None if result.reject_reason is None else result.reject_reason.value,
+    }
+    if task is LlmTask.ZH_SUMMARY:
+        content = result.zh_summary.fields() if result.zh_summary is not None else {}
+        params.update({column: content.get(column) for column in ZH_SUMMARY_CONTENT_COLUMNS})
+    elif result.zh_summary is not None:
+        raise ValueError(f"{task.value} 的表頭不收中文重點的內容")
+    value = connection.execute(_INSERT[task], params).scalar_one()
     return uuid.UUID(str(value))
 
 

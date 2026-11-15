@@ -29,6 +29,7 @@ from radar.domain.llm_schemas import (
     FakeKind,
     FakeNested,
     FakeResearchQuestion,
+    ZhSummaryOutput,
 )
 from radar.domain.policy import CloudPolicy, CloudSafeText, ContentSource, clear_for_cloud
 from tests.anthropic_cassette import cassette_response
@@ -107,7 +108,7 @@ def test_registry_holds_every_model_in_the_schema_module() -> None:
     frozen: Mapping[int, tuple[type[BaseModel], str]] = llm._FROZEN_SCHEMAS
     classes = {entry[0] for entry in frozen.values()}
 
-    assert classes == {FakeAnyObject, FakeResearchQuestion, FakeItem, FakeNested}
+    assert classes == {FakeAnyObject, FakeResearchQuestion, FakeItem, FakeNested, ZhSummaryOutput}
     assert all(cls.__pydantic_complete__ for cls in classes)
     # 列舉只能當欄位型別，不能直接當 output_schema。
     with pytest.raises(TypeError, match=r"llm_schemas\.py 最上層"):

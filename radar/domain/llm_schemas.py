@@ -23,10 +23,10 @@
 
 from enum import StrEnum
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 # --- 替身與測試用 ------------------------------------------------------------------------------
-# 給 `radar/adapters/fake/` 與測試用的通用 schema；2.2 起真正的工作 schema 也放在這個模組。
+# 給 `radar/adapters/fake/` 與測試用的通用 schema；真正的工作 schema 放在檔案後面。
 
 
 class FakeAnyObject(BaseModel):
@@ -64,3 +64,27 @@ class FakeNested(BaseModel):
     kind: FakeKind
     item: FakeItem
     tags: tuple[str, ...] = ()
+
+
+# --- 正式工作的 schema -------------------------------------------------------------------------
+
+
+class ZhSummaryOutput(BaseModel):
+    """中文重點（`zh_summary`，Story 2.4、ADR-0032）：四欄都要給，摘要沒提到的給 null。
+
+    結構化輸出支援 `anyOf` null、要求 `additionalProperties: false`，但不支援 `maxLength`，所以
+    長度、繁中、編造、逐句翻譯都由 `domain/validators/zh_summary.py` 驗；這裡只管形狀。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    research_question: str | None = Field(
+        description="研究問題：這篇研究想回答什麼，一句繁體中文；摘要沒提到就填 null"
+    )
+    method: str | None = Field(
+        description="方法：研究設計、資料與分析方法，一句或短語；摘要沒提到就填 null"
+    )
+    theory: str | None = Field(
+        description="理論：摘要明確寫出的理論或理論框架；摘要沒提到就填 null，不推測"
+    )
+    findings: str | None = Field(description="發現：主要結果，一句繁體中文；摘要沒提到就填 null")

@@ -21,6 +21,7 @@ from radar.domain.import_report import ImportBaseline
 from radar.domain.jobs import scheduled_jobs
 from radar.domain.pricing import ModelsConfig
 from radar.domain.settings import MigrationSettings, Settings, heartbeat_url_field
+from radar.domain.validators.zh_summary import ZhSummaryRules
 
 type ProcessKind = Literal["api", "worker", "cli"]
 
@@ -163,6 +164,8 @@ IMPORT_BASELINE_FILE = "import_baseline.yaml"
 MODELS_FILE = "models.yaml"
 # 每月預算（NFR-3、ADR-0031）：閘門的 BudgetGuard 與 `radar costs` 讀（`load_budget_config`）。
 BUDGET_FILE = "budget.yaml"
+# 中文重點的驗證門檻（PRD FR-14、ADR-0032）：跑 `zh_summary` 的工作讀（`load_zh_summary_rules`）。
+ZH_SUMMARY_FILE = "zh_summary.yaml"
 
 
 def config_dir(environ: Mapping[str, str] | None = None) -> Path:
@@ -252,6 +255,22 @@ def load_budget_config(environ: Mapping[str, str] | None = None) -> BudgetConfig
     if problems or budget is None:
         raise ConfigError(problems)
     return budget
+
+
+def load_zh_summary_rules(environ: Mapping[str, str] | None = None) -> ZhSummaryRules:
+    """讀 `RADAR_CONFIG_DIR` 下的 `zh_summary.yaml`（中文重點的驗證門檻）並驗證。
+
+    讀法與錯誤格式和 `load_domain_config` 相同（「檔名：欄位路徑：原因」）。
+
+    Raises:
+        ConfigError: 缺檔、不是合法 YAML、鍵寫兩次、缺鍵或多鍵、值不是整數（含浮點數、布林）、
+            0 或負數、門檻超出範圍。
+    """
+    problems: list[str] = []
+    rules = _load_yaml_model(config_dir(environ), ZH_SUMMARY_FILE, ZhSummaryRules, problems)
+    if problems or rules is None:
+        raise ConfigError(problems)
+    return rules
 
 
 def _load_yaml_model[T: BaseModel](

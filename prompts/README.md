@@ -1,8 +1,13 @@
 # prompts/
 
-LLM 工作的 prompt 檔（AD-8、ADR-0009 第 3 步、ADR-0030）。Story 2.2 還沒有正式的 prompt，
-所以雜湊登記（`radar/domain/prompt_hashes.py`）是空的；2.4～2.6 會加 `zh_summary`、`classify`、
-`extract_model`。
+LLM 工作的 prompt 檔（AD-8、ADR-0009 第 3 步、ADR-0030）。目前的正式 prompt：
+
+| 工作 | 目前版本 | schema | 說明 |
+|---|---|---|---|
+| `zh_summary` | v1 | `ZhSummaryOutput` | 中文重點四欄（Story 2.4、ADR-0032）；內容的驗證在 `radar/domain/validators/zh_summary.py` |
+
+`classify`、`extract_model` 由 2.5、2.6 加。prompt 的範例一律用自己編的假論文（不取自評估的測試組，
+不放 DOI）。
 
 ## 檔案位置
 
