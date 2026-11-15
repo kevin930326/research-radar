@@ -10,8 +10,10 @@
    - 重算目前輸入的 `input_sha256`、目前的 prompt 版本、目前該用的模型，有一個對不上
      → `superseded`（晚到的結果不蓋掉新的）；
    - 都對 → 先把舊的 `active` 標成 `superseded`，再新增 `active`。
-3. 內容：不是拒收、工作是 `zh_summary`、輸出是 `ZhSummaryOutput` 時，用
-   `normalize_zh_summary` 從（閘門已經驗證過的）輸出得出四欄內容一起寫；呼叫端不能直接給內容。
+3. 內容：不是拒收時，從（閘門已經驗證過的）輸出得出內容一起寫；呼叫端不能直接給內容。
+   - `zh_summary`、輸出是 `ZhSummaryOutput`：`normalize_zh_summary` 得出四欄。
+   - `classify`、輸出是 `ClassificationOutput`：`normalize_classification` 對照**現在的分類表**
+     （`taxonomy`）得出標籤與丟掉的計數；沒給分類表是程式的錯（`ValueError`）。
    拒收一律不寫內容（資料庫的 CHECK 也擋）。
 4. `derivation_run` 還是 `running` 時，同一個交易改成 `succeeded`（被 sweep 改成 `failed` 的維持
    `failed`；原因是 `llm_result_pending` 的改成 `llm_run_expired`：已經寫了表頭，不再接續）。
@@ -26,6 +28,7 @@ from pydantic import BaseModel
 
 from radar.domain.ai_outputs import (
     HEADER_TABLES,
+    ClassificationContent,
     DerivationRun,
     GatewayConfig,
     LlmTask,
@@ -40,8 +43,10 @@ from radar.domain.ai_outputs import (
 )
 from radar.domain.errors import ErrorCode
 from radar.domain.fingerprints import input_sha256
-from radar.domain.llm_schemas import ZhSummaryOutput
+from radar.domain.llm_schemas import ClassificationOutput, ZhSummaryOutput
 from radar.domain.permissions import Action, require
+from radar.domain.taxonomy import Taxonomy
+from radar.domain.validators.classification import normalize_classification
 from radar.domain.validators.zh_summary import normalize_zh_summary
 from radar.domain.viewer import SystemViewer, Viewer
 from radar.repo.ai_outputs import create_ai_result, update_ai_results_superseded
@@ -72,21 +77,28 @@ def record_llm_result(
     taxonomy_version: str | None = None,
     context_values_version: str | None = None,
     output: BaseModel | str | None = None,
+    taxonomy: Taxonomy | None = None,
 ) -> ResultStatus:
     """把一次模型呼叫的結果寫成一列表頭，回寫成的狀態（見模組說明的順序）。
 
     `reject_reason` 有值代表被拒收；`abstract_id` 是送出時用的那一筆摘要（只看標題時是 None）。
     `output` 是閘門驗證過的輸出（Pydantic 模型；沒有 schema 時是文字），內容欄位從它得出。
     `taxonomy_version`／`context_values_version` 是**現在**的分類表與情境值清單版本（重算目前輸入
-    的指紋用；2.5／2.6 由呼叫端在寫入時讀設定傳進來）。
+    的指紋用）。`taxonomy` 是寫入的行程載入的分類表（只給 `classify`）：有給時「現在的分類表版本」
+    就是它的版本，標籤也對照它正規化（ADR-0033）。
 
     Raises:
         PermissionDeniedError: `actor` 不是系統工作（不碰資料庫）。
         ResultTargetNotFoundError: 論文或 `derivation_run` 不存在，或 run 不是這篇論文的。
-        ValueError: 這個工作沒有表頭表。
+        ValueError: 這個工作沒有表頭表；`taxonomy` 和 `taxonomy_version` 的版本不一樣、不是
+            `classify` 卻給了 `taxonomy`，或 `classify` 的輸出要寫標籤卻沒給 `taxonomy`。
         PromptIntegrityError, PromptFormatError: 讀不出目前的 prompt 版本。
     """
     require(actor, Action.RUN_AI_JOBS, None)
+    if taxonomy is not None:
+        if taxonomy_version is not None and taxonomy_version != taxonomy.version_label:
+            raise ValueError("taxonomy_version 和分類表的版本不一樣")
+        taxonomy_version = taxonomy.version_label
     viewer = SystemViewer()
     with database.transaction() as connection:
         source = find_paper_llm_source(viewer, connection, paper_id, for_update=True)
@@ -96,6 +108,11 @@ def record_llm_result(
         task = run.key.task
         if task not in HEADER_TABLES:
             raise ValueError(f"{task.value} 沒有表頭表")
+        if taxonomy is not None and task is not LlmTask.CLASSIFY:
+            raise ValueError("只有 classify 能給分類表")
+        # 先做出內容（不碰資料庫）：做不出來就整個交易退回、不切換 active。
+        zh_summary = _zh_summary_content(task, reject_reason, output)
+        classification = _classification_content(task, reject_reason, output, taxonomy)
 
         if reject_reason is not None:
             status = ResultStatus.REJECTED
@@ -122,7 +139,8 @@ def record_llm_result(
                 lang=lang,
                 status=status,
                 reject_reason=reject_reason,
-                zh_summary=_zh_summary_content(task, reject_reason, output),
+                zh_summary=zh_summary,
+                classification=classification,
             ),
         )
         if run.status is RunStatus.RUNNING:
@@ -141,6 +159,26 @@ def _zh_summary_content(
     if not isinstance(output, ZhSummaryOutput):
         return None
     return normalize_zh_summary(output)
+
+
+def _classification_content(
+    task: LlmTask,
+    reject_reason: ErrorCode | None,
+    output: BaseModel | str | None,
+    taxonomy: Taxonomy | None,
+) -> ClassificationContent | None:
+    """要和表頭一起寫的分類內容：只有不是拒收、`classify`、輸出是 `ClassificationOutput` 時有。
+
+    Raises:
+        ValueError: 要寫標籤卻沒給分類表。
+    """
+    if reject_reason is not None or task is not LlmTask.CLASSIFY:
+        return None
+    if not isinstance(output, ClassificationOutput):
+        return None
+    if taxonomy is None:
+        raise ValueError("classify 的輸出要對照分類表寫標籤，沒給分類表")
+    return normalize_classification(output, taxonomy)
 
 
 def _still_current(

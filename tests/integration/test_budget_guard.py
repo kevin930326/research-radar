@@ -16,6 +16,7 @@ import pytest
 from structlog.testing import capture_logs
 
 from radar.adapters.fake import FakeLlmProvider, fake_completion
+from radar.config import load_taxonomy
 from radar.domain.ai_outputs import GatewayConfig, InputKind, LlmTask, OutputLang
 from radar.domain.budget import BUDGET_TIMEZONE, BudgetConfig, month_window
 from radar.domain.llm import LlmUsage
@@ -27,6 +28,7 @@ from radar.services.budget import BudgetGuard, get_budget_status
 from radar.services.llm_gateway import GatewayOutcome, GatewayResult, LlmJob, run_llm_job
 from tests.database import TestDatabase, migrate
 from tests.llm_support import (
+    ROOT,
     GatedProvider,
     budget_config,
     create_paper,
@@ -46,6 +48,7 @@ SYSTEM = SystemViewer()
 NOW = datetime(2026, 11, 15, 12, 0, tzinfo=TAIPEI)
 NEXT_MONTH = datetime(2026, 12, 1, 0, 0, tzinfo=TAIPEI)
 WAIT = 20.0
+TAXONOMY = load_taxonomy({"RADAR_CONFIG_DIR": str(ROOT / "config")})
 
 
 @pytest.fixture
@@ -75,7 +78,9 @@ def _job(paper_id: uuid.UUID, task: LlmTask = LlmTask.ZH_SUMMARY) -> LlmJob:
         task,
         InputKind.ABSTRACT,
         OutputLang.ZH_HANT,
-        taxonomy_version="tax-v1" if task is LlmTask.CLASSIFY else None,
+        # classify 一定要帶分類表（Story 2.5 起 LlmJob 建構時就擋）：只補輸入，斷言不變。
+        taxonomy_version=TAXONOMY.version_label if task is LlmTask.CLASSIFY else None,
+        taxonomy=TAXONOMY if task is LlmTask.CLASSIFY else None,
     )
 
 

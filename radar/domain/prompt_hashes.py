@@ -11,11 +11,12 @@
   執行期由別的資料組出來；`radar/` 裡只有 `domain/policy.py` 與 `services/prompt_loader.py` 讀它。
 - 登記只增不改：已登記的版本不改雜湊，內容或設定區改了就新增 `v<N+1>.md` 並在這裡加一列。
 
-正式 prompt：`zh_summary` v1（Story 2.4、ADR-0032）；`classify`、`extract_model` 由 2.5、2.6 加。
+正式 prompt：`zh_summary` v1（Story 2.4、ADR-0032）、`classify` v1（Story 2.5、ADR-0033）；
+`extract_model` 由 2.6 加。
 """
 
 # 工作代碼 → 目前用的版本。
-CURRENT_PROMPT_VERSIONS: dict[str, int] = {"zh_summary": 1}
+CURRENT_PROMPT_VERSIONS: dict[str, int] = {"zh_summary": 1, "classify": 1}
 
 # 工作代碼 → 版本 → (整個 prompt 檔的 SHA-256, 凍結的輸出 schema 字串的 SHA-256)；
 # 沒有結構化輸出時第二個是 None。
@@ -24,6 +25,12 @@ PROMPT_FILE_HASHES: dict[str, dict[int, tuple[str, str | None]]] = {
         1: (
             "26a03aa09d0da7e8860a2e8f5eb21219964ff61c6b72855d8ad953dff7c8c5e2",
             "0de6e57cd05014d0c54aff8bd0db5d9cab9e5748be372d90ed8b0f7fe5ce1899",
+        ),
+    },
+    "classify": {
+        1: (
+            "31bcc8434aaaaa180b7eb5e62123470e14e8077eede5526280a80547915af479",
+            "9a9cb33f829686bb43c9bbb769b24a26279c647f7f9c516fd050d1fc90c31c09",
         ),
     },
 }

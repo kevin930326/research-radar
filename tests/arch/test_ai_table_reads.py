@@ -1,8 +1,10 @@
-"""讀 AI 表頭表（`zh_summary`、`classification`、`research_model`）的查詢只准放在
-`radar/repo/ai_outputs.py`（AD-7、ADR-0030）：哪一筆算數（`active`、候選不算）只在一個地方決定。
+"""讀 AI 表頭表（`zh_summary`、`classification`、`research_model`）與掛在分類底下的細項表
+`classification_label` 的查詢只准放在 `radar/repo/ai_outputs.py`（AD-7、ADR-0030、ADR-0033）：
+哪一筆算數（`active`、候選不算）只在一個地方決定；標籤不接上 `active` 表頭就去數，會把候選與
+已取代的也算進去。
 
 做法照 `test_keyword_table_reads.py`：掃 `radar/` 每個 .py 檔的字串（f-string 的變數換成佔位
-字元、不含 docstring），`FROM`／`JOIN`／`USING` 這三張表只准出現在 `repo/ai_outputs.py`；
+字元、不含 docstring），`FROM`／`JOIN`／`USING` 這四張表只准出現在 `repo/ai_outputs.py`；
 `DELETE FROM` 是寫入，不算讀取。表的物件（`zh_summary_table` 等）也不准在別處用。
 """
 
@@ -17,7 +19,9 @@ from tests.arch.test_keyword_table_reads import _string_literals
 ROOT = Path(__file__).resolve().parents[2]
 RADAR = ROOT / "radar"
 ALLOWED = frozenset({"radar/repo/ai_outputs.py"})
-TABLES = tuple(sorted(HEADER_TABLES.values()))
+# 表頭表加上細項表（細項的狀態跟著表頭，讀細項也要經同一個模組）。
+DETAIL_TABLES = ("classification_label",)
+TABLES = tuple(sorted({*HEADER_TABLES.values(), *DETAIL_TABLES}))
 TABLE_OBJECTS = frozenset(f"{table}_table" for table in TABLES)
 _READ = re.compile(
     r"(\bDELETE\s+)?\b(?:FROM|JOIN|USING)\s+(?:ONLY\s+)?(?:\"?[A-Za-z_]\w*\"?\.)?\"?"
@@ -95,6 +99,9 @@ def test_scanner_catches_each_mistake() -> None:
             'def f(c):\n    return f"SELECT 1 FROM paper p JOIN public.classification k ON {c}"'
         ),
         "radar/services/x.py": 'SQL = """SELECT * FROM\n  "research_model" m"""',
+        "radar/repo/stats2.py": (
+            'SQL = "SELECT key, count(*) FROM classification_label GROUP BY key"'
+        ),
         "radar/repo/orm.py": (
             "from radar.repo.ai_outputs import zh_summary_table\n"
             "def f(select):\n    return select(zh_summary_table)"
@@ -113,5 +120,6 @@ def test_scanner_catches_each_mistake() -> None:
         "radar/repo/orm.py",
         "radar/repo/papers.py",
         "radar/repo/stats.py",
+        "radar/repo/stats2.py",
         "radar/services/x.py",
     ], problems

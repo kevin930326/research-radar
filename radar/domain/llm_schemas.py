@@ -18,7 +18,8 @@
     預設值不能是 list、dict、set。
   - 不用 `Enum("X", ...)` 這種函式寫法，不指定 `__doc__`，類別沒有 decorator、沒有方法。
 
-需要動態內容（例如 2.5 的分類清單 `enum`）時另寫 ADR，不能直接在這裡讀資料庫或外部文字。
+需要動態內容時另寫 ADR，不能直接在這裡讀資料庫或外部文字。2.5 的分類清單沒有放進 schema 的
+`enum`：標籤寫成字串陣列，清單寫死在 prompt 模板裡，清單外的由 domain 丟掉並計數（ADR-0033）。
 """
 
 from enum import StrEnum
@@ -88,3 +89,21 @@ class ZhSummaryOutput(BaseModel):
         description="理論：摘要明確寫出的理論或理論框架；摘要沒提到就填 null，不推測"
     )
     findings: str | None = Field(description="發現：主要結果，一句繁體中文；摘要沒提到就填 null")
+
+
+class ClassificationOutput(BaseModel):
+    """主題與方法分類（`classify`，Story 2.5、ADR-0033）：兩欄都要給，都不符合給空陣列。
+
+    標籤寫成字串、不放 `enum`：分類清單在設定檔，schema 只能是寫死的字面值（ADR-0029）。結構化
+    輸出支援 array，但不支援陣列長度限制，所以「只能用清單裡的 key」「重複」「放錯欄位」都由
+    `domain/validators/classification.py` 處理（清單外丟掉並計數，不算拒收）。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    topics: list[str] = Field(
+        description="主題：分類清單「主題」裡符合的 key，可以多個；都不符合給空陣列"
+    )
+    methods: list[str] = Field(
+        description="方法：分類清單「方法」裡符合的 key，可以多個；都不符合給空陣列"
+    )

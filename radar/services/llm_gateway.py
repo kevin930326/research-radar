@@ -79,6 +79,7 @@ from radar.domain.permissions import Action, require
 from radar.domain.policy import CloudClearanceError, CloudSafeText, clear_for_cloud, cloud_text
 from radar.domain.pricing import estimate_input_tokens, llm_call_cost
 from radar.domain.prompts import PromptIntegrityError
+from radar.domain.taxonomy import Taxonomy
 from radar.domain.viewer import SystemViewer, Viewer
 from radar.ports import LlmProvider
 from radar.repo.ai_outputs import find_blocking_ai_result
@@ -147,6 +148,14 @@ class LlmJob:
     - `validate_output`：這個工作的 domain 驗證（2.4～2.6 各自提供）；None 表示不另外驗。
     - `taxonomy_version`／`context_values_version`：`classify`／`extract_model` 一定要帶，其他不得帶
       （算進 `input_sha256`）。
+    - `taxonomy`：這個行程載入的分類表。`classify` 一定要帶、其他不得帶；`taxonomy_version` 要等於
+      它的版本。寫入時當「現在的分類表」：核對晚到結果的版本，並把輸出正規化成標籤（ADR-0033）。
+      建構時就擋：少了分類表的 `classify` 到寫入才會失敗，那時模型已經呼叫、帳已經記了，接續也會
+      一直失敗。
+
+    Raises:
+        ValueError: `classify` 沒帶分類表、不是 `classify` 卻帶了分類表，或 `taxonomy_version` 和
+            分類表的版本不一樣。
     """
 
     paper_id: uuid.UUID
@@ -156,6 +165,18 @@ class LlmJob:
     validate_output: OutputValidator | None = None
     taxonomy_version: str | None = None
     context_values_version: str | None = None
+    taxonomy: Taxonomy | None = None
+
+    def __post_init__(self) -> None:
+        is_classify = LlmTask(self.task) is LlmTask.CLASSIFY
+        if self.taxonomy is None:
+            if is_classify:
+                raise ValueError("classify 一定要帶分類表（taxonomy），不然付了錢也寫不進結果")
+            return
+        if not is_classify:
+            raise ValueError("只有 classify 能帶分類表")
+        if self.taxonomy_version != self.taxonomy.version_label:
+            raise ValueError("taxonomy_version 要等於分類表的版本")
 
 
 @dataclass(frozen=True)
@@ -607,6 +628,7 @@ def _write_result(
             taxonomy_version=job.taxonomy_version,
             context_values_version=job.context_values_version,
             output=output,
+            taxonomy=job.taxonomy,
         )
     except BaseException as exc:
         _try_fail_run(database, run_id)
