@@ -6,6 +6,11 @@
   對象不設外鍵（論文刪除、AI 產出依摘要來源移除時，應用程式角色刪不了事件，外鍵會卡住刪除）；
   `member_id` 暫不設外鍵（`member` 在 3.3）。`report_event_id` 指回同一張表，UNIQUE（一筆回報
   最多一筆處理結果，也當外鍵的索引）。
+- 處理結果寫入前的觸發器 `tg_judgment_event_resolution_matches_report`：`report_event_id` 指到的
+  事件要是 `summary_report`，而且對象（`target_type`、`target_id`）與 `field` 相同，不是就拒絕
+  （`check_violation`）。外鍵與 CHECK 擋不了跨列的比對；錯的處理結果寫進去會占住 UNIQUE 又刪不掉，
+  所以資料庫也擋一道（`repo/judgments.create_judgment_event` 的 `INSERT … SELECT` 是第一道）。
+  觸發器函式不用 SECURITY DEFINER（以寫入者的權限讀這張表），`search_path` 固定、表名寫全。
 - 新增 `audit_event`：稽核事件只新增（寫入者留給做寫入的 Story）。
 - 應用程式角色對兩張事件表收回 UPDATE、DELETE（0001 的預設權限給了四種）。
 - 新增 view `effective_zh_summary`、`effective_classification`、`effective_research_model`：有效值
@@ -14,7 +19,8 @@
   重建後再收一次寫入權限。
 
 和 `radar/repo/judgments.py`、`radar/repo/audit.py` 的表定義一致（`alembic check` 比對）；CHECK 約束
-autogenerate 不比，這裡照抄同一份條件。可降版（降版會丟掉兩張事件表與三個 view）。
+autogenerate 不比，這裡照抄同一份條件。可降版（降版會丟掉兩張事件表、處理結果的觸發器函式
+與三個 view）。
 
 版本：0014
 上一版：0013
@@ -247,6 +253,45 @@ _VIEWS = (
 )
 
 
+# 處理結果要對得上它指到的回報。指到不存在的事件時不在這裡擋，留給外鍵回 foreign_key_violation；
+# `field` 是 NULL 時也不在這裡擋，留給 CHECK（處理結果一定要有欄位）。
+_RESOLUTION_TRIGGER = "tg_judgment_event_resolution_matches_report"
+_RESOLUTION_FUNCTION = "judgment_event_resolution_matches_report"
+_CREATE_RESOLUTION_FUNCTION = f"""
+CREATE FUNCTION public.{_RESOLUTION_FUNCTION}() RETURNS trigger
+LANGUAGE plpgsql
+SECURITY INVOKER
+SET search_path = pg_catalog, pg_temp
+AS $$
+DECLARE
+  report record;
+BEGIN
+  IF NEW.kind <> 'summary_report_resolution' OR NEW.report_event_id IS NULL
+      OR NEW.field IS NULL THEN
+    RETURN NEW;
+  END IF;
+  SELECT kind, target_type, target_id, field INTO report
+  FROM public.judgment_event WHERE id = NEW.report_event_id;
+  IF NOT FOUND THEN
+    RETURN NEW;
+  END IF;
+  IF report.kind <> 'summary_report' OR report.target_type <> NEW.target_type
+      OR report.target_id <> NEW.target_id OR report.field IS DISTINCT FROM NEW.field THEN
+    RAISE EXCEPTION '處理結果要指到同一個對象、同一欄的 summary_report'
+      USING ERRCODE = 'check_violation', CONSTRAINT = '{_RESOLUTION_TRIGGER}',
+        TABLE = 'judgment_event';
+  END IF;
+  RETURN NEW;
+END;
+$$
+"""
+_CREATE_RESOLUTION_TRIGGER = f"""
+CREATE TRIGGER {_RESOLUTION_TRIGGER}
+BEFORE INSERT ON public.judgment_event
+FOR EACH ROW EXECUTE FUNCTION public.{_RESOLUTION_FUNCTION}()
+"""
+
+
 def _now() -> sa.TextClause:
     return sa.text("now()")
 
@@ -280,6 +325,8 @@ def upgrade() -> None:
     op.create_index(
         "ix_judgment_event_target", "judgment_event", ["target_type", "target_id", "field"]
     )
+    op.execute(_CREATE_RESOLUTION_FUNCTION)
+    op.execute(_CREATE_RESOLUTION_TRIGGER)
 
     op.create_table(
         "audit_event",
@@ -310,3 +357,4 @@ def downgrade() -> None:
         op.execute(f"DROP VIEW {name}")
     op.drop_table("audit_event")
     op.drop_table("judgment_event")
+    op.execute(f"DROP FUNCTION public.{_RESOLUTION_FUNCTION}()")

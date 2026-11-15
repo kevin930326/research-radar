@@ -202,7 +202,8 @@ def _zh_summary_block(row: RowMapping) -> AiBlock:
 
 def _classification_block(rows: Sequence[RowMapping]) -> AiBlock:
     """（論文, `field`）的列 → 一個分類區塊。來歷用 AI 那一筆（有的話）；只有人工值時模型與
-    `input_kind` 是空的、時間是最新一筆人工值。經人工核對＝兩欄都是人工值。"""
+    `input_kind` 是空的、時間是最新一筆人工值。經人工核對＝兩欄都是人工值（有沒有 AI 值都一樣；
+    只修正了一欄、另一欄沒有值時不算）。"""
     fields: dict[TaxonomyField, ClassificationFieldValue] = {}
     ai_row: RowMapping | None = None
     fixed_at: list[datetime] = []
@@ -224,7 +225,7 @@ def _classification_block(rows: Sequence[RowMapping]) -> AiBlock:
         provenance = _ai_provenance(ai_row, human_verified=verified)
     else:
         provenance = Provenance(
-            model=None, generated_at=max(fixed_at), input_kind=None, human_verified=True
+            model=None, generated_at=max(fixed_at), input_kind=None, human_verified=verified
         )
     value = ClassificationValue(
         topic=fields.get(TaxonomyField.TOPIC), method=fields.get(TaxonomyField.METHOD)

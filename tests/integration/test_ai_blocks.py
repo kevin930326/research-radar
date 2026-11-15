@@ -361,7 +361,16 @@ def test_classification_with_only_a_human_value_is_ready_without_model(
     assert block.value.method is None
     assert block.provenance is not None
     assert (block.provenance.model, block.provenance.input_kind) == (None, None)
-    assert block.provenance.human_verified is True
+    # 只修正了主題、方法沒有值：兩欄不都是人工值，不算經人工核對（ADR-0035 保守解讀第 2、5 項）。
+    assert block.provenance.human_verified is False
+
+    fix(database, paper_id, TaxonomyField.METHOD, ["case_study"])
+
+    both = _block(database, paper_id, AiProduct.CLASSIFICATION)
+    assert both is not None
+    assert both.provenance is not None
+    assert (both.provenance.model, both.provenance.input_kind) == (None, None)
+    assert both.provenance.human_verified is True
 
 
 def test_research_model_empty_and_ready(

@@ -152,6 +152,12 @@ deferred:
 
 路由說明：第 7、15、16 條照流程應是 bad_spec（由這次改動造成），但修法需要 Taxonomy 參數或讓 `repo/judgments.py` 讀 AI 表（違反既有架構測試），而 epics 2.7 沒有寫入流程；目前沒有正式呼叫端，所以記成 deferred 交給 3.11／3.12，PR 說明列為沒照流程做的地方。
 
+### 2026-11-15 — Codex 主審查（7f0576f，高 0、中 3，全部修正）
+
+  - `[medium]` `[patch]` C1 view 讀取限制可被逗號來源、變數組字串繞過 — 反向規則改成 view 名稱的字串（含 f-string 固定部分、`+` 接起來的常數、`effective_` 接變數的片段）只准出現在 `VIEW_READERS`；補反例
+  - `[medium]` `[patch]` C2 直接 SQL 可寫入對象或欄位錯的處理結果、占住 UNIQUE — 遷移 0014 加寫入前觸發器 `tg_judgment_event_resolution_matches_report`（SECURITY INVOKER、`search_path` 固定）；上面第一輪判 reject 的「處理結果指到同一筆同一欄的回報 資料庫沒擋」一併解決
+  - `[medium]` `[patch]` C3 沒有 AI 分類時一律 `human_verified=True`，與保守解讀第 2 項矛盾 — 統一兩欄判定，`Provenance` 拿掉對應限制，ADR-0035 第 2、5 項統一
+
 ## Design Notes
 
 **`judgment_event` 各 kind 的形狀（CHECK＋domain）：**
@@ -167,7 +173,7 @@ deferred:
 
 **`audit_event`：** `id`、`actor_member_id`（可空＝系統）、`actor_role`（`member`／`admin`／`system`，`system` ⇔ 成員為空）、`action`（`^[a-z][a-z0-9_]*$`）、`target_type`、`target_id`（可空）、`detail jsonb`（物件）、`created_at`；索引 `created_at`、（`target_type`, `target_id`）。
 
-**保守解讀（每項列給 Kevin）：** 意見不同＝每位成員各取最新一筆、≥2 人且整組 key 不同（管理者的最終修正不消掉標示）；分類的 `human_verified`＝區塊裡每一欄都是人工值；分類永遠不是 `empty`（至少有 `unclassified`）；研究模型 `empty`＝沒有構面、假設、情境、樣本數、限制、未來研究；只有人工值沒有 AI 值時 provenance 的模型與 `input_kind` 是空的；`PublicViewer` 只套 `visible_papers`，示範站的內容規則留給示範站的 Story。
+**保守解讀（每項列給 Kevin）：** 意見不同＝每位成員各取最新一筆、≥2 人且整組 key 不同（管理者的最終修正不消掉標示）；分類的 `human_verified`＝兩欄都是人工值（有沒有 AI 值都一樣，只有一欄有值時不算；Codex 主審查 C3 統一）；分類永遠不是 `empty`（至少有 `unclassified`）；研究模型 `empty`＝沒有構面、假設、情境、樣本數、限制、未來研究；只有人工值沒有 AI 值時 provenance 的模型與 `input_kind` 是空的；`PublicViewer` 只套 `visible_papers`，示範站的內容規則留給示範站的 Story。
 
 ## Verification
 

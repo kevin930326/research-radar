@@ -5,7 +5,8 @@ ADR-0035、Story 2.7）。
 - 形狀由 `domain/judgments.NewJudgmentEvent` 在建構時擋，CHECK 再擋一次（和遷移 0014 同一份條件；
   key 排序、去重 CHECK 不擋、domain 擋；`effective_classification` 讀人工值時也會去重、排序）。
 - 處理結果（`summary_report_resolution`）用 `INSERT … SELECT`：只有指到的那一筆是同一筆
-  `zh_summary`、同一欄的回報時才寫；一筆回報最多一筆處理結果（UNIQUE，重複時不寫）。
+  `zh_summary`、同一欄的回報時才寫；一筆回報最多一筆處理結果（UNIQUE，重複時不寫）。資料庫的
+  寫入前觸發器（遷移 0014）再擋一次，防直接寫 SQL。
 - 有效值不在這裡讀：讀 `effective_*` view（`repo/ai_blocks.py`）。權限檢查與同一個交易寫稽核在
   `services/judgments.py`（3.11、3.12、Epic 10）。
 - 寫入一律用 `text()` SQL；函式收呼叫端開好的交易連線，不 commit。

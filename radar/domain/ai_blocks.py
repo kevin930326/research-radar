@@ -86,11 +86,11 @@ class Provenance:
     """來歷：哪個模型、什麼時候產生、模型看的是什麼、是否經人工核對。
 
     只有人工值、沒有 AI 值時（例如分類只有人工修正），`model` 與 `input_kind` 都是 None，
-    `generated_at` 是最新一筆人工值的時間。
+    `generated_at` 是最新一筆人工值的時間。這時「經人工核對」照各產出自己的規則（分類是兩欄
+    都是人工值才算，只修正一欄時是否），不因為沒有 AI 值就一律是。
 
     Raises:
-        ValueError: `model` 與 `input_kind` 一個有值一個沒有、`model` 是空字串、時間沒有時區、
-            只有人工值卻沒標經人工核對。
+        ValueError: `model` 與 `input_kind` 一個有值一個沒有、`model` 是空字串、時間沒有時區。
     """
 
     model: str | None
@@ -108,8 +108,6 @@ class Provenance:
         _check_aware("generated_at", self.generated_at)
         if type(self.human_verified) is not bool:
             raise ValueError("human_verified 要是布林")
-        if self.model is None and not self.human_verified:
-            raise ValueError("沒有 AI 來歷時一定是人工值")
 
 
 # --- 值 -----------------------------------------------------------------------------------

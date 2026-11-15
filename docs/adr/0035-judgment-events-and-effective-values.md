@@ -54,7 +54,7 @@ repo 不能讀 prompt 登記（`services/prompt_loader.py`）、也不該自己�
    | `summary_report_resolution` | `zh_summary`（同回報） | 同回報 | 新：`"confirmed_ok"`／`"regenerated"`；舊：空 | `report_event_id`；角色一定是 `admin` |
 
    CHECK 擋上表除了「key 排序、不重複」以外的每一項（jsonb 陣列的順序在 CHECK 裡不好寫，交給 domain；`effective_classification` 讀人工值時另外去重、排序）；條件用 `COALESCE(…, FALSE)` 包起來，欄位是 NULL 時算違反，不會默默通過。理由有值時不能只有空白。
-2. **處理結果的寫入**：`create_judgment_event` 對處理結果用 `INSERT … SELECT`，只有指到的那一筆是同一筆 `zh_summary`、同一欄的 `summary_report` 才寫；不是就不寫、回 None。`report_event_id` UNIQUE（一筆回報最多一筆處理結果，也當外鍵索引），重複時 `ON CONFLICT DO NOTHING` 回 None。
+2. **處理結果的寫入**：`create_judgment_event` 對處理結果用 `INSERT … SELECT`，只有指到的那一筆是同一筆 `zh_summary`、同一欄的 `summary_report` 才寫；不是就不寫、回 None。`report_event_id` UNIQUE（一筆回報最多一筆處理結果，也當外鍵索引），重複時 `ON CONFLICT DO NOTHING` 回 None。資料庫另有寫入前觸發器 `tg_judgment_event_resolution_matches_report` 擋直接寫 SQL：`report_event_id` 指到的事件不是 `summary_report`、或對象、欄位不同就拒絕（`check_violation`）；錯的處理結果寫進去會占住 UNIQUE 又刪不掉（Codex 主審查 C2）。觸發器函式不用 SECURITY DEFINER、`search_path` 固定、表名寫全。
 3. **`audit_event`（`repo/audit.py`）**：`actor_member_id`（空＝系統）、`actor_role`（`member`／`admin`／`system`，`system` ⇔ 成員為空）、`action`（小寫識別字）、`target_type`、`target_id`（可空）、`detail`（jsonb 物件）、`created_at`；索引 `created_at`、（`target_type`, `target_id`）。只建表；寫入函式留給第一個寫稽核的 Story（AD-26 寫的 `record()` 不符合 repo 的命名前綴規則，名字到時候再定）。
 4. **權限（遷移 0014）**：`REVOKE UPDATE, DELETE ON judgment_event, audit_event FROM radar_app`；三個 view `REVOKE INSERT, UPDATE, DELETE`（照 0008）。
 5. **三個 view**：
@@ -70,10 +70,10 @@ repo 不能讀 prompt 登記（`services/prompt_loader.py`）、也不該自己�
 | # | 問題 | 這次的做法 | 另一種做法 | 之後能不能改 |
 |---|---|---|---|---|
 | 1 | 「成員意見不同」怎麼算 | 每位成員各取最新一筆，兩人以上而且整組 key 不同；管理者的最終修正不會消掉標示 | 管理者修正後就不算意見不同 | 可以（改 view） |
-| 2 | 分類的「經人工核對」 | 區塊裡兩欄都是人工值才算 | 任一欄是人工值就算 | 可以（改 `repo/ai_blocks.py`） |
+| 2 | 分類的「經人工核對」 | 區塊裡兩欄都是人工值才算（有沒有 AI 值都一樣；只修正一欄、另一欄沒有值時不算） | 任一欄是人工值就算 | 可以（改 `repo/ai_blocks.py`） |
 | 3 | 分類會不會是 `empty` | 不會（AI 至少給 `unclassified`） | — | — |
 | 4 | 研究模型的 `empty` | 沒有構面、假設、情境、樣本數、限制、未來研究（是不是文獻回顧不算內容） | 把是不是文獻回顧也算內容 | 可以 |
-| 5 | 只有人工值、沒有 AI 值時的來歷 | 模型與 `input_kind` 是空的、時間是最新一筆人工值、標經人工核對 | 不顯示來歷 | 可以 |
+| 5 | 只有人工值、沒有 AI 值時的來歷 | 模型與 `input_kind` 是空的、時間是最新一筆人工值；「經人工核對」照第 2 項（兩欄都是人工值才算），不因為沒有 AI 值就標 | 不顯示來歷 | 可以 |
 | 6 | 示範站（`PublicViewer`） | 只套 `visible_papers`；示範站的內容限制留給示範站的 Story | 先擋 AI 區塊 | 可以 |
 | 7 | 中文重點與研究模型的「經人工核對」 | 一律否（還沒有人工修正這兩種的事件；「已確認無誤」不算人工值） | 「已確認無誤」算核對 | 可以 |
 | 8 | 一筆回報可以有幾筆處理結果 | 最多一筆（UNIQUE）；之後再回報是另一筆回報 | 允許多筆、取最新 | 要遷移（拿掉 UNIQUE） |

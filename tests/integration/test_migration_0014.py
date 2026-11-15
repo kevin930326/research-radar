@@ -5,6 +5,8 @@
   view 只能讀取。
 - `judgment_event` 各 `kind` 的形狀由 CHECK 擋（domain 是第一道，見 `tests/unit/test_judgments.py`；
   key 排序、去重只在 domain）；`report_event_id` 要指到存在的事件、一筆回報最多一筆處理結果。
+- 處理結果的觸發器：直接寫 SQL 時，指到的事件要是同一個對象、同一欄的 `summary_report`；觸發器
+  函式不是 SECURITY DEFINER、`search_path` 固定。
 - `audit_event`：`system` ⇔ 沒有成員、`action` 的寫法、`detail` 是物件。
 """
 
@@ -344,9 +346,12 @@ def _resolution(db: TestDatabase, report_id: uuid.UUID | None, **changes: object
     ],
 )
 def test_resolution_checks(db: TestDatabase, changes: dict[str, object]) -> None:
-    report_id = _report(db, uuid.uuid4())
-    with pytest.raises(psycopg.errors.CheckViolation):
-        _resolution(db, report_id, **changes)
+    summary_id = uuid.uuid4()
+    report_id = _report(db, summary_id)
+    with pytest.raises(psycopg.errors.CheckViolation) as raised:
+        _resolution(db, report_id, target_id=summary_id, **changes)
+    # 是 CHECK 擋下的，不是處理結果的觸發器（對象、欄位都對得上）。
+    assert (raised.value.diag.constraint_name or "").startswith("ck_judgment_event_")
 
 
 def test_resolution_must_point_at_an_existing_event_and_only_once(db: TestDatabase) -> None:
@@ -358,6 +363,50 @@ def test_resolution_must_point_at_an_existing_event_and_only_once(db: TestDataba
     _resolution(db, report_id, target_id=summary_id)
     with pytest.raises(psycopg.errors.UniqueViolation):
         _resolution(db, report_id, target_id=summary_id, new_value=json.dumps("confirmed_ok"))
+
+
+RESOLUTION_TRIGGER = "tg_judgment_event_resolution_matches_report"
+
+
+def test_resolution_trigger_rejects_wrong_target_field_or_kind_written_by_raw_sql(
+    db: TestDatabase,
+) -> None:
+    summary_id = uuid.uuid4()
+    report_id = _report(db, summary_id)
+    other_report_id = _report(db, summary_id)
+    resolved_report_id = _report(db, summary_id)
+    resolution_id = _resolution(db, resolved_report_id, target_id=summary_id)
+
+    wrong: list[tuple[uuid.UUID, dict[str, object]]] = [
+        (report_id, {"target_id": uuid.uuid4()}),  # 別筆中文重點
+        (report_id, {"target_id": summary_id, "field": "method"}),  # 別欄
+        (resolution_id, {"target_id": summary_id}),  # 指到處理結果，不是回報
+    ]
+    for pointed_at, changes in wrong:
+        with pytest.raises(psycopg.errors.CheckViolation) as raised:
+            _resolution(db, pointed_at, **changes)
+        assert raised.value.diag.constraint_name == RESOLUTION_TRIGGER
+
+    # 錯的都沒寫進去，UNIQUE 沒被占住：正確的處理結果照樣寫得進去。
+    assert _app(
+        db, "SELECT count(*) FROM judgment_event WHERE report_event_id = %s", report_id
+    ) == [(0,)]
+    _resolution(db, report_id, target_id=summary_id)
+    _resolution(db, other_report_id, target_id=summary_id, new_value=json.dumps("confirmed_ok"))
+
+
+def test_resolution_trigger_function_is_not_security_definer_and_pins_search_path(
+    db: TestDatabase,
+) -> None:
+    with connect_admin(db.name) as admin:
+        rows = admin.execute(
+            "SELECT p.prosecdef, p.proconfig FROM pg_trigger AS t"
+            " JOIN pg_proc AS p ON p.oid = t.tgfoid"
+            " WHERE t.tgrelid = 'judgment_event'::regclass AND t.tgname = %s",
+            (RESOLUTION_TRIGGER,),
+        ).fetchall()
+
+    assert rows == [(False, ["search_path=pg_catalog, pg_temp"])]
 
 
 # --- audit_event 的 CHECK -------------------------------------------------------------------

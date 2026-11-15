@@ -207,8 +207,9 @@ def test_provenance_with_only_human_values_has_no_model() -> None:
     provenance = Provenance(model=None, generated_at=AT, input_kind=None, human_verified=True)
 
     assert provenance.model is None
-    with pytest.raises(ValueError, match="人工值"):
-        Provenance(model=None, generated_at=AT, input_kind=None, human_verified=False)
+    # 只有人工值不代表經人工核對（分類只修正一欄時是否，ADR-0035 保守解讀第 2、5 項）。
+    partial = Provenance(model=None, generated_at=AT, input_kind=None, human_verified=False)
+    assert (partial.model, partial.human_verified) == (None, False)
     with pytest.raises(ValueError, match="一起"):
         Provenance(model="m", generated_at=AT, input_kind=None, human_verified=False)
     with pytest.raises(ValueError, match="時區"):

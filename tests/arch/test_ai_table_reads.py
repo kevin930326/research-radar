@@ -10,8 +10,13 @@
 
 有效值只由三個 view 決定（AD-10、Story 2.7）：正向檢查 `repo/ai_blocks.py` 讀的是
 `effective_zh_summary`、`effective_classification`、`effective_research_model`；反向檢查 `radar/`
-裡讀這三個 view 只准在允許清單（`VIEW_READERS`）裡的模組。view 本身不接可見範圍，讀的模組要自己
-接 `visible_papers`。
+裡三個 view 的名稱只准出現在允許清單（`VIEW_READERS`）裡的模組。view 本身不接可見範圍，讀的模組要
+自己接 `visible_papers`。
+
+反向檢查不看 SQL 怎麼寫（逗號來源 `FROM paper p, effective_classification e`、JOIN、先把名稱放進
+變數再組字串、SQLAlchemy 的 `table("…")` 都一樣）：字串常數（含 f-string 的固定部分、`+` 接起來
+的常數）裡出現 view 的名稱就算；以 `effective_` 結尾、後面接變數的片段（`f"effective_{x}"`、
+`"effective_" + x`）也算。docstring 與註解不算（不會被執行）；遷移檔與測試不在 `radar/` 裡，不受限。
 """
 
 import ast
@@ -45,6 +50,11 @@ _VIEW_READ = re.compile(
 # 准讀三個有效值 view 的模組。view 不接可見範圍：之後新增讀取者時加進這裡，並在查詢裡接上
 # `repo/visibility.py` 的可見條件（`visible_papers`）。
 VIEW_READERS = frozenset({"radar/repo/ai_blocks.py"})
+# 反向檢查：view 的全名出現在字串裡任何位置；或 `effective_` 後面沒有接英數字（字串結尾、f-string
+# 的佔位字元、空白），代表後半段是組出來的。
+_VIEW_MENTION = re.compile(
+    rf"({'|'.join(EFFECTIVE_VIEWS)})|effective_(?![A-Za-z0-9_])", re.IGNORECASE
+)
 
 
 def _reads_in_strings(source: str) -> list[str]:
@@ -169,13 +179,44 @@ def test_view_scanner_sees_from_and_join_only() -> None:
     assert effective_view_reads(source) == {"effective_zh_summary", "effective_classification"}
 
 
-def effective_view_read_problems(sources: Mapping[str, str]) -> list[str]:
-    """`sources`（相對路徑 → 原始碼）裡，在 `VIEW_READERS` 以外讀有效值 view 的地方。"""
+def _folded_concatenations(tree: ast.Module) -> list[str]:
+    """`"a" + "b"` 這種全是字串常數的 `+`，接起來的結果（巢狀的每一層都算）。"""
+
+    def fold(node: ast.expr) -> str | None:
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return node.value
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+            left, right = fold(node.left), fold(node.right)
+            if left is not None and right is not None:
+                return left + right
+        return None
+
     return [
-        f"{relative}：讀 {view}，只准在 {sorted(VIEW_READERS)}（要接 visible_papers）"
+        folded
+        for node in ast.walk(tree)
+        if isinstance(node, ast.BinOp)
+        if (folded := fold(node)) is not None
+    ]
+
+
+def effective_view_mentions(source: str) -> set[str]:
+    """原始碼的字串常數裡提到的有效值 view 名稱（組出來的片段記成 `effective_…`）。"""
+    tree = ast.parse(source)
+    return {
+        (match.group(1) or "effective_…").lower()
+        for literal in [*_string_literals(tree), *_folded_concatenations(tree)]
+        for match in _VIEW_MENTION.finditer(literal)
+    }
+
+
+def effective_view_read_problems(sources: Mapping[str, str]) -> list[str]:
+    """`sources`（相對路徑 → 原始碼）裡，在 `VIEW_READERS` 以外提到有效值 view 名稱的地方。"""
+    return [
+        f"{relative}：提到 {view}，有效值 view 只准在 {sorted(VIEW_READERS)} 讀"
+        "（要接 visible_papers）"
         for relative, source in sorted(sources.items())
         if relative not in VIEW_READERS
-        for view in sorted(effective_view_reads(source))
+        for view in sorted(effective_view_mentions(source))
     ]
 
 
@@ -185,16 +226,46 @@ def test_only_allowed_modules_read_the_effective_views() -> None:
 
 def test_view_read_scanner_catches_reads_outside_the_allowlist() -> None:
     sources = {
-        "radar/repo/stats.py": 'SQL = "SELECT field, keys FROM effective_classification"',
-        "radar/services/x.py": 'SQL = "SELECT 1 FROM paper p JOIN public.effective_zh_summary z"',
-        # 不算：允許的模組、docstring。
+        "radar/repo/a_from.py": 'SQL = "SELECT field, keys FROM effective_classification"',
+        "radar/repo/b_join.py": 'SQL = "SELECT 1 FROM paper p JOIN public.effective_zh_summary z"',
+        # 逗號來源：FROM 後面先是別的表。
+        "radar/repo/c_comma.py": (
+            'SQL = "SELECT e.* FROM paper p, effective_classification e WHERE p.id = e.paper_id"'
+        ),
+        # 名稱先放進變數，再組字串。
+        "radar/repo/d_variable.py": (
+            'VIEW = "effective_research_model"\n'
+            'def f(c):\n    return c.execute(f"SELECT * FROM {VIEW}")'
+        ),
+        "radar/repo/e_quoted.py": "SQL = 'SELECT 1 FROM \"Effective_ZH_Summary\"'",
+        # 名稱拆成兩半再接起來。
+        "radar/repo/f_split.py": 'SQL = "SELECT 1 FROM " + "effective" + "_classification"',
+        "radar/repo/g_suffix_var.py": (
+            'def f(kind):\n    return "SELECT 1 FROM effective_" + kind'
+        ),
+        "radar/repo/h_suffix_fstring.py": (
+            'def f(kind):\n    return f"SELECT 1 FROM effective_{kind} AS e"'
+        ),
+        "radar/repo/i_sqlalchemy.py": (
+            'import sqlalchemy as sa\nVIEW = sa.table("effective_zh_summary")'
+        ),
+        # 不算：允許的模組、docstring、註解、別的以 effective_ 開頭的字。
         "radar/repo/ai_blocks.py": 'SQL = "SELECT 1 FROM effective_research_model"',
-        "radar/repo/doc.py": '"""SELECT 1 FROM effective_research_model"""',
+        "radar/repo/doc.py": '"""讀 effective_research_model 要經 repo/ai_blocks.py。"""',
+        "radar/repo/comment.py": "# effective_classification 的說明\nX = 1",
+        "radar/repo/other.py": 'SQL = "SELECT effective_date FROM paper"',
     }
 
     problems = effective_view_read_problems(sources)
 
     assert [problem.split("：")[0] for problem in problems] == [
-        "radar/repo/stats.py",
-        "radar/services/x.py",
+        "radar/repo/a_from.py",
+        "radar/repo/b_join.py",
+        "radar/repo/c_comma.py",
+        "radar/repo/d_variable.py",
+        "radar/repo/e_quoted.py",
+        "radar/repo/f_split.py",
+        "radar/repo/g_suffix_var.py",
+        "radar/repo/h_suffix_fstring.py",
+        "radar/repo/i_sqlalchemy.py",
     ], problems
