@@ -53,7 +53,7 @@ Story 1.1 之前沒有 CI：檢查只在 Kevin 的 Mac 手動跑，映像只在 
 
 全部選 B。
 
-1. **觸發**：所有分支的 `push`，以及所有 `pull_request`。
+1. **觸發**：所有分支的 `push`，以及所有 `pull_request`。（2026-11-15 改成 `push` 只看 `main`，見最後的「補充」。）
 2. **三個 job**
    - `checks`（`ubuntu-24.04`）：依序跑 ruff（風格、排版）、mypy、import-linter、pytest（`unit`、`integration`、`arch` 分三次）、gitleaks、pip-audit；任何一步失敗，整個 job 就失敗。前面的檢查失敗時，後面的檢查一般就不跑，但 gitleaks 與 pip-audit 例外（`if: ${{ !cancelled() }}`）：秘密外洩與有漏洞的套件不能因為別的檢查先失敗而沒被回報。
    - `image`（matrix：`ubuntu-24.04` 建 amd64、`ubuntu-24.04-arm` 建 arm64）：`needs: checks`。建映像 → `.github/scripts/smoke.sh` 冒煙 → push 事件才登入並以 `<完整 commit SHA>-<架構>` 推 GHCR。
@@ -100,3 +100,19 @@ Story 1.1 之前沒有 CI：檢查只在 Kevin 的 Mac 手動跑，映像只在 
 - **原生執行機**：CPU 架構和要建的映像一樣的 CI 機器（amd64 用 Intel／AMD 的機器、arm64 用 Arm 的機器），不靠模擬。
 - **QEMU**：在一種 CPU 上模擬另一種 CPU 的軟體；能在 amd64 上建 arm64 映像，但慢，也不保證真的 Arm 機器跑得動。
 - **預期失敗（strict xfail）**：先寫明「這個測試應該失敗」；真的失敗才算過，意外通過反而算錯。
+
+## 補充（Kevin 2026-11-15）：push 只看 main，同一個 PR 的舊執行會被取消
+
+「取捨」裡留給 Kevin 決定的那一項，現在定了。
+
+- **發生什麼事**：11 月 14、15 兩天，自動執行的幾條線一共跑了 261 次 CI，用掉 2,696 分鐘（每月額度 3,000）。其中 pull_request 事件的 1,015 分鐘（約 38%）和 push 事件跑的是同一個 commit。
+- **決定**：
+  1. `push` 只在 `main` 觸發；分支上的 commit 由 `pull_request` 檢查一次。疊在別的分支上的 PR 照樣檢查（`pull_request` 不限目標分支）。
+  2. 加 `concurrency`：同一個 PR 有新的 commit 時，取消還在跑的舊執行；`main` 上的不取消。
+- **放棄了什麼**：
+  - PR 分支的 commit 不再推映像，只有 `main` 的 commit 有映像。目前沒有任何流程用到分支的映像。
+  - 還沒開 PR 的分支推上去不會跑 CI：要看 CI 結果就先開 PR（草稿也可以）。
+  - PR 的檢查對象是 GitHub 產生的「合併後」commit，不是分支的 commit 本身；合併進 `main` 之後 `main` 的 push 會再完整跑一次。
+  - 連續推兩次時，前一個 commit 沒有 CI 結果（被取消）。
+- **沒有改的**：三個 job 的內容、映像的標籤規則、不用 repo secret、action 釘 commit SHA。
+- **之後還不夠省的話**（都還沒做）：`image` 只在 `main` 跑、`web` 只在動到 `web/` 時跑、自動執行的每個 Story 修正集中成一次推送。

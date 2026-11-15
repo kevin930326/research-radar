@@ -50,13 +50,22 @@ def _steps(job: str) -> list[dict[str, Any]]:
     return steps
 
 
-def test_triggers_on_every_branch_push_and_every_pull_request() -> None:
+def test_triggers_on_main_push_and_every_pull_request() -> None:
+    # ADR-0017 補充（Kevin 2026-11-15）：push 只看 main，分支上的 commit 由 pull_request 檢查一次。
     workflow = _workflow()
     # YAML 1.1 會把沒加引號的 on 讀成 True。
     triggers: dict[str, Any] = workflow["on"] if "on" in workflow else workflow[True]
     assert set(triggers) == {"push", "pull_request"}
-    assert triggers["push"] == {"branches": ["**"]}
-    assert not triggers["pull_request"]  # 不限 branches、paths
+    assert triggers["push"] == {"branches": ["main"]}
+    assert not triggers["pull_request"]  # 不限 branches、paths（疊在別的分支上的 PR 也要檢查）
+
+
+def test_newer_commit_cancels_the_running_pr_check_but_never_main() -> None:
+    concurrency = _workflow()["concurrency"]
+    # 同一個 PR 一組；不是 PR（main 的 push）時用 ref 分組。
+    assert concurrency["group"] == "ci-${{ github.event.pull_request.number || github.ref }}"
+    # 只有 pull_request 事件會取消舊的執行：main 上每個合併都要跑完、推映像。
+    assert concurrency["cancel-in-progress"] == "${{ github.event_name == 'pull_request' }}"
 
 
 def test_workflow_uses_no_repo_secrets() -> None:
