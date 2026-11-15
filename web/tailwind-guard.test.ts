@@ -12,6 +12,7 @@ import {
   formatError,
   isCheckedFile,
   loadDesignSystem,
+  NOT_CLASSES,
   tailwindGuard,
 } from "./tailwind-guard.ts";
 
@@ -41,6 +42,39 @@ describe("tailwind guard", () => {
     expect(checkFile(path.join(FIXTURES, "DefaultTailwindClass.tsx")).sort()).toEqual(
       ["bg-red-500", "lg:flex", "m-0", "text-xl"].sort(),
     );
+  });
+
+  it("blocks arbitrary breakpoints, custom @media / @container and dark: even though they emit CSS", () => {
+    expect(checkFile(path.join(FIXTURES, "ForbiddenVariants.tsx")).sort()).toEqual(
+      [
+        "min-[1024px]:flex",
+        "max-[600px]:hidden",
+        "[@media(min-width:900px)]:flex",
+        "[@container(min-width:400px)]:flex",
+        "@min-[400px]:flex",
+        "dark:bg-background",
+      ].sort(),
+    );
+    // not- 包一層也一樣；主題裡的斷點（split、max-split、tablet）照樣可以用。
+    expect(findInvalidClasses(design, ["not-dark:flex", "hover:max-[600px]:hidden"])).toEqual([
+      "not-dark:flex",
+      "hover:max-[600px]:hidden",
+    ]);
+    expect(findInvalidClasses(design, ["split:flex", "max-split:hidden", "tablet:grid-cols-3", "min-w-[0]"])).toEqual(
+      [],
+    );
+  });
+
+  it("the not-a-class list: every entry has a reason and would be flagged without the list", () => {
+    expect(NOT_CLASSES.size).toBeGreaterThan(0);
+    for (const [word, reason] of NOT_CLASSES) {
+      expect(reason.trim(), word).not.toBe("");
+    }
+    const words = [...NOT_CLASSES.keys()];
+    expect(findInvalidClasses(design, words)).toEqual([]);
+    // 只放過整個字：前面加 variant 就是想當類別用，照樣擋（也證明每一項不放清單就會被擋）。
+    const asClasses = words.map((word) => `hover:${word}`);
+    expect(findInvalidClasses(design, asClasses)).toEqual(asClasses);
   });
 
   it("allows token classes, layout arbitrary values, i18n keys, URLs, sentences and component props", () => {

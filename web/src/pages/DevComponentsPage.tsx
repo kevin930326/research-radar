@@ -28,6 +28,8 @@ i18n.addResourceBundle(LANGUAGE, "dev", dev, true, true);
 const SECTION_CLASS = "flex flex-col gap-6 border-t border-hairline py-12";
 const HEADING_CLASS = "font-title-zh text-section-title-zh text-text-primary";
 const TOKEN_CLASS = "font-mono text-label-mono text-text-tertiary";
+// 有說明框的那一排下面多留 64px（spacing-16）：說明框往下展開（約 90px）時不壓到下一段的分隔線與標題。
+const POPOVER_ROW_CLASS = "flex flex-wrap items-center gap-6 pb-16";
 
 function Section({ id, title, children }: { id: string; title: string; children: ReactNode }) {
   return (
@@ -110,7 +112,7 @@ export function DevComponentsPage() {
       </Section>
 
       <Section id="ai-badges" title={t("dev:dev.sections.aiBadges")}>
-        <div className="flex flex-wrap items-center gap-6">
+        <div className={POPOVER_ROW_CLASS}>
           <AiBadge provenance={UNVERIFIED} first />
           <AiBadge provenance={UNVERIFIED} />
           <AiBadge provenance={VERIFIED} />
@@ -118,7 +120,7 @@ export function DevComponentsPage() {
       </Section>
 
       <Section id="status-tags" title={t("dev:dev.sections.statusTags")}>
-        <div className="flex flex-wrap items-center gap-6">
+        <div className={POPOVER_ROW_CLASS}>
           <StatusTag info={t("dev:dev.examples.outOfScopeInfo")}>{t("dev:dev.examples.outOfScope")}</StatusTag>
           <StatusTag>{t("dev:dev.examples.private")}</StatusTag>
         </div>

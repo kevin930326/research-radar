@@ -2,7 +2,8 @@
 // 不能少也不能多；斷點只有 DESIGN.md 內文的四個值；元件示範頁列出每個顏色與字級代幣，
 // 字級用的字體對到 DESIGN.md 的 fontFamily。
 // YAML 用這裡的小解析器讀（只認 DESIGN.md 用到的兩層「名稱: 值」），不另裝套件。
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync, statSync } from "node:fs";
+import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
@@ -229,6 +230,17 @@ describe("DESIGN.md tokens equal the Tailwind theme", () => {
     expect(outside).not.toMatch(/\b(?:rgba?|hsla?|hwb|lab|lch|oklab|oklch|color-mix)\(/i);
     expect(outside).not.toMatch(/font-size\s*:\s*[-\d.]+(?:px|rem|em|pt)\b/i);
     expect(outside).not.toMatch(/(?:^|[;{\s])font\s*:\s*[^;]*\d(?:px|rem|em|pt)\b/i);
+  });
+
+  it("styles.css is the only CSS file under src/ (no other stylesheet escapes these checks)", () => {
+    const srcDir = path.dirname(STYLES_PATH);
+    const walk = (directory: string): string[] =>
+      readdirSync(directory).flatMap((name) => {
+        const file = path.join(directory, name);
+        return statSync(file).isDirectory() ? walk(file) : [file];
+      });
+    const stylesheets = walk(srcDir).filter((file) => /\.(?:css|scss|sass|less|styl|pcss)$/i.test(file));
+    expect(stylesheets.map((file) => path.relative(srcDir, file))).toEqual(["styles.css"]);
   });
 
   it("mobile overrides keep the token names (page-title-zh 28px, paper-title 26px)", () => {

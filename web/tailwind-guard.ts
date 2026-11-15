@@ -5,6 +5,10 @@
 // 的 hover:、split: 等）後，本體能被解析成某個 utility（靜態的，或帶值的），但整個類別不產生 CSS，
 // 就算錯。判斷和實際產生的 CSS 用同一套規則，所以不會走樣。
 //
+// 另外兩種會產生 CSS、但違反 ADR-0010 第 15 點（斷點只有 DESIGN.md 的四個值）與「只有深色主題」的寫法也算錯：
+// 任意值斷點（min-[1024px]:、max-[600px]:、@min-[400px]:、[@media(...)]:、[@container(...)]:）與 dark:。
+// 少數「長得像類別、但其實是元件屬性值」的英文字（inline-start、flex-start 這類）放在 NOT_CLASSES，每項附理由。
+//
 // 用的是 tailwindcss 4.3.5 的 __unstable__loadDesignSystem（版本在 package.json 釘死；升級後介面若變了，
 // tailwind-guard.test.ts 會壞）。vite.config.ts 的外掛與單元測試共用這一份。
 import { readFileSync } from "node:fs";
@@ -103,20 +107,58 @@ function looksLikeUtility({ theme, defaults }: GuardSystems, body: string): bool
   return candidates.length > 0 && defaults.candidatesToCss([bare])[0] !== null;
 }
 
-/** 回傳看起來像 Tailwind 類別、但不產生 CSS 的那些（不重複、照出現順序）。 */
+/**
+ * 不是類別的字串（例外清單）：程式裡常當成元件屬性值或資料、剛好被 Tailwind 解析成「不產生 CSS 的類別」的字。
+ * 只比對整個字（不含 variant）。每一項都要寫理由；要加新的，先確認它真的不是想當類別用。
+ */
+export const NOT_CLASSES: ReadonlyMap<string, string> = new Map([
+  ["inline-start", "Base UI 定位元件的 side 屬性值（說明框、選單出現在哪一側）"],
+  ["inline-end", "Base UI 定位元件的 side 屬性值"],
+  ["top-start", "定位元件的 placement 寫法（上方、靠起點對齊）"],
+  ["top-end", "定位元件的 placement 寫法"],
+  ["bottom-start", "定位元件的 placement 寫法（下方、靠起點對齊）"],
+  ["bottom-end", "定位元件的 placement 寫法"],
+  ["flex-start", "CSS 的 align-items／justify-content 值，用在 style 或資料裡"],
+  ["flex-end", "CSS 的 align-items／justify-content 值"],
+  ["row-reverse", "CSS 的 flex-direction 值"],
+  ["col-reverse", "排序方向之類的資料值"],
+  ["ease-in", "CSS／動畫函式庫的時間曲線名稱"],
+  ["ease-out", "CSS／動畫函式庫的時間曲線名稱"],
+  ["order-asc", "排序參數的值（例如 API 查詢字串）"],
+  ["order-desc", "排序參數的值（例如 API 查詢字串）"],
+]);
+
+/** 去掉 not- 前綴後，這個 variant 是任意值斷點、自訂 @media／@container 或 dark（ADR-0030）。 */
+function isForbiddenVariant(variant: string): boolean {
+  const bare = variant.replace(/^(?:not-)+/, "");
+  return bare === "dark" || /^(?:@?(?:min|max)-\[|@\[|\[@(?:media|container))/.test(bare);
+}
+
+/**
+ * 回傳建置不准的類別（不重複、照出現順序）：看起來像 Tailwind 類別、但不產生 CSS 的，
+ * 以及用了任意值斷點、自訂 @media／@container 或 dark: 的。
+ */
 export function findInvalidClasses(systems: GuardSystems, tokens: Iterable<string>): string[] {
   const suspects: string[] = [];
+  const forbidden = new Set<string>();
   for (const token of new Set(tokens)) {
-    const body = splitVariants(token).at(-1) ?? "";
+    if (NOT_CLASSES.has(token)) {
+      continue;
+    }
+    const parts = splitVariants(token);
+    const body = parts.at(-1) ?? "";
     if (looksLikeUtility(systems, body)) {
       suspects.push(token);
+      if (parts.slice(0, -1).some(isForbiddenVariant)) {
+        forbidden.add(token);
+      }
     }
   }
   if (suspects.length === 0) {
     return [];
   }
   const css = systems.theme.candidatesToCss(suspects);
-  return suspects.filter((_token, index) => css[index] === null);
+  return suspects.filter((token, index) => css[index] === null || forbidden.has(token));
 }
 
 /**
@@ -170,7 +212,7 @@ export function isCheckedFile(id: string): boolean {
 }
 
 export function formatError(file: string, invalid: readonly string[]): string {
-  return `${path.relative(WEB_ROOT, file)}：這些類別不產生 CSS（DESIGN.md 沒有這個代幣，或是已清掉的 Tailwind 預設類別）：${invalid.join(", ")}`;
+  return `${path.relative(WEB_ROOT, file)}：這些類別不產生 CSS（DESIGN.md 沒有這個代幣，或是已清掉的 Tailwind 預設類別），或用了 DESIGN.md 以外的斷點、dark:（只有深色主題）：${invalid.join(", ")}`;
 }
 
 /** Vite 外掛：建置與開發伺服器轉換每個 src/ 檔案時檢查，有錯就讓建置失敗。 */

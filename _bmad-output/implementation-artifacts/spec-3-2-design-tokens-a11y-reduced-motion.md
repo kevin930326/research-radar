@@ -173,6 +173,19 @@ deferred:
   - `[low]` `[reject]` （Intent）只有深色主題沒有直接測試 — 沒有淺色代幣也沒有切換元件；代幣測試不准多出前綴已間接守住。
   - `[false]` `[reject]` （Intent）改了 3.1 的元件超出範圍 — 規格的 Tasks 明列這些元件要換掉不產生 CSS 的類別，是建置檢查的必要結果。
 
+### 2026-11-15 — 獨立審查（Opus，PR #63，審 0ef4800）
+- verdicts: 9 findings — high 0, medium 3, low 6；8 條照修、1 條不同意（主對話 triage：`docs/runs/epic-3a/reviews/3.2-triage.md`）
+- findings:
+  - `[medium]` `[patch]` 說明框展開蓋住下一段的分隔線（示範頁每段 py-12 小於說明框高度）；Positioner 沒有層級 — 已修：示範頁 AI 標章與狀態標記兩排下面多留 `pb-16`（64px，既有間距代幣）；`InfoPopover` 的 Positioner 加 `z-10`；e2e 新增「1440／1000／500 點開每個說明框，底端不超過下一段頂端」；重拍三張截圖。
+  - `[medium]` `[patch]` 任意值斷點（`min-[…]`、`max-[…]`、`[@media…]`）與 `dark:` 會產生 CSS、建置檢查放行 — 已修：`tailwind-guard.ts` 把任意值斷點、容器查詢 `@min-[…]`／`@max-[…]`／`@[…]`、`[@media…]`、`[@container…]` 與 `dark`（含 `not-` 包一層）判為錯；補違反檔 `lint-fixtures/src/components/ForbiddenVariants.tsx` 與測試；錯誤訊息加上這一類。
+  - `[medium]` `[reject]` WebKit 在 Linux 按 Alt+Tab 會跳過連結 — 不同意：CI 實測（run 43669129810、43669362436 的 web job）webkit 的 a11y-floor 全過，包括有「回首頁」連結的 member `/no/such/page`；不改。
+  - `[low]` `[patch]` 顏色名稱規則 `[a-z]+` 誤擋 `color="primary"`；`width: "2em"` 被當字級擋 — 已修：改用 CSS 標準 148 個顏色名稱清單（transparent、currentColor、inherit、none 本來就不在清單）；單獨的 rem／em／pt 當成物件屬性或 JSX 屬性的值時只在字級屬性擋；`AllowedStyles.tsx` 補 `color="primary"`、`width: "2em"`。
+  - `[low]` `[patch]` 漏網寫法（`shadow-[0_0_4px_red]`、`bg-[color:red]`、`[color:red]`、`[background:white]`、`text-body/[20px]`、style 的 lineHeight／letterSpacing；styles.css 以外的 CSS 檔沒人管） — 已修：任意值方括號裡的顏色名稱一律擋（取代原本只看顏色類工具的規則）；`text-…/[…]`、`text-…/(…)` 與 lineHeight／letterSpacing 寫死併進字級規則；`design-tokens.test.ts` 斷言 `src/` 只有 `styles.css` 一個 CSS 檔；補違反檔 `ArbitraryColor.tsx`、`HardcodedLineHeight.tsx`。
+  - `[low]` `[patch]` `inline-start`、`flex-start`、`order-desc` 這類非類別字串會讓建置失敗，沒有例外機制 — 已修：`tailwind-guard.ts` 加例外清單 `NOT_CLASSES`（14 項，每項附理由；只比對整個字，加了 variant 照樣擋）；測試確認每項有理由、不放清單就會被擋；寫進 ADR-0030。
+  - `[low]` `[patch]` `outline-none`、`outline-0`、`focus:outline-none`、`transition-all`、`transition` 能通過 — 已修：ESLint 擋 `outline-none`／`outline-0`／`outline-hidden`、`focus:`／`focus-visible:`／`focus-within:` 後面的 `outline-…`／`ring-…`，以及整組的 `transition`、`transition-all`；補違反檔 `FocusOutlineRemoved.tsx`。
+  - `[low]` `[patch]` lang 檢查只看 PaperText 自己加的屬性，永遠不會失敗；中文論文傳 zh-Hant 會誤報 — 已修：改成每個 `[data-paper-text]` 自己的 lang 要和內容語言一致（英文剛好是 `en`，和原本的斷言一樣嚴；有中日韓文字的要 `zh` 開頭）；加反例測試（注入沒有 lang、空 lang、不一致的元素要被抓到，`zh-Hant` 的中文標題不誤報）。
+  - `[low]` `[patch]` 說明框是 role=dialog 但沒有名稱；axe 只在說明框關著時跑 — 已修：Popup 用 `aria-labelledby` 指向觸發按鈕（名稱就是按鈕上 EXPERIENCE.md 既有的字，例如「AI 整理」「追蹤範圍外」，不另寫文字）；開發站加「每個說明框點開、淡入結束後跑 axe」；e2e 斷言說明框的無障礙名稱。
+
 ## Design Notes
 
 - **為什麼不只靠 `--*: initial`**：清掉主題後，`bg-red-500` 只是「不產生 CSS」，建置不會失敗。檢查用 Tailwind 自己的設計系統判斷，所以規則和實際產生的 CSS 永遠一致；用的是 4.3.5 的 `__unstable__` 介面，版本鎖死，升級時有測試會壞給你看。

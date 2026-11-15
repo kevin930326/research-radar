@@ -1,5 +1,5 @@
 // 元件示範頁（/dev/components，Story 3.2）：六種元件都在、AI 標章的說明框點開有完整說法／模型／台北日期、
-// Esc 關閉；1440／1000／500 量位置；三張截圖（chromium，先點開一個說明框）。
+// Esc 關閉、說明框有名稱、展開時不壓到下一段；1440／1000／500 量位置；三張截圖（chromium，先點開一個說明框）。
 import { fileURLToPath } from "node:url";
 
 import dev from "../src/i18n/zh-TW/dev.json" with { type: "json" };
@@ -91,6 +91,46 @@ test("the popover also opens on hover and from the keyboard", async ({ page }) =
   await expect(popup).toBeVisible();
   await page.keyboard.press("Escape");
   await expect(popup).toHaveCount(0);
+});
+
+test("each popover is a dialog named after the words on its trigger", async ({ page }) => {
+  await page.goto(URL_);
+  const popup = page.locator("[data-info-popover]");
+
+  await page.locator("[data-dev-section='ai-badges'] button").nth(1).click();
+  await expect(popup).toHaveAttribute("role", "dialog");
+  await expect(popup).toHaveAccessibleName(TEXT["ai:ai.badge.short"]);
+  await page.keyboard.press("Escape");
+  await expect(popup).toHaveCount(0);
+
+  await page.locator("[data-dev-section='status-tags'] button").click();
+  await expect(popup).toHaveAccessibleName(EXAMPLES.outOfScope);
+  await page.keyboard.press("Escape");
+  await expect(popup).toHaveCount(0);
+});
+
+test("an open popover does not cover the next section", async ({ page }) => {
+  for (const width of Object.keys(GUTTERS).map(Number)) {
+    await page.setViewportSize({ width, height: 900 });
+    await page.goto(URL_);
+    await page.evaluate(() => document.fonts.ready);
+    for (const [section, next] of [
+      ["ai-badges", "status-tags"],
+      ["status-tags", "focus"],
+    ] as const) {
+      const triggers = page.locator(`[data-dev-section='${section}'] [data-info-popover-trigger]`);
+      for (let index = 0; index < (await triggers.count()); index += 1) {
+        await triggers.nth(index).click();
+        const popup = page.locator("[data-info-popover]");
+        await expect(popup).toHaveCSS("opacity", "1");
+        const box = await popup.boundingBox();
+        const nextTop = (await page.locator(`[data-dev-section='${next}']`).boundingBox())?.y ?? 0;
+        expect((box?.y ?? 0) + (box?.height ?? 0), `${width}px ${section} #${index}`).toBeLessThanOrEqual(nextTop);
+        await page.keyboard.press("Escape");
+        await expect(popup).toHaveCount(0);
+      }
+    }
+  }
 });
 
 test("a status tag with an explanation opens a popover", async ({ page }) => {

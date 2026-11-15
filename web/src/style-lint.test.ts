@@ -10,6 +10,8 @@ const WEB_ROOT = fileURLToPath(new URL("..", import.meta.url));
 const COLOR = /不得寫死色碼/;
 const FONT_SIZE = /不得寫死字級/;
 const REDUCED_MOTION = /use-reduced-motion\.ts/;
+const OUTLINE = /焦點外框只用 styles\.css/;
+const TRANSITION = /不得用 transition／transition-all/;
 
 interface Finding {
   line: number;
@@ -63,6 +65,29 @@ describe("style lint rules", () => {
     // 2: "1.2rem"、7: text-[13px]、8: [font-size:13px]、9: fontSize: 13、11: font: "13px serif"、
     // 12: leading-[1.2]、13: tracking-[0.1em]、14: font-[600]、16: SVG fontSize="13"、22: "font-size: 13px"
     expectBlockedLines(findings, [2, 7, 8, 9, 11, 12, 13, 14, 16, 22], FONT_SIZE);
+  });
+
+  it("blocks CSS color names inside any arbitrary value and in style colors", async () => {
+    const findings = await lint("lint-fixtures/src/components/ArbitraryColor.tsx");
+    // 5: shadow-[0_0_4px_red]、6: bg-[color:red]、7: [color:red]、8: hover:[background:white]、
+    // 9: color "rebeccapurple"、10: border-[1px_solid_gainsboro]
+    expectBlockedLines(findings, [5, 6, 7, 8, 9, 10], COLOR);
+  });
+
+  it("blocks hard-coded line heights and letter spacing", async () => {
+    const findings = await lint("lint-fixtures/src/components/HardcodedLineHeight.tsx");
+    // 5: text-body/[20px]、6: lineHeight "20px"、7: letterSpacing 2、9: SVG letterSpacing="2"、
+    // 11: md:text-caption/(--leading)
+    expectBlockedLines(findings, [5, 6, 7, 9, 11], FONT_SIZE);
+  });
+
+  it("blocks removing or restyling the focus ring, and transition / transition-all", async () => {
+    const findings = await lint("lint-fixtures/src/components/FocusOutlineRemoved.tsx");
+    // 5: outline-none、6: focus-visible:outline-0、7: outline-hidden、8: focus:outline-none、
+    // 9: focus-visible:outline-2
+    expectBlockedLines(findings, [5, 6, 7, 8, 9], OUTLINE);
+    // 10: transition-all、11: transition、12: hover:transition
+    expectBlockedLines(findings, [10, 11, 12], TRANSITION);
   });
 
   it("blocks querying prefers-reduced-motion outside the shared hook", async () => {

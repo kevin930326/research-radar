@@ -3,8 +3,8 @@
 // (2) 看得到的按鈕與連結至少 44×44；
 // (3) 720×450（1440 寬放大 200%）沒有橫向捲動、文字元素互不重疊；
 // (4) 第一層標題剛好一個；
-// (5) 論文標題與摘要元素有 lang="en"；
-// (6) 開發站另跑 axe（正式建置由 3.1 的 a11y.spec.ts 跑）。
+// (5) 論文標題與摘要元素自己有 lang，且和內容的語言一致（英文是 en，中文是 zh 開頭）；
+// (6) 開發站另跑 axe（正式建置由 3.1 的 a11y.spec.ts 跑），每個說明框點開後也跑一次。
 // 頁面清單和站內連結檢查同一份（pages.ts），新頁面加進來就自動被檢查。
 // 「找不到這一頁」（MISSING_PATH）也跑 (1)～(3)；它沒有第一層標題（EXPERIENCE.md 沒有那段文字），
 // 所以不跑 (4)～(6)，要不要補待 Kevin 決定。
@@ -90,6 +90,23 @@ async function walkFocus(page: Page, browserName: string): Promise<FocusWalk> {
     if (problem !== null) problems.push(problem);
   }
   return { expectedCount, visited, problems };
+}
+
+/**
+ * 每個論文標題與摘要（[data-paper-text]）的 lang 是否和內容的語言一致；回傳不一致的（空的才算通過）。
+ * lang 要寫在元素自己身上（不能靠 <html lang> 繼承）。內容有中日韓文字的是中文論文，lang 要是 zh 開頭；
+ * 其他是英文（追蹤的期刊都是英文期刊），lang 要剛好是 en。
+ */
+async function paperLangProblems(page: Page): Promise<string[]> {
+  return page.evaluate(() => {
+    const cjk = /[\u3400-\u9fff\uf900-\ufaff]/;
+    return [...document.querySelectorAll<HTMLElement>("[data-paper-text]")].flatMap((element) => {
+      const text = (element.textContent ?? "").trim();
+      const lang = element.getAttribute("lang") ?? "";
+      const ok = cjk.test(text) ? /^zh(?:-|$)/i.test(lang) : lang === "en";
+      return ok ? [] : [`${text.slice(0, 30)}: lang="${lang}"`];
+    });
+  });
 }
 
 /** 這一頁的內容出現了：一般頁面等 h1，「找不到這一頁」等訊息條。 */
@@ -181,13 +198,10 @@ for (const site of A11Y_SITES) {
       await expect(page.locator("h1")).toHaveCount(1);
     });
 
-    test(`${site.name} ${path}: paper titles and abstracts are marked lang="en"`, async ({ page }) => {
+    test(`${site.name} ${path}: paper titles and abstracts carry the lang of their text`, async ({ page }) => {
       await page.goto(url);
       await expect(page.locator("main h1")).toBeVisible();
-      const papers = page.locator("[data-paper-text]");
-      for (let index = 0; index < (await papers.count()); index += 1) {
-        await expect(papers.nth(index)).toHaveAttribute("lang", "en");
-      }
+      expect(await paperLangProblems(page)).toEqual([]);
     });
 
     if (site.name === "dev") {
@@ -196,6 +210,30 @@ for (const site of A11Y_SITES) {
         await expect(page.locator("main h1")).toBeVisible();
         const results = await new AxeBuilder({ page }).withTags(TAGS).analyze();
         expect(results.violations.map((violation) => `${violation.id}: ${violation.help}`)).toEqual([]);
+      });
+
+      test(`${site.name} ${path}: no axe violations with each popover open`, async ({ page }) => {
+        await page.goto(url);
+        await expect(page.locator("main h1")).toBeVisible();
+        const triggers = page.locator("[data-info-popover-trigger]");
+        const popup = page.locator("[data-info-popover]");
+        const count = await triggers.count();
+        expect(count).toBeGreaterThan(0);
+        for (let index = 0; index < count; index += 1) {
+          await triggers.nth(index).click();
+          await expect(popup).toBeVisible();
+          // 等淡入（0.2 秒）結束：半透明時 axe 會把文字的對比算低。
+          await expect(popup).toHaveCSS("opacity", "1");
+          const results = await new AxeBuilder({ page }).withTags(TAGS).analyze();
+          expect(
+            results.violations.map(
+              (violation) =>
+                `#${index} ${violation.id}: ${violation.help} ${violation.nodes.map((node) => node.html).join(" | ")}`,
+            ),
+          ).toEqual([]);
+          await page.keyboard.press("Escape");
+          await expect(popup).toHaveCount(0);
+        }
       });
     }
   }
@@ -211,4 +249,34 @@ test("the focus check notices an element without the gold ring", async ({ page, 
   expect(walk.visited.length).toBe(walk.expectedCount);
   expect(walk.problems.length).toBeGreaterThan(0);
   expect(walk.problems.every((problem) => problem.includes("rgb(255, 0, 0)"))).toBe(true);
+});
+
+// 反例：證明論文語言檢查（同一個 paperLangProblems）抓得到沒有 lang、空的 lang、和內容不一致的 lang，
+// 而且中文論文標成 zh-Hant 不會被誤報。
+test("the paper lang check notices a missing or mismatched lang", async ({ page }) => {
+  const site = A11Y_SITES.find((candidate) => candidate.name === "dev")!;
+  await page.goto(`${site.baseURL}${site.pages[0]}`);
+  await waitForPage(page, false);
+  expect(await paperLangProblems(page)).toEqual([]);
+  await page.evaluate(() => {
+    // 中文字用字碼產生（程式裡不寫死中文，AD-21）：「資訊系統」「資訊系統研究」。
+    const zh = String.fromCodePoint(0x8cc7, 0x8a0a, 0x7cfb, 0x7d71);
+    const add = (lang: string | null, text: string) => {
+      const element = document.createElement("p");
+      element.setAttribute("data-paper-text", "title");
+      if (lang !== null) element.setAttribute("lang", lang);
+      element.textContent = text;
+      document.querySelector("main")!.append(element);
+    };
+    add(null, "Missing lang");
+    add("", "Empty lang");
+    add("en", zh);
+    add("zh-Hant", "Wrong lang");
+    add("zh-Hant", `${zh}${String.fromCodePoint(0x7814, 0x7a76)}`);
+  });
+  const problems = await paperLangProblems(page);
+  expect(problems).toHaveLength(4);
+  expect(problems.some((problem) => problem.startsWith("Missing lang"))).toBe(true);
+  expect(problems.some((problem) => problem.startsWith("Empty lang"))).toBe(true);
+  expect(problems.some((problem) => problem.startsWith("Wrong lang"))).toBe(true);
 });

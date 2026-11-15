@@ -8,9 +8,12 @@
 // 2. 介面文字只走 i18n：JSX 裡不得有寫死的文字（i18next/no-literal-string），
 //    src/ 與 e2e/ 的字串裡不得有寫死的中文。
 // 3. 樣式只用 DESIGN.md 的代幣（Story 3.2、ADR-0030）：src/（資料來源層與測試檔除外）不得寫死色碼
-//    （#xxxxxx、rgb()／hsl() 等色彩函式、bg-[red] 與 style／fill／stroke 的顏色名稱）與字級
-//    （text-[13px]、leading-[…]、tracking-[…]、font-[…]、[font-size:…]、style 或 JSX 屬性的 fontSize／font
-//    寫死數字或長度、字串裡的 font-size:、單獨的 rem／em／pt 長度）。版面寬度的任意值（w-[40%]）不擋。
+//    （#xxxxxx、rgb()／hsl() 等色彩函式；CSS 標準顏色名稱寫在任意值方括號裡（bg-[red]、shadow-[0_0_4px_red]、
+//    [color:red]）或 style／fill／stroke／color 的值）與字級（text-[13px]、text-body/[20px]、leading-[…]、
+//    tracking-[…]、font-[…]、[font-size:…]、style 或 JSX 屬性的 fontSize／font／lineHeight／letterSpacing
+//    寫死數字或長度、字串裡的 font-size:、單獨的 rem／em／pt 長度（width 這類非字級屬性的值除外））。
+//    版面寬度的任意值（w-[40%]）不擋。焦點外框不得拿掉或改寫（outline-none、outline-0、outline-hidden、
+//    focus:outline-…），過場不得用整組的 transition／transition-all（會連焦點外框一起淡入）。
 // 4. 「減少動態」只有一個判斷：字串 prefers-reduced-motion 只准出現在 src/hooks/use-reduced-motion.ts。
 // lint-fixtures/ 是故意違反規則的檔案，不在正式檢查範圍；src/lint.test.ts、src/style-lint.test.ts
 // 用 ESLint 程式介面對它跑。
@@ -57,8 +60,41 @@ const XHR_MESSAGE = "頁面與元件不得用 XMLHttpRequest，請經過 datasou
 // 寫死的色碼與字級（ADR-0030）：字串、樣板字串、JSX 屬性都算。
 const COLOR_MESSAGE = "顏色只用 DESIGN.md 的代幣（Tailwind 類別或 var(--color-…)），不得寫死色碼（ADR-0030）。";
 const FONT_SIZE_MESSAGE = "字級只用 DESIGN.md 的代幣（text-body 這類類別），不得寫死字級（ADR-0030）。";
-// 一個英文字的顏色名稱（red、white）；transparent、currentColor、inherit、none 不算。
-const NAMED_COLOR = "^(?!(?:currentcolor|transparent|inherit|none)$)[a-z]+$";
+// CSS 標準的顏色名稱（CSS Color Module Level 4 的 148 個）。transparent、currentColor、inherit、none
+// 不是寫死的顏色，不在清單裡；用清單而不是「任何英文字」，元件的 color="primary" 這類屬性才不會被誤擋。
+const CSS_COLOR_NAMES = [
+  "aliceblue", "antiquewhite", "aqua", "aquamarine", "azure", "beige", "bisque", "black", "blanchedalmond",
+  "blue", "blueviolet", "brown", "burlywood", "cadetblue", "chartreuse", "chocolate", "coral",
+  "cornflowerblue", "cornsilk", "crimson", "cyan", "darkblue", "darkcyan", "darkgoldenrod", "darkgray",
+  "darkgreen", "darkgrey", "darkkhaki", "darkmagenta", "darkolivegreen", "darkorange", "darkorchid",
+  "darkred", "darksalmon", "darkseagreen", "darkslateblue", "darkslategray", "darkslategrey",
+  "darkturquoise", "darkviolet", "deeppink", "deepskyblue", "dimgray", "dimgrey", "dodgerblue",
+  "firebrick", "floralwhite", "forestgreen", "fuchsia", "gainsboro", "ghostwhite", "gold", "goldenrod",
+  "gray", "green", "greenyellow", "grey", "honeydew", "hotpink", "indianred", "indigo", "ivory", "khaki",
+  "lavender", "lavenderblush", "lawngreen", "lemonchiffon", "lightblue", "lightcoral", "lightcyan",
+  "lightgoldenrodyellow", "lightgray", "lightgreen", "lightgrey", "lightpink", "lightsalmon",
+  "lightseagreen", "lightskyblue", "lightslategray", "lightslategrey", "lightsteelblue", "lightyellow",
+  "lime", "limegreen", "linen", "magenta", "maroon", "mediumaquamarine", "mediumblue", "mediumorchid",
+  "mediumpurple", "mediumseagreen", "mediumslateblue", "mediumspringgreen", "mediumturquoise",
+  "mediumvioletred", "midnightblue", "mintcream", "mistyrose", "moccasin", "navajowhite", "navy",
+  "oldlace", "olive", "olivedrab", "orange", "orangered", "orchid", "palegoldenrod", "palegreen",
+  "paleturquoise", "palevioletred", "papayawhip", "peachpuff", "peru", "pink", "plum", "powderblue",
+  "purple", "rebeccapurple", "red", "rosybrown", "royalblue", "saddlebrown", "salmon", "sandybrown",
+  "seagreen", "seashell", "sienna", "silver", "skyblue", "slateblue", "slategray", "slategrey", "snow",
+  "springgreen", "steelblue", "tan", "teal", "thistle", "tomato", "turquoise", "violet", "wheat", "white",
+  "whitesmoke", "yellow", "yellowgreen",
+];
+const COLOR_NAME_GROUP = `(?:${CSS_COLOR_NAMES.join("|")})`;
+// 整個值就是一個顏色名稱（style 的 color: "red"、JSX 的 fill="white"）。
+const NAMED_COLOR = `^\\s*${COLOR_NAME_GROUP}\\s*$`;
+const OUTLINE_MESSAGE =
+  "焦點外框只用 styles.css 的全站規則（1px 金色、外擴 4px），不得拿掉或改寫（ADR-0030、UX-DR7）。";
+const TRANSITION_MESSAGE =
+  "過場只寫要動的屬性（transition-transform、transition-opacity 這類），不得用 transition／transition-all：會連焦點外框一起淡入（ADR-0030）。";
+// 單獨一個長度（"1.2rem"、"0.9em"、"12pt"）。
+const STANDALONE_LENGTH = "^\\s*-?(?:\\d+\\.?\\d*|\\.\\d+)(?:rem|em|pt)\\s*$";
+// 寫死就算字級的 style 屬性與 JSX 屬性。
+const FONT_PROPERTIES = "^(?:fontSize|font|lineHeight|letterSpacing)$";
 const onStrings = (pattern, message) => [
   { selector: `Literal[value=/${pattern}/i]`, message },
   { selector: `TemplateElement[value.raw=/${pattern}/i]`, message },
@@ -68,11 +104,9 @@ const STYLE_SELECTORS = [
   ...onStrings("#(?:[0-9a-f]{3,4}|[0-9a-f]{6}|[0-9a-f]{8})(?![0-9a-z_-])", COLOR_MESSAGE),
   // rgb(、rgba(、hsl(、hsla(、hwb(、lab(、lch(、oklab(、oklch(、color(、color-mix(
   ...onStrings("(?:^|[^a-z0-9_-])(?:rgba?|hsla?|hwb|lab|lch|oklab|oklch|color|color-mix)\\(", COLOR_MESSAGE),
-  // 有名字的顏色寫成任意值：bg-[red]、hover:fill-[white]、border-x-[black]（transparent、currentColor 等不算）
-  ...onStrings(
-    "(?:^|[\\s:!])-?(?:bg|border(?:-[a-z]+)?|fill|stroke|outline|decoration|ring|accent|caret|from|via|to|divide|placeholder)-\\[(?!(?:transparent|currentcolor|inherit|none)\\])[a-z]+\\]",
-    COLOR_MESSAGE,
-  ),
+  // 任意值方括號裡有顏色名稱：bg-[red]、hover:fill-[white]、border-x-[black]、shadow-[0_0_4px_red]、
+  // bg-[color:red]、[color:red]、[background:white]。前後是字母或 - 的不算（var(--color-accent-gold) 的 gold）。
+  ...onStrings(`\\[[^\\]\\s]*(?<![a-z0-9-])${COLOR_NAME_GROUP}(?![a-z0-9-])[^\\]\\s]*\\]`, COLOR_MESSAGE),
   // style 的顏色屬性、JSX 的 fill／stroke／color 屬性寫有名字的顏色（red、white）
   {
     selector: `Property[key.name=/^(?:color|backgroundColor|borderColor|fill|stroke)$/] > Literal.value[value=/${NAMED_COLOR}/i]`,
@@ -85,22 +119,38 @@ const STYLE_SELECTORS = [
   // text-[13px]、md:text-[1.2rem]、leading-[1.2]、tracking-[0.1em]、font-[600]、[font-size:13px]、"font-size: 13px"
   ...onStrings("(?:^|[\\s:!])-?(?:text|leading|tracking|font)-\\[", FONT_SIZE_MESSAGE),
   ...onStrings("font-size\\s*:", FONT_SIZE_MESSAGE),
-  // 單獨的 "1.2rem"、"0.9em"、"12pt"
-  ...onStrings("^\\s*-?(?:\\d+\\.?\\d*|\\.\\d+)(?:rem|em|pt)\\s*$", FONT_SIZE_MESSAGE),
-  // style={{ fontSize: 13 }}、{ font: "13px serif" }、{ "fontSize": `${n}px` }
+  // 字級後面的行高修飾：text-body/[20px]、text-body/(--x)（顏色的任意透明度 text-…/[0.5] 也一併不准）
+  ...onStrings("(?:^|[\\s:!])-?text-[a-z0-9-]+\\x2F[\\[(]", FONT_SIZE_MESSAGE),
+  // 單獨的 "1.2rem"、"0.9em"、"12pt"（變數、陣列等）；當成物件屬性或 JSX 屬性的值時只在字級屬性擋（下面幾條），
+  // width: "2em" 這類版面屬性不擋。
   {
-    selector: "Property[key.name=/^(?:fontSize|font)$/] > :matches(Literal[raw=/\\d/], TemplateLiteral).value",
+    selector: `Literal[value=/${STANDALONE_LENGTH}/i]:not(Property > Literal.value, JSXAttribute Literal)`,
     message: FONT_SIZE_MESSAGE,
   },
   {
-    selector: "Property[key.value=/^(?:fontSize|font)$/] > :matches(Literal[raw=/\\d/], TemplateLiteral).value",
+    selector: `TemplateElement[value.raw=/${STANDALONE_LENGTH}/i]:not(Property > TemplateLiteral.value > TemplateElement, JSXAttribute TemplateElement)`,
     message: FONT_SIZE_MESSAGE,
   },
-  // SVG 的 fontSize="13"、font={13}
+  // style={{ fontSize: 13 }}、{ font: "13px serif" }、{ "fontSize": `${n}px` }、{ lineHeight: "20px" }、{ letterSpacing: 2 }
   {
-    selector: "JSXAttribute[name.name=/^(?:fontSize|font)$/] Literal[raw=/\\d/]",
+    selector: `Property[key.name=/${FONT_PROPERTIES}/] > :matches(Literal[raw=/\\d/], TemplateLiteral).value`,
     message: FONT_SIZE_MESSAGE,
   },
+  {
+    selector: `Property[key.value=/${FONT_PROPERTIES}/] > :matches(Literal[raw=/\\d/], TemplateLiteral).value`,
+    message: FONT_SIZE_MESSAGE,
+  },
+  // SVG 的 fontSize="13"、font={13}、letterSpacing="2"
+  {
+    selector: `JSXAttribute[name.name=/${FONT_PROPERTIES}/] Literal[raw=/\\d/]`,
+    message: FONT_SIZE_MESSAGE,
+  },
+  // 拿掉焦點外框：outline-none、outline-0、outline-hidden（含 variant 與 !）
+  ...onStrings("(?:^|[\\s:!])outline-(?:none|0|hidden)(?![a-z0-9-])", OUTLINE_MESSAGE),
+  // 在焦點狀態改寫外框：focus:outline-…、focus-visible:outline-…、focus-within:ring-…
+  ...onStrings("(?:^|[\\s:])(?:group-|peer-)?focus(?:-visible|-within)?:(?:[^\\s:]+:)*!?(?:outline|ring)(?![a-z0-9])", OUTLINE_MESSAGE),
+  // 整組過場：transition、transition-all（transition-transform、transition-[border-color] 不擋）
+  ...onStrings("(?:^|[\\s:!])transition(?:-all)?(?![a-z0-9\\[(-])", TRANSITION_MESSAGE),
 ];
 const REDUCED_MOTION_SELECTORS = onStrings(
   "prefers-reduced-motion",
