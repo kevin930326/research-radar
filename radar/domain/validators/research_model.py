@@ -253,12 +253,31 @@ _REPORT_SUBJECT: Final = re.compile(
 )
 
 
-def _result_after_question(quote: str, question_end: int, *, by_words: bool) -> int | None:
-    """研究問題（結束在 `question_end`）後面另一個子句寫出的結果：回那個子句的開頭（最後一個斷點的
-    結尾），沒有就是 None。`by_words` 時先找明確的結果寫法（見 `_REPORTED_AFTER_QUESTION` 上面的
-    說明）；再找研究問題後面的統計量，子句開頭是統計量前面最後一個斷點（沒有斷點時是研究問題的結尾，
-    例如 `we examine whether PU affects trust (β = 0.42)`）。斷點只找一次，每個結果寫法用二分搜尋找
-    它前面最後一個斷點。"""
+# 寫出結果的子句在結果寫法（或統計量）之後的下一個句點、分號、冒號（或 `!`、`?`）結束（Codex 複查
+# R1：一路取到結果原文結尾時，後面的無關敘述——`…, and we find that satisfaction affects loyalty;
+# the questionnaire measures PU and trust`——會替另一條關係背書）。後面直接接數字的點（`0.42`、
+# `p < .01`）不是句點；結果寫法後面直接接的冒號（`we find that: …`）也不算結束，冒號後面才是找到的
+# 內容。
+_RESULT_CLAUSE_END: Final = re.compile(r"[;:]|[.!?](?=\s|$)")
+_LEADING_COLONS: Final = re.compile(r"[\s:]*")
+
+
+def _clause_end(quote: str, marker_end: int) -> int:
+    """結果寫法結束在 `marker_end` 的子句，結束的位置（見 `_RESULT_CLAUSE_END`；緊接在結果寫法後面的
+    冒號與空白先跳過）。"""
+    begin = _LEADING_COLONS.match(quote, marker_end)
+    found = _RESULT_CLAUSE_END.search(quote, begin.end() if begin else marker_end)
+    return found.start() if found else len(quote)
+
+
+def _result_after_question(
+    quote: str, question_end: int, *, by_words: bool
+) -> tuple[int, int] | None:
+    """研究問題（結束在 `question_end`）後面另一個子句寫出的結果：回（那個子句的開頭＝最後一個斷點
+    的結尾, 結果寫法或統計量的結尾），沒有就是 None。`by_words` 時先找明確的結果寫法（見
+    `_REPORTED_AFTER_QUESTION` 上面的說明）；再找研究問題後面的統計量，子句開頭是統計量前面最後一個
+    斷點（沒有斷點時是研究問題的結尾，例如 `we examine whether PU affects trust (β = 0.42)`）。斷點
+    只找一次，每個結果寫法用二分搜尋找它前面最後一個斷點。"""
     break_ends = [match.end() for match in _CLAUSE_BREAK.finditer(quote, question_end)]
     if by_words:
         for marker in _REPORTED_AFTER_QUESTION.finditer(quote, question_end):
@@ -270,12 +289,12 @@ def _result_after_question(quote: str, question_end: int, *, by_words: bool) -> 
                 continue
             subject = quote[break_ends[position - 1] : marker.start()].strip()
             if _REPORT_SUBJECT.fullmatch(subject):
-                return break_ends[position - 1]
+                return break_ends[position - 1], marker.end()
     statistic = _RESULT_STATISTIC.search(quote, question_end)
     if statistic is None:
         return None
     position = bisect.bisect_right(break_ends, statistic.start())
-    return break_ends[position - 1] if position else question_end
+    return (break_ends[position - 1] if position else question_end), statistic.end()
 
 
 @dataclass(frozen=True, slots=True)
@@ -293,17 +312,19 @@ def _reported_part(quote: str) -> _ReportedPart | None:
 
     - 沒有研究問題：有統計量，或有結果用語、而且沒有假設句寫法（同 2.6）→ 整段。
     - 有研究問題（we examine whether…；Codex 主審查第 1 條）：最後一個研究問題後面另一個子句寫了
-      明確的結果（有假設句寫法時只看統計量）→ 從那個子句的開頭到結尾，研究問題不算在裡面，免得
-      研究問題提到的構面替另一條關係的結果背書；研究問題後面沒有、前面有統計量 → 研究問題前面那段。
+      明確的結果（有假設句寫法時只看統計量）→ 從那個子句的開頭到結果寫法之後的下一個句點、分號或
+      冒號（`_clause_end`；Codex 複查 R1），研究問題與後面的句子都不算在裡面，免得它們提到的構面替
+      另一條關係的結果背書；研究問題後面沒有、前面有統計量 → 研究問題前面那段。
     """
     questions = list(_RESEARCH_QUESTION.finditer(quote))
     words = _RESULT_WORD.search(quote) is not None and _HYPOTHESIS_STATEMENT.search(quote) is None
     if not questions:
         return _ReportedPart(0, len(quote)) if words or _RESULT_STATISTIC.search(quote) else None
     last = questions[-1]
-    start = _result_after_question(quote, last.end(), by_words=words)
-    if start is not None:
-        return _ReportedPart(start, len(quote), last.start())
+    found = _result_after_question(quote, last.end(), by_words=words)
+    if found is not None:
+        start, marker_end = found
+        return _ReportedPart(start, _clause_end(quote, marker_end), last.start())
     if _RESULT_STATISTIC.search(quote, 0, last.start()):
         return _ReportedPart(0, last.start())
     return None
@@ -574,8 +595,12 @@ _HYPOTHESIS_LABEL: Final = re.compile(r"(?<![a-z0-9])h[0-9]{1,2}[a-z]?(?![a-z0-9
 # - 主詞（we、it、they、（the／our）results／findings／data／analysis／evidence／estimates…）＋
 #   （also、strongly…）＋ support(s)／supported／confirm…／reject… ＋ `{target}`，或主詞＋
 #   find／provide／offer／lend…（no、strong…）support for／to ＋ `{target}`；
-# - support is／was found／obtained／observed／provided for ＋ `{target}`。
-# 主詞要是這篇研究自己（`Prior studies support H1` 不算）。
+# - （strong、partial…）support is／was found／obtained／observed／provided for ＋ `{target}`。
+# 每一種都要在**子句開頭**（Codex 複查 R2）：前面只能是段落開頭、`,` `;` `:` `(`、句點，或這些
+# 標點後面的 and／but／thus；或在這樣的開頭先寫「本研究的主詞＋find／show／reveal／indicate／
+# demonstrate／confirm＋that」（`The results show that H1 was supported`）。其他外層的主詞或動詞
+# 一律不算：`We dispute that H1 was supported`、`Other researchers report that all hypotheses were
+# supported`、`It is not the case that H1 was supported`、`Prior studies support H1`。
 _TARGET_PARENTHETICAL: Final = r"(?: ?\([^()]{0,80}\))?"
 _TARGET_VERDICT: Final = (
     r" ?(?:: ?|- )?(?:(?:is|was|are|were|has been|have been) )?"
@@ -583,15 +608,23 @@ _TARGET_VERDICT: Final = (
     r"(?:supported|confirmed|rejected|accepted|significant|non-?significant|insignificant)(?![a-z])"
 )
 _SUPPORT_AMOUNT: Final = r"(?:(?:no|strong|partial|some|empirical|full|significant|mixed|clear) )?"
-# 主詞要在子句開頭（段落開頭，或接在標點、and、but、that、thus 後面），免得 `Prior findings
-# support H1` 的 findings 被當成主詞。
+_CLAUSE_START: Final = (
+    r"(?:^|(?<=[,;:(])|(?<=[,;:(.] )"
+    r"|(?<=^and )|(?<=^but )|(?<=^thus )"
+    r"|(?<=[,;:.] and )|(?<=[,;:.] but )|(?<=[,;:.] thus )"
+    r"|(?<=[,;:]and )|(?<=[,;:]but )|(?<=[,;:]thus ))"
+)
+# 這篇研究自己的主詞（`Prior findings` 的 findings 不在子句開頭，所以不算）。
 _STUDY_SUBJECT: Final = (
-    r"(?:^|(?<=[,;:(.] )|(?<=[,;:(])|(?<=(?<![a-z])and )|(?<=(?<![a-z])but )"
-    r"|(?<=(?<![a-z])that )|(?<=(?<![a-z])thus ))"
     r"(?:we|it|they|(?:(?:the|our|these) (?:(?:empirical|statistical|main|overall|structural)"
     r" )?)?(?:results?|findings|data|analys[ie]s|evidence|estimates|tests?))"
     r"(?: (?:also|strongly|fully|partially|largely|clearly))?"
 )
+_STUDY_REPORTS_THAT: Final = (
+    rf"{_STUDY_SUBJECT} (?:find|finds|found|show|shows|showed|reveal|reveals|revealed|indicate"
+    r"|indicates|indicated|demonstrate|demonstrates|demonstrated|confirm|confirms|confirmed) that "
+)
+_STATEMENT_START: Final = rf"{_CLAUSE_START}(?:{_STUDY_REPORTS_THAT})?"
 _HYPOTHESES_WORD: Final = r"(?:(?:the )?hypothes[ie]s )?"
 
 
@@ -599,6 +632,7 @@ def _direct_result(target: str) -> re.Pattern[str]:
     """直接陳述 `target`（不能有捕捉組）結果的寫法（見上面的說明）；`target` 在每個寫法裡是唯一的
     捕捉組。"""
     return re.compile(
+        rf"{_STATEMENT_START}(?:"
         rf"({target}){_TARGET_PARENTHETICAL}{_TARGET_VERDICT}"
         rf"|({target}){_TARGET_PARENTHETICAL} (?:receive[sd]?|gain(?:s|ed)?) {_SUPPORT_AMOUNT}"
         r"support(?![a-z])"
@@ -607,8 +641,9 @@ def _direct_result(target: str) -> re.Pattern[str]:
         rf"|{_STUDY_SUBJECT} (?:find|finds|found|provides?|provided|offers?|offered|lends?|lent"
         rf"|yields?|yielded|shows?|showed) {_SUPPORT_AMOUNT}support (?:for|to) {_HYPOTHESES_WORD}"
         rf"({target})"
-        r"|(?<![a-z])support (?:is|was) (?:also )?(?:found|obtained|observed|provided) for "
+        rf"|{_SUPPORT_AMOUNT}support (?:is|was) (?:also )?(?:found|obtained|observed|provided) for "
         rf"{_HYPOTHESES_WORD}({target})"
+        r")"
     )
 
 
@@ -703,10 +738,36 @@ def _abbreviates(abbreviation: str, words: list[str]) -> bool:
     return fits(0, 0)
 
 
+def _strict_initials(abbreviation: str, words: list[str]) -> bool:
+    """`abbreviation`（casefold）是 `words` 的**嚴格首字母**：第一個詞不是虛詞；每個不是虛詞的詞剛好
+    貢獻它的第一個字母，虛詞貢獻第一個字母或不貢獻（`system satisfaction` → `ss`、`perceived ease
+    of use` → `peou`、`trust in transactions` → `tt`）。"""
+    if not words or words[0] in _SKIPPABLE:
+        return False
+    reachable = {0}
+    for word in words:
+        following = {
+            used + 1
+            for used in reachable
+            if used < len(abbreviation) and abbreviation[used] == word[0]
+        }
+        reachable = following | reachable if word in _SKIPPABLE else following
+        if not reachable:
+            return False
+    return len(abbreviation) in reachable
+
+
 def _defined_name(abbreviation: str, before: str) -> str | None:
-    """輸入裡「名稱 (縮寫)」的名稱：括號前面（`before`）正規化後，縮寫得出來的最短的最後幾個詞
-    （最多 `_MAX_DEFINED_WORDS` 個；`satisfaction with trust (ST)` 是 satisfaction with trust，
-    不是 trust）。縮寫字尾多一個小寫 s 也可以（`ICTs`）。找不到是 None。"""
+    """輸入裡「名稱 (縮寫)」的名稱：括號前面（`before`）正規化後，最後 1～`_MAX_DEFINED_WORDS` 個詞
+    裡縮寫得出來的那一段。縮寫字尾多一個小寫 s 也可以（`ICTs`）。
+
+    - 有**嚴格首字母**對得上的（`_strict_initials`）→ 取最長的那一段：`system satisfaction (SS)`
+      是 system satisfaction，不是 satisfaction（Opus 確認審查 M2：只取最短的一段時，縮寫字母全部
+      落在最後一個詞裡就只剩那個詞，模型漏列較長的名稱時會錯綁）；
+    - 沒有嚴格的，只有一段用寬鬆的寫法（`_abbreviates`：同一個詞可以多貢獻後面的字）對得上 → 那
+      一段（`trust (TR)`、`loyalty (LOY)`、`electronic word-of-mouth (eWOM)`）；
+    - 兩段以上都只有寬鬆的寫法對得上（`sales satisfaction (SAS)`：satisfaction 與 sales
+      satisfaction 都對得上）→ 分不出名稱，None。找不到也是 None。"""
     try:
         words = normalize_name(before).split()
     except ValueError:  # 前面只有標點
@@ -714,11 +775,17 @@ def _defined_name(abbreviation: str, before: str) -> str | None:
     candidates = [abbreviation.casefold()]
     if len(abbreviation) > 2 and abbreviation.endswith("s"):
         candidates.append(abbreviation[:-1].casefold())
+    strict: list[str] | None = None
+    loose: list[list[str]] = []
     for count in range(1, min(len(words), _MAX_DEFINED_WORDS) + 1):
         tail = words[-count:]
-        if any(_abbreviates(candidate, tail) for candidate in candidates):
-            return " ".join(tail)
-    return None
+        if any(_strict_initials(candidate, tail) for candidate in candidates):
+            strict = tail
+        elif any(_abbreviates(candidate, tail) for candidate in candidates):
+            loose.append(tail)
+    if strict is not None:
+        return " ".join(strict)
+    return " ".join(loose[0]) if len(loose) == 1 else None
 
 
 def _construct_abbreviations(
@@ -726,33 +793,51 @@ def _construct_abbreviations(
 ) -> dict[str, frozenset[str]]:
     """每個構面（正規化名稱）可以代表它的縮寫（casefold）：
 
-    - 英文名的首字母（`Perceived usefulness` → `pu`；`Trust` 只有一個字母，沒有）；
-    - 輸入裡寫了「名稱 (縮寫)」，而且那個名稱（`_defined_name`：縮寫得出來的最短的最後幾個詞）和
-      這個構面的名稱**完全一樣**（正規化名稱，或英文名拿掉括號後的正規化名稱：`Trust (TR)` 也看
-      `trust`）。Codex 主審查第 4 條：只看「括號前面以構面名稱結尾」時，模型漏列較長的名稱
-      （`satisfaction with trust (ST)` 而模型只列 Trust）就會把 ST 錯給 Trust；現在 ST 的名稱是
-      satisfaction with trust，和 Trust 不一樣，不給。
+    - 英文名的首字母（`Perceived usefulness` → `pu`；`Trust` 只有一個字母，沒有）；但輸入已經把
+      這個縮寫定義成別的名稱（`price uncertainty (PU)`，而這個構面不叫 price uncertainty）時不給
+      （Opus 確認審查 L2）；
+    - 輸入裡寫了「名稱 (縮寫)」，而且那個名稱（`_defined_name`）和這個構面的名稱**完全一樣**
+      （正規化名稱，或英文名拿掉括號後的正規化名稱：`Trust (TR)` 也看 `trust`）。Codex 主審查
+      第 4 條：只看「括號前面以構面名稱結尾」時，模型漏列較長的名稱（`satisfaction with trust
+      (ST)` 而模型只列 Trust）就會把 ST 錯給 Trust；現在 ST 的名稱是 satisfaction with trust，
+      和 Trust 不一樣，不給。
 
     縮寫一定要出現在輸入裡（首字母的縮寫也要結果原文或原句真的寫出來才用得上）；模型自己在英文名
     括號裡寫的縮寫不算，免得模型改名字就能把別的句子算成這條關係的結果。
     """
-    found: dict[str, set[str]] = {}
+    initials: dict[str, set[str]] = {}
+    spellings: dict[str, set[str]] = {}
     owners: dict[str, set[str]] = {}
     for construct in output.constructs:
         name = normalize_name(normalize_text(construct.name_en))
-        found.setdefault(name, set()).update(_initials(construct.name_en))
+        initials.setdefault(name, set()).update(_initials(construct.name_en))
         for spelled in (name, _without_parentheses(construct.name_en)):
             if spelled:
+                spellings.setdefault(name, set()).add(spelled)
                 owners.setdefault(spelled, set()).add(name)
     definitions = (
         match for match in _DEFINED_ABBREVIATION.finditer(input_text) if _is_abbreviation(match[1])
     )
+    # 縮寫（casefold）→ 輸入把它定義成的名稱。
+    defined_names: dict[str, set[str]] = {}
     for match in itertools.islice(definitions, _MAX_DEFINITIONS):
         line_start = input_text.rfind("\n", 0, match.start()) + 1
         before = input_text[max(line_start, match.start() - _DEFINITION_WINDOW) : match.start()]
         defined = _defined_name(match[1], before)
-        for name in owners.get(defined or "", ()):
-            found[name].add(match[1].casefold())
+        if defined is not None:
+            defined_names.setdefault(match[1].casefold(), set()).add(defined)
+    found: dict[str, set[str]] = {}
+    for name, own in initials.items():
+        # 輸入把這個首字母定義成別的名稱時，不從首字母給（Opus 確認審查 L2；輸入的定義優先）。
+        found[name] = {
+            abbreviation
+            for abbreviation in own
+            if not defined_names.get(abbreviation, set()) - spellings.get(name, set())
+        }
+    for abbreviation, names in defined_names.items():
+        for defined in names:
+            for name in owners.get(defined, ()):
+                found[name].add(abbreviation)
     return {name: frozenset(abbreviations) for name, abbreviations in found.items()}
 
 

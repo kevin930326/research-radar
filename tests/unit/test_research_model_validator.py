@@ -53,6 +53,7 @@ from radar.domain.llm_schemas import (
 from radar.domain.papers import AbstractSource
 from radar.domain.validators.research_model import (
     ResearchModelValidator,
+    _reported_part,
     quote_key,
     validate_research_model,
 )
@@ -2364,23 +2365,300 @@ def test_sample_size_from_an_abbreviated_magnitude_variant_is_rejected(
 
 
 def _seconds_for_markers(repeats: int) -> float:
+    # 直接量 `_reported_part`（Opus 確認審查 M1）：量整個 `_validate` 時，正規化、找原文這些線性
+    # 的步驟會把平方那一段的放大效果稀釋掉（還原修正後整個 `_validate` 只放大 13.7～15.4 倍，抓
+    # 不到）。
     quote = "we examine whether trust, " + "zz find that " * repeats
-    data = _data()
-    data["hypotheses"][0]["result_quote"] = quote.strip()
     best = float("inf")
     for _ in range(3):
         started = time.perf_counter()
-        with contextlib.suppress(OutputRejectedError):
-            _validate(data, _input(abstract=ABSTRACT + " " + quote))
+        _reported_part(quote)
         best = min(best, time.perf_counter() - started)
     return best
 
 
 def test_many_result_markers_after_one_clause_break_is_quick() -> None:
-    # 比「輸入變 8 倍、時間變幾倍」，不比絕對秒數（CI 機器比本機慢，絕對秒數會時好時壞）：
-    # 線性約 8 倍，平方時間約 64 倍（Codex 量到修正前單是這個函式 8,000→64,000 就差約 40 倍）；
-    # 門檻取 20 倍，另加 0.05 秒吸收很短時間的雜訊。
-    small = _seconds_for_markers(8_000)
-    large = _seconds_for_markers(64_000)
+    # 比「輸入變 8 倍、時間變幾倍」，不比絕對秒數（CI 機器比本機慢，絕對秒數會時好時壞）：修正後
+    # 約 8 倍（線性），修正前約 47 倍（平方時間）；門檻取 20 倍，另加 0.01 秒吸收很短時間的雜訊。
+    # 已用還原修正確認會失敗：把 `_result_after_question` 的條件還原成 `if position == 0:` 後，這個
+    # 測試不通過。
+    small = _seconds_for_markers(16_000)
+    large = _seconds_for_markers(128_000)
 
-    assert large < small * 20 + 0.05
+    assert large < small * 20 + 0.01
+
+
+# --- Codex 複查（PR #68）R1、R2 ------------------------------------------------------------------
+# R1：研究問題後面寫出結果的那段，在結果寫法之後的下一個句點／分號／冒號（不含小數點）結束；後面的
+# 無關敘述不能替另一條關係背書。
+
+
+@pytest.mark.parametrize(
+    "result_quote",
+    [
+        # Codex 的例子：結果只有 satisfaction → loyalty，問卷敘述提到 PU、trust。
+        "We examine whether perceived usefulness affects trust, and we find that satisfaction"
+        " affects loyalty; the questionnaire measures perceived usefulness and trust",
+        "We examine whether perceived usefulness affects trust, and we find that satisfaction"
+        " affects loyalty. The questionnaire measures perceived usefulness and trust",
+        "We examine whether perceived usefulness affects trust, and we find that satisfaction"
+        " affects loyalty: the questionnaire measures perceived usefulness and trust",
+        # 統計量的子句也一樣（小數點不是句點）。
+        "We examine whether perceived usefulness affects trust, and satisfaction affects loyalty"
+        " (β = 0.30); the questionnaire measures perceived usefulness and trust",
+        # 結果寫法後面直接接冒號：冒號後面才是找到的內容，不能只看冒號前面就當成指回研究問題。
+        "We examine whether perceived usefulness affects trust, and we find that: satisfaction"
+        " affects loyalty",
+    ],
+)
+def test_result_clause_after_a_research_question_ends_at_the_next_sentence_break(
+    result_quote: str,
+) -> None:
+    data = _data()
+    data["hypotheses"][0]["result_quote"] = result_quote
+
+    content = _validate(data, _input(abstract=f"{ABSTRACT} {result_quote}."))
+
+    assert content.hypotheses[0].support is SupportLevel.NOT_STATED
+    assert content.hypotheses[0].result_quote is None
+
+
+@pytest.mark.parametrize(
+    "result_quote",
+    [
+        # 小數點與 p 值的點不是句點：結果子句仍包含後面的構面名稱。
+        "We examine whether perceived usefulness affects trust, and we find that the effect"
+        " (β = 0.42, p < .01) is positive for trust",
+        # 結果子句只用代名詞指回研究問題，後面的敘述不影響。
+        "We examine whether perceived usefulness affects trust, and we find that it does;"
+        " the questionnaire measures satisfaction and loyalty",
+    ],
+)
+def test_result_clause_after_a_research_question_keeps_its_own_relation(
+    result_quote: str,
+) -> None:
+    data = _data()
+    data["hypotheses"][0]["result_quote"] = result_quote
+
+    content = _validate(data, _input(abstract=f"{ABSTRACT} {result_quote}."))
+
+    assert content.hypotheses[0].support is SupportLevel.SUPPORTED
+    assert content.hypotheses[0].result_quote == result_quote
+
+
+# R2：代號與全部假設的每一種直接陳述寫法（含被動句與 `Support was found for`）都要在子句開頭：前面
+# 只能是段落開頭、標點、（標點後的）and／but／thus，或「本研究主詞＋find／show…＋that」。否認、
+# 轉述別人的研究、其他外層主詞或動詞都不算。
+
+OUTER_CLAIMS = (
+    "We dispute that H1 was supported",
+    "We dispute that all hypotheses were supported",
+    "Other researchers report that H1 was supported",
+    "Other researchers report that all hypotheses were supported",
+    "Other researchers report that the results support H1",
+    "Other researchers report that support was found for H1",
+    "Others argue that H1 received support",
+    "It is not the case that H1 was supported",
+    "Other researchers report that loyalty and H1 were supported",
+)
+OWN_CLAIMS = (
+    "The results show that H1 was supported",
+    "We find that all hypotheses were supported",
+    "Thus, H1 was supported",
+    "As expected, H1 was supported",
+    "Overall, the results support H1",
+    "Strong support was found for H1",
+)
+OUTER_ABSTRACT = (
+    LABELLED_ABSTRACT + " " + " ".join(f"{quote}." for quote in OUTER_CLAIMS + OWN_CLAIMS)
+)
+
+
+@pytest.mark.parametrize("result_quote", OUTER_CLAIMS)
+def test_label_or_all_hypotheses_inside_an_outer_claim_becomes_not_stated(
+    result_quote: str,
+) -> None:
+    hypothesis = _labelled(H1_SENTENCE, result_quote, abstract=OUTER_ABSTRACT)
+
+    assert hypothesis.support is SupportLevel.NOT_STATED
+    assert hypothesis.result_quote is None
+
+
+@pytest.mark.parametrize("result_quote", OWN_CLAIMS)
+def test_label_or_all_hypotheses_reported_by_the_study_itself_is_kept(result_quote: str) -> None:
+    hypothesis = _labelled(H1_SENTENCE, result_quote, abstract=OUTER_ABSTRACT)
+
+    assert hypothesis.support is SupportLevel.SUPPORTED
+    assert hypothesis.result_quote == result_quote
+
+
+def test_label_after_but_in_a_new_clause_is_kept() -> None:
+    quote = "H1 was not tested, but H2 was supported"
+    hypothesis = _labelled(
+        H2_SENTENCE, quote, cause="Trust", effect="Loyalty", abstract=f"{OUTER_ABSTRACT} {quote}."
+    )
+
+    assert hypothesis.support is SupportLevel.SUPPORTED
+
+
+# --- Opus 確認審查（PR #68）M2、L1、L2：輸入定義的縮寫要分得出名稱 ------------------------------
+
+
+def _support_with_defined_abbreviation(
+    definition: str, name_en: str, abbreviation: str, extra: str = ""
+) -> SupportLevel:
+    """輸入多一句 `We measure {definition}.`（和 `extra`），模型多列構面 `name_en`，這個構面 →
+    Perceived usefulness 的結果原文寫 `{abbreviation} rose significantly (β = 0.2)`。"""
+    result_quote = f"{abbreviation} rose significantly (β = 0.2)"
+    abstract = f"{ABSTRACT} We measure {definition}.{extra} {result_quote}."
+    data = _data()
+    data["constructs"].append(
+        {"name_en": name_en, "label_zh": "測試構面", "definition": None, "measurement": None}
+    )
+    data["hypotheses"] = [
+        _hypothesis(
+            sentence=f"We measure {definition}.",
+            cause=name_en,
+            effect="Perceived usefulness",
+            result_quote=result_quote,
+            statistics=None,
+        )
+    ]
+    return _validate(data, _input(abstract=abstract)).hypotheses[0].support
+
+
+# M2：縮寫的字母全部落在最後一個詞裡時，名稱不能只剩那個詞（嚴格首字母的較長名稱優先；寬鬆的寫法
+# 只在唯一時用；分不出就不給）。
+
+
+@pytest.mark.parametrize(
+    ("definition", "name_en", "abbreviation", "kept"),
+    [
+        ("system satisfaction (SS)", "Satisfaction", "SS", False),
+        ("system satisfaction (SS)", "System satisfaction", "SS", True),
+        ("trust in transactions (TT)", "Transactions", "TT", False),
+        ("trust in transactions (TT)", "Trust in transactions", "TT", True),
+        ("effort expectancy (EE)", "Expectancy", "EE", False),
+        ("effort expectancy (EE)", "Effort expectancy", "EE", True),
+        # satisfaction 和 sales satisfaction 都只有寬鬆的寫法對得上：分不出名稱，不給。
+        ("sales satisfaction (SAS)", "Satisfaction", "SAS", False),
+        # 只有一段對得上時照舊用寬鬆的寫法。
+        ("satisfaction (SAT)", "Satisfaction", "SAT", True),
+        ("loyalty (LOY)", "Loyalty", "LOY", True),
+        ("electronic word-of-mouth (eWOM)", "Electronic word-of-mouth", "eWOM", True),
+        ("satisfaction with trust (ST)", "Satisfaction with trust", "ST", True),
+        ("perceived ease of use (PEOU)", "Perceived ease of use", "PEOU", True),
+    ],
+)
+def test_defined_abbreviation_name_prefers_strict_initials(
+    definition: str, name_en: str, abbreviation: str, kept: bool
+) -> None:
+    support = _support_with_defined_abbreviation(definition, name_en, abbreviation)
+
+    assert support is (SupportLevel.SUPPORTED if kept else SupportLevel.NOT_STATED)
+
+
+def test_defined_system_satisfaction_is_not_given_to_satisfaction() -> None:
+    # 確認審查的完整例子：模型列了 Satisfaction、漏列 System satisfaction。
+    abstract = (
+        f"{ABSTRACT} H1: Satisfaction affects trust. We measure system satisfaction (SS)."
+        " SS significantly affects loyalty."
+    )
+    data = _with_loyalty(
+        _hypothesis(
+            sentence="H1: Satisfaction affects trust.",
+            cause="Satisfaction",
+            effect="Trust",
+            result_quote="SS significantly affects loyalty",
+            statistics=None,
+        )
+    )
+    data["constructs"].append(
+        {"name_en": "Satisfaction", "label_zh": "滿意度", "definition": None, "measurement": None}
+    )
+
+    content = _validate(data, _input(abstract=abstract))
+
+    assert content.hypotheses[0].support is SupportLevel.NOT_STATED
+
+
+# L1（鎖住現在的行為，ADR-0039 取捨有寫）：縮寫跳過的詞不是虛詞、或縮寫只取名稱的一部分時認不得，
+# 錯在少判。
+
+
+@pytest.mark.parametrize(
+    ("definition", "name_en", "abbreviation"),
+    [
+        ("attitude toward using (ATT)", "Attitude toward using", "ATT"),
+        ("behavioral intention to use (BI)", "Behavioral intention to use", "BI"),
+        ("trust in vendor (TR)", "Trust in vendor", "TR"),
+        ("customer satisfaction (SAT)", "Customer satisfaction", "SAT"),
+    ],
+)
+def test_partial_or_skipping_abbreviation_is_not_recognized(
+    definition: str, name_en: str, abbreviation: str
+) -> None:
+    support = _support_with_defined_abbreviation(definition, name_en, abbreviation)
+
+    assert support is SupportLevel.NOT_STATED
+
+
+# L2：輸入已把縮寫定義成別的名稱時，不從首字母給這個構面。
+
+
+@pytest.mark.parametrize(("defines_elsewhere", "kept"), [(True, False), (False, True)])
+def test_initials_defined_as_another_name_in_the_input_do_not_count(
+    defines_elsewhere: bool, kept: bool
+) -> None:
+    extra = " We also measure price uncertainty (PU)." if defines_elsewhere else ""
+    result_quote = "PU significantly affects loyalty"
+    abstract = f"{ABSTRACT}{extra} {result_quote}."
+    data = _with_loyalty(
+        _hypothesis(
+            sentence=SENTENCE,
+            cause="Perceived usefulness",
+            effect="Trust",
+            result_quote=result_quote,
+            statistics=None,
+        )
+    )
+
+    content = _validate(data, _input(abstract=abstract))
+
+    expected = SupportLevel.SUPPORTED if kept else SupportLevel.NOT_STATED
+    assert content.hypotheses[0].support is expected
+
+
+# --- Opus 確認審查 M3、M4：量級縮寫的完整驗證器成對測試 ------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("written", "sample_size"),
+    [("a 2M-user panel of", 2), ("a 10k-respondent panel of", 10)],
+)
+def test_sample_size_from_an_abbreviated_magnitude_before_a_hyphen_is_rejected(
+    written: str, sample_size: int
+) -> None:
+    abstract = ABSTRACT.replace("200 bank customers", f"{written} bank customers")
+    data = _data()
+    data["context"]["sample_size"] = sample_size
+    data["hypotheses"][0]["statistics"]["sample_size"] = None
+
+    assert (
+        _rejected(data, _input(abstract=abstract)) is ErrorCode.RESEARCH_MODEL_UNSUPPORTED_CONTENT
+    )
+
+
+@pytest.mark.parametrize(
+    ("written", "sample_size"),
+    [("412 M&A deals of", 412), ("120 M.B.A. students and", 120), ("200 M-Turk workers and", 200)],
+)
+def test_sample_size_before_a_magnitude_letter_in_another_word_is_kept(
+    written: str, sample_size: int
+) -> None:
+    abstract = ABSTRACT.replace("200 bank customers", f"{written} bank customers")
+    data = _data()
+    data["context"]["sample_size"] = sample_size
+    data["hypotheses"][0]["statistics"]["sample_size"] = None
+
+    assert _validate(data, _input(abstract=abstract)).sample_size == sample_size

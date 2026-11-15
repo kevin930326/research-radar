@@ -285,3 +285,58 @@ def test_structured_numbers_skip_abbreviated_magnitude_variants(
 )
 def test_structured_numbers_still_read_numbers_before_longer_words(text: str, value: str) -> None:
     assert _n(value) in structured_numbers(check_copy(text))
+
+
+# Opus 確認審查（PR #68）M3：數字和量級字母中間沒有空白時，後面接「連字號＋字母」的複合形容詞
+# （`a 2M-user platform`）也是縮寫；中間有空白或連字號的（`200 M-Turk`、`312 K-12`）照讀。
+
+
+@pytest.mark.parametrize(
+    ("text", "unreadable"),
+    [
+        ("a 2M-user platform", ("2", "2000000")),
+        ("a 10k-respondent panel", ("10", "10000")),
+        ("a 10K-sample survey", ("10", "10000")),
+        ("a 2B-dollar market", ("2", "2000000000")),
+        ("a 12MM-user network", ("12",)),
+        ("a 1.5bn-dollar deal", ("1.5",)),
+    ],
+)
+def test_structured_numbers_skip_abbreviated_magnitudes_before_a_hyphenated_word(
+    text: str, unreadable: tuple[str, ...]
+) -> None:
+    found = structured_numbers(check_copy(text))
+
+    for value in unreadable:
+        assert _n(value) not in found, value
+
+
+# M4：量級字母後面接 `&`、`/`、`.字母` 的不是縮寫（`412 M&A deals`、`120 M.B.A. students`）；
+# 句尾的 `12M.` 仍是縮寫。
+
+
+@pytest.mark.parametrize(
+    ("text", "value"),
+    [
+        ("412 M&A deals", "412"),
+        ("412 m&a deals", "412"),
+        ("120 M.B.A. students", "120"),
+        ("20 M.D. physicians", "20"),
+        ("200 B.Sc. students", "200"),
+        ("120 M/F", "120"),
+        ("12 B.V. firms", "12"),
+        ("200 M-Turk workers", "200"),
+        ("312 K-12 teachers", "312"),
+    ],
+)
+def test_structured_numbers_read_numbers_before_a_magnitude_letter_in_another_word(
+    text: str, value: str
+) -> None:
+    assert _n(value) in structured_numbers(check_copy(text))
+
+
+@pytest.mark.parametrize("text", ["the panel has 12M.", "the panel has 12M. Next", "N = 12M; fine"])
+def test_structured_numbers_still_skip_an_abbreviated_magnitude_before_punctuation(
+    text: str,
+) -> None:
+    assert _n("12") not in structured_numbers(check_copy(text))

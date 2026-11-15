@@ -291,12 +291,19 @@ def _scientific_values(text: str) -> set[Number]:
 # `2 bln`、`2 bil`、`12-M`（Codex 主審查第 5 條；不分大小寫，數字和字母之間最多一個空白或一個
 # 連字號）。讀不出量級（M 是 million 還是別的單位、k 是 thousand 還是 kilo、mm 也可能是公釐），照
 # 科學記號的做法整段換成空白、不取數字：`12M` 不會變成 12，也不會變成 12000000。數字前面不能接著
-# 字母、數字、`.`、`,`（`H2b`、`B2B` 的 2 不算），字母後面不能再接字母、數字或連字號
-# （`12 months`、`12-month`、`5 MB`、`5-MB`、`2 B2B`、`312 K-12 teachers`、`200 M-Turk`、
-# `12 mmHg` 不算）。
+# 字母、數字、`.`、`,`（`H2b`、`B2B` 的 2 不算）。字母後面：
+# - 不能再接字母、數字、連字號、`&`、`/`，或「`.`＋字母」（`12 months`、`12-month`、`5 MB`、
+#   `5-MB`、`2 B2B`、`312 K-12 teachers`、`200 M-Turk`、`12 mmHg`，以及 Opus 確認審查 M4 的
+#   `412 M&A deals`、`120 M.B.A. students`、`20 M.D.`、`120 M/F` 不算）；句尾的 `12M.` 照樣算；
+# - 例外（Opus 確認審查 M3）：數字和字母**中間沒有空白也沒有連字號**時，後面接「連字號＋字母」的
+#   複合形容詞也算（`a 2M-user platform`、`a 10k-respondent panel`、`2B-dollar`）；中間有空白或
+#   連字號的（`200 M-Turk`、`312 K-12`）照上一條不算。
+_MAGNITUDE_NUMBER: Final = r"(?:(?:[0-9]{1,3}(?:,[0-9]{3})+|[0-9]+)(?:\.[0-9]+)?|\.[0-9]+)"
+_MAGNITUDE_LETTERS: Final = r"(?i:bln|bil|bn|mln|mil|mio|mm|mn|[kmb])"
 _ABBREVIATED_MAGNITUDE: Final = re.compile(
-    r"(?<![0-9A-Za-z.,])(?:(?:[0-9]{1,3}(?:,[0-9]{3})+|[0-9]+)(?:\.[0-9]+)?|\.[0-9]+)(?:\s?|-)"
-    r"(?i:bln|bil|bn|mln|mil|mio|mm|mn|[kmb])(?![0-9A-Za-z-])"
+    rf"(?<![0-9A-Za-z.,]){_MAGNITUDE_NUMBER}"
+    rf"(?:(?:\s?|-){_MAGNITUDE_LETTERS}(?![0-9A-Za-z&/-]|\.[A-Za-z])"
+    rf"|{_MAGNITUDE_LETTERS}(?=-[A-Za-z]))"
 )
 
 
