@@ -312,7 +312,8 @@ def eval_split_sha256(doi: str) -> str:
 
 def trial_sample_sha256(seed: int, doi: str) -> str:
     """試跑抽樣的排序鍵（64 位小寫十六進位 SHA-256）：（seed, 正規化後的 DOI）。和 paper_id 無關，
-    所以本機與試用主機用同一個 seed 抽到同樣的 DOI；新增論文不會打亂既有論文之間的先後。
+    所以候選相同時，本機與試用主機用同一個 seed 抽到同樣的 DOI；新增論文不會打亂既有論文之間
+    的先後（但可能排進前 N、換掉名單，要固定名單用名單檔）。
 
     Raises:
         ValueError: `seed` 不是整數（`bool` 也不收），或 `doi` 不是正規化後的 DOI。

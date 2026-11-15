@@ -443,13 +443,13 @@ def embeddings_backfill(
 
 
 def _read_ids_file(path: Path) -> TrialTargets:
-    """讀 `--ids-file`（UTF-8）。
+    """讀 `--ids-file`（UTF-8；開頭有 BOM 也收，有些編輯器或試算表匯出時會加）。
 
     Raises:
         TrialArgumentError: 讀不到、不是 UTF-8，或內容看不懂（見 `parse_trial_ids_file`）。
     """
     try:
-        text = path.read_text(encoding="utf-8")
+        text = path.read_text(encoding="utf-8-sig")
     except (OSError, UnicodeDecodeError) as exc:
         raise TrialArgumentError(f"讀不到名單檔（{type(exc).__name__}）") from None
     return parse_trial_ids_file(text)

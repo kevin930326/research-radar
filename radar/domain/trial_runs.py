@@ -15,6 +15,9 @@
   `GatewayOutcome` 的值；另有 `not_found`（論文在跑之前被刪）、`error`（非預期例外，只記類別名）、
   `not_run`（設定錯停下後剩下的）、`input_changed`（確認後輸入變了，或確認時不會呼叫、現在會：
   沒有呼叫模型）。有 `transient_failure`／`error`／`not_run`／`input_changed` 時退出碼 1。
+- **總表的「這次呼叫模型」**：只算這次有新 run、而且拿到回應的項目（`active`／`candidate`／
+  `superseded`／`rejected`），拒收率的分母只算這些；`transient_failure`（送了請求、重試完還是
+  沒拿到回應）另列「呼叫了但沒拿到回應」，不算測到。
 - **輸出文字**：只印 id、DOI、狀態、原因代碼、token 數、金額與回應的「形狀」（鍵與 type 名稱，
   只收 `^[A-Za-z0-9_]{1,64}$`，其他寫 `<?>`），不印論文內容。只有 `--show-output` 才印模型輸出：
   `json.dumps(ensure_ascii=False)`，控制字元與格式字元一律跳脫，最多 `SHOW_OUTPUT_MAX_CHARS` 字。
@@ -348,6 +351,17 @@ FAILING_STATUSES: Final = frozenset(
 )
 
 
+# 這次呼叫模型而且拿到回應的狀態（總表「這次呼叫模型」與拒收率的分母只算這些）。
+RESPONDED_STATUSES: Final = frozenset(
+    {
+        TrialItemStatus.ACTIVE,
+        TrialItemStatus.CANDIDATE,
+        TrialItemStatus.SUPERSEDED,
+        TrialItemStatus.REJECTED,
+    }
+)
+
+
 @dataclass(frozen=True)
 class LlmCallDiagnostics:
     """一筆 `llm_call` 的診斷欄位（`--verbose`、`--show-output` 用）。`raw_response` 只拿來描述
@@ -396,8 +410,15 @@ class TrialItem:
 
     @property
     def called_model(self) -> bool:
-        """這一次有呼叫模型（有新的 run、不是接續）。略過、預算不准、擋下、沒跑、接續都不算。"""
+        """這一次有呼叫模型（有新的 run、不是接續）。略過、預算不准、擋下、沒跑、接續都不算。
+        `transient_failure` 也算（送了請求，只是沒拿到回應），所以要再看 `got_response`。"""
         return self.run_id is not None and not self.resumed
+
+    @property
+    def got_response(self) -> bool:
+        """這一次呼叫模型而且拿到回應（`active`／`candidate`／`superseded`／`rejected`）。
+        總表「這次呼叫模型」與拒收率的分母只算這些；`transient_failure` 不算。"""
+        return self.called_model and self.status in RESPONDED_STATUSES
 
 
 @dataclass(frozen=True)
@@ -430,8 +451,19 @@ class TrialReport:
         return dict(sorted(counts.items()))
 
     def called_items(self) -> tuple[TrialItem, ...]:
-        """這一次有呼叫模型的項目（拒收率的分母只算這些）。"""
+        """這一次有呼叫模型的項目（含沒拿到回應的 `transient_failure`）。"""
         return tuple(item for item in self.items if item.called_model)
+
+    def responded_items(self) -> tuple[TrialItem, ...]:
+        """這一次呼叫模型而且拿到回應的項目（總表「這次呼叫模型」與拒收率的分母只算這些）。"""
+        return tuple(item for item in self.items if item.got_response)
+
+    def no_response_by_status(self) -> dict[str, int]:
+        """這一次呼叫了模型、卻沒拿到回應的項目數，依狀態（例如 `transient_failure`）。"""
+        counts = Counter(
+            item.status.value for item in self.items if item.called_model and not item.got_response
+        )
+        return dict(sorted(counts.items()))
 
     def not_called_by_status(self) -> dict[str, int]:
         """這一次沒有呼叫模型的項目數，依狀態（接續的另記 `resumed`）。"""
@@ -693,14 +725,17 @@ def render_trial_summary(report: TrialReport, *, verbose: bool) -> list[str]:
         )
     else:
         lines.append("拒收：沒有")
-    called = report.called_items()
-    called_rejected = sum(1 for item in called if item.status is TrialItemStatus.REJECTED)
+    responded = report.responded_items()
+    responded_rejected = sum(1 for item in responded if item.status is TrialItemStatus.REJECTED)
+    no_response = report.no_response_by_status()
     not_called = report.not_called_by_status()
-    breakdown = "、".join(f"{status} {count}" for status, count in not_called.items())
-    lines.append(
-        f"這次呼叫模型：{len(called)} 項（其中拒收 {called_rejected} 項）；沒有呼叫模型："
-        f"{sum(not_called.values())} 項" + (f"（{breakdown}）" if breakdown else "")
-    )
+    line = f"這次呼叫模型：{len(responded)} 項（其中拒收 {responded_rejected} 項）"
+    if no_response:
+        line += f"；呼叫了但沒拿到回應：{sum(no_response.values())} 項（{_breakdown(no_response)}）"
+    line += f"；沒有呼叫模型：{sum(not_called.values())} 項"
+    if not_called:
+        line += f"（{_breakdown(not_called)}）"
+    lines.append(line)
     lines.append(f"這次費用：{format_trial_usd(report.cost_usd)} 美元（接續與略過是 0）")
     if verbose:
         lines += _verbose_summary(report)
@@ -718,6 +753,10 @@ def render_trial_summary(report: TrialReport, *, verbose: bool) -> list[str]:
         )
         lines += [f"  {item.paper_id} {item.task.value}" for item in changed]
     return lines
+
+
+def _breakdown(counts: Mapping[str, int]) -> str:
+    return "、".join(f"{status} {count}" for status, count in counts.items())
 
 
 def _verbose_summary(report: TrialReport) -> list[str]:
