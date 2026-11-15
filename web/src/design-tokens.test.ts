@@ -1,6 +1,7 @@
 // 設計代幣（Story 3.2、ADR-0037）：DESIGN.md 開頭 YAML 的代幣和 styles.css 的 Tailwind 主題逐項相等，
 // 不能少也不能多；斷點只有 DESIGN.md 內文的四個值；元件示範頁列出每個顏色與字級代幣，
 // 字級用的字體對到 DESIGN.md 的 fontFamily。
+// ADR-0038 加了三組尺度（font-sizes、line-heights、letter-spacings）：同樣逐項相等、示範頁每個都列。
 // YAML 用這裡的小解析器讀（只認 DESIGN.md 用到的兩層「名稱: 值」），不另裝套件。
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
@@ -9,7 +10,16 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 import dev from "./i18n/zh-TW/dev.json";
-import { COLOR_SWATCHES, TYPE_SCALE, colorToken, typeToken } from "./pages/dev-showcase";
+import {
+  COLOR_SWATCHES,
+  FONT_SIZE_SCALE,
+  LETTER_SPACING_SCALE,
+  LINE_HEIGHT_SCALE,
+  TYPE_SCALE,
+  colorToken,
+  scaleToken,
+  typeToken,
+} from "./pages/dev-showcase";
 
 const REPO_ROOT = fileURLToPath(new URL("../../", import.meta.url));
 const UX_DIR = `${REPO_ROOT}_bmad-output/planning-artifacts/ux-designs/ux-research-radar-2026-11-12/`;
@@ -121,6 +131,10 @@ const colors = flatSection("colors");
 const typography = nestedSection("typography");
 const spacing = flatSection("spacing");
 const rounded = flatSection("rounded");
+// 尺度（ADR-0038）：字級、行高、字距各一組，可以自由搭配。
+const fontSizes = flatSection("font-sizes");
+const lineHeights = flatSection("line-heights");
+const letterSpacings = flatSection("letter-spacings");
 const theme = themeVariables();
 
 /** 「待選」的中文標題字體先用的系統襯線字堆疊（Kevin 決定，3.1 起沿用）。 */
@@ -159,6 +173,9 @@ describe("DESIGN.md tokens equal the Tailwind theme", () => {
     expect(Object.keys(typography)).toHaveLength(21);
     expect(Object.keys(spacing)).toHaveLength(17);
     expect(Object.keys(rounded)).toHaveLength(2);
+    expect(Object.keys(fontSizes)).toHaveLength(26);
+    expect(Object.keys(lineHeights)).toHaveLength(16);
+    expect(Object.keys(letterSpacings)).toHaveLength(11);
     for (const [name, properties] of Object.entries(typography)) {
       expect(properties, name).toHaveProperty("fontFamily");
       expect(properties, name).toHaveProperty("fontSize");
@@ -166,8 +183,17 @@ describe("DESIGN.md tokens equal the Tailwind theme", () => {
     }
   });
 
-  it("theme has only color, font, text, spacing, radius and breakpoint variables", () => {
-    const prefixes = ["--color-", "--font-", "--text-", "--spacing-", "--radius-", "--breakpoint-"];
+  it("theme has only color, font, text, leading, tracking, spacing, radius and breakpoint variables", () => {
+    const prefixes = [
+      "--color-",
+      "--font-",
+      "--text-",
+      "--leading-",
+      "--tracking-",
+      "--spacing-",
+      "--radius-",
+      "--breakpoint-",
+    ];
     for (const name of Object.keys(theme)) {
       expect(prefixes.some((prefix) => name.startsWith(prefix)), name).toBe(true);
     }
@@ -192,7 +218,41 @@ describe("DESIGN.md tokens equal the Tailwind theme", () => {
         }
       }
     }
-    expect(withPrefix(theme, "--text-")).toEqual(expected);
+    // --text- 底下是 21 個角色加 26 個字級尺度（Tailwind 4 的字級類別只認 --text-），兩組不撞名、合起來不多不少。
+    for (const name of Object.keys(fontSizes)) {
+      expect(expected, name).not.toHaveProperty(name);
+    }
+    expect(withPrefix(theme, "--text-")).toEqual({ ...expected, ...fontSizes });
+  });
+
+  it("scales: font sizes, line heights and letter spacings have the same names and values", () => {
+    // 字級尺度只有字級本身：沒有 --text-s15--line-height 這類附帶的行高、字距、字重。
+    const sizes = Object.fromEntries(
+      Object.entries(withPrefix(theme, "--text-")).filter(([name]) => !(name.split("--")[0]! in typography)),
+    );
+    expect(sizes).toEqual(fontSizes);
+    expect(withPrefix(theme, "--leading-")).toEqual(lineHeights);
+    expect(withPrefix(theme, "--tracking-")).toEqual(letterSpacings);
+  });
+
+  it("scales: names show the value and do not collide with roles or colors", () => {
+    for (const [name, value] of Object.entries(fontSizes)) {
+      expect(value, name).toMatch(/^\d+px$/);
+      expect(name).toBe(`s${Number.parseInt(value, 10)}`);
+    }
+    for (const [name, value] of Object.entries(lineHeights)) {
+      expect(value, name).toMatch(/^\d(?:\.\d+)?$/);
+      expect(name).toBe(String(Math.round(Number(value) * 100)));
+    }
+    for (const [name, value] of Object.entries(letterSpacings)) {
+      expect(value, name).toMatch(/^(?:0|-?\d\.\d+em)$/);
+      const digits = value.replace(/em$/, "").replace("-", "").replace(".", "");
+      expect(name).toBe(`${value.startsWith("-") ? "n" : ""}${digits}`);
+    }
+    const taken = new Set([...Object.keys(typography), ...Object.keys(colors), ...Object.keys(spacing)]);
+    for (const name of [...Object.keys(fontSizes), ...Object.keys(lineHeights), ...Object.keys(letterSpacings)]) {
+      expect(taken.has(name), name).toBe(false);
+    }
   });
 
   it("spacing and rounded: same names and values", () => {
@@ -266,6 +326,22 @@ describe("component showcase lists every token", () => {
       const classes = className.split(/\s+/);
       expect(classes.filter((name) => name.startsWith("font-")), token).toEqual([`font-${font}`]);
       expect(classes.includes("italic"), token).toBe(italic);
+    }
+  });
+});
+
+describe("component showcase lists every scale value", () => {
+  it("every font size, line height and letter spacing has a sample", () => {
+    const groups: [readonly string[], string, Flat][] = [
+      [FONT_SIZE_SCALE, "text-", fontSizes],
+      [LINE_HEIGHT_SCALE, "leading-", lineHeights],
+      [LETTER_SPACING_SCALE, "tracking-", letterSpacings],
+    ];
+    for (const [classes, prefix, tokens] of groups) {
+      expect(classes.map(scaleToken).sort(), prefix).toEqual(Object.keys(tokens).sort());
+      for (const className of classes) {
+        expect(className).toBe(`${prefix}${scaleToken(className)}`);
+      }
     }
   });
 });

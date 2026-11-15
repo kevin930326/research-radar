@@ -12,11 +12,15 @@ import dev from "../i18n/zh-TW/dev.json";
 import {
   COLOR_SWATCHES,
   EXTERNAL_EXAMPLE,
+  FONT_SIZE_SCALE,
+  LETTER_SPACING_SCALE,
+  LINE_HEIGHT_SCALE,
   PAPER_TITLE_TOKENS,
   TYPE_SCALE,
   UNVERIFIED,
   VERIFIED,
   colorToken,
+  scaleToken,
   typeToken,
 } from "./dev-showcase";
 
@@ -69,6 +73,19 @@ function TypeRow({ className }: { className: string }) {
   );
 }
 
+/** 一組尺度（ADR-0038）：每個值一個樣本，樣本的字就是名稱，套上那個類別。 */
+function ScaleList({ scale, classes }: { scale: string; classes: readonly string[] }) {
+  return (
+    <ul data-scale={scale} className="flex flex-wrap items-baseline gap-x-6 gap-y-3 border-t border-hairline py-4">
+      {classes.map((className) => (
+        <li key={className} data-scale-token={scaleToken(className)} className={`${className} text-text-primary`}>
+          {scaleToken(className)}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
 export function DevComponentsPage() {
   const { t } = useTranslation(["dev", "notice"]);
   const reducedMotion = useReducedMotion();
@@ -90,6 +107,9 @@ export function DevComponentsPage() {
             <TypeRow key={className} className={className} />
           ))}
         </ul>
+        <ScaleList scale="sizes" classes={FONT_SIZE_SCALE} />
+        <ScaleList scale="leading" classes={LINE_HEIGHT_SCALE} />
+        <ScaleList scale="tracking" classes={LETTER_SPACING_SCALE} />
       </Section>
 
       <Section id="buttons" title={t("dev:dev.sections.buttons")}>

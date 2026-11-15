@@ -117,6 +117,67 @@
   --text-table-number: 14px;
   --text-table-number--font-weight: 400;
 
+  /*
+   * 尺度（DESIGN.md font-sizes 26 個、line-heights 16 個、letter-spacings 11 個；ADR-0038）：
+   * 設計稿的字級、行高、字距組合不等於上面任何一個角色時，用這三組自由搭配。
+   * text-s15 只設字級（不帶行高與字距）、leading-185 是行高 1.85、tracking-004 是字距 0.04em（n001 是 -0.01em）。
+   * 尺度以外的 leading-…／tracking-…（含負號、任意值、間距代幣）、text-[…]／text-(…)、
+   * 任意屬性寫字體屬性或改寫主題變數（[line-height:1.7]、[--text-s15:30px]）由 tailwind-guard.ts 擋。
+   */
+  --text-s11: 11px;
+  --text-s12: 12px;
+  --text-s13: 13px;
+  --text-s14: 14px;
+  --text-s15: 15px;
+  --text-s16: 16px;
+  --text-s17: 17px;
+  --text-s18: 18px;
+  --text-s19: 19px;
+  --text-s20: 20px;
+  --text-s21: 21px;
+  --text-s22: 22px;
+  --text-s23: 23px;
+  --text-s24: 24px;
+  --text-s25: 25px;
+  --text-s26: 26px;
+  --text-s28: 28px;
+  --text-s30: 30px;
+  --text-s32: 32px;
+  --text-s34: 34px;
+  --text-s36: 36px;
+  --text-s38: 38px;
+  --text-s40: 40px;
+  --text-s44: 44px;
+  --text-s60: 60px;
+  --text-s68: 68px;
+  --leading-100: 1;
+  --leading-105: 1.05;
+  --leading-120: 1.2;
+  --leading-125: 1.25;
+  --leading-130: 1.3;
+  --leading-135: 1.35;
+  --leading-140: 1.4;
+  --leading-145: 1.45;
+  --leading-150: 1.5;
+  --leading-160: 1.6;
+  --leading-165: 1.65;
+  --leading-170: 1.7;
+  --leading-175: 1.75;
+  --leading-180: 1.8;
+  --leading-185: 1.85;
+  --leading-190: 1.9;
+  --tracking-n001: -0.01em;
+  --tracking-0: 0;
+  --tracking-0005: 0.005em;
+  --tracking-001: 0.01em;
+  --tracking-002: 0.02em;
+  --tracking-003: 0.03em;
+  --tracking-004: 0.04em;
+  --tracking-006: 0.06em;
+  --tracking-008: 0.08em;
+  --tracking-01: 0.1em;
+  --tracking-012: 0.12em;
+
   /* spacing（DESIGN.md spacing，17 個） */
   --spacing-1: 4px;
   --spacing-2: 8px;

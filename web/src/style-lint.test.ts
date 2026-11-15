@@ -88,6 +88,16 @@ describe("style lint rules", () => {
     expectBlockedLines(findings, [5, 6, 7, 9, 11, 12, 13], FONT_SIZE);
   });
 
+  it("still blocks arbitrary sizes, line heights and letter spacings now that the scales exist (ADR-0038)", async () => {
+    const findings = await lint("lint-fixtures/src/components/ArbitraryScaleValue.tsx");
+    // 5: text-[15px]、6: leading-[1.7]、7: split:tracking-[0.02em]、8: text-s15/[1.7]
+    expectBlockedLines(findings, [5, 6, 7, 8], FONT_SIZE);
+  });
+
+  it("allows scale classes: text-s15, leading-185, tracking-004 in any combination", async () => {
+    expect(await lint("lint-fixtures/src/components/ScaleType.tsx")).toEqual([]);
+  });
+
   it("blocks removing or restyling the focus ring, and transition / transition-all", async () => {
     const findings = await lint("lint-fixtures/src/components/FocusOutlineRemoved.tsx");
     // 5: outline-none、6: focus-visible:outline-0、7: outline-hidden、8: focus:outline-none、

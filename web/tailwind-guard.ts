@@ -7,6 +7,8 @@
 //
 // 另外兩種會產生 CSS、但違反 ADR-0010 第 15 點（斷點只有 DESIGN.md 的四個值）與「只有深色主題」的寫法也算錯：
 // 任意值斷點（min-[1024px]:、max-[600px]:、@min-[400px]:、[@media(...)]:、[@container(...)]:）與 dark:。
+// 行高與字距只能用 DESIGN.md 的尺度（ADR-0038）：leading-…／tracking-… 的值不是主題裡 --leading-…／--tracking-… 的名稱
+// 也算錯（leading-4 會拿間距代幣當行高、-tracking-004 會變成負的字距、leading-[1.7]／leading-(--x) 是任意值）。
 // 少數「長得像類別、但其實是元件屬性值」的英文字（inline-start、flex-start 這類）放在 NOT_CLASSES，每項附理由。
 //
 // 用的是 tailwindcss 4.3.5 的 __unstable__loadDesignSystem（版本在 package.json 釘死；升級後介面若變了，
@@ -132,9 +134,53 @@ function isForbiddenVariant(variant: string): boolean {
   return bare === "dark" || /^(?:@?(?:min|max)-\[|@\[|\[@(?:media|container))/.test(bare);
 }
 
+/** 任意屬性（[屬性:值]）裡不准直接寫的字體屬性，以及不准就地改寫的主題變數前綴。 */
+const TYPE_PROPERTIES = new Set(["font", "font-size", "font-weight", "font-family", "line-height", "letter-spacing"]);
+// --tw-leading／--tw-tracking／--tw-font-weight 是 Tailwind 內部變數：角色類別的行高、字距、字重會讀它們。
+const THEME_VARIABLE = /^--(?:text|leading|tracking|font|color|tw-leading|tw-tracking|tw-font-weight)(?:-|$)/;
+
+/**
+ * 本體繞過了字級、行高、字距的尺度（ADR-0038）：
+ * - leading-…／tracking-… 的值必須是主題裡 --leading-…／--tracking-… 的名稱。Tailwind 的 leading-4 會退而拿
+ *   間距代幣（--spacing-4）當行高、-tracking-004 是負的字距、leading-[1.7] 與 leading-(--x) 是任意值。
+ * - text-[…]／text-(…)：任意值的字級或顏色（text-(length:--x) 可以把任何變數當字級）。
+ * - 任意屬性 [line-height:1.7]、[letter-spacing:0.02em]、[font-size:27px]、[font-weight:300]、[font-family:…]、[font:…]。
+ * - 任意屬性就地改寫主題變數或 Tailwind 內部變數：[--text-s15:30px]、[--leading-185:3]、[--color-…:…]、[--tw-leading:3]。
+ * 這些都會產生 CSS，但不在 DESIGN.md 裡。
+ */
+function isOffScale({ theme }: GuardSystems, body: string): boolean {
+  const bare = body.replace(/^!/, "").replace(/!$/, "");
+  let candidates: ReturnType<DesignSystem["parseCandidate"]>;
+  try {
+    candidates = theme.parseCandidate(bare);
+  } catch {
+    return false;
+  }
+  return candidates.some((candidate) => {
+    if (candidate.kind === "arbitrary") {
+      return TYPE_PROPERTIES.has(candidate.property) || THEME_VARIABLE.test(candidate.property);
+    }
+    if (candidate.kind !== "functional" || candidate.value === null) {
+      return false;
+    }
+    if (candidate.root === "text") {
+      return candidate.value.kind === "arbitrary";
+    }
+    const root = candidate.root.replace(/^-/, "");
+    if (root !== "leading" && root !== "tracking") {
+      return false;
+    }
+    return (
+      candidate.root.startsWith("-") ||
+      candidate.value.kind !== "named" ||
+      theme.theme.get([`--${root}-${candidate.value.value}`]) === null
+    );
+  });
+}
+
 /**
  * 回傳建置不准的類別（不重複、照出現順序）：看起來像 Tailwind 類別、但不產生 CSS 的，
- * 以及用了任意值斷點、自訂 @media／@container 或 dark: 的。
+ * 用了任意值斷點、自訂 @media／@container 或 dark: 的，以及繞過字級、行高、字距尺度的寫法。
  */
 export function findInvalidClasses(systems: GuardSystems, tokens: Iterable<string>): string[] {
   const suspects: string[] = [];
@@ -147,7 +193,7 @@ export function findInvalidClasses(systems: GuardSystems, tokens: Iterable<strin
     const body = parts.at(-1) ?? "";
     if (looksLikeUtility(systems, body)) {
       suspects.push(token);
-      if (parts.slice(0, -1).some(isForbiddenVariant)) {
+      if (parts.slice(0, -1).some(isForbiddenVariant) || isOffScale(systems, body)) {
         forbidden.add(token);
       }
     }
@@ -210,7 +256,7 @@ export function isCheckedFile(id: string): boolean {
 }
 
 export function formatError(file: string, invalid: readonly string[]): string {
-  return `${path.relative(WEB_ROOT, file)}：這些類別不產生 CSS（DESIGN.md 沒有這個代幣，或是已清掉的 Tailwind 預設類別），或用了 DESIGN.md 以外的斷點、dark:（只有深色主題）：${invalid.join(", ")}`;
+  return `${path.relative(WEB_ROOT, file)}：這些類別不產生 CSS（DESIGN.md 沒有這個代幣，或是已清掉的 Tailwind 預設類別），或用了 DESIGN.md 以外的斷點、dark:（只有深色主題）、尺度以外的行高或字距（leading-…、tracking-… 只能用 DESIGN.md 的 line-heights、letter-spacings）：${invalid.join(", ")}`;
 }
 
 /** Vite 外掛：建置與開發伺服器轉換每個 src/ 檔案時檢查，有錯就讓建置失敗。 */
