@@ -791,3 +791,20 @@ def test_canary_case_checks_non_exempt_endpoints_are_hidden(
     run_canary_case(_note_case(), _app_context(_notes_app()), _log_reader(capsys))
     with pytest.raises(AssertionError, match="成員 B"):
         run_canary_case(_note_case(), _app_context(_notes_app(leaky=True)), _log_reader(capsys))
+
+
+@pytest.fixture
+def diary_context(capsys: pytest.CaptureFixture[str]) -> PermissionContext:
+    # 和整合測試一樣：context 在 fixture（setup 階段）建好，日誌也在這裡先設一次。
+    configure_logging()
+    return _app_context(_diary_app(log_canary=False))
+
+
+def test_canary_case_with_a_context_built_in_a_fixture(
+    diary_context: PermissionContext, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # 整合測試的寫法：測試本體裡再設一次日誌，capsys 才讀得到目標請求的日誌（只在 fixture 設定會
+    # 報「沒有接到這個請求」，CI 上 c73d72e 就是這樣失敗的）。
+    configure_logging()
+
+    run_canary_case(_diary_case(), diary_context, _log_reader(capsys))

@@ -551,7 +551,9 @@ def run_canary_case(
 
     `read_logs` 每次呼叫回傳上次之後的日誌並清空（例如 pytest 的 `capsys.readouterr()`）。送出前先
     清空一次（準備資料、兩位成員登入留下的不算），送出時帶一個新的 request ID，日誌裡要有這個 ID 的
-    「請求完成」，才算真的接到了這個請求的日誌。
+    「請求完成」，才算真的接到了這個請求的日誌。日誌設定（`configure_logging()`）要在測試本體裡呼叫：
+    在 fixture（setup 階段）設定的話，handler 綁到 setup 階段的輸出，`capsys` 讀不到這個請求的日誌，
+    這裡會報錯。
 
     Raises:
         AssertionError: 沒打到登記的端點、狀態不是預期的（豁免）或不是「看不到」（沒豁免）、沒接到

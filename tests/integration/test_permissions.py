@@ -73,7 +73,7 @@ def _log_in(client: TestClient, database: Database, email: str, name: str) -> Me
 
 @pytest.fixture
 def context(db: TestDatabase, capsys: pytest.CaptureFixture[str]) -> PermissionContext:
-    # 日誌接到 capsys（run_canary_case 送出前會先清空，登入留下的不算）。
+    # 先設好日誌，登入與遷移的紀錄才有地方寫；金絲雀測試在測試本體裡會再設一次（見那裡的註解）。
     configure_logging()
     database = Database(db.app_url, connect_timeout=5, pool_size=2)
     settings = AuthSettings(environment=Environment.DEVELOPMENT, fake_login=True)
@@ -104,6 +104,10 @@ def test_other_member_never_sees_the_canary(
     # 前提：金絲雀確實在成員 A 的私人資料裡（不然這個測試永遠會過）。
     emails = {row[0] for row in execute(db, "SELECT email FROM allowed_email")}
     assert CANARY_EMAIL in emails
+    # 在測試本體（call 階段）重新設定日誌：fixture 在 setup 階段設定時，handler 綁的是 setup 階段的
+    # 輸出，capsys 在 call 階段讀不到目標請求的日誌（CI 上 run_canary_case 因此報「沒有接到這個
+    # 請求」）。
+    configure_logging()
 
     def read_logs() -> str:
         captured = capsys.readouterr()
