@@ -222,9 +222,13 @@ for (const site of A11Y_SITES) {
         for (let index = 0; index < count; index += 1) {
           await triggers.nth(index).click();
           await expect(popup).toBeVisible();
-          // 等淡入（0.2 秒）結束：半透明時 axe 會把文字的對比算低。
+          // 等淡入（0.2 秒）結束：Base UI 拿掉 data-starting-style、透明度到 1 才檢查（半透明時 axe 會把文字的對比算低）。
+          await expect(popup).not.toHaveAttribute("data-starting-style");
           await expect(popup).toHaveCSS("opacity", "1");
-          const results = await new AxeBuilder({ page }).withTags(TAGS).analyze();
+          // 不檢查 Base UI 的焦點守衛：它是 tabindex=0＋aria-hidden 的 span（data-base-ui-focus-guard），
+          // 焦點一進來就由 React 代收的 focus 事件轉走，axe 看不到這段處理，會誤判成 aria-hidden-focus。
+          // 之前能過是因為 axe 把 role=dialog 當成模態而判成「無法判定」，不是真的沒問題。
+          const results = await new AxeBuilder({ page }).withTags(TAGS).exclude("[data-base-ui-focus-guard]").analyze();
           expect(
             results.violations.map(
               (violation) =>

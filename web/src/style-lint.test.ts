@@ -67,6 +67,13 @@ describe("style lint rules", () => {
     expectBlockedLines(findings, [2, 7, 8, 9, 11, 12, 13, 14, 16, 22], FONT_SIZE);
   });
 
+  it("allows a standalone rem/em/pt only as a layout property value", async () => {
+    const findings = await lint("lint-fixtures/src/components/HardcodedFontSize.tsx");
+    // 23: CSS 自訂屬性 "--reading-size": "1.1rem"、24: 其他物件屬性 size: "0.9em"、
+    // 25: 樣板字串 `12pt`、26: JSX 屬性 width="1.5em"
+    expectBlockedLines(findings, [23, 24, 25, 26], FONT_SIZE);
+  });
+
   it("blocks CSS color names inside any arbitrary value and in style colors", async () => {
     const findings = await lint("lint-fixtures/src/components/ArbitraryColor.tsx");
     // 5: shadow-[0_0_4px_red]、6: bg-[color:red]、7: [color:red]、8: hover:[background:white]、
@@ -77,8 +84,8 @@ describe("style lint rules", () => {
   it("blocks hard-coded line heights and letter spacing", async () => {
     const findings = await lint("lint-fixtures/src/components/HardcodedLineHeight.tsx");
     // 5: text-body/[20px]、6: lineHeight "20px"、7: letterSpacing 2、9: SVG letterSpacing="2"、
-    // 11: md:text-caption/(--leading)
-    expectBlockedLines(findings, [5, 6, 7, 9, 11], FONT_SIZE);
+    // 11: md:text-caption/(--leading)、12: text-body/none、13: text-caption/tight
+    expectBlockedLines(findings, [5, 6, 7, 9, 11, 12, 13], FONT_SIZE);
   });
 
   it("blocks removing or restyling the focus ring, and transition / transition-all", async () => {
@@ -86,8 +93,9 @@ describe("style lint rules", () => {
     // 5: outline-none、6: focus-visible:outline-0、7: outline-hidden、8: focus:outline-none、
     // 9: focus-visible:outline-2
     expectBlockedLines(findings, [5, 6, 7, 8, 9], OUTLINE);
-    // 10: transition-all、11: transition、12: hover:transition
-    expectBlockedLines(findings, [10, 11, 12], TRANSITION);
+    // 10: transition-all、11: transition、12: hover:transition、13: transition-colors、
+    // 14: transition-[outline-color]、15: transition-[all]、16: hover:transition-[color,outline-offset]
+    expectBlockedLines(findings, [10, 11, 12, 13, 14, 15, 16], TRANSITION);
   });
 
   it("blocks querying prefers-reduced-motion outside the shared hook", async () => {

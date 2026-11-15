@@ -90,11 +90,15 @@ const NAMED_COLOR = `^\\s*${COLOR_NAME_GROUP}\\s*$`;
 const OUTLINE_MESSAGE =
   "焦點外框只用 styles.css 的全站規則（1px 金色、外擴 4px），不得拿掉或改寫（ADR-0037、UX-DR7）。";
 const TRANSITION_MESSAGE =
-  "過場只寫要動的屬性（transition-transform、transition-opacity 這類），不得用 transition／transition-all：會連焦點外框一起淡入（ADR-0037）。";
+  "過場只寫要動的屬性（transition-transform、transition-opacity 這類），不得用 transition／transition-all，也不得用 transition-colors 或含 all、outline 的 transition-[…]：會連焦點外框一起淡入（ADR-0037）。";
 // 單獨一個長度（"1.2rem"、"0.9em"、"12pt"）。
 const STANDALONE_LENGTH = "^\\s*-?(?:\\d+\\.?\\d*|\\.\\d+)(?:rem|em|pt)\\s*$";
 // 寫死就算字級的 style 屬性與 JSX 屬性。
 const FONT_PROPERTIES = "^(?:fontSize|font|lineHeight|letterSpacing)$";
+// 單獨的 rem／em／pt 長度只在這些版面屬性（物件的屬性值）放行：尺寸、外距、內距、間隔、定位。
+const LAYOUT_PROPERTIES =
+  "^(?:width|height|inlineSize|blockSize|(?:min|max)(?:Width|Height|InlineSize|BlockSize)|margin[A-Za-z]*|padding[A-Za-z]*|gap|rowGap|columnGap|inset[A-Za-z]*|top|left|right|bottom|flexBasis)$";
+const LAYOUT_PROPERTY = `Property:matches([key.name=/${LAYOUT_PROPERTIES}/], [key.value=/${LAYOUT_PROPERTIES}/])`;
 const onStrings = (pattern, message) => [
   { selector: `Literal[value=/${pattern}/i]`, message },
   { selector: `TemplateElement[value.raw=/${pattern}/i]`, message },
@@ -121,14 +125,16 @@ const STYLE_SELECTORS = [
   ...onStrings("font-size\\s*:", FONT_SIZE_MESSAGE),
   // 字級後面的行高修飾：text-body/[20px]、text-body/(--x)（顏色的任意透明度 text-…/[0.5] 也一併不准）
   ...onStrings("(?:^|[\\s:!])-?text-[a-z0-9-]+\\x2F[\\[(]", FONT_SIZE_MESSAGE),
-  // 單獨的 "1.2rem"、"0.9em"、"12pt"（變數、陣列等）；當成物件屬性或 JSX 屬性的值時只在字級屬性擋（下面幾條），
-  // width: "2em" 這類版面屬性不擋。
+  // 具名的行高修飾：text-body/none、text-caption/tight（Tailwind 內建的行高名稱，不是 DESIGN.md 的代幣）
+  ...onStrings("(?:^|[\\s:!])-?text-[a-z0-9-]+\\x2F(?:none|tight|snug|normal|relaxed|loose)(?![a-z0-9-])", FONT_SIZE_MESSAGE),
+  // 單獨的 "1.2rem"、"0.9em"、"12pt"：只有當版面屬性（width: "2em"、marginTop: "0.5rem"）的值時放行；
+  // 變數、陣列、其他物件屬性、CSS 自訂屬性（"--size": "1rem"）、JSX 屬性（width="2em"）都擋。
   {
-    selector: `Literal[value=/${STANDALONE_LENGTH}/i]:not(Property > Literal.value, JSXAttribute Literal)`,
+    selector: `Literal[value=/${STANDALONE_LENGTH}/i]:not(${LAYOUT_PROPERTY} > Literal.value)`,
     message: FONT_SIZE_MESSAGE,
   },
   {
-    selector: `TemplateElement[value.raw=/${STANDALONE_LENGTH}/i]:not(Property > TemplateLiteral.value > TemplateElement, JSXAttribute TemplateElement)`,
+    selector: `TemplateElement[value.raw=/${STANDALONE_LENGTH}/i]:not(${LAYOUT_PROPERTY} > TemplateLiteral.value > TemplateElement)`,
     message: FONT_SIZE_MESSAGE,
   },
   // style={{ fontSize: 13 }}、{ font: "13px serif" }、{ "fontSize": `${n}px` }、{ lineHeight: "20px" }、{ letterSpacing: 2 }
@@ -151,6 +157,9 @@ const STYLE_SELECTORS = [
   ...onStrings("(?:^|[\\s:])(?:group-|peer-)?focus(?:-visible|-within)?:(?:[^\\s:]+:)*!?(?:outline|ring)(?![a-z0-9])", OUTLINE_MESSAGE),
   // 整組過場：transition、transition-all（transition-transform、transition-[border-color] 不擋）
   ...onStrings("(?:^|[\\s:!])transition(?:-all)?(?![a-z0-9\\[(-])", TRANSITION_MESSAGE),
+  // transition-colors 也包含 outline-color；任意值裡寫 all 或 outline（transition-[all]、transition-[outline-color]）同理
+  ...onStrings("(?:^|[\\s:!])transition-colors(?![a-z0-9-])", TRANSITION_MESSAGE),
+  ...onStrings("(?:^|[\\s:!])transition-\\[[^\\]\\s]*(?<![a-z0-9-])(?:all(?![a-z0-9-])|outline)", TRANSITION_MESSAGE),
 ];
 const REDUCED_MOTION_SELECTORS = onStrings(
   "prefers-reduced-motion",

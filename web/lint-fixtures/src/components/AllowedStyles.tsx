@@ -1,5 +1,5 @@
 // 照規則寫的樣式：代幣類別、var(--color-…)、版面寬度的任意值都不能被擋。
-// 樣板字串、i18n 鍵、網址、英文句子、元件的英文屬性值（color="primary"、例外清單裡的 inline-start 等）、
+// 樣板字串、i18n 鍵、網址、英文句子、元件的英文屬性值（color="primary"、例外清單裡 Base UI 定位用的 inline-start 等）、
 // 非字級屬性的 em 長度也不能被誤擋。
 const WIDTH = 40;
 
@@ -22,13 +22,14 @@ export function AllowedStyles({ wide, label }: { wide: boolean; label: string })
       <p style={{ width: "2em", marginTop: "0.5rem" }} className="bg-[var(--color-accent-gold)]">
         {label}
       </p>
+      <p style={{ padding: `1rem`, maxWidth: "40em", inset: "0.5rem", "gap": "1rem" }}>{label}</p>
       {/* 只過場要動的屬性 */}
       <p className="transition-transform transition-[border-color] duration-250">{label}</p>
-      {/* 例外清單（tailwind-guard.ts 的 NOT_CLASSES）：元件屬性值與資料，不是類別 */}
-      <p data-side="inline-start" data-placement="bottom-start" data-align="flex-start" data-direction="row-reverse">
+      {/* 例外清單（tailwind-guard.ts 的 NOT_CLASSES）：Base UI 定位元件的屬性值，不是類別 */}
+      <p data-side="inline-start" data-placement="bottom-start">
         {label}
       </p>
-      <p data-ease="ease-in" data-order="order-desc">
+      <p data-side="inline-end" data-placement="right-end">
         {label}
       </p>
     </section>

@@ -124,7 +124,12 @@ test("an open popover does not cover the next section", async ({ page }) => {
         const popup = page.locator("[data-info-popover]");
         await expect(popup).toHaveCSS("opacity", "1");
         const box = await popup.boundingBox();
+        const triggerBox = await triggers.nth(index).boundingBox();
         const nextTop = (await page.locator(`[data-dev-section='${next}']`).boundingBox())?.y ?? 0;
+        // 說明框要真的在觸發按鈕下方：翻到上方時「不壓下一段」會白過。
+        expect(box?.y ?? 0, `${width}px ${section} #${index} below its trigger`).toBeGreaterThanOrEqual(
+          (triggerBox?.y ?? 0) + (triggerBox?.height ?? 0),
+        );
         expect((box?.y ?? 0) + (box?.height ?? 0), `${width}px ${section} #${index}`).toBeLessThanOrEqual(nextTop);
         await page.keyboard.press("Escape");
         await expect(popup).toHaveCount(0);

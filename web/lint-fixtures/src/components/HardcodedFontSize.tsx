@@ -20,3 +20,7 @@ export function HardcodedFontSize({ label }: { label: string }) {
 }
 
 export const INLINE_CSS = "font-size: 13px";
+export const CUSTOM_PROPERTY = { "--reading-size": "1.1rem" };
+export const OBJECT_VALUE = { size: "0.9em" };
+export const TEMPLATE_VALUE = { label: `12pt` };
+export const SVG_ICON = <svg viewBox="0 0 10 10" width="1.5em" aria-hidden="true" />;

@@ -9,6 +9,8 @@ export function HardcodedLineHeight({ label }: { label: string }) {
         <text letterSpacing="2">{label}</text>
       </svg>
       <p className="md:text-caption/(--leading)">{label}</p>
+      <p className="text-body/none">{label}</p>
+      <p className="text-caption/tight">{label}</p>
     </div>
   );
 }

@@ -108,24 +108,22 @@ function looksLikeUtility({ theme, defaults }: GuardSystems, body: string): bool
 }
 
 /**
- * 不是類別的字串（例外清單）：程式裡常當成元件屬性值或資料、剛好被 Tailwind 解析成「不產生 CSS 的類別」的字。
- * 只比對整個字（不含 variant）。每一項都要寫理由；要加新的，先確認它真的不是想當類別用。
+ * 不是類別的字串（例外清單）：只放 Base UI 定位元件（說明框、選單）當屬性值用、剛好被 Tailwind 解析成
+ * 「不產生 CSS 的類別」的字。只比對整個字（不含 variant）。每一項都要寫理由；要加新的，先確認它真的
+ * 只會當元件屬性值、不會被當成類別寫（ease-in、flex-start、row-reverse、order-desc 這類本身就是
+ * Tailwind 類別名或像類別名的字不放：寫成 className 時要被擋）。
  */
 export const NOT_CLASSES: ReadonlyMap<string, string> = new Map([
-  ["inline-start", "Base UI 定位元件的 side 屬性值（說明框、選單出現在哪一側）"],
-  ["inline-end", "Base UI 定位元件的 side 屬性值"],
-  ["top-start", "定位元件的 placement 寫法（上方、靠起點對齊）"],
-  ["top-end", "定位元件的 placement 寫法"],
-  ["bottom-start", "定位元件的 placement 寫法（下方、靠起點對齊）"],
-  ["bottom-end", "定位元件的 placement 寫法"],
-  ["flex-start", "CSS 的 align-items／justify-content 值，用在 style 或資料裡"],
-  ["flex-end", "CSS 的 align-items／justify-content 值"],
-  ["row-reverse", "CSS 的 flex-direction 值"],
-  ["col-reverse", "排序方向之類的資料值"],
-  ["ease-in", "CSS／動畫函式庫的時間曲線名稱"],
-  ["ease-out", "CSS／動畫函式庫的時間曲線名稱"],
-  ["order-asc", "排序參數的值（例如 API 查詢字串）"],
-  ["order-desc", "排序參數的值（例如 API 查詢字串）"],
+  ["inline-start", "Base UI 定位元件的 side 屬性值（說明框、選單出現在起點那一側）"],
+  ["inline-end", "Base UI 定位元件的 side 屬性值（出現在終點那一側）"],
+  ["top-start", "Base UI 底層 Floating UI 的 placement 值（上方、靠起點對齊）"],
+  ["top-end", "Base UI 底層 Floating UI 的 placement 值（上方、靠終點對齊）"],
+  ["bottom-start", "Base UI 底層 Floating UI 的 placement 值（下方、靠起點對齊）"],
+  ["bottom-end", "Base UI 底層 Floating UI 的 placement 值（下方、靠終點對齊）"],
+  ["left-start", "Base UI 底層 Floating UI 的 placement 值（左方、靠起點對齊）"],
+  ["left-end", "Base UI 底層 Floating UI 的 placement 值（左方、靠終點對齊）"],
+  ["right-start", "Base UI 底層 Floating UI 的 placement 值（右方、靠起點對齊）"],
+  ["right-end", "Base UI 底層 Floating UI 的 placement 值（右方、靠終點對齊）"],
 ]);
 
 /** 去掉 not- 前綴後，這個 variant 是任意值斷點、自訂 @media／@container 或 dark（ADR-0037）。 */

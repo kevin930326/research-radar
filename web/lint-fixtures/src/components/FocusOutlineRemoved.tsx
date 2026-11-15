@@ -10,6 +10,10 @@ export function FocusOutlineRemoved({ label }: { label: string }) {
       <button className="transition-all duration-250">{label}</button>
       <button className="transition duration-250">{label}</button>
       <button className="hover:transition">{label}</button>
+      <button className="transition-colors duration-250">{label}</button>
+      <button className="transition-[outline-color] duration-250">{label}</button>
+      <button className="transition-[all] duration-250">{label}</button>
+      <button className="hover:transition-[color,outline-offset]">{label}</button>
     </div>
   );
 }

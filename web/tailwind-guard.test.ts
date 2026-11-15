@@ -77,6 +77,25 @@ describe("tailwind guard", () => {
     expect(findInvalidClasses(design, asClasses)).toEqual(asClasses);
   });
 
+  it("does not exempt real Tailwind class names: ease-in, flex-start, row-reverse, order-desc written as classes are flagged", () => {
+    // 這些字不在例外清單：寫成 className 時（例如以為 ease-in 是時間曲線類別）建置要失敗。
+    const code =
+      'export const A = <p className="ease-in ease-out flex-start flex-end row-reverse col-reverse order-asc order-desc" />;';
+    expect(findInvalidClasses(design, extractTokens("x.tsx", code))).toEqual([
+      "ease-in",
+      "ease-out",
+      "flex-start",
+      "flex-end",
+      "row-reverse",
+      "col-reverse",
+      "order-asc",
+      "order-desc",
+    ]);
+    for (const word of ["ease-in", "ease-out", "flex-start", "flex-end", "row-reverse", "col-reverse", "order-asc", "order-desc"]) {
+      expect(NOT_CLASSES.has(word), word).toBe(false);
+    }
+  });
+
   it("allows token classes, layout arbitrary values, i18n keys, URLs, sentences and component props", () => {
     expect(checkFile(path.join(FIXTURES, "AllowedStyles.tsx"))).toEqual([]);
   });

@@ -38,16 +38,16 @@ ADR-0010 定了「Tailwind 只留 `DESIGN.md` 的代幣、用到預設類別時�
    - 資料來源層（`src/datasource/`）沒有畫面，裡面的 HTTP 標頭（`content-type`）這類字串會被誤認成類別，不檢查。
    - 「是類別」但整個類別（含 variant）不產生 CSS，就 `this.error`，列出檔名與類別；建置與開發伺服器都會失敗。
    - **會產生 CSS 但不准的 variant 也算錯**：任意值斷點（`min-[1024px]:`、`max-[600px]:`、容器查詢的 `@min-[…]:`、`@max-[…]:`、`@[…]:`）、自訂的 `[@media(…)]:`、`[@container(…)]:`，以及 `dark:`（前面包 `not-` 也一樣）。斷點只能用主題裡 `DESIGN.md` 的四個（`tablet`、`split`、`desktop`、`wide`，含 `max-` 版本；ADR-0010 第 15 點）；全站只有深色主題，`dark:` 沒有意義、日後淺色主題出來時也不該靠它切換（`DESIGN.md`：換值不換名）。
-   - **例外清單 `NOT_CLASSES`**：少數常當成元件屬性值或資料的英文字（`inline-start`、`bottom-start`、`flex-start`、`row-reverse`、`ease-in`、`order-desc` 這類）剛好被 Tailwind 解析成「不產生 CSS 的類別」，放在清單裡不檢查。只比對整個字；前面加了 variant（`hover:inline-start`）就是想當類別用，照樣擋。每一項都要寫理由，單元測試確認每項有理由、而且不放清單就會被擋（沒有多餘的項）。要加新的，先確認它真的不是想當類別用。
+   - **例外清單 `NOT_CLASSES`**：只放 Base UI 定位元件當屬性值用、剛好被 Tailwind 解析成「不產生 CSS 的類別」的字：side 值 `inline-start`、`inline-end`，以及底層 Floating UI 的 placement 值 `top-start`、`bottom-end` 這類（上下左右各配 `-start`／`-end`，共 10 項），放在清單裡不檢查。本身就是 Tailwind 類別名或像類別名的字（`ease-in`、`ease-out`、`flex-start`、`row-reverse`、`col-reverse`、`order-desc` 這類）不放：寫成 className 時要被擋（修正確認後拿掉，單元測試確認 `ease-in` 寫成類別會被擋）；當資料值用時也會被擋，遇到時換個寫法。只比對整個字；前面加了 variant（`hover:inline-start`）就是想當類別用，照樣擋。每一項都要寫理由，單元測試確認每項有理由、而且不放清單就會被擋（沒有多餘的項）。要加新的，先確認它真的不是想當類別用。
    - 設計系統由 `styles.css` 載入，和實際產生 CSS 用同一份規則；`tailwindcss` 版本已在 `package.json` 釘死（4.3.5），升級時 `tailwind-guard.test.ts` 會壞給你看。
 2. **代幣（選項 B）**：`styles.css` 的 `@theme` 放 `DESIGN.md` 開頭 YAML 的全部顏色（19）、字級（21，含 YAML 有寫的行高／字距／字重）、間距（17）、圓角（2），加上五個字體（`title-zh`、`body`、`display`、`reading-en`、`mono`）與四個斷點（768／900／1200／1232）。`src/design-tokens.test.ts` 用一個小解析器讀 YAML（不另裝套件），逐項比對、不多不少；主題只准有這六種前綴。「待選」的中文標題字體對到系統襯線字堆疊 `"Songti TC", "Noto Serif TC", "PMingLiU", serif`（Kevin 決定）。
 3. **寫死樣式的 lint**：`src/`（資料來源層與測試檔除外）擋十六進位色碼、`rgb(`／`hsl(` 等色彩函式、`text-[…]`、`[font-size:…]`、字串裡的 `font-size:`、單獨的 `rem`／`em`／`pt` 長度、`style` 的 `fontSize`／`font` 寫死數字或長度。版面寬度的任意值（`w-[40%]`、`max-w-[320px]`、內距 `px-[11px]`）不擋：它們不是 `DESIGN.md` 的代幣。獨立審查（PR #63）後補上：
    - 顏色名稱用 CSS 標準的 148 個顏色名稱清單比對（不再是「任何英文字」，元件的 `color="primary"` 不會被誤擋）；任何任意值方括號裡出現顏色名稱都擋（`shadow-[0_0_4px_red]`、`bg-[color:red]`、`[color:red]`、`[background:white]`），`var(--color-accent-gold)` 這種前後接字母或 `-` 的不算。
-   - 字級擴大到 `text-…/[…]`、`text-…/(…)` 的行高修飾，與 `style`／JSX 屬性的 `lineHeight`、`letterSpacing` 寫死數字或長度。單獨的 `rem`／`em`／`pt` 字串當成物件屬性或 JSX 屬性的值時，只在字級屬性擋（`width: "2em"` 不擋）。
-   - 焦點外框不得拿掉或改寫：`outline-none`、`outline-0`、`outline-hidden`，以及 `focus:`、`focus-visible:`、`focus-within:` 後面接 `outline-…`、`ring-…`。過場不得用整組的 `transition`、`transition-all`（會連 `outline-color` 一起淡入），要寫 `transition-transform`、`transition-opacity`、`transition-[border-color]` 這類。
+   - 字級擴大到 `text-…/[…]`、`text-…/(…)` 的行高修飾，與 `style`／JSX 屬性的 `lineHeight`、`letterSpacing` 寫死數字或長度。單獨的 `rem`／`em`／`pt` 字串只在當版面屬性的值時放行（`width`、`height`、`min`／`max-*`、`margin*`、`padding*`、`gap`、`inset*`、`top`／`left`／`right`／`bottom`、`flexBasis`；例如 `width: "2em"`），其他物件屬性、CSS 自訂屬性（`"--size": "1rem"`）、JSX 屬性（`width="1.5em"`）、變數都擋（修正確認後收緊）。具名的行高修飾 `text-…/none`、`/tight`、`/snug`、`/normal`、`/relaxed`、`/loose` 也擋。
+   - 焦點外框不得拿掉或改寫：`outline-none`、`outline-0`、`outline-hidden`，以及 `focus:`、`focus-visible:`、`focus-within:` 後面接 `outline-…`、`ring-…`。過場不得用整組的 `transition`、`transition-all`、`transition-colors`，以及任意值裡含 `all` 或 `outline` 的 `transition-[…]`（都會連 `outline-color` 一起淡入），要寫 `transition-transform`、`transition-opacity`、`transition-[border-color]` 這類。
    - `src/` 底下只准有 `styles.css` 一個 CSS 檔（`design-tokens.test.ts` 斷言），其他樣式檔逃不過上面的檢查。
 4. **焦點外框與減少動態**各是 `styles.css` base 層的一條規則：`:focus-visible` 1px 實線 `accent-gold`、外擴 4px（元件示範頁的外框樣本 `[data-focus-sample]` 用同一條）；`prefers-reduced-motion: reduce` 時所有元素 `transition: none; animation: none`（`!important`，分層的 important 是前面的層優先，所以蓋得過 utilities）。程式要知道這個設定時只能用 `src/hooks/use-reduced-motion.ts`（`prefersReducedMotion`、`subscribeReducedMotion`、`useReducedMotion`），ESLint 擋其他地方寫 `prefers-reduced-motion`。
-5. **無障礙底線的檢查**（`e2e/a11y-floor.spec.ts`）跑 `A11Y_SITES = [...SITES, DEV_SITE]`：正式建置的頁面清單（和站內連結檢查同一份）加上開發伺服器上的元件示範頁。開發伺服器沒有 CSP，所以不放進 `SITES`（`security.spec.ts` 對 `SITES` 驗 CSP）。六項：Tab 走過的每個元素是金色外框、可見的按鈕與連結 ≥44×44、720×450（1440 放大 200%）沒有橫向捲動且文字不重疊、h1 剛好一個、論文標題與摘要自己帶 `lang` 且和內容語言一致（英文 `en`；有中日韓文字的是中文論文，要 `zh` 開頭）、開發站另跑 axe（每個說明框點開後也跑一次）。語言檢查與焦點檢查各有一個反例測試，證明真的抓得到錯。
+5. **無障礙底線的檢查**（`e2e/a11y-floor.spec.ts`）跑 `A11Y_SITES = [...SITES, DEV_SITE]`：正式建置的頁面清單（和站內連結檢查同一份）加上開發伺服器上的元件示範頁。開發伺服器沒有 CSP，所以不放進 `SITES`（`security.spec.ts` 對 `SITES` 驗 CSP）。六項：Tab 走過的每個元素是金色外框、可見的按鈕與連結 ≥44×44、720×450（1440 放大 200%）沒有橫向捲動且文字不重疊、h1 剛好一個、論文標題與摘要自己帶 `lang` 且和內容語言一致（英文 `en`；有中日韓文字的是中文論文，要 `zh` 開頭）、開發站另跑 axe（每個說明框點開、淡入結束——沒有 `data-starting-style` 且透明度 1——後也跑一次；這次不檢查 Base UI 的焦點守衛 `[data-base-ui-focus-guard]`：它是 `tabindex=0`＋`aria-hidden` 的 span，焦點由 React 代收的 focus 事件轉走，axe 看不到會誤判成 aria-hidden-focus）。語言檢查與焦點檢查各有一個反例測試，證明真的抓得到錯。
 6. **元件示範頁 `/dev/components`** 只在 `import.meta.env.DEV` 時掛路由（動態 import），正式建置整段被拿掉；`e2e/dev-only.spec.ts` 檢查 `dist`、`dist-demo` 沒有它。示範頁自己的標籤放在 `dev.json`，只在示範頁載入，不進正式的 i18n。
 
 ## 理由
@@ -59,7 +59,7 @@ ADR-0010 定了「Tailwind 只留 `DESIGN.md` 的代幣、用到預設類別時�
 ## 取捨
 
 - **`__unstable__` 介面**：Tailwind 改版可能拿掉或改名。版本釘死，升級時單元測試會先壞；到時改成比對建置出來的 CSS。
-- **字串誤判**：程式裡剛好長得像類別、但不是類別的字串（例如單獨寫 `"text-primary"` 當資料）會被擋。示範頁的代幣名稱因此一律從類別名稱取出（`bg-<代幣>`、`text-<代幣>`）。常見的元件屬性值放進例外清單 `NOT_CLASSES`（每項附理由）；清單以外的照樣擋，錯誤訊息會列出字串。
+- **字串誤判**：程式裡剛好長得像類別、但不是類別的字串（例如單獨寫 `"text-primary"` 當資料）會被擋。示範頁的代幣名稱因此一律從類別名稱取出（`bg-<代幣>`、`text-<代幣>`）。Base UI 定位元件的屬性值放進例外清單 `NOT_CLASSES`（每項附理由）；清單以外的照樣擋，錯誤訊息會列出字串。
 - **顏色的任意透明度一併不准**：`text-…/[…]` 的規則分不出是字級的行高還是顏色的透明度，一律擋；`DESIGN.md` 的半透明色本來就是代幣（`hairline`、`border`、`popover-surface`）。
 - **過場不能包含 `outline-color`**：Tailwind 的 `transition`、`transition-colors` 會連焦點外框一起淡入，Tab 到的瞬間外框不是金色。按鈕只對位移與框色做過場；a11y 檢查會抓到用了整組 `transition` 的元件。
 - **「找不到這一頁」「載入失敗」沒有 h1**：`EXPERIENCE.md` 沒有那段文字，這次不加，也不放進「每頁一個 h1」的檢查；要不要補交給 Kevin 決定。

@@ -186,6 +186,17 @@ deferred:
   - `[low]` `[patch]` lang 檢查只看 PaperText 自己加的屬性，永遠不會失敗；中文論文傳 zh-Hant 會誤報 — 已修：改成每個 `[data-paper-text]` 自己的 lang 要和內容語言一致（英文剛好是 `en`，和原本的斷言一樣嚴；有中日韓文字的要 `zh` 開頭）；加反例測試（注入沒有 lang、空 lang、不一致的元素要被抓到，`zh-Hant` 的中文標題不誤報）。
   - `[low]` `[patch]` 說明框是 role=dialog 但沒有名稱；axe 只在說明框關著時跑 — 已修：Popup 用 `aria-labelledby` 指向觸發按鈕（名稱就是按鈕上 EXPERIENCE.md 既有的字，例如「AI 整理」「追蹤範圍外」，不另寫文字）；開發站加「每個說明框點開、淡入結束後跑 axe」；e2e 斷言說明框的無障礙名稱。
 
+### 2026-11-15 — 修正確認（Opus，審 c0642c3）
+- verdicts: 7 findings — high 0, medium 1, low 6；5 條照修、2 條同意但這次不修（主對話 triage：`docs/runs/epic-3a/reviews/3.2-triage.md` 最後一段）
+- findings:
+  - `[medium]` `[patch]` `NOT_CLASSES` 放了真的 Tailwind 類別名（`ease-in`／`ease-out`、`row-reverse`、`col-reverse`、`flex-start`／`flex-end`、`order-asc`／`order-desc`），寫成 className 也會靜默通過 — 已修：清單只留 Base UI 定位元件的屬性值（side 的 `inline-start`／`inline-end`，底層 Floating UI 的 placement 值上下左右各配 `-start`／`-end`，共 10 項，每項附理由）；`tailwind-guard.test.ts` 補「這 8 個字寫成 className 會被擋、而且不在清單裡」；`AllowedStyles.tsx` 拿掉 `data-align="flex-start"` 等已不再放行的資料值、改放 `inline-end`／`right-end`；ADR-0037 同步。
+  - `[low]` `[patch]` `transition-colors`、`transition-[outline-color]`、`transition-[all]` 沒擋 — 已修：ESLint 另擋 `transition-colors`，以及任意值裡含 `all`（整個字）或 `outline` 的 `transition-[…]`；`FocusOutlineRemoved.tsx` 補 4 行（含 `hover:transition-[color,outline-offset]`），測試斷言第 13～16 行；`transition-[border-color]` 照舊放行。
+  - `[low]` `[defer]` 不加 focus 前綴的 `outline-2`、`outline-offset-0`、`outline-<色>`，以及 `group-focus-visible/item:`、`has-focus-visible:` 沒擋 — 同意是缺口，這次不修：lint 是防呆不是安全邊界，e2e 的 Tab 走訪會在頁面清單上補抓；3.5 起有導覽列元件時一起收緊。
+  - `[low]` `[defer]` 幾種誤擋（`data-[tone=gold]:`、`bg-[url(/img/red.png)]`、`content-['Gold']`、`"items[tan]"`、`<Chip color="gold">`、含 transition 的英文句子） — 同意，這次不修：目前 `src/` 沒踩到；遇到時照 ADR-0037 調整。
+  - `[low]` `[patch]` 單獨的 rem／em／pt 在物件與 JSX 屬性值全放行；`text-body/none` 放行 — 已修：只在版面屬性（`width`、`height`、`min`／`max-*`、`margin*`、`padding*`、`gap`、`inset*`、`top`／`left`／`right`／`bottom`、`flexBasis`）的值放行，其他物件屬性、CSS 自訂屬性、JSX 屬性、變數照擋；具名行高修飾 `text-…/none`、`/tight`、`/snug`、`/normal`、`/relaxed`、`/loose` 也擋；`HardcodedFontSize.tsx` 補 4 行、`HardcodedLineHeight.tsx` 補 2 行並加斷言；`AllowedStyles.tsx` 的 `width: "2em"` 仍不擋，另補 `padding`／`maxWidth`／`inset`／`"gap"` 幾個版面寫法。
+  - `[low]` `[patch]` 點開說明框跑 axe 是靠 axe 的猜測規則通過，註解理由不對 — 已修：`a11y-floor.spec.ts` 用 `.exclude("[data-base-ui-focus-guard]")`（已確認 Base UI 1.9.0 的 `utils/FocusGuard.js` 給守衛加這個屬性），註解寫明守衛是 `tabindex=0`＋`aria-hidden` 的 span、axe 看不到 React 代收的 focus 事件會誤判，之前能過是因為 axe 把 role=dialog 當成模態而判成無法判定；等待條件改成 Popup 沒有 `data-starting-style` 且透明度 1；本機 chromium `--repeat-each=5` 5／5 通過。
+  - `[low]` `[patch]` 說明框翻到上方時「不壓下一段」測試白過 — 已修：`dev-components.spec.ts` 加斷言說明框頂端 ≥ 觸發按鈕底端（三種寬度、每個說明框）；本機 chromium `--repeat-each=5` 5／5 通過。
+
 ## Design Notes
 
 - **為什麼不只靠 `--*: initial`**：清掉主題後，`bg-red-500` 只是「不產生 CSS」，建置不會失敗。檢查用 Tailwind 自己的設計系統判斷，所以規則和實際產生的 CSS 永遠一致；用的是 4.3.5 的 `__unstable__` 介面，版本鎖死，升級時有測試會壞給你看。
