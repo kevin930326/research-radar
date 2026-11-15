@@ -807,3 +807,8 @@
 - **維運身分（`SystemViewer`）**：不是任何一位成員、代表「系統管理工作」的身分；Kevin 在主機上跑 `radar members` 時就是用它，稽核事件記成 `system`。
 - **環境（`RADAR_ENVIRONMENT`）**：這個程式跑在開發、試用還是正式環境；沒設就當正式，正式環境不能開假登入。
 - **`kid`（金鑰編號）**：JWT 標頭裡的欄位，寫明是公鑰清單（JWKS）裡的哪一把鑰匙簽的，驗證時用它挑出對應的公鑰。
+- **problem details（`application/problem+json`）**：RFC 9457 定的錯誤回應格式；這個專案只回 `type`、`title`、`status`、`code` 四個欄位，畫面上的字由前端用 `code` 查 i18n。
+- **`about:blank`**：RFC 9457 的預設錯誤類別，意思是「除了 HTTP 狀態本身沒有更多分類」；細分的原因看 `code`。
+- **端點登記表**：每個 API 端點登記「另一位成員怎麼呼叫它」的清單（`tests/permissions/cases.py`）；測試拿它和 `openapi.json` 比對，新端點沒登記就失敗。
+- **豁免清單（換人測試）**：不必寫換人測試的端點，例如健康檢查、只回自己資料的 `/api/v1/me`；每一個都要寫理由。
+- **`operationId`**：`openapi.json` 裡每個端點的名字；orval 產生的前端函式就用這個名字（本專案用路由函式的名稱，例如 `me`）。

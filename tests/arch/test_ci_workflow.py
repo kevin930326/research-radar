@@ -20,6 +20,7 @@ CHECK_ORDER = [
     "mypy",
     "import-linter",
     "pytest-unit",
+    "openapi-drift",
     "pytest-integration",
     "pytest-arch",
     "alembic-check",
@@ -321,3 +322,12 @@ def test_smoke_runs_worker_enqueue_and_graceful_stop() -> None:
     assert '[[ "${worker_logs}" == *正常關機* ]] || fail' in after_stop
     assert "compose logs --no-color worker >&2" in text
     assert 'docker image rm "${COMPOSE_IMAGE}" "${WORKER_IMAGE}"' in text
+
+
+def test_openapi_drift_regenerates_and_diffs() -> None:
+    # Story 3.4（AD-21、NFR-12）：openapi.json 和程式不一致時 CI 失敗。
+    runs = {step["id"]: step["run"] for step in _steps("checks") if "id" in step}
+
+    assert "radar export-schema" in runs["openapi-drift"]
+    assert "git diff --exit-code -- openapi.json" in runs["openapi-drift"]
+    assert "set -euo pipefail" in runs["openapi-drift"]

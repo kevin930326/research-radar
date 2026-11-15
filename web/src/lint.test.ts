@@ -56,6 +56,19 @@ describe("project lint rules", () => {
     expect(await ruleIds("routes/loader-fetch.ts")).toContain("no-restricted-globals");
   });
 
+  // Story 3.4：orval 產生的呼叫函式只有資料來源層能用；頁面只准 import type。
+  it("blocks importing a generated API function from a page", async () => {
+    expect(await ruleIds("pages/ImportGeneratedPage.tsx")).toContain("no-restricted-imports");
+  });
+
+  it("allows importing generated types from a page", async () => {
+    expect(await ruleIds("pages/ImportGeneratedTypePage.tsx")).toEqual([]);
+  });
+
+  it("blocks a dynamic import of the generated files from a component", async () => {
+    expect(await ruleIds("components/DynamicImportGenerated.tsx")).toContain("no-restricted-syntax");
+  });
+
   it("blocks importing #datasource-impl from a page", async () => {
     expect(await ruleIds("pages/ImportImplPage.tsx")).toContain("no-restricted-imports");
   });

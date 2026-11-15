@@ -44,7 +44,17 @@ describe("UI text matches EXPERIENCE.md", () => {
 
   it("keys follow page.block.item", () => {
     for (const key of Object.keys(actual)) {
+      // 錯誤的鍵照 Conventions「錯誤」固定是 errors.<code>（後端的代碼），不是三段（Story 3.4）。
+      if (key.startsWith("errors:")) {
+        continue;
+      }
       expect(key.split(":")[1]?.split(".")).toHaveLength(3);
+    }
+  });
+
+  it("error keys are errors.<code> with a snake_case backend code", () => {
+    for (const key of Object.keys(actual).filter((name) => name.startsWith("errors:"))) {
+      expect(key).toMatch(/^errors:[a-z][a-z0-9_]*$/);
     }
   });
 });

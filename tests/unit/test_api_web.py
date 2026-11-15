@@ -140,7 +140,12 @@ def test_api_paths_stay_404_json(client: TestClient, path: str) -> None:
     response = client.get(path)
 
     assert response.status_code == 404
-    assert response.json() == {"detail": "Not Found"}
+    assert response.json() == {
+        "type": "about:blank",
+        "title": "Not Found",
+        "status": 404,
+        "code": "not_found",
+    }
 
 
 @pytest.mark.parametrize("method", ["POST", "PUT", "PATCH", "DELETE"])
@@ -151,7 +156,12 @@ def test_api_paths_are_404_json_for_every_method(
     response = client.request(method, path)
 
     assert response.status_code == 404
-    assert response.json() == {"detail": "Not Found"}
+    assert response.json() == {
+        "type": "about:blank",
+        "title": "Not Found",
+        "status": 404,
+        "code": "not_found",
+    }
     _assert_security_headers(response.headers)
 
 
@@ -165,7 +175,12 @@ def test_api_paths_are_404_for_methods_outside_any_list(
 
     assert response.status_code == 404
     if method != "HEAD":
-        assert response.json() == {"detail": "Not Found"}
+        assert response.json() == {
+            "type": "about:blank",
+            "title": "Not Found",
+            "status": 404,
+            "code": "not_found",
+        }
     _assert_security_headers(response.headers)
 
 

@@ -47,6 +47,10 @@ NETWORK_ALLOWED: dict[str, str] = {
     "radar.adapters.cloudflare_access": (
         "試用環境的假登入：GET Cloudflare Access 的公鑰清單（/cdn-cgi/access/certs）"
     ),
+    "radar.entrypoints.cli.export_schema": (
+        "radar export-schema：用 subprocess 執行本機的 python -m radar.entrypoints.api.openapi"
+        "（三個入口互相不 import，ADR-0001），不連網路"
+    ),
 }
 # 會送出請求的 HTTP client 方法。
 REQUEST_METHODS = frozenset(

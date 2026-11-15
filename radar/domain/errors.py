@@ -83,3 +83,10 @@ class ErrorCode(StrEnum):
     ORIGIN_REJECTED = "origin_rejected"  # 會改資料的請求，Origin 缺少或不是本站（403）
     LOGIN_REJECTED = "login_rejected"  # 假登入被拒（不說是哪一關，403）
     ADMIN_MEMBER_MISSING = "admin_member_missing"  # 試用：管理者成員還沒建立（403）
+
+    # api 的錯誤回應（Story 3.4、ADR-0047）：RFC 9457；HTTP 狀態只在 `entrypoints/api/problems.py`
+    NOT_FOUND = "not_found"  # 路徑不存在，或資料不存在／沒有權限（同一個 404，AD-3）
+    METHOD_NOT_ALLOWED = "method_not_allowed"  # 路徑對、方法不對（405）
+    REQUEST_INVALID = "request_invalid"  # 請求的內容或參數不合格式（422）
+    REQUEST_REJECTED = "request_rejected"  # 框架擋下、沒有專屬代碼的其他 4xx
+    INTERNAL_ERROR = "internal_error"  # 未預期的錯誤（500）；回應不帶任何內部細節
