@@ -8,7 +8,8 @@ AR-65 選項 A、ADR-0008（第 1.3 項的驗簽規則照搬）、ADR-0046。不
 - 驗簽交給 joserfc（`jwt.decode` 只驗簽、不驗 claims），允許的演算法只有 `RS256`。
 - claims 全部自己檢查型別與值：`iss` 是字串而且等於 `https://<team 網域>`；`aud` 是字串時要完全
   相等，是陣列時每一項都是字串而且含設定的 audience，其他型別一律拒絕；`exp` 是整數而且還沒到；
-  `nbf` 有的話是整數而且已經到了；`email` 是字串、轉成小寫後格式正確。
+  `nbf` 有的話是整數而且已經到了（容許主機時鐘慢 `NOT_BEFORE_LEEWAY`，`exp` 不容許）；
+  `email` 是字串、轉成小寫後格式正確。
 - 公鑰取得是注入的函式（`fetch_jwks`）：正式由 `fetch_access_jwks` 經 httpx2 取，測試傳假的函式，
   不連 Cloudflare（ADR-0008 第 9 項的做法，不另建 port）。
 
@@ -21,7 +22,7 @@ import hmac
 import json
 import re
 from collections.abc import Callable, Mapping
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Final
 
 import httpx2
@@ -47,6 +48,8 @@ JWKS_PATH: Final = "/cdn-cgi/access/certs"
 # JWT 的長度上限（Access 的 token 約 1～2 KB；擋掉拿超大標頭耗資源的請求）。
 ASSERTION_MAX_LENGTH: Final = 8192
 MIN_RSA_KEY_BITS: Final = 2048
+# 主機時鐘可能比 Cloudflare 慢一點：`nbf` 容許晚這麼久；`exp` 不放寬。
+NOT_BEFORE_LEEWAY: Final = timedelta(seconds=60)
 _SEGMENT: Final = re.compile(r"[A-Za-z0-9_-]+")
 _KID_MAX_LENGTH: Final = 256
 
@@ -179,7 +182,9 @@ def verify_access_jwt(
         raise _invalid("exp")
     not_before = claims.get("nbf")
     if not_before is not None and (
-        isinstance(not_before, bool) or not isinstance(not_before, int) or not_before > timestamp
+        isinstance(not_before, bool)
+        or not isinstance(not_before, int)
+        or not_before > timestamp + NOT_BEFORE_LEEWAY.total_seconds()
     ):
         raise _invalid("nbf")
     email = claims.get("email")

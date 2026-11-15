@@ -41,6 +41,7 @@ class FakeLoginMode(StrEnum):
 # 開發環境沒設 `RADAR_SITE_ORIGIN` 時接受的來源（compose 的 api 綁在 127.0.0.1:8000）。
 DEVELOPMENT_ORIGINS: Final = frozenset({"http://localhost:8000", "http://127.0.0.1:8000"})
 _ORIGIN_SCHEMES: Final = frozenset({"http", "https"})
+_DEFAULT_PORTS: Final = {"http": 80, "https": 443}
 _HOST_LABEL: Final = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
 _TEAM_DOMAIN: Final = re.compile(rf"{_HOST_LABEL}(?:\.{_HOST_LABEL})+")
 _AUDIENCE: Final = re.compile(r"[\x21-\x7e]{1,256}")
@@ -77,7 +78,7 @@ class AuthSettings(BaseModel):
             return SecretStr(normalize_email(value.get_secret_value()))
         except InvalidEmailError:
             # 訊息不帶值（email 是個資）。
-            raise ValueError("email 的格式不對（要像 name@example.com）") from None
+            raise ValueError("email 的格式不對") from None
 
     @field_validator("access_team_domain")
     @classmethod
@@ -121,6 +122,9 @@ class AuthSettings(BaseModel):
             or "#" in value
         ):
             raise ValueError("要是 https://主機[:連接埠]（沒有路徑、結尾斜線、查詢字串或帳密）")
+        if port is not None and port == _DEFAULT_PORTS[parts.scheme]:
+            # 瀏覽器送的 Origin 不寫預設連接埠，寫了就永遠對不上（每個 POST 都 403）。
+            raise ValueError("不要寫預設連接埠（https 的 443、http 的 80）")
         origin = f"{parts.scheme}://{hostname}" + ("" if port is None else f":{port}")
         if origin != value:
             raise ValueError("要全部小寫，而且和瀏覽器送的 Origin 寫法相同")

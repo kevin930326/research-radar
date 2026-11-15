@@ -121,7 +121,7 @@ def test_bad_emails_are_rejected_without_echoing_them(value: object) -> None:
     assert str(caught.value) in {
         "email 要是字串",
         "email 要是 1～254 個 ASCII 字元",
-        "email 的格式不對（要像 name@example.com）",
+        "email 的格式不對",
     }
 
 

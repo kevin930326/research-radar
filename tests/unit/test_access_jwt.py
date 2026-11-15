@@ -22,6 +22,7 @@ from joserfc.jwk import RSAKey
 
 from radar.adapters.cloudflare_access import (
     JWKS_PATH,
+    NOT_BEFORE_LEEWAY,
     AccessKeysError,
     confirm_access_identity,
     fetch_access_jwks,
@@ -118,6 +119,20 @@ def test_audience_list_with_other_entries_is_accepted(key: RSAKey) -> None:
 
 def test_nbf_is_optional(key: RSAKey) -> None:
     assert _verify(_sign(key, _claims(nbf=_DROP)), _jwks(key)) == ADMIN
+
+
+def test_nbf_allows_a_slightly_slow_host_clock(key: RSAKey) -> None:
+    # 主機時鐘比 Cloudflare 慢 30 秒：剛簽的 token 仍然收。
+    token = _sign(key, _claims(nbf=int((NOW + timedelta(seconds=30)).timestamp())))
+
+    assert timedelta(seconds=60) == NOT_BEFORE_LEEWAY
+    assert _verify(token, _jwks(key)) == ADMIN
+
+
+def test_nbf_beyond_the_leeway_is_rejected(key: RSAKey) -> None:
+    token = _sign(key, _claims(nbf=int((NOW + timedelta(seconds=120)).timestamp())))
+
+    assert _rejected(token, _jwks(key)) is LoginRejection.ASSERTION_INVALID
 
 
 def test_right_key_is_picked_by_kid(key: RSAKey, other_key: RSAKey) -> None:
@@ -431,7 +446,6 @@ def test_fetch_gets_the_team_certs_url(key: RSAKey) -> None:
     "response",
     [
         httpx2.Response(503),
-        httpx2.Response(302, headers={"Location": "https://elsewhere.example.com"}),
         httpx2.Response(200, content=b"not json"),
         httpx2.Response(200, json=[1, 2]),
     ],
@@ -441,6 +455,18 @@ def test_fetch_failures_raise_access_keys_error(response: httpx2.Response) -> No
 
     with pytest.raises(AccessKeysError):
         fetch_access_jwks(TEAM, transport=transport)
+
+
+def test_fetch_does_not_follow_redirects() -> None:
+    seen: list[httpx2.Request] = []
+    redirect = httpx2.Response(302, headers={"Location": "https://elsewhere.example.com/keys"})
+    transport = _transport(lambda _r: redirect, seen)
+
+    with pytest.raises(AccessKeysError, match="302"):
+        fetch_access_jwks(TEAM, transport=transport)
+
+    # 只打了 team 網域那一次，沒有跟著 Location 去別的主機。
+    assert [str(r.url) for r in seen] == [f"https://{TEAM}{JWKS_PATH}"]
 
 
 def test_fetch_transport_error_raises_access_keys_error() -> None:

@@ -117,7 +117,7 @@ def normalize_email(value: object) -> str:
         or _EMAIL_LOCAL.fullmatch(local) is None
         or _EMAIL_DOMAIN.fullmatch(domain) is None
     ):
-        raise InvalidEmailError("email 的格式不對（要像 name@example.com）")
+        raise InvalidEmailError("email 的格式不對")
     return lowered
 
 

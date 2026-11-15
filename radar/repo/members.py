@@ -85,7 +85,7 @@ _SELECT_MEMBER: Final = (
 )
 _FIND_BY_EMAIL: Final = text(f"{_SELECT_MEMBER} WHERE a.email = :email")
 _FIND_BY_ID: Final = text(f"{_SELECT_MEMBER} WHERE m.id = :member_id")
-_LIST: Final = text(f"{_SELECT_MEMBER} ORDER BY m.display_name, m.id")
+_LIST: Final = text(f"{_SELECT_MEMBER} ORDER BY m.id")
 
 
 def _member(row: tuple[object, object, object]) -> AllowedMember:
@@ -135,5 +135,8 @@ def find_allowed_member_by_id(connection: Connection, member_id: uuid.UUID) -> A
 
 
 def list_allowed_members(connection: Connection) -> list[AllowedMember]:
-    """允許名單上的每一位成員，依顯示名稱排序（開發環境的假登入選人用）。"""
+    """允許名單上的每一位成員，依加入的先後排序（開發環境的假登入選人用）。
+
+    成員 ID 是 UUIDv7，照 ID 排就是加入的先後；不照名稱排，免得順序跟著資料庫的定序變。
+    """
     return [_member(row.tuple()) for row in connection.execute(_LIST)]

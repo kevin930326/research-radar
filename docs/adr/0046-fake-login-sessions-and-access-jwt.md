@@ -84,3 +84,7 @@ Google 登入在 Epic 7 才做，但 Epic 3 之後的每個畫面都要知道「
 - `member.first_login_at` 假登入不寫，留給 Google 登入第一次成功時寫。
 - `MANAGE_ALLOWLIST`（ADMIN）與 CLI 用 `SystemViewer` 不一致，services 用型別檢查補；要不要改權限表等 Kevin 決定。
 - 遷移 0020 接在 0014 後面（0015～0019 保留給另一條線），兩條線合併後要把 `down_revision` 改接 0019，並刪掉 `tests/arch/test_migrations.py` 的保留空號。
+- `__Host-` cookie 一定要帶 Secure。Chrome、Firefox 在 `http://localhost`、`http://127.0.0.1` 也收，但有些版本的 Safari 不收，所以本機開發請用 Chrome 或 Firefox（要 Kevin 手動確認一次）。
+- compose 的 `environment:` 會蓋過 `env_file`，所以本機開發要改 `RADAR_ENVIRONMENT`、`RADAR_FAKE_LOGIN`、`RADAR_SITE_ORIGIN` 時改 `compose.yaml`（例如用 Vite 的 5173 埠時，在那裡設 `RADAR_SITE_ORIGIN`）。
+- 公鑰清單沒有快取：只要請求的標頭長得像 RS256 的 JWT，就會觸發一次抓取（逾時最多 5 秒）。站台在 Access 後面時可以接受；如果哪天主機能被直接連到，要加以 `kid` 為鍵的快取。
+- 移出名單是刪 `allowed_email`，之後同一個 email 再加回來會建一位新的 `member`（舊的紀錄留在舊 ID 上）。改成軟刪除還是保留 email 與成員的對應，由 Story 7.2 決定。

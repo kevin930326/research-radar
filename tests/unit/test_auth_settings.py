@@ -7,6 +7,7 @@
 import json
 import subprocess
 import sys
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -197,6 +198,18 @@ def test_site_origin_with_port_is_accepted() -> None:
     assert allowed_origins(settings) == {"http://localhost:5173"}
 
 
+@pytest.mark.parametrize("origin", ["https://radar.example.com:443", "http://localhost:80"])
+def test_site_origin_with_default_port_is_rejected(origin: str) -> None:
+    # 瀏覽器送的 Origin 不寫預設連接埠；寫了就每個 POST 都 403。
+    with pytest.raises(ConfigError) as caught:
+        load_auth_settings({"RADAR_ENVIRONMENT": "development", "RADAR_SITE_ORIGIN": origin})
+
+    (problem,) = caught.value.problems
+    assert problem.startswith("環境變數 RADAR_SITE_ORIGIN 格式不對")
+    assert "預設連接埠" in problem
+    assert origin not in problem
+
+
 def test_session_days_default_to_14_and_30() -> None:
     policy = session_policy(load_auth_settings({}))
 
@@ -251,9 +264,20 @@ def test_confirm_function_follows_the_environment() -> None:
     assert build_fake_login_confirm(load_auth_settings({})) is None
     development = load_auth_settings({"RADAR_ENVIRONMENT": "development", "RADAR_FAKE_LOGIN": "1"})
     assert build_fake_login_confirm(development) is pick_member_identity
-    trial = build_fake_login_confirm(load_auth_settings(TRIAL))
-    assert trial is not None
-    assert getattr(trial, "func", None).__name__ == "confirm_access_identity"  # type: ignore[union-attr]
+    from radar.adapters.cloudflare_access import confirm_access_identity, fetch_access_jwks
+
+    trial = build_fake_login_confirm(
+        load_auth_settings({**TRIAL, "RADAR_ADMIN_EMAIL": ADMIN_EMAIL.upper()})
+    )
+    assert isinstance(trial, partial)
+    assert trial.func is confirm_access_identity
+    assert trial.keywords["team_domain"] == TRIAL["RADAR_ACCESS_TEAM_DOMAIN"]
+    assert trial.keywords["audience"] == TRIAL["RADAR_ACCESS_AUDIENCE"]
+    assert trial.keywords["admin_email"] == ADMIN_EMAIL
+    fetch = trial.keywords["fetch_jwks"]
+    assert isinstance(fetch, partial)
+    assert fetch.func is fetch_access_jwks
+    assert fetch.args == (TRIAL["RADAR_ACCESS_TEAM_DOMAIN"],)
 
 
 def test_api_process_does_not_load_joserfc_unless_trial() -> None:

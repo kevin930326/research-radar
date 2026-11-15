@@ -2,10 +2,10 @@
 title: 'Story 3.3：假登入與 session'
 type: 'feature'
 created: '2026-11-15'
-baseline_revision: '17a1eedf109c3975d757895a67cd539bc5c76213'
-status: 'in-review'
+baseline_revision: 'ae109dc295c4527686d61571aad9cb4e857434ab'
+status: 'done'
 review_loop_iteration: 0
-followup_review_recommended: false
+followup_review_recommended: true
 context:
   - '{project-root}/AGENTS.md'
   - '{project-root}/_bmad-output/implementation-artifacts/epic-3-context.md'
@@ -13,7 +13,35 @@ context:
   - '{project-root}/docs/adr/0002-read-authorization-viewer.md'
   - '/Users/kevin/Documents/research-radar/docs/runs/epic-3b/brief-3-3.md'
 warnings: ['oversized']
-deferred: []
+deferred:
+  - summary: >-
+      偽造但外形正確的 Access JWT 標頭每次都會觸發一次 JWKS 抓取（沒有快取）。
+    evidence: |-
+      maybe-false：要確認試用主機是否只經 Cloudflare Tunnel 可達；若能繞過 Access 直連，則可被拿來大量對外連線。
+    location: >-
+      radar/adapters/cloudflare_access/__init__.py verify_access_jwt
+    severity: medium (unverified)
+  - summary: >-
+      移出名單是刪 allowed_email，之後同一個 email 再 allow 會建立新的 member，歷史留在舊 ID。
+    evidence: |-
+      email 與 member 的對應只存在 allowed_email；這個 Story 沒有移出路徑，Story 7.2 做 revoke 時要決定軟刪除或保留對應。
+    location: >-
+      radar/repo/members.py、migrations/versions/0020_members_sessions.py
+    severity: medium
+  - summary: >-
+      Epic 7 前半段測試由測試自己呼叫 create_judgment_event，文獻庫那一半沒測。
+    evidence: |-
+      成員寫入端點與文獻庫要到 3.16／3.17 才有；屆時改成經過端點寫入並補文獻庫。
+    location: >-
+      tests/integration/test_sessions.py test_trial_session_member_is_the_judgment_event_member
+    severity: medium
+  - summary: >-
+      CLI 用 SystemViewer，與權限表 MANAGE_ALLOWLIST 要 ADMIN 不一致。
+    evidence: |-
+      ADR-0046 選項 A；改權限表要改 PRD 字面與 test_viewer_permissions，列為要 Kevin 決定。
+    location: >-
+      radar/services/members.py
+    severity: medium
 ---
 
 <intent-contract>
@@ -125,6 +153,46 @@ deferred: []
 
 ## Review Triage Log
 
+### 2026-11-15 — Review pass
+- verdicts: 36 findings — high 0, medium 12, low 17, false 6, maybe-false 1
+- findings:
+  - `[medium]` `[patch]` （blind）開發環境 `__Host-` Secure cookie 在 http://localhost 某些 Safari 版本不收 — ADR-0046 取捨補上「本機開發用 Chrome／Firefox，Kevin 手動確認」；cookie 屬性照 ADR-0008 不改。
+  - `[medium]` `[patch]` （blind）驗 Access JWT 的 `nbf` 沒有時鐘誤差容許 — 加 60 秒容許值（`exp` 維持嚴格），補 30 秒接受、120 秒拒絕兩個測試。
+  - `[maybe-false]` `[defer]` （blind）標頭像樣的偽造請求每次都會讓 api 去抓一次 JWKS — 若主機能繞過 Access 直連則為 medium（未驗證）；要確認試用主機是否只經 Cloudflare Tunnel 可達。ADR-0046 取捨已記。
+  - `[medium]` `[defer]` （blind）移出名單（刪 `allowed_email`）後再 allow 會變成新的 member — 這個 Story 沒有移出路徑，移出／撤銷屬 Story 7.2；要在 7.2 決定軟刪除或保留對應。ADR-0046 取捨已記。
+  - `[low]` `[reject]` （blind）只開 `RADAR_GOOGLE_LOGIN` 也能啟動 — 修正要改 spec 已定的行為（`test_google_login_alone_is_allowed`），列為要 Kevin 決定。
+  - `[low]` `[reject]` （blind）之後新增的改資料路由沒有機制保證掛 Origin 檢查 — 目前四條路由都受保護；修正要新增公開介面，留給第一個新增改資料路由的 Story；ADR 已記。
+  - `[low]` `[reject]` （blind）再次登入沒有結束舊 session — 舊 token 只存在已被覆寫的 cookie，閒置 14 天自然失效；修正要加分支與資料庫呼叫。
+  - `[false]` `[reject]` （blind）登入／登出沒寫稽核 — AD-23 與 AC 要求的是允許名單的每次變更寫稽核（已做）；session 不是業務資料。
+  - `[low]` `[patch]` （blind）compose 的 `environment:` 蓋過 `env_file`，本機改不了 — ADR-0046 取捨補上「本機要改就改 compose.yaml（例如用 Vite 時設 RADAR_SITE_ORIGIN）」。
+  - `[medium]` `[defer]` （blind）Epic 7 前半段測試是測試自己呼叫 `create_judgment_event`，沒經過成員寫入端點 — 寫入端點與文獻庫要到 3.16／3.17 才有，屆時補。
+  - `[low]` `[reject]` （blind）審查 patch 混進 PR #66、spec 基準版本過時 — 修正是改 spec；已順手把 `baseline_revision` 更正為 ae109dc（分支真正的起點）並重產 diff。
+  - `[low]` `[reject]` （blind）spec 寫進本機絕對路徑 — 修正是改 spec；brief 本來就在 repo 外。
+  - `[low]` `[reject]` （blind）同名成員在選人清單分不出來 — 只在開發環境、測試資料；修正要加 UNIQUE 或警告分支。
+  - `[low]` `[patch]` （blind）名詞表 RS256 說明過時、缺 `kid` — 已更新 RS256 那行並新增 `kid`。
+  - `[low]` `[reject]` （blind）`_utc_now` 在 main.py 與 bootstrap.py 各一份 — 合併要開一個共用的公開函式，兩份都只有一行。
+  - `[medium]` `[patch]` （edge）`RADAR_SITE_ORIGIN` 寫明預設連接埠（:443／:80）會被接受，但瀏覽器送的 Origin 不帶，所有 POST 變 403 — 驗證時拒絕預設連接埠，補一個測試。
+  - `[medium]` `[patch]` （edge）`nbf` 沒有時鐘誤差容許 — 同上面 blind 那一列一起修。
+  - `[low]` `[reject]` （edge）兩個同 email 的 `allow` 同時跑，輸的那個 exit 1 — 只有一位維運者手動跑 CLI；失敗明確，重跑會回「已在名單」。
+  - `[medium]` `[defer]` （edge）移出後再 allow 會變新成員 — 同 blind 那一列，留給 7.2。
+  - `[low]` `[reject]` （edge）再次登入舊 session 還有效 — 同 blind 那一列。
+  - `[low]` `[reject]` （edge）試用環境 POST 沒帶 JSON body 回 422 — 前端一定送 JSON；422 是明確失敗不是安全問題，修正要加分支。
+  - `[medium]` `[patch]` （edge）Secure cookie 在 http 本機被某些瀏覽器丟掉 — 同 blind 第一列，ADR 記錄並列手動確認。
+  - `[low]` `[reject]` （edge）JWKS 同一個 `kid` 有兩筆時只試第一筆 — Cloudflare 每把金鑰 `kid` 唯一，實際不會遇到。
+  - `[false]` `[reject]` （edge）audit `detail` 內層可變值被改 — 呼叫端（services/members.py）每次傳新建的字面字典、建完不再改，描述的情況不會發生。
+  - `[medium]` `[patch]` （verification-gap）`build_fake_login_confirm` 試用分支沒有測試檢查參數有沒有接對 — `test_confirm_function_follows_the_environment` 加上 team_domain、audience、小寫 admin_email、`fetch_jwks` 綁定的斷言。
+  - `[medium]` `[patch]` （verification-gap）抓 JWKS「不跟轉址」的測試太弱 — 302 案例保留 `seen` 並斷言只發一個請求。
+  - `[false]` `[reject]` （intent）沒有可以在瀏覽器選人的頁面 — Story 標明「後端、UX 無」，前端是之後的 Story。
+  - `[medium]` `[defer]` （intent）Epic 7 前半段沒經過成員寫入端點、文獻庫沒測 — 同 blind 那一列。
+  - `[false]` `[reject]` （intent）試用環境只在登入那次驗 Access JWT、不是每個請求 — AC 字面是「每次假登入都驗」；之後用 session 是 ADR-0008 的設計。
+  - `[low]` `[reject]` （intent）過期、audience 錯等拒絕情況只在函式層測，沒有走路由 — 路由用的就是同一個 `confirm`；整合測試的 trial_client 用真的 `confirm_access_identity` 走過管理者與非管理者。
+  - `[low]` `[reject]` （intent）Origin 保護範圍只到這個 Story 的路由 — 同 blind 那一列。
+  - `[low]` `[reject]` （intent）試用環境啟動條件比 AC 嚴（多要管理者 email 與 https 站台來源） — 「只讓管理者登入」需要管理者 email，Origin 檢查需要站台來源；PR 說明列為偏差。
+  - `[false]` `[reject]` （intent）只有 api 會因為假登入設定不啟動 — 只有 api 有登入路由，worker 與 CLI 不能讓任何人登入。
+  - `[low]` `[reject]` （intent）改了既有測試 — 每一項在 spec 與 PR 說明都有理由（保留空號、登入查找例外、網路白名單、HEAD 版本號）。
+  - `[false]` `[reject]` （intent）看不出有沒有開 PR — 沒有開 PR，也沒有合併。
+  - `[medium]` `[defer]` （intent）CLI 用 `SystemViewer`，和權限表 `MANAGE_ALLOWLIST` 要 ADMIN 不一致 — 已列為要 Kevin 決定（ADR-0046 選項 A）。
+
 ## Design Notes
 
 - **CLI 的身分**：`radar members` 是第一位管理者還不存在時就要能跑（3.19 是 Kevin 經 SSH 直接執行，沒有 `--as`），所以 actor 是 `SystemViewer`（ADR-0002 的「維運」）。權限表 `MANAGE_ALLOWLIST` 是 `ADMIN`，`SystemViewer` 過不了 `require`；改表要改 PRD 字面與既有測試，所以先不改：services 只收 `SystemViewer`（型別＋執行時檢查，不是就丟 `PermissionDeniedError`），稽核記 `system`。列為要 Kevin 決定。
@@ -142,3 +210,24 @@ deferred: []
 - `RADAR_TEST_ADMIN_DATABASE_URL=postgresql://postgres@127.0.0.1:1/postgres uv run pytest -m unit` -- expected: 全過
 - `RADAR_TEST_ADMIN_DATABASE_URL=postgresql://postgres@127.0.0.1:1/postgres uv run pytest -m arch` -- expected: 只有需要資料庫的測試因連不到失敗
 - push 後 `gh run list --branch feat/3-3-members-fake-login-session` -- expected: 最後一個 commit 的 CI 全綠（含 integration、arch、alembic check、映像冒煙）
+
+## Auto Run Result
+
+**做了什麼：** 遷移 0020（接 0014）建 `member`、`allowed_email`、`session`；`radar members allow／set-admin`（`SystemViewer`、每次真的變更寫一筆稽核、輸出只有成員 ID）；session 照 ADR-0008（只存 token 的 SHA-256、`__Host-radar_session`、閒置 14 天／最長 30 天、移出名單立刻失效）；`GET /api/v1/me`、`POST /api/v1/auth/logout`、只在開假登入時才有的 `GET／POST /api/v1/auth/fake-login`；會改資料的請求檢查 Origin；開發環境選人登入、試用環境驗 Cloudflare Access 的 JWT（joserfc 只驗簽，只收 RS256，claims 自己檢查）且只讓管理者登入；正式環境開假登入、假登入加 Google 登入時 api 不啟動。ADR-0046（提議）。
+
+**改到的檔：** 見 PR 說明草稿的檔案清單（新檔 21 個、改既有檔 28 個，含 6 個整合測試的 HEAD 版本號與 3 個 arch 測試的例外）。
+
+**審查結果：** 36 項（high 0、medium 12、low 17、false 6、maybe-false 1）。
+- patch（7 組）：Access JWT `nbf` 容許 60 秒時鐘誤差；`RADAR_SITE_ORIGIN` 拒絕寫明預設連接埠；`build_fake_login_confirm` 試用分支的參數斷言；抓 JWKS 不跟轉址的測試改成斷言只發一個請求；ADR-0046 補四項取捨（Safari 與 Secure cookie、compose 蓋過 env_file、JWKS 沒快取、移出後再加回會變新成員）；名詞表 RS256 更新、新增 `kid`。
+- defer（4 項）：見 frontmatter `deferred`。
+- reject：每一項的理由都記在上面的 Review Triage Log。
+
+**CI 第一輪（43693835262）失敗後的修正：**
+- `tests/integration/test_members.py` 三個案例失敗：email 格式錯誤訊息裡的範例 `name@example.com` 讓「輸出不帶 @」的斷言失敗。訊息改成「email 的格式不對」（`radar/domain/auth.py`、`radar/domain/auth_settings.py`），`tests/unit/test_auth_domain.py` 裡固定訊息的集合跟著改（這個 Story 新寫的測試）。
+- `tests/integration/test_sessions.py::test_dev_fake_login_lists_members_and_starts_a_session` 失敗：成員清單照顯示名稱排序，順序跟著資料庫定序變（CI 是逐碼位，「乙」排在「甲」前面）。改成照成員 ID（UUIDv7，即加入先後）排序，測試沒改。
+
+**followup_review_recommended：true**：這一輪修了 4 組 medium（其中兩組改到驗證邏輯：JWT `nbf` 容許值、站台來源的連接埠檢查），這兩處安全相關的驗證改動沒有經過第二輪獨立審查。
+
+**驗證：** `ruff check`、`ruff format --check`（320 檔）、`mypy`（312 檔）、`lint-imports`（19 條）全過；`pytest -m unit` 2920 passed、1 xfailed；`pytest -m arch` 297 passed、9 errors（都是本機連不到資料庫）；整合測試以 CI 為準。
+
+**剩下的風險：** 本機 Safari 可能不收 http 底下的 Secure cookie（要 Kevin 用瀏覽器確認一次）；兩條線合併時 0020 要改接 0019 並刪掉保留空號；試用主機若能繞過 Access 直連，JWKS 抓取可能被濫用。
