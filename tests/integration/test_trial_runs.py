@@ -9,6 +9,7 @@
 模型一律用依 schema 回覆的替身（`tests/trial_support.py`），不連網路；論文與回覆都是自己編的。
 """
 
+import dataclasses
 import threading
 import uuid
 from collections.abc import Iterator
@@ -21,6 +22,7 @@ from radar.domain.eval_split import EvalSplit
 from radar.domain.llm import LlmConfigurationError, LlmTimeoutError
 from radar.domain.permissions import PermissionDeniedError
 from radar.domain.trial_runs import (
+    TrialEstimate,
     TrialItem,
     TrialItemStatus,
     TrialReport,
@@ -41,8 +43,16 @@ from radar.services.trial_runs import (
 )
 from tests.batch_support import NOW
 from tests.database import TestDatabase, create_database, drop_database, migrate
-from tests.llm_support import budget_config, create_paper, execute, insert_ledger, table_counts
+from tests.llm_support import (
+    budget_config,
+    create_paper,
+    execute,
+    insert_ledger,
+    set_abstract,
+    table_counts,
+)
 from tests.trial_support import (
+    BANKING_ABSTRACT,
     WAIT,
     SchemaReplyProvider,
     banking_paper,
@@ -87,11 +97,15 @@ def _run(
     setup: TrialSetup | None = None,
     **kwargs: object,
 ) -> TrialReport:
+    setup = setup or trial_setup()
+    if "estimate" not in kwargs:
+        # run_trial 只跑確認過的項目：沒指定時用執行前一刻的預估（等於「確認後什麼都沒變」）。
+        kwargs["estimate"] = estimate_trial(SYSTEM, database, setup, selection, attempts=1)
     return run_trial(
         SYSTEM,
         database,
         provider,
-        setup or trial_setup(),
+        setup,
         selection,
         clock=lambda: NOW,
         **kwargs,  # type: ignore[arg-type]
@@ -147,7 +161,7 @@ def test_estimate_matches_what_runs(db: TestDatabase, database: Database) -> Non
     setup = trial_setup()
     selection = _select(database, str(with_abstract), str(no_abstract))
 
-    estimate = estimate_trial(SYSTEM, database, setup, selection)
+    estimate = estimate_trial(SYSTEM, database, setup, selection, attempts=1)
 
     assert [(item.paper_id, item.task) for item in estimate.items] == [
         (with_abstract, LlmTask.ZH_SUMMARY),
@@ -500,9 +514,173 @@ def test_member_viewer_cannot_run_trials(db: TestDatabase, database: Database) -
     with pytest.raises(PermissionDeniedError):
         sample_trial_papers(admin, database, 1, seed=1)
     with pytest.raises(PermissionDeniedError):
-        estimate_trial(admin, database, trial_setup(), selection)
+        estimate_trial(admin, database, trial_setup(), selection, attempts=1)
     with pytest.raises(PermissionDeniedError):
-        run_trial(admin, database, provider, trial_setup(), selection, clock=lambda: NOW)
+        run_trial(
+            admin,
+            database,
+            provider,
+            trial_setup(),
+            selection,
+            clock=lambda: NOW,
+            estimate=TrialEstimate(()),
+        )
 
     assert provider.total_calls == 0
     assert table_counts(db) == before
+
+
+# --- 審查後的修正（Codex 主審查第 1、2 條） ------------------------------------------------
+
+
+def test_estimate_worst_case_follows_adapter_attempts(db: TestDatabase, database: Database) -> None:
+    paper = banking_paper(database, doi_in(EvalSplit.TUNING, "1"), 1)
+    setup = trial_setup()
+    selection = _select(database, str(paper))
+
+    once = estimate_trial(SYSTEM, database, setup, selection, attempts=1)
+    thrice = estimate_trial(SYSTEM, database, setup, selection, attempts=3)
+
+    assert thrice.attempts == 3
+    assert [item.attempts for item in thrice.items] == [3, 3, 3]
+    assert [item.max_cost_usd for item in thrice.items] == [
+        item.max_cost_usd for item in once.items
+    ]
+    assert thrice.max_cost_usd == once.max_cost_usd * 3
+    with pytest.raises(ValueError, match="attempts"):
+        estimate_trial(SYSTEM, database, setup, selection, attempts=0)
+
+
+def test_estimate_records_the_key_the_gateway_uses(db: TestDatabase, database: Database) -> None:
+    paper = banking_paper(database, doi_in(EvalSplit.TUNING, "1"), 1)
+    selection = _select(database, str(paper))
+    estimate = estimate_trial(SYSTEM, database, trial_setup(), selection, attempts=1)
+
+    report = _run(database, SchemaReplyProvider(good_replies()), selection, estimate=estimate)
+
+    assert [item.status for item in report.items] == [TrialItemStatus.ACTIVE] * 3
+    keys = {
+        (row[0], row[1], row[2], row[3])
+        for row in execute(
+            db, "SELECT task, prompt_version, model, input_sha256 FROM derivation_run"
+        )
+    }
+    assert keys == {
+        (item.task.value, item.key.prompt_version, item.key.model, item.key.input_sha256)
+        for item in estimate.items
+        if item.key is not None
+    }
+
+
+def test_abstract_added_after_confirmation_runs_nothing_extra(
+    db: TestDatabase, database: Database
+) -> None:
+    doi = doi_in(EvalSplit.TUNING, "1")
+    paper = banking_paper(database, doi, 1, abstract=None)
+    selection = _select(database, str(paper))
+    estimate = estimate_trial(SYSTEM, database, trial_setup(), selection, attempts=1)
+    assert [item.task for item in estimate.items] == [LlmTask.CLASSIFY]
+    # 確認之後，每週更新替這篇補上了摘要（同一個 OpenAlex ID 再寫一次）。
+    banking_paper(database, doi, 1)
+    provider = SchemaReplyProvider(good_replies())
+
+    report = _run(database, provider, selection, estimate=estimate)
+
+    assert [item.status for item in report.items] == [TrialItemStatus.INPUT_CHANGED] * 3
+    assert provider.total_calls == 0
+    counts = table_counts(db)
+    assert (counts["derivation_run"], counts["llm_call"]) == (0, 0)
+    assert report.cost_usd <= estimate.max_cost_usd
+    assert report.exit_code == 1
+
+
+def test_input_changed_after_confirmation_skips_only_that_item(
+    db: TestDatabase, database: Database
+) -> None:
+    paper = banking_paper(database, doi_in(EvalSplit.TUNING, "1"), 1)
+    selection = _select(database, str(paper))
+    estimate = estimate_trial(SYSTEM, database, trial_setup(), selection, attempts=1)
+    # 只有分類那一項「確認時的輸入」和現在不一樣（等於確認後分類的輸入變了）。
+    tampered = TrialEstimate(
+        tuple(
+            dataclasses.replace(item, key=dataclasses.replace(item.key, input_sha256="0" * 64))
+            if item.task is LlmTask.CLASSIFY and item.key is not None
+            else item
+            for item in estimate.items
+        ),
+        attempts=estimate.attempts,
+    )
+    provider = SchemaReplyProvider(good_replies())
+
+    with capture_logs() as logs:
+        report = _run(database, provider, selection, estimate=tampered)
+
+    assert [item.status for item in report.items] == [
+        TrialItemStatus.ACTIVE,
+        TrialItemStatus.INPUT_CHANGED,
+        TrialItemStatus.ACTIVE,
+    ]
+    assert dict(provider.calls) == {LlmTask.ZH_SUMMARY: 1, LlmTask.EXTRACT_MODEL: 1}
+    assert execute(db, "SELECT count(*) FROM derivation_run WHERE task = 'classify'") == [(0,)]
+    [entry] = [entry for entry in logs if entry["event"] == "確認後輸入變了，這一項沒有呼叫模型"]
+    assert (entry["input_changed"], entry["prompt_version_changed"]) == (True, False)
+
+
+def test_changed_abstract_after_confirmation_is_not_sent(
+    db: TestDatabase, database: Database
+) -> None:
+    paper = banking_paper(database, doi_in(EvalSplit.TUNING, "1"), 1)
+    selection = _select(database, str(paper))
+    estimate = estimate_trial(SYSTEM, database, trial_setup(), selection, attempts=1)
+    set_abstract(db, paper, BANKING_ABSTRACT + " (corrected)")
+    provider = SchemaReplyProvider(good_replies())
+
+    report = _run(database, provider, selection, estimate=estimate)
+
+    assert [item.status for item in report.items] == [TrialItemStatus.INPUT_CHANGED] * 3
+    assert provider.total_calls == 0
+    assert table_counts(db)["derivation_run"] == 0
+
+
+def test_unconfirmed_items_keep_their_non_call_status(db: TestDatabase, database: Database) -> None:
+    paper = banking_paper(database, doi_in(EvalSplit.TUNING, "1"), 1, abstract=None)
+    selection = _select(database, str(paper))
+    provider = SchemaReplyProvider(good_replies())
+
+    report = _run(database, provider, selection, estimate=TrialEstimate(()))
+
+    # 預估是空的（什麼都沒確認）：會呼叫的分類變 input_changed，其餘照常是 no_input。
+    assert [item.status for item in report.items] == [
+        TrialItemStatus.NO_INPUT,
+        TrialItemStatus.INPUT_CHANGED,
+        TrialItemStatus.NO_INPUT,
+    ]
+    assert provider.total_calls == 0
+
+
+def test_unconfirmed_item_error_is_reported_and_others_continue(
+    db: TestDatabase, database: Database, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paper = banking_paper(database, doi_in(EvalSplit.TUNING, "1"), 1)
+    selection = _select(database, str(paper))
+    estimate = estimate_trial(SYSTEM, database, trial_setup(), selection, attempts=1)
+    without_classify = TrialEstimate(
+        tuple(item for item in estimate.items if item.task is not LlmTask.CLASSIFY),
+        attempts=estimate.attempts,
+    )
+
+    def broken(*_args: object) -> None:
+        raise RuntimeError("替身故意出錯")
+
+    monkeypatch.setattr(trial_runs, "_read_paper", broken)
+    provider = SchemaReplyProvider(good_replies())
+
+    report = _run(database, provider, selection, estimate=without_classify)
+
+    assert [item.status for item in report.items] == [
+        TrialItemStatus.ACTIVE,
+        TrialItemStatus.ERROR,
+        TrialItemStatus.ACTIVE,
+    ]
+    assert report.items[1].reason == "RuntimeError"
+    assert dict(provider.calls) == {LlmTask.ZH_SUMMARY: 1, LlmTask.EXTRACT_MODEL: 1}

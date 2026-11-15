@@ -543,6 +543,21 @@ def test_report_by_ids_file_and_since(
     assert bad.exit_code == 2
 
 
+def test_report_reads_an_ids_file_with_utf8_bom(
+    db: TestDatabase, database: Database, env: Path, tmp_path: Path
+) -> None:
+    """和 2.10 的 `--ids-file` 一樣收 BOM（有些編輯器或試算表匯出時會加）與 CRLF。"""
+    submission_id = _imported_with_rejection(database)
+    paper_id = batch_items(database, submission_id)[0].key.paper_id
+    ids_file = tmp_path / "ids-bom.txt"
+    ids_file.write_text(f"﻿{paper_id}\r\n", encoding="utf-8")
+
+    result = _invoke(["runs", "report", "--ids-file", str(ids_file)])
+
+    assert result.exit_code == 0, result.output
+    assert "llm_invalid_request" in result.output
+
+
 def test_report_takes_the_newest_normal_run_and_skips_eval_runs(
     db: TestDatabase, database: Database, env: Path
 ) -> None:
