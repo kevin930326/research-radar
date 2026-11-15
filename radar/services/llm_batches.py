@@ -57,16 +57,28 @@ Batch 價的保守上限。不寫任何列、不建 provider、不看預算。
 
 - 列出 `submitted`／`ended` 的批次（可限定 id）；有要查的才呼叫 `open_provider()`（一次）。
 - 每批經閘門的 `fetch_llm_batch` 查狀態：
-  - 找不到（404）：`submitted`／`ended` → `needs_attention`（`batch_provider_not_found`），不丟。
+  - 找不到（404）：`submitted`／`ended`（而且還是查的那個供應商 batch ID）→ `needs_attention`
+    （`batch_provider_not_found`），不丟。
   - 其他供應商錯誤：這批不動、記錯誤、繼續下一批（結果的 `errors` 加一）。
-  - `in_progress`／`canceling`：不動；過了 `expires_at` 標「逾期」並記警告。
-  - `ended`：條件式 `submitted` → `ended`（記 `ended_at`；上次中斷已經是 `ended` 的照樣往下做）。
+  - `in_progress`／`canceling`：不動；過了 `expires_at` 標「逾期」並記警告。過了 29 天保留期還沒
+    結束的照下面「拿不到結果」處理（審查後）。
+  - `ended`：條件式 `submitted` → `ended`（記 `ended_at`；上次中斷已經是 `ended` 的照樣往下做；
+    條件式更新沒套用、重讀也不是同一個 ID 的 `ended` 就停止這一批）。
     過了 29 天保留期或沒有結果檔 → 還 `running` 的 run 全部 `failed`
     （`batch_results_unavailable`）；
     否則串流結果，用 `custom_id` 對回 item，逐項經閘門的 `import_llm_batch_result` 匯入（不認得的
-    custom_id 與讀不到 custom_id 的行只計數）；串流讀完後還 `running` 的 → `batch_result_missing`。
-    最後條件式 `ended` → `imported`（同一句確認這批已經沒有 `running` 的 run）。串流途中斷線：記成
-    這批的錯誤，批次留 `ended`，下一次接著做（已匯入的項目 run 已經不是 `running`，不重記帳）。
+    custom_id 與讀不到 custom_id 的行只計數）。串流讀完先核對供應商的 `request_counts`：讀到的項數
+    （不重複的 custom_id＋讀不到 custom_id 的行）比它少就當成被截短，記錯誤、批次留 `ended`、這次
+    不判缺項，下次重讀（審查後）；同一個供應商 batch ID 連續 `incomplete_results_attention_after`
+    次（預設 3）都比它少，就條件式 `ended` → `needs_attention`（`batch_results_incomplete`），交給
+    人工確認：`--fail` 接受缺項、`--provider-batch-id` 再讀（`submitted` → `ended` 時次數歸零；
+    確認審查 D2）。夠了，還 `running` 的才 → `batch_result_missing`。
+    最後條件式 `ended` → `imported`（同一句確認這批已經沒有 `running` 的 run、ID 沒換）。串流途中
+    斷線：記成這批的錯誤，批次留 `ended`，下一次接著做（已匯入的項目 run 已經不是 `running`，不重
+    記帳）。
+  - 每一個寫入交易（逐項記帳、改 run、寫表頭、整批釋放 run）都先以 `FOR SHARE` 鎖住批次列、確認
+    它還是 `ended` 而且供應商 batch ID 沒換；不是就停止這一批、不寫（`stopped`，審查後）。別的 poll
+    同時把它標成 `needs_attention` 時，那句 UPDATE 會等這個交易做完，之後的交易就看到新狀態。
   - 單一批次裡的非預期錯誤（例如 prompt 版本讀不出來）：記錯誤類別、這批留在原狀態、繼續下一批
     （結果的 `errors` 加一）。
 - 最後 `weekly_update.mark_weekly_runs_ai_done`、讀全庫 `needs_attention` 的筆數。
@@ -117,6 +129,7 @@ from radar.domain.llm_batches import (
     SUBMIT_BUDGET_LOCK_TIMEOUT_MS,
     SUBMITTING_STALE_AFTER,
     BatchImportCounts,
+    BatchImportStoppedError,
     BatchItemOutcome,
     BatchItemRun,
     BatchPollRow,
@@ -136,6 +149,7 @@ from radar.domain.llm_batches import (
     batch_overdue,
     in_month_start_hold,
     results_expired,
+    results_incomplete,
 )
 from radar.domain.permissions import Action, require
 from radar.domain.pricing import max_call_cost
@@ -154,7 +168,9 @@ from radar.repo.llm_batches import (
     create_batch_item,
     create_batch_submission,
     find_batch_submission,
+    find_batch_submission_importing,
     list_batch_items,
+    list_batch_pending_paper_ids,
     list_batch_reservations_ahead_by_task,
     list_batch_submissions,
     update_batch_submission_attention_on_not_found,
@@ -165,6 +181,7 @@ from radar.repo.llm_batches import (
     update_batch_submission_needs_attention,
     update_batch_submission_requeued,
     update_batch_submission_resolved_failed,
+    update_batch_submission_results_incomplete,
     update_batch_submission_resumed,
     update_batch_submission_submitted,
     update_batch_submission_submitting,
@@ -1168,6 +1185,21 @@ def count_llm_batch_running_runs(
         return count_batch_running_runs(SystemViewer(), connection, batch_submission_id)
 
 
+def list_llm_batch_pending_papers(
+    actor: Viewer, database: Database, batch_submission_ids: Collection[uuid.UUID] | None
+) -> list[uuid.UUID]:
+    """這幾批（`None`＝全部的批次）裡寫結果失敗、等互動接續（`llm_result_pending`）的 run 屬於哪些
+    論文（`radar batches wait` 結束前印；沒有目標時查全部，確認審查 D3）。之後已經有更新的 run 的
+    不算（見 `repo.list_batch_pending_paper_ids`）。
+
+    Raises:
+        PermissionDeniedError: `actor` 不是系統工作（不碰資料庫）。
+    """
+    require(actor, Action.RUN_AI_JOBS, None)
+    with database.transaction() as connection:
+        return list_batch_pending_paper_ids(SystemViewer(), connection, batch_submission_ids)
+
+
 # --- 結果匯入 -------------------------------------------------------------------------------
 
 
@@ -1249,7 +1281,12 @@ def _poll_one(
     row: BatchSubmission,
     clock: Callable[[], datetime],
 ) -> BatchPollRow:
-    """查一批、結束了就匯入。供應商的錯誤記在回傳的列上，不丟。"""
+    """查一批、結束了就匯入。供應商的錯誤記在回傳的列上，不丟。
+
+    每個寫入都核對這批還在匯入**同一個**供應商 batch ID（`row.provider_batch_id`）：條件式更新沒
+    套用、或匯入途中被別的 poll 標成 `needs_attention`／人工確認換了 ID，就停止這一批（`stopped`），
+    不再寫任何列。
+    """
     out = BatchPollRow(row.id, row.status)
     provider_batch_id = row.provider_batch_id
     if provider_batch_id is None:  # submitted 以後一定有（資料庫的 CHECK 守著）
@@ -1257,11 +1294,12 @@ def _poll_one(
     try:
         status = fetch_llm_batch(actor, provider, provider_batch_id)
     except LlmConfigurationError as exc:
-        if exc.status == 404 and _mark_not_found(database, row.id):
+        if exc.status == 404 and _mark_not_found(database, row.id, provider_batch_id):
             out.status = BatchSubmissionStatus.NEEDS_ATTENTION
             return out
         out.error = _error_text(exc)
         _log_provider_error(row.id, "查狀態", exc)
+        out.status = _current_status(database, row.id)
         return out
     except LlmError as exc:
         out.error = _error_text(exc)
@@ -1269,6 +1307,7 @@ def _poll_one(
         return out
     out.provider_status = status.processing_status
     now = _aware(clock())
+    expired = results_expired(status, now)
     if status.processing_status is not BatchProcessingStatus.ENDED:
         out.overdue = batch_overdue(status, now)
         if out.overdue:
@@ -1277,41 +1316,67 @@ def _poll_one(
                 batch_submission_id=str(row.id),
                 provider_status=status.processing_status.value,
             )
-        return out
+        if not expired:
+            return out
+        # 過了 29 天保留期還沒結束：照過期處理（結果拿不到），不讓預留一直占著。
+        log.warning(
+            "Batch 過了結果保留期還沒結束，照過期處理",
+            batch_submission_id=str(row.id),
+            provider_status=status.processing_status.value,
+        )
 
     with database.transaction() as connection:
-        update_batch_submission_ended(connection, row.id)
-    if results_expired(status, now) or not status.results_available:
-        with database.transaction() as connection:
-            out.counts.unavailable = update_derivation_runs_failed_for_batch(
-                connection, row.id, ErrorCode.BATCH_RESULTS_UNAVAILABLE
+        moved_to_ended = update_batch_submission_ended(connection, row.id, provider_batch_id)
+    if not moved_to_ended:
+        current = _current_row(database, row.id)
+        if not (
+            current.status is BatchSubmissionStatus.ENDED
+            and current.provider_batch_id == provider_batch_id
+        ):
+            # 別的 poll 已經匯入完、標了 needs_attention，或人工確認換了 ID：這次不做。
+            return _stopped(out, current.status)
+    try:
+        if expired or not status.results_available:
+            out.counts.unavailable = _release_running(
+                database, row.id, provider_batch_id, ErrorCode.BATCH_RESULTS_UNAVAILABLE
             )
-        log.warning(
-            "Batch 的結果已經拿不到",
-            batch_submission_id=str(row.id),
-            released_runs=out.counts.unavailable,
-        )
-    else:
-        try:
-            _import_results(actor, database, provider, setup, row.id, provider_batch_id, out.counts)
-        except LlmError as exc:
-            # 下載途中斷線：批次留 ended，下一次接著做（匯入過的不會重記帳）。
-            out.error = _error_text(exc)
-            _log_provider_error(row.id, "下載結果", exc)
-            out.status = _current_status(database, row.id)
-            return out
-        with database.transaction() as connection:
-            out.counts.missing = update_derivation_runs_failed_for_batch(
-                connection, row.id, ErrorCode.BATCH_RESULT_MISSING
-            )
-        if out.counts.missing:
             log.warning(
-                "Batch 結果少了幾項",
+                "Batch 的結果已經拿不到",
                 batch_submission_id=str(row.id),
-                missing=out.counts.missing,
+                released_runs=out.counts.unavailable,
             )
+        else:
+            try:
+                read = _import_results(
+                    actor, database, provider, setup, row.id, provider_batch_id, out.counts
+                )
+            except LlmError as exc:
+                # 下載途中斷線：批次留 ended，下一次接著做（匯入過的不會重記帳）。
+                out.error = _error_text(exc)
+                _log_provider_error(row.id, "下載結果", exc)
+                out.status = _current_status(database, row.id)
+                return out
+            expected = results_incomplete(status, read)
+            if expected is not None:
+                # 串流正常結束但行數不夠（被截短）：不判缺項，批次留 ended，下次重讀；同一個 ID 連續
+                # 對不上到設定的次數就交給人工確認（確認審查 D2）。
+                out.error = f"BatchResultsIncomplete（讀到 {read}／{expected} 項）"
+                return _results_incomplete(
+                    database, setup, out, provider_batch_id, read=read, expected=expected
+                )
+            out.counts.missing = _release_running(
+                database, row.id, provider_batch_id, ErrorCode.BATCH_RESULT_MISSING
+            )
+            if out.counts.missing:
+                log.warning(
+                    "Batch 結果少了幾項",
+                    batch_submission_id=str(row.id),
+                    missing=out.counts.missing,
+                )
+    except BatchImportStoppedError:
+        return _stopped(out, _current_status(database, row.id))
     with database.transaction() as connection:
-        update_batch_submission_imported(connection, row.id)
+        update_batch_submission_imported(connection, row.id, provider_batch_id)
     out.status = _current_status(database, row.id)
     counts = out.counts
     log.info(
@@ -1327,6 +1392,85 @@ def _poll_one(
     return out
 
 
+def _results_incomplete(
+    database: Database,
+    setup: LlmBatchSetup,
+    out: BatchPollRow,
+    provider_batch_id: str,
+    *,
+    read: int,
+    expected: int,
+) -> BatchPollRow:
+    """讀到的項數比供應商的計數少：記一次（`incomplete_reads` 加一），連續
+    `incomplete_results_attention_after` 次就 `ended` → `needs_attention`
+    （`batch_results_incomplete`），否則批次留 `ended`、下次重讀。這批已經不是 `ended` 或換了 ID
+    時不改，照重讀的狀態回報。"""
+    attention_after = setup.batches.incomplete_results_attention_after
+    with database.transaction() as connection:
+        counted = update_batch_submission_results_incomplete(
+            connection, out.batch_submission_id, provider_batch_id, attention_after=attention_after
+        )
+    if counted is None:
+        out.status = _current_status(database, out.batch_submission_id)
+        return out
+    out.status, times = counted
+    if out.status is BatchSubmissionStatus.NEEDS_ATTENTION:
+        log.error(
+            "Batch 結果連續幾次都比供應商的計數少，標 needs_attention（要人工確認）",
+            batch_submission_id=str(out.batch_submission_id),
+            read=read,
+            expected=expected,
+            incomplete_reads=times,
+        )
+    else:
+        log.error(
+            "Batch 結果讀到的項數比供應商的計數少，這次不判缺項、下次重讀",
+            batch_submission_id=str(out.batch_submission_id),
+            read=read,
+            expected=expected,
+            incomplete_reads=times,
+            attention_after=attention_after,
+        )
+    return out
+
+
+def _current_row(database: Database, batch_submission_id: uuid.UUID) -> BatchSubmission:
+    """重讀一筆批次（條件式更新沒套用時看它現在的狀態與供應商 batch ID）。"""
+    with database.transaction() as connection:
+        row = find_batch_submission(SystemViewer(), connection, batch_submission_id)
+    if row is None:
+        raise LookupError("找不到 batch_submission")
+    return row
+
+
+def _stopped(out: BatchPollRow, status: BatchSubmissionStatus) -> BatchPollRow:
+    out.stopped = True
+    out.status = status
+    log.warning(
+        "Batch 匯入途中狀態變了（needs_attention、換了供應商 batch ID 或已匯入），停止這一批、不寫",
+        batch_submission_id=str(out.batch_submission_id),
+        status=status.value,
+    )
+    return out
+
+
+def _release_running(
+    database: Database, batch_submission_id: uuid.UUID, provider_batch_id: str, reason: ErrorCode
+) -> int:
+    """（一個交易）先鎖批次列、確認還在匯入同一個 ID，再把這批還 `running` 的 run 全部改 `failed`
+    （有存下輸出的記 `llm_result_pending`），回改了幾筆。
+
+    Raises:
+        BatchImportStoppedError: 批次已經不是 `ended` 或換了 ID（什麼都沒改）。
+    """
+    with database.transaction() as connection:
+        if not find_batch_submission_importing(
+            SystemViewer(), connection, batch_submission_id, provider_batch_id
+        ):
+            raise BatchImportStoppedError(batch_submission_id)
+        return update_derivation_runs_failed_for_batch(connection, batch_submission_id, reason)
+
+
 def _import_results(
     actor: Viewer,
     database: Database,
@@ -1335,21 +1479,28 @@ def _import_results(
     batch_submission_id: uuid.UUID,
     provider_batch_id: str,
     counts: BatchImportCounts,
-) -> None:
-    """串流這批的結果，逐項匯入。不認得的 custom_id 與讀不到 custom_id 的行只計數。
+) -> int:
+    """串流這批的結果，逐項匯入，回讀到幾項（不重複的 custom_id，加上連 custom_id 都讀不到的行；
+    給 `results_incomplete` 核對）。不認得的 custom_id 與讀不到 custom_id 的行只計數。
 
     Raises:
         LlmError: 下載前或下載途中供應商的錯誤。
+        BatchImportStoppedError: 這批已經不在匯入 `provider_batch_id`（讀 item 時或匯入途中）。
     """
     with database.transaction() as connection:
         items = list_batch_items(SystemViewer(), connection, batch_submission_id)
+    if any(item.provider_batch_id != provider_batch_id for item in items):
+        # 讀 item 時這批的供應商 batch ID 已經換了：下載的不是它的結果。
+        raise BatchImportStoppedError(batch_submission_id)
     by_custom_id: dict[str, BatchItemRun] = {item.custom_id: item for item in items}
+    seen: set[str] = set()
     results = iter_llm_batch_results(actor, provider, provider_batch_id)
     try:
         for line in results:
             if line.custom_id is None:
                 counts.unreadable_lines += 1
                 continue
+            seen.add(line.custom_id)
             item = by_custom_id.get(line.custom_id)
             if item is None:
                 counts.unknown_custom_ids += 1
@@ -1367,14 +1518,17 @@ def _import_results(
             unknown_custom_ids=counts.unknown_custom_ids,
             unreadable_lines=counts.unreadable_lines,
         )
+    return len(seen) + counts.unreadable_lines
 
 
-def _mark_not_found(database: Database, batch_submission_id: uuid.UUID) -> bool:
+def _mark_not_found(
+    database: Database, batch_submission_id: uuid.UUID, provider_batch_id: str
+) -> bool:
     """供應商找不到這批：`submitted`／`ended` → `needs_attention`。已經不是這兩種狀態（例如別的
-    poll 剛匯入完）時不改、回 False（當成一般錯誤）。"""
+    poll 剛匯入完）或換了供應商 batch ID 時不改、回 False（當成一般錯誤）。"""
     with database.transaction() as connection:
         changed = update_batch_submission_attention_on_not_found(
-            connection, batch_submission_id, ErrorCode.BATCH_PROVIDER_NOT_FOUND
+            connection, batch_submission_id, provider_batch_id, ErrorCode.BATCH_PROVIDER_NOT_FOUND
         )
     if changed:
         log.error(

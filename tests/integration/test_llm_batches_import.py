@@ -6,9 +6,10 @@ provider 是 `FakeLlmProvider`：假的批次狀態與結果行不是真的錄�
 回覆都是測試自己編的。
 """
 
+import dataclasses
 import threading
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from datetime import timedelta
 from decimal import Decimal
 
@@ -24,6 +25,7 @@ from radar.domain.ai_outputs import LlmTask
 from radar.domain.errors import ErrorCode
 from radar.domain.llm import (
     BatchProcessingStatus,
+    BatchRequestCounts,
     LlmBatchResult,
     LlmBatchResultKind,
     LlmConnectionError,
@@ -41,6 +43,7 @@ from radar.domain.pricing import llm_call_cost
 from radar.domain.prompts import PromptIntegrityError
 from radar.repo.ai_blocks import find_ai_block
 from radar.repo.db import Database
+from radar.repo.llm_batches import update_batch_submission_ended
 from radar.services.llm_batches import (
     LlmBatchSetup,
     estimate_llm_batches,
@@ -1038,3 +1041,277 @@ def test_failed_validation_marks_run_pending_and_reports_error(
     }
     assert len(ledger(db)) == 3
     assert headers(db) == {}
+
+
+# --- 審查後：Codex 主審查第 1、3、4 條 ------------------------------------------------------
+
+
+class _PausingProvider(FakeLlmProvider):
+    """下載結果時，讀完前 `after` 行先執行 `pause`（模擬 poll A 拿到 ended、匯入到一半停住，期間
+    別的行程動了這批），再接著回剩下的行。"""
+
+    def __init__(self, pause: Callable[[], None], *, after: int) -> None:
+        super().__init__()
+        self._pause = pause
+        self._after = after
+
+    def batch_results(self, provider_batch_id: str) -> Iterator[LlmBatchResult]:
+        lines = super().batch_results(provider_batch_id)
+
+        def paused() -> Iterator[LlmBatchResult]:
+            for n, result in enumerate(lines):
+                if n == self._after:
+                    self._pause()
+                yield result
+
+        return paused()
+
+
+@pytest.mark.parametrize("after", [0, 1])
+def test_stale_poll_writes_nothing_after_another_poll_marks_needs_attention(
+    db: TestDatabase, database: Database, setup: LlmBatchSetup, after: int
+) -> None:
+    """A 拿到 ended 後停住；B 查同一批收到 404、標 needs_attention；A 恢復後一筆都不寫。"""
+    submission_id = submitted_batch(database, setup)
+    found = list(by_task(database, submission_id).values())
+
+    def other_poll() -> None:
+        marked = poll(database, FakeLlmProvider(), setup)  # 沒準備狀態 → 404
+        assert marked.rows[0].status is BatchSubmissionStatus.NEEDS_ATTENTION
+
+    stale = provider_with(
+        [succeeded(item) for item in found], provider=_PausingProvider(other_poll, after=after)
+    )
+
+    result = poll(database, stale, setup)
+
+    [row] = result.rows
+    assert row.stopped
+    assert row.status is BatchSubmissionStatus.NEEDS_ATTENTION
+    assert result.needs_attention == 1
+    assert not result.healthy
+    assert submission_row(db, submission_id)[:3] == (
+        "needs_attention",
+        BATCH_ID,
+        "batch_provider_not_found",
+    )
+    # 停住之前已經匯入的（after 行）照舊；之後的一筆都沒寫：沒有帳、沒有表頭、run 還是 running。
+    assert len(ledger(db)) == after
+    assert len(headers(db)) == after
+    states = run_states(db, [item.run_id for item in found])
+    assert [states[item.run_id][0] for item in found[after:]] == ["running"] * (3 - after)
+    # 底下還在跑的項目，AI 區塊照 needs_attention 的規則顯示 failed（不是 A 寫的 active）。
+    zh = next(item for item in found if item.key.task is LlmTask.ZH_SUMMARY)
+    if zh in found[after:]:
+        assert _zh_block(database, setup, zh.key.paper_id) is AiBlockState.FAILED
+
+
+def test_stale_poll_writes_nothing_after_the_batch_id_is_replaced(
+    db: TestDatabase, database: Database, setup: LlmBatchSetup
+) -> None:
+    """A 停住期間，人工確認把這批換成別的供應商 batch ID、而且新的 ID 也已經結束（狀態又是
+    ended）：A 下載的是舊 ID 的結果，一筆都不寫。"""
+    submission_id = submitted_batch(database, setup)
+    found = list(by_task(database, submission_id).values())
+
+    def replaced() -> None:
+        poll(database, FakeLlmProvider(), setup)  # 404 → needs_attention
+        resolved = resolve_llm_batch(
+            SYSTEM, database, submission_id, provider_batch_id=OTHER_BATCH_ID
+        )
+        assert resolved.outcome is ResolveOutcome.RESUMED
+        with database.transaction() as connection:
+            assert update_batch_submission_ended(connection, submission_id, OTHER_BATCH_ID)
+
+    stale = provider_with(
+        [succeeded(item) for item in found], provider=_PausingProvider(replaced, after=0)
+    )
+
+    result = poll(database, stale, setup)
+
+    assert result.rows[0].stopped
+    assert submission_row(db, submission_id)[:2] == ("ended", OTHER_BATCH_ID)
+    assert ledger(db) == []
+    assert headers(db) == {}
+    assert set(run_states(db, [item.run_id for item in found]).values()) == {("running", None)}
+
+
+def _counts(succeeded_items: int) -> BatchRequestCounts:
+    return BatchRequestCounts(
+        processing=0, succeeded=succeeded_items, errored=0, canceled=0, expired=0
+    )
+
+
+def test_truncated_results_are_not_treated_as_missing_and_are_read_again(
+    db: TestDatabase, database: Database, setup: LlmBatchSetup
+) -> None:
+    """串流正常結束但只回了 1 行（供應商說有 3 項）：不判缺項、不放掉預留、批次留 ended；下次重讀
+    補齊，帳不重記。"""
+    submission_id = submitted_batch(database, setup)
+    found = list(by_task(database, submission_id).values())
+    status = fake_batch_status(BATCH_ID, request_counts=_counts(3))
+
+    first = poll(database, provider_with([succeeded(found[0])], status=status), setup)
+
+    [row] = first.rows
+    assert row.error == "BatchResultsIncomplete（讀到 1／3 項）"
+    assert row.status is BatchSubmissionStatus.ENDED
+    assert row.counts.missing == 0
+    assert not first.healthy
+    states = run_states(db, [item.run_id for item in found])
+    assert [states[item.run_id][0] for item in found] == ["succeeded", "running", "running"]
+    assert submission_row(db, submission_id)[0] == "ended"
+
+    second = poll(
+        database, provider_with([succeeded(item) for item in found], status=status), setup
+    )
+
+    assert second.rows[0].status is BatchSubmissionStatus.IMPORTED
+    assert second.rows[0].counts.count(BatchItemOutcome.ALREADY_DONE) == 1
+    assert second.healthy
+    assert len(ledger(db)) == 3
+    assert set(headers(db).values()) == {("active", None)}
+
+
+def test_unreadable_lines_count_toward_the_provider_total(
+    db: TestDatabase, database: Database, setup: LlmBatchSetup
+) -> None:
+    """讀不到 custom_id 的行也算讀到一項：供應商那邊真的有一行壞掉時，批次照樣收得完（那一項
+    判缺項），不會每次重讀卡住。"""
+    submission_id = submitted_batch(database, setup)
+    found = list(by_task(database, submission_id).values())
+    status = fake_batch_status(BATCH_ID, request_counts=_counts(3))
+    lines = [
+        succeeded(found[0]),
+        succeeded(found[1]),
+        LlmBatchResult(None, LlmBatchResultKind.UNREADABLE),
+    ]
+
+    result = poll(database, provider_with(lines, status=status), setup)
+
+    [row] = result.rows
+    assert row.error is None
+    assert row.status is BatchSubmissionStatus.IMPORTED
+    assert row.counts.unreadable_lines == 1
+    assert row.counts.missing == 1
+    assert run_states(db, [found[2].run_id])[found[2].run_id] == (
+        "failed",
+        "batch_result_missing",
+    )
+
+
+@pytest.mark.parametrize(
+    "processing", [BatchProcessingStatus.IN_PROGRESS, BatchProcessingStatus.CANCELING]
+)
+def test_unfinished_batch_past_retention_is_released_like_expired_results(
+    db: TestDatabase, database: Database, setup: LlmBatchSetup, processing: BatchProcessingStatus
+) -> None:
+    """建立超過 29 天還回 in_progress／canceling：照「拿不到結果」結束剩下的 run、釋放預留。"""
+    submission_id = submitted_batch(database, setup)
+    provider = provider_with([], status=fake_batch_status(BATCH_ID, processing))
+
+    result = poll(database, provider, setup, now=NOW + timedelta(days=29, hours=1))
+
+    [row] = result.rows
+    assert row.overdue
+    assert row.counts.unavailable == 3
+    assert row.status is BatchSubmissionStatus.IMPORTED
+    assert provider.downloaded == []
+    assert submission_row(db, submission_id) == ("imported", BATCH_ID, None, True, True)
+    found = batch_items(database, submission_id)
+    assert set(run_states(db, [item.run_id for item in found]).values()) == {
+        ("failed", "batch_results_unavailable")
+    }
+
+
+# --- 確認審查 D2：計數一直對不上要有人工出口 ---------------------------------------------------
+
+
+def _incomplete_reads(db: TestDatabase, submission_id: uuid.UUID) -> int:
+    [(value,)] = execute(
+        db, "SELECT incomplete_reads FROM batch_submission WHERE id = %s", submission_id
+    )
+    return int(value)
+
+
+def test_results_short_of_the_provider_count_three_times_need_attention(
+    db: TestDatabase, database: Database, setup: LlmBatchSetup
+) -> None:
+    """供應商說 4 項、結果檔一直只有 3 行：前兩次留 ended 重讀，第三次（設定預設 3）改
+    needs_attention（batch_results_incomplete）；`resolve --fail` 收得掉，沒讀到的那項釋放。"""
+    assert setup.batches.incomplete_results_attention_after == 3
+    submission_id = submitted_batch(database, setup)
+    found = list(by_task(database, submission_id).values())
+    status = fake_batch_status(BATCH_ID, request_counts=_counts(4))
+
+    for expected_reads in (1, 2):
+        result = poll(database, provider_with([succeeded(i) for i in found], status=status), setup)
+        [row] = result.rows
+        assert row.status is BatchSubmissionStatus.ENDED
+        assert row.error == "BatchResultsIncomplete（讀到 3／4 項）"
+        assert _incomplete_reads(db, submission_id) == expected_reads
+        assert result.needs_attention == 0
+
+    third = poll(database, provider_with([succeeded(i) for i in found], status=status), setup)
+
+    [row] = third.rows
+    assert row.status is BatchSubmissionStatus.NEEDS_ATTENTION
+    assert third.needs_attention == 1
+    assert not third.healthy
+    assert submission_row(db, submission_id)[:3] == (
+        "needs_attention",
+        BATCH_ID,
+        "batch_results_incomplete",
+    )
+    assert _incomplete_reads(db, submission_id) == 3
+    assert len(ledger(db)) == 3  # 三次都讀到同樣 3 項，帳只記一次
+    # 之後的 poll 不再查它（不是 submitted／ended），不會一直重下載。
+    assert poll(database, FakeLlmProvider(), setup).rows == []
+
+    resolved = resolve_llm_batch(SYSTEM, database, submission_id, fail=True)
+
+    assert resolved.outcome is ResolveOutcome.FAILED
+    assert submission_row(db, submission_id)[:3] == ("failed", BATCH_ID, "batch_resolved_failed")
+
+
+def test_results_completed_before_the_limit_are_imported_normally(
+    db: TestDatabase, database: Database, setup: LlmBatchSetup
+) -> None:
+    """對不上兩次、第三次讀齊了：照常匯入（imported），不會進 needs_attention。"""
+    submission_id = submitted_batch(database, setup)
+    found = list(by_task(database, submission_id).values())
+    status = fake_batch_status(BATCH_ID, request_counts=_counts(3))
+    for _ in range(2):
+        poll(database, provider_with([succeeded(found[0])], status=status), setup)
+    assert _incomplete_reads(db, submission_id) == 2
+
+    result = poll(database, provider_with([succeeded(i) for i in found], status=status), setup)
+
+    assert result.rows[0].status is BatchSubmissionStatus.IMPORTED
+    assert result.healthy
+    assert submission_row(db, submission_id) == ("imported", BATCH_ID, None, True, True)
+    assert len(ledger(db)) == 3
+    assert set(headers(db).values()) == {("active", None)}
+
+
+def test_resolving_with_the_same_id_starts_counting_again(
+    db: TestDatabase, database: Database, setup: LlmBatchSetup
+) -> None:
+    """needs_attention（batch_results_incomplete）後用同一個 ID `resolve --provider-batch-id`：
+    回到 submitted、下一次看到 ended 時次數歸零，再讀一次對不上只算第 1 次。"""
+    tight = dataclasses.replace(
+        setup,
+        batches=setup.batches.model_copy(update={"incomplete_results_attention_after": 1}),
+    )
+    submission_id = submitted_batch(database, tight)
+    found = list(by_task(database, submission_id).values())
+    status = fake_batch_status(BATCH_ID, request_counts=_counts(4))
+    poll(database, provider_with([succeeded(i) for i in found], status=status), tight)
+    assert submission_row(db, submission_id)[2] == "batch_results_incomplete"
+
+    resumed = resolve_llm_batch(SYSTEM, database, submission_id, provider_batch_id=BATCH_ID)
+
+    assert resumed.outcome is ResolveOutcome.RESUMED
+    result = poll(database, provider_with([succeeded(i) for i in found], status=status), setup)
+    assert result.rows[0].status is BatchSubmissionStatus.ENDED
+    assert _incomplete_reads(db, submission_id) == 1

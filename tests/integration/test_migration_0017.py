@@ -137,3 +137,54 @@ def test_a_batch_run_is_charged_at_most_once(db: TestDatabase) -> None:
         run_id,
     )
     assert inserted == []
+
+
+def test_upgrade_again_after_batches_were_imported(db: TestDatabase) -> None:
+    """用過之後降版（兩欄刪掉）再升版：已經 ended／imported 的列先回填時間（用 updated_at），CHECK
+    才加得上（Story 2.11 審查後）。"""
+    ended = _submission(db, "ended", ended_at="2026-11-15T04:00:00Z")
+    imported = _submission(
+        db, "imported", ended_at="2026-11-15T04:00:00Z", imported_at="2026-11-15T05:00:00Z"
+    )
+    submitted = _submission(db, "submitted")
+
+    down = _alembic(db, "downgrade", "0016")
+    assert down.returncode == 0, down.stdout + down.stderr
+
+    migrate(db)
+
+    assert db.revisions() == {"0018"}
+    rows = {
+        uuid.UUID(str(row[0])): row[1:]
+        for row in execute(
+            db,
+            "SELECT id, ended_at = updated_at, imported_at = updated_at, imported_at IS NULL"
+            " FROM batch_submission",
+        )
+    }
+    assert rows[ended] == (True, None, True)
+    assert rows[imported] == (True, True, False)
+    assert rows[submitted] == (None, None, True)
+    check = _alembic(db, "check")
+    assert check.returncode == 0, check.stdout + check.stderr
+
+
+def test_incomplete_reads_defaults_to_zero_and_is_never_negative(db: TestDatabase) -> None:
+    """`incomplete_reads`（確認審查 D2）：新的列是 0、不能是負的；降版刪掉、升版加回來。"""
+    submission_id = _submission(db, "submitted")
+
+    assert _app(
+        db, "SELECT incomplete_reads FROM batch_submission WHERE id = %s", submission_id
+    ) == [(0,)]
+    with pytest.raises(psycopg.errors.CheckViolation):
+        _submission(db, "submitted", incomplete_reads=-1)
+
+    down = _alembic(db, "downgrade", "0016")
+
+    assert down.returncode == 0, down.stdout + down.stderr
+    assert "incomplete_reads" not in _columns(db)
+    migrate(db)
+    assert "incomplete_reads" in _columns(db)
+    assert _app(
+        db, "SELECT incomplete_reads FROM batch_submission WHERE id = %s", submission_id
+    ) == [(0,)]

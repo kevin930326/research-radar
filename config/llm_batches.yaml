@@ -30,3 +30,10 @@ poll_interval_minutes: 10
 # 指令印的為準）：分類表改版約 3 美元會過，情境值清單改版約 6 美元會被擋——刻意的，第一次改情境值
 # 清單前要 Kevin 決定。數字待 Kevin 決定。
 revision_rerun_max_usd: "5"
+# 同一批（同一個供應商 batch ID）連續幾次讀到的結果項數比供應商的計數（request_counts）少，就把批次
+# 標 needs_attention（batch_results_incomplete），交給 `radar batches resolve`（1～100）。被截短多半
+# 是偶發的斷線，重讀一兩次就補齊；一直對不上代表計數和結果檔本身不一致，再讀也一樣。取 3：給兩次
+# 重讀的機會，cron（每 15 分鐘）約 45 分鐘、`radar batches wait`（每 10 分鐘）約 30 分鐘後進
+# needs_attention；也和 wait「連續 3 次查詢都有錯誤就停」一致，wait 停下時印的是 resolve 的指令
+# （Story 2.11 確認審查 D2、ADR-0043）。
+incomplete_results_attention_after: 3

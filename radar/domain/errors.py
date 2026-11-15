@@ -150,6 +150,11 @@ class ErrorCode(StrEnum):
     # 查批次狀態時供應商回 404：批次 `submitted` → `needs_attention`，要人工確認（`radar batches
     # resolve`）
     BATCH_PROVIDER_NOT_FOUND = "batch_provider_not_found"
+    # 同一個供應商 batch ID 連續 `incomplete_results_attention_after` 次
+    # （`config/llm_batches.yaml`）讀到的結果項數比供應商的計數少：批次 `ended` →
+    # `needs_attention`，要人工確認（`radar batches resolve`：`--fail` 接受缺項、
+    # `--provider-batch-id` 再讀；Story 2.11 確認審查 D2）
+    BATCH_RESULTS_INCOMPLETE = "batch_results_incomplete"
     # `radar batches resolve --fail`：人工把 `needs_attention` 的批次標失敗，還在跑的 run 一起改
     # failed
     BATCH_RESOLVED_FAILED = "batch_resolved_failed"

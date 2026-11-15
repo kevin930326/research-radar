@@ -7,7 +7,8 @@
 - `Completion`：adapter 從供應商的回應取出的中立形狀；`interpret_completion` 把它判讀成
   `LlmResult`，或丟有型別的錯誤。替身也走同一個函式，所以兩邊丟的是同一批類別。Batch 結果匯入
   沒有 `LlmRequest`，用同一套判讀的 `interpret_message`（Story 2.11）。
-- `LlmBatchStatus`、`LlmBatchResult`：查批次狀態與下載結果時 adapter 回的中立形狀（Story 2.11）。
+- `LlmBatchStatus`（含 `BatchRequestCounts`）、`LlmBatchResult`：查批次狀態與下載結果時 adapter
+  回的中立形狀（Story 2.11）。
 - 錯誤分三大類（2.2 的閘門只看類別）：
   - `LlmRejectedError`（拒收）：拒答、長度截斷、回應格式不對、請求不合法 → 寫 `rejected`，
     不自動重試。由完整回應得出的（拒答、截斷、格式不對）帶 `usage` 與 ids，照樣記帳。
@@ -677,12 +678,39 @@ class BatchProcessingStatus(StrEnum):
 
 
 @dataclass(frozen=True, slots=True)
+class BatchRequestCounts:
+    """供應商回的 `request_counts`：這批的請求各在什麼狀態（docs/runs/epic-2b/api-reference.md
+    第一節）。結束後 `processing` 是 0，其餘四種的合計（`finished`）就是結果檔應該有的行數。
+
+    Raises:
+        ValueError: 有負數，或不是整數。
+    """
+
+    processing: int
+    succeeded: int
+    errored: int
+    canceled: int
+    expired: int
+
+    def __post_init__(self) -> None:
+        for value in (self.processing, self.succeeded, self.errored, self.canceled, self.expired):
+            if type(value) is not int or value < 0:
+                raise ValueError("request_counts 要是不小於 0 的整數")
+
+    @property
+    def finished(self) -> int:
+        """已經有結果的請求數（succeeded＋errored＋canceled＋expired）。"""
+        return self.succeeded + self.errored + self.canceled + self.expired
+
+
+@dataclass(frozen=True, slots=True)
 class LlmBatchStatus:
     """查一個批次得到的狀態（adapter 驗過形狀）。
 
     - `created_at`／`expires_at`：供應商的建立時間與處理期限（建立＋24 小時）；`ended_at` 結束前是
       None。都帶時區。
     - `results_available`：供應商有給 `results_url`（結束了而且結果還在；建立 29 天後就沒有）。
+    - `request_counts`：供應商的計數（真的 adapter 一定有；替身沒給時是 None，匯入就不核對行數）。
 
     Raises:
         ValueError: 時間沒有時區。
@@ -694,6 +722,7 @@ class LlmBatchStatus:
     expires_at: datetime
     ended_at: datetime | None
     results_available: bool
+    request_counts: BatchRequestCounts | None = None
 
     def __post_init__(self) -> None:
         for moment in (self.created_at, self.expires_at, self.ended_at):

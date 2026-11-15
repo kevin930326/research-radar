@@ -7,16 +7,20 @@
 
 import uuid
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
+from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
 
 from radar.adapters.fake import FakeLlmProvider, fake_batch_status, fake_completion
 from radar.adapters.fake.llm import FakeRepliesExhaustedError
+from radar.config import load_llm_batch_config
 from radar.domain.ai_outputs import LlmTask, ResultStatus, RunStatus
 from radar.domain.budget import BUDGET_TIMEZONE
 from radar.domain.llm import (
     BatchProcessingStatus,
+    BatchRequestCounts,
     LlmBatchResult,
     LlmBatchResultKind,
     LlmBatchStatus,
@@ -35,15 +39,19 @@ from radar.domain.llm_batches import (
     BatchImportCounts,
     BatchItemOutcome,
     BatchPollRow,
+    BatchSubmission,
     BatchSubmissionStatus,
     LlmBatchConfig,
+    LlmBatchEstimate,
     LlmBatchPollResult,
     batch_overdue,
     is_finished,
     render_poll_row,
     render_poll_summary,
+    render_queued_batches,
     render_wait_progress,
     results_expired,
+    results_incomplete,
 )
 from radar.domain.run_reports import (
     RunOutcome,
@@ -353,3 +361,97 @@ def test_fake_status_defaults() -> None:
     assert running.results_available is False
     assert ended.ended_at == ended.created_at + timedelta(hours=1)
     assert ended.results_available is True
+
+
+# --- 審查後（Codex 主審查第 1～3 條） ----------------------------------------------------------
+
+
+def test_request_counts_must_be_non_negative_integers() -> None:
+    counts = BatchRequestCounts(processing=0, succeeded=2, errored=1, canceled=0, expired=1)
+
+    assert counts.finished == 4
+    with pytest.raises(ValueError, match="request_counts"):
+        BatchRequestCounts(processing=0, succeeded=-1, errored=0, canceled=0, expired=0)
+    with pytest.raises(ValueError, match="request_counts"):
+        BatchRequestCounts(processing=0, succeeded=True, errored=0, canceled=0, expired=0)
+
+
+def test_results_incomplete_compares_with_the_provider_counts() -> None:
+    counted = fake_batch_status(
+        BATCH_ID,
+        request_counts=BatchRequestCounts(
+            processing=0, succeeded=2, errored=0, canceled=1, expired=0
+        ),
+    )
+
+    assert results_incomplete(counted, 2) == 3
+    assert results_incomplete(counted, 3) is None
+    assert results_incomplete(counted, 4) is None  # 重複的行不會讓它變成「沒讀完」
+    assert results_incomplete(fake_batch_status(BATCH_ID), 0) is None  # 替身沒給計數
+    with pytest.raises(ValueError, match="負數"):
+        results_incomplete(counted, -1)
+
+
+def test_stopped_poll_row_says_so() -> None:
+    row = BatchPollRow(uuid.UUID(int=1), BatchSubmissionStatus.NEEDS_ATTENTION, stopped=True)
+
+    assert "停止匯入" in render_poll_row(row)
+
+
+def _queued(n: int, items: int, cost: str) -> BatchSubmission:
+    return BatchSubmission(
+        id=uuid.UUID(int=n),
+        weekly_run_id=None,
+        status=BatchSubmissionStatus.QUEUED,
+        provider_batch_id=None,
+        item_count=items,
+        estimated_max_cost_usd=Decimal(cost),
+        failure_reason=None,
+    )
+
+
+def test_queued_batches_are_part_of_the_confirmed_total() -> None:
+    estimate = LlmBatchEstimate(
+        by_task={LlmTask.CLASSIFY: 2}, estimated_max_cost_usd=Decimal("0.5")
+    )
+
+    lines = render_queued_batches([_queued(1, 3, "1.25"), _queued(2, 4, "0.25")], estimate)
+
+    shown = "\n".join(lines)
+    assert str(uuid.UUID(int=1)) in shown
+    assert str(uuid.UUID(int=2)) in shown
+    assert "已排好、還沒送出的批次：2 批" in shown
+    assert lines[-1] == "這次會送出：9 筆（新排 2＋已排好 7），保守上限合計 2.0000 美元"
+    assert render_queued_batches([], estimate) == [
+        "",
+        "這次會送出：2 筆，保守上限合計 0.5000 美元",
+    ]
+
+
+# --- 確認審查 D2 ------------------------------------------------------------------------------
+
+
+def test_incomplete_results_attention_after_has_a_default_and_bounds() -> None:
+    base: dict[str, object] = {
+        "weekly_planning_enabled": False,
+        "max_requests_per_batch": 500,
+        "month_start_hold_hours": 8,
+    }
+
+    assert LlmBatchConfig.model_validate(base).incomplete_results_attention_after == 3
+    assert (
+        LlmBatchConfig.model_validate(
+            {**base, "incomplete_results_attention_after": 1}
+        ).incomplete_results_attention_after
+        == 1
+    )
+    for bad in (0, 101, "3", 2.5, True):
+        with pytest.raises(ValidationError):
+            LlmBatchConfig.model_validate({**base, "incomplete_results_attention_after": bad})
+
+
+def test_repo_config_sets_incomplete_results_attention_after_to_three() -> None:
+    root = Path(__file__).resolve().parents[2]
+    config = load_llm_batch_config({"RADAR_CONFIG_DIR": str(root / "config")})
+
+    assert config.incomplete_results_attention_after == 3

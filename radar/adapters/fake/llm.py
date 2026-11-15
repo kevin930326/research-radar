@@ -25,6 +25,7 @@ from typing import Any
 
 from radar.domain.llm import (
     BatchProcessingStatus,
+    BatchRequestCounts,
     Completion,
     CompletionBlock,
     LlmBatchRequest,
@@ -91,9 +92,11 @@ def fake_batch_status(
     expires_at: datetime | None = None,
     ended_at: datetime | None = None,
     results_available: bool | None = None,
+    request_counts: BatchRequestCounts | None = None,
 ) -> LlmBatchStatus:
     """一個假的批次狀態（不是真的錄的，形狀照官方文件）。`expires_at` 預設建立＋24 小時；
-    `results_available` 預設「已結束就有」；`ended_at` 預設已結束時是建立＋1 小時。"""
+    `results_available` 預設「已結束就有」；`ended_at` 預設已結束時是建立＋1 小時；
+    `request_counts` 預設不給（匯入就不核對結果的行數）。"""
     ended = processing_status is BatchProcessingStatus.ENDED
     return LlmBatchStatus(
         provider_batch_id=provider_batch_id,
@@ -102,6 +105,7 @@ def fake_batch_status(
         expires_at=expires_at or created_at + _DAY,
         ended_at=ended_at or (created_at + _HOUR if ended else None),
         results_available=ended if results_available is None else results_available,
+        request_counts=request_counts,
     )
 
 

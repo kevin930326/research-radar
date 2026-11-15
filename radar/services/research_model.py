@@ -52,9 +52,12 @@ def run_research_model(
     *,
     clock: Callable[[], datetime],
     confirmed_key: RunKey | None = None,
+    call_allowed: bool = True,
 ) -> ResearchModelRun:
     """跑一篇論文的研究模型擷取（見模組說明）。`clock` 給預算檢查算台北月份用。
     `confirmed_key`：試跑確認過的鍵，原樣交給閘門核對（Story 2.10；見 `run_llm_job`）。
+    `call_allowed`：False 時閘門只接續或略過、不呼叫模型（Story 2.11 確認審查 D1；見
+    `run_llm_job`）。
 
     Raises:
         PermissionDeniedError: `actor` 不是系統工作（不碰資料庫）。
@@ -85,5 +88,6 @@ def run_research_model(
         ),
         budget_allows=BudgetGuard(database, budget, clock),
         confirmed_key=confirmed_key,
+        call_allowed=call_allowed,
     )
     return ResearchModelRun(plan, result)
