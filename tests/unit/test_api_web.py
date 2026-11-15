@@ -1,4 +1,4 @@
-"""全站安全標頭與成員版前端的頁面殼（Story 3.1、AD-21、AD-22、ADR-0029）。"""
+"""全站安全標頭與成員版前端的頁面殼（Story 3.1、AD-21、AD-22、ADR-0036）。"""
 
 import json
 from collections.abc import Mapping
@@ -44,7 +44,7 @@ def _assert_security_headers(headers: Mapping[str, str]) -> None:
         assert headers[name] == value, name
 
 
-# ADR-0029 決定 1 的內容：檔案被改掉時這裡會失敗，不是拿檔案和自己比。
+# ADR-0036 決定 1 的內容：檔案被改掉時這裡會失敗，不是拿檔案和自己比。
 CSP_DIRECTIVES = {
     "default-src 'self'",
     "script-src 'self'",
@@ -79,7 +79,7 @@ def test_security_headers_are_exactly_the_decided_set() -> None:
     assert "'unsafe-eval'" not in csp
     others = {name: value for name, value in headers.items() if name != "Content-Security-Policy"}
     assert others == OTHER_HEADERS
-    # HSTS 不在應用程式設（ADR-0029）。
+    # HSTS 不在應用程式設（ADR-0036）。
     assert "Strict-Transport-Security" not in headers
 
 

@@ -11,7 +11,7 @@ import { tailwindGuard } from "./tailwind-guard.ts";
 
 const here = (relative: string): string => fileURLToPath(new URL(relative, import.meta.url));
 
-// 全站安全標頭只有一份來源（ADR-0029）：api 與 vite preview 都讀這個檔。
+// 全站安全標頭只有一份來源（ADR-0036）：api 與 vite preview 都讀這個檔。
 const SECURITY_HEADERS_PATH = here("../radar/entrypoints/api/security_headers.json");
 
 function securityHeaders(): Record<string, string> {

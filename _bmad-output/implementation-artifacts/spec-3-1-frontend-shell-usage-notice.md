@@ -103,7 +103,7 @@ deferred:
 - `.github/workflows/ci.yml` -- 新增 `web` job（ubuntu-24.04，和 `checks` 平行；`actions/setup-node` 釘 SHA）：`npm ci` → ESLint → 型別檢查 → Vitest → 兩種建置 → `npx playwright install --with-deps chromium firefox webkit` → Playwright＋axe。不改 `checks` 的 step 與 `image.needs`（既有測試鎖住；是否讓映像等 `web` 列入「要 Kevin 決定」）。
 - `tests/arch/test_ci_workflow.py` 以外新增 `tests/arch/test_web_ci.py` -- `web` job 存在、步驟齊全、三種引擎、action 釘 SHA。
 - `.github/scripts/smoke.sh` -- `/readyz` 200 之後確認 `/` 回 200 且有 `content-security-policy`、`/api/v1/not-found` 回 404。
-- `docs/adr/0029-frontend-serving-security-headers-and-web-ci.md` -- 狀態「提議」：安全標頭清單與單一來源、頁面殼路由、`web/dist` 位置、HSTS 不在應用程式、`web` job 平行、示範站 NotFound 不放回首頁連結、狀態測試的做法。
+- `docs/adr/0036-frontend-serving-security-headers-and-web-ci.md` -- 狀態「提議」：安全標頭清單與單一來源、頁面殼路由、`web/dist` 位置、HSTS 不在應用程式、`web` job 平行、示範站 NotFound 不放回首頁連結、狀態測試的做法。
 - `docs/glossary.md` -- 檔尾加新名詞（頁面殼、安全標頭、CSP 指令、axe、Fontsource、站內連結檢查、量位置的版面檢查等）。
 - `_bmad-output/implementation-artifacts/sprint-status.yaml` -- 3.1 → `review`、epic-3 → `in-progress`；不寫實際工時。
 
@@ -150,7 +150,7 @@ deferred:
   - `[medium]` `[patch]` （Edge）e2e 的 init script 每次換頁都重設違規清單，多次導航的測試會漏掉前面頁面的 CSP 違規 — 已修：違規事件直接回報到 Node 端的清單。
   - `[low]` `[patch]` （Edge）站內連結檢查用站台根目錄解析相對 href — 已修：改用目前頁面網址解析。
   - `[low]` `[reject]` （Edge）截圖每次覆寫、不比對 — 與 Blind 第 6 條同一根因，同理不修。
-  - `[medium]` `[patch]` （Verification）安全標頭內容只鎖住 3 條 CSP 指令 — 已修：unit 測試逐條鎖 ADR-0029 的全部 CSP 指令、五個其他標頭與禁止 `unsafe-inline`／`unsafe-eval`。
+  - `[medium]` `[patch]` （Verification）安全標頭內容只鎖住 3 條 CSP 指令 — 已修：unit 測試逐條鎖 ADR-0036 的全部 CSP 指令、五個其他標頭與禁止 `unsafe-inline`／`unsafe-eval`。
   - `[medium]` `[patch]` （Verification）標頭檔格式檢查與「啟動時就讀」沒有測試 — 與 Blind 第 5 條同一根因，同一個修正。
   - `[medium]` `[patch]` （Verification）lint 違反檔沒涵蓋 `#datasource-impl`、`globalThis.fetch`、template literal 中文、e2e 路徑中文 — 已修：各加一個違反檔與測試案例。
   - `[medium]` `[defer]` （Verification）「重新整理」按鈕沒有任何測試按過 — 目前沒有會出錯的路由，觸發要另加測試專用路由；記入 deferred，3.14 補。
@@ -213,7 +213,7 @@ Status: done（2026-11-15 第二次執行解除：改用官方別名網址安裝
 - `tests/unit/test_api_web.py`、`tests/arch/test_web_ci.py` -- 新測試（既有測試沒改）。
 - `web/**` -- 前端專案、ESLint 規則與故意違反檔、i18n 與比對清單、Vitest、Playwright（版面量測、截圖、狀態、axe、站內連結、CSP）。
 - `Dockerfile`、`.dockerignore`、`.github/workflows/ci.yml`、`.github/scripts/smoke.sh` -- 映像建前端、CI `web` job、冒煙多檢查 `/` 與 `/api/`。
-- `docs/adr/0029-...md`（提議）、`docs/adr/README.md`、`docs/glossary.md`、`sprint-status.yaml`。
+- `docs/adr/0036-...md`（提議）、`docs/adr/README.md`、`docs/glossary.md`、`sprint-status.yaml`。
 
 **審查結果：** 42 條（medium 11、low 27、false 4）。patch 15 條（合併成 12 項修正：medium 7 個群組、low 5 項）；defer 2 條（同一根因：載入失敗按鈕與骨架沒在瀏覽器觸發，3.14 補）；reject 25 條，理由逐條記在 Review Triage Log。
 

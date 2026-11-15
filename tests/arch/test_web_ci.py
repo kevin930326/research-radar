@@ -1,4 +1,4 @@
-"""CI 的前端 job（Story 3.1、ADR-0029）：步驟齊全、三種引擎、和 checks 平行、action 釘 SHA。"""
+"""CI 的前端 job（Story 3.1、ADR-0036）：步驟齊全、三種引擎、和 checks 平行、action 釘 SHA。"""
 
 import json
 import re
