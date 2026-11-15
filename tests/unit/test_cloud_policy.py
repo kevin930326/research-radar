@@ -43,7 +43,6 @@ ALWAYS_CLEARED_SOURCES = [
     ContentSource.CROSSREF_ABSTRACT,
     ContentSource.TITLE,
     ContentSource.USER_QUERY,
-    ContentSource.PROMPT_TEMPLATE,
 ]
 
 
@@ -61,7 +60,7 @@ def _blocked(
 @pytest.mark.parametrize("policy", [OFF, ON], ids=["開關關", "開關開"])
 @pytest.mark.parametrize("license", ALL_LICENSES)
 @pytest.mark.parametrize("source", ALWAYS_CLEARED_SOURCES)
-def test_abstracts_titles_queries_and_templates_are_always_cleared(
+def test_abstracts_titles_and_queries_are_always_cleared(
     source: ContentSource, license: ContentLicense | None, policy: CloudPolicy
 ) -> None:
     safe = clear_for_cloud(SECRET_TEXT, source, license, policy)
@@ -127,6 +126,19 @@ def test_semantic_scholar_abstract_is_blocked_regardless_of_switch(
     error = _blocked(ContentSource.SEMANTIC_SCHOLAR_ABSTRACT, license, policy)
 
     assert error.reason is ErrorCode.CLOUD_BLOCKED_SOURCE
+
+
+@pytest.mark.parametrize("policy", [OFF, ON], ids=["開關關", "開關開"])
+@pytest.mark.parametrize("license", ALL_LICENSES)
+def test_prompt_template_is_never_cleared_by_clear_for_cloud(
+    license: ContentLicense | None, policy: CloudPolicy
+) -> None:
+    # 模板只能經 clear_prompt_file（核對 domain 寫死的雜湊）放行；這裡收了，任何文字都能標成模板。
+    error = _blocked(ContentSource.PROMPT_TEMPLATE, license, policy)
+
+    assert error.reason is ErrorCode.CLOUD_BLOCKED_SOURCE
+    assert error.source is ContentSource.PROMPT_TEMPLATE
+    assert SECRET_TEXT not in str(error) + repr(error)
 
 
 @pytest.mark.parametrize("policy", [OFF, ON], ids=["開關關", "開關開"])

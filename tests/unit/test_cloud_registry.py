@@ -33,6 +33,7 @@ from radar.domain.policy import (
     clear_for_cloud,
     cloud_text,
 )
+from tests.prompt_support import template_text
 
 POLICY = CloudPolicy()
 CLEARED = "（假摘要）已經放行的標題 CLEARED-MARKER-4M"
@@ -48,7 +49,7 @@ def _safe(text: str = CLEARED, source: ContentSource = ContentSource.TITLE) -> C
 def _request(**changes: Any) -> LlmRequest:
     values: dict[str, Any] = {
         "model": "claude-haiku-5-5",
-        "system": _safe("請整理。", ContentSource.PROMPT_TEMPLATE),
+        "system": template_text("請整理。"),
         "content": (_safe(),),
         "max_tokens": 1024,
     }
@@ -215,7 +216,7 @@ def test_copy_replace_and_pickle_are_still_blocked(tampered: bool) -> None:
 
 def test_request_cannot_be_built_from_tampered_text() -> None:
     content = _safe()
-    system = _safe("請整理。", ContentSource.PROMPT_TEMPLATE)
+    system = template_text("請整理。")
     _tamper(content)
     _tamper(system)
 

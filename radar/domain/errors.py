@@ -16,6 +16,9 @@ class ErrorCode(StrEnum):
     CLOUD_BLOCKED_SOURCE = "cloud_blocked_source"  # 來源還沒取得授權（例如 Semantic Scholar）
     CLOUD_BLOCKED_EMPTY = "cloud_blocked_empty"  # 空字串或只有空白
     CLOUD_BLOCKED_INVALID_TEXT = "cloud_blocked_invalid_text"  # 編不成 UTF-8（例如單獨的代理字元）
+    # prompt 檔（`policy.clear_prompt_file`）：沒登記在 `domain/prompt_hashes.py`，或整個檔的雜湊
+    # 和登記的不一樣（改了內容或設定區卻沒升版）
+    CLOUD_PROMPT_UNREGISTERED = "cloud_prompt_unregistered"
     # 送出前核對：CloudSafeText 不在放行登記裡（被硬改過、空殼或已回收），不送出
     CLOUD_TEXT_NOT_REGISTERED = "cloud_text_not_registered"
 
@@ -33,3 +36,13 @@ class ErrorCode(StrEnum):
     LLM_RATE_LIMITED = "llm_rate_limited"
     LLM_SERVER_ERROR = "llm_server_error"
     LLM_CONNECTION_ERROR = "llm_connection_error"
+
+    # LLM 閘門（`radar/services/llm_gateway.py`，Story 2.2）
+    LLM_INPUT_TOO_LARGE = "llm_input_too_large"  # 預估輸入超過 max_input_tokens，不送出
+    LLM_OUTPUT_INVALID = "llm_output_invalid"  # 輸出沒通過 Pydantic（多欄位、缺欄位、型別錯）
+    LLM_OUTPUT_UNSTORABLE = "llm_output_unstorable"  # 輸出的字串存不進資料庫（NUL、單獨的代理字元）
+    LLM_RUN_EXPIRED = "llm_run_expired"  # 互動呼叫超過時限還是 running，由 sweep 改成 failed
+    LLM_GATEWAY_ERROR = "llm_gateway_error"  # 閘門自己出錯（例如寫結果失敗），run 改 failed
+    # 模型已經回應、帳與輸出已存進 `llm_call`，但驗證或寫結果時出錯（或 sweep 判定逾時）：下一次
+    # 同一組鍵從存下的輸出接續驗證與寫入，不再呼叫模型（ADR-0030）
+    LLM_RESULT_PENDING = "llm_result_pending"

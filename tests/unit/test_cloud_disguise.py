@@ -31,6 +31,7 @@ from radar.domain.policy import (
     cloud_text,
     is_cloud_safe_text,
 )
+from tests.prompt_support import template_text
 
 POLICY = CloudPolicy()
 CLEARED = "（假摘要）已經放行的標題 CLEARED-MARKER-6P"
@@ -46,7 +47,7 @@ def _safe(text: str = CLEARED, source: ContentSource = ContentSource.TITLE) -> C
 def _request(**changes: Any) -> LlmRequest:
     values: dict[str, Any] = {
         "model": "claude-haiku-5-5",
-        "system": _safe("請整理。", ContentSource.PROMPT_TEMPLATE),
+        "system": template_text("請整理。"),
         "content": (_safe(),),
         "max_tokens": 1024,
     }

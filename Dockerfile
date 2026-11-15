@@ -31,6 +31,8 @@ WORKDIR /app
 COPY migrations ./migrations
 # 領域設定（期刊清單、OpenAlex 設定）：api、worker、CLI 啟動時驗證，預設讀工作目錄下的 config/。
 COPY config ./config
+# LLM 工作的 prompt 檔與雜湊登記（AD-8、ADR-0030）：閘門預設讀工作目錄下的 prompts/。
+COPY prompts ./prompts
 USER radar
 EXPOSE 8000
 CMD ["python", "-m", "radar.entrypoints.api"]

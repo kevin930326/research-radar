@@ -5,6 +5,7 @@
 !radar/
 !migrations/
 !config/
+!prompts/
 **/__pycache__
 **/*.pyc
 # 保險：即使上面的白名單被改寬，.env 也不會進映像。

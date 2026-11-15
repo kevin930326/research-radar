@@ -21,11 +21,13 @@ log = structlog.get_logger(__name__)
 
 @dataclass(frozen=True)
 class SweepResult:
-    """這一輪找到幾列卡住的狀態列、其中新排入幾個（其餘已經在排隊），以及重試了幾個卡住的工作。"""
+    """這一輪找到幾列卡住的狀態列、其中新排入幾個（其餘已經在排隊）、重試了幾個卡住的工作，
+    以及把幾筆逾時的互動 LLM 呼叫（`derivation_run`）改成 `failed`。"""
 
     stuck_rows: int
     requeued: int
     retried_jobs: int
+    expired_runs: int = 0
 
 
 def sweep(
@@ -34,18 +36,22 @@ def sweep(
     enqueue: Enqueue,
     retry_stalled: Callable[[], int],
     send_heartbeat: Callable[[str], None],
+    expire_runs: Callable[[], int] | None = None,
 ) -> SweepResult:
     """掃一輪：
 
     1. 在一個交易裡讀出每張登記表卡住的列，結束交易（不在開著的交易裡排工作）。
     2. 逐列排入登記的工作，參數是 `<表名>_id`；已經在排隊的不會多一筆。
     3. 重試 worker 已經不在、卻還停在執行中的工作（`retry_stalled`）。
+    4. 有給 `expire_runs` 時，把超過時限還是 `running` 的互動 LLM 呼叫改成 `failed`
+       （`derivation_run` 不進登記清單：它卡住時不是重新排入，而是判定失敗、留給下一次再跑；
+       ADR-0009、ADR-0030）。
 
     全部成功才送 `sweep` 的心跳；任何一步丟出例外就原樣往上丟、不送。
     """
     return run_scheduled_job(
         SWEEP.check,
-        lambda: _sweep_once(database, registry, enqueue, retry_stalled),
+        lambda: _sweep_once(database, registry, enqueue, retry_stalled, expire_runs),
         send_heartbeat,
     )
 
@@ -55,6 +61,7 @@ def _sweep_once(
     registry: Sequence[SweepEntry],
     enqueue: Enqueue,
     retry_stalled: Callable[[], int],
+    expire_runs: Callable[[], int] | None,
 ) -> SweepResult:
     stuck: list[tuple[SweepEntry, list[uuid.UUID]]] = []
     if registry:
@@ -77,11 +84,15 @@ def _sweep_once(
             )
 
     retried = retry_stalled()
-    result = SweepResult(stuck_rows=stuck_rows, requeued=requeued, retried_jobs=retried)
+    expired = 0 if expire_runs is None else expire_runs()
+    result = SweepResult(
+        stuck_rows=stuck_rows, requeued=requeued, retried_jobs=retried, expired_runs=expired
+    )
     log.info(
         "sweep 完成",
         stuck_rows=result.stuck_rows,
         requeued=result.requeued,
         retried_jobs=result.retried_jobs,
+        expired_runs=result.expired_runs,
     )
     return result

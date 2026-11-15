@@ -34,6 +34,7 @@ class Action(StrEnum):
     MANAGE_ALLOWLIST = "manage_allowlist"
     MANAGE_SETTINGS = "manage_settings"
     INGEST_PAPERS = "ingest_papers"
+    RUN_AI_JOBS = "run_ai_jobs"
 
 
 # FR-7 權限表的寫入列。`PublicViewer`（訪客）一律唯讀，所以不在任何規則裡。
@@ -55,6 +56,9 @@ PERMISSIONS: Mapping[Action, Rule] = MappingProxyType(
         Action.MANAGE_SETTINGS: Rule.ADMIN,
         # 匯入與每週更新寫論文：只有系統工作。
         Action.INGEST_PAPERS: Rule.SYSTEM,
+        # LLM 閘門與寫入 AI 結果（Story 2.2）：只有系統工作。成員觸發的（上傳、試跑）也由 worker
+        # 以系統身分代跑。
+        Action.RUN_AI_JOBS: Rule.SYSTEM,
     }
 )
 

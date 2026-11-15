@@ -20,6 +20,7 @@
     `LlmServerError`；連不上 → `LlmConnectionError`。
 - 重試：只重試 `LlmTransientError`，最多 `attempts` 次（含第一次）；帶 `Retry-After` 時不超過
   `retry_after_max` 秒就照它等，超過就不再重試、丟出最後一次的錯誤（不提早重送）。
+  `deadline`（秒）是含所有重試的總時限（交給 stamina 的 `timeout`），預設 None 不限。
 """
 
 import json
@@ -217,6 +218,7 @@ class AnthropicLlmProvider:
         retry_wait_max: float,
         retry_wait_jitter: float,
         retry_after_max: float,
+        deadline: float | None = None,
         base_url: str = ANTHROPIC_BASE_URL,
         transport: httpx2.BaseTransport | None = None,
     ) -> None:
@@ -224,6 +226,9 @@ class AnthropicLlmProvider:
             raise ValueError("api_key 不能是空的")
         if attempts < 1:
             raise ValueError("attempts 至少是 1")
+        if deadline is not None and deadline <= 0:
+            raise ValueError("deadline 要大於 0 或是 None")
+        self._deadline = deadline
         self._base_url = base_url
         self._attempts = attempts
         self._retry_wait_initial = retry_wait_initial
@@ -267,7 +272,10 @@ class AnthropicLlmProvider:
         for attempt in stamina.retry_context(
             on=self._backoff,
             attempts=self._attempts,
-            timeout=None,
+            # 含所有重試的總時限（AD-8 的硬性時間上限）；超過就不再重試，丟出最後一次的錯誤。
+            # 失敗後才檢查總時限、沒超過就等完退避再試，正在進行的那一次也不會被打斷（最壞是
+            # deadline + 最長的一次等待 + timeout 秒，見 Settings.anthropic_deadline）。None＝不限。
+            timeout=self._deadline,
             wait_initial=self._retry_wait_initial,
             wait_max=self._retry_wait_max,
             wait_jitter=self._retry_wait_jitter,

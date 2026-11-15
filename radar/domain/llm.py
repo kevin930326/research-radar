@@ -19,7 +19,7 @@ import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
-from types import ModuleType
+from types import MappingProxyType, ModuleType
 from typing import Any, ClassVar, Final, Literal, cast, final, get_args
 
 from pydantic import BaseModel
@@ -50,11 +50,9 @@ type Effort = Literal["low", "medium", "high"]
 EFFORTS: Final[frozenset[str]] = frozenset(get_args(Effort.__value__))
 
 # 可以送出的模型 ID（白名單）。`model` 也會原樣送到雲端，所以不收任意字串（ADR-0029）。
-# 目前還沒有模型設定檔，先放 domain 常數；2.2 的 `config/models.yaml` 之後接手。
+# 每個工作用哪個模型寫在 `config/models.yaml`；讀設定時驗證那裡的模型都在這份白名單裡
+# （`domain/pricing.py` 的 `ModelsConfig`），兩邊對不上設定就讀不進來。
 ALLOWED_MODELS: Final[frozenset[str]] = frozenset({"claude-haiku-5-5"})
-
-# `output_schema` 只收這個模組最上層定義的類別（ADR-0029；寫法由架構測試守著）。
-SCHEMA_MODULE: Final = llm_schemas.__name__
 
 # 正常結束與長度截斷的 `stop_reason`（其餘都當格式不對）。
 END_TURN: Final = "end_turn"
@@ -308,7 +306,11 @@ def _freeze_schemas(module: ModuleType) -> dict[int, tuple[type[BaseModel], str]
 
 
 # 凍結的 schema 登記表（Opus 第四次確認審查）：只有這裡面的類別能當 `output_schema`。
-_FROZEN_SCHEMAS: Final = _freeze_schemas(llm_schemas)
+# 包成唯讀的 `MappingProxyType`，執行期不能增刪項目；`radar/` 裡只有這個模組碰得到它與
+# `_freeze_schemas`、`_render_schema`（`tests/arch/test_frozen_schema_registry.py`）。
+_FROZEN_SCHEMAS: Final[Mapping[int, tuple[type[BaseModel], str]]] = MappingProxyType(
+    _freeze_schemas(llm_schemas)
+)
 
 
 def _frozen_schema(value: object) -> str | None:
@@ -326,6 +328,19 @@ def _schema_json(output_schema: type[BaseModel] | None) -> str | None:
     frozen = _frozen_schema(output_schema)
     if frozen is None:  # pragma: no cover - _validate_request 已經擋下
         raise TypeError("LlmRequest.output_schema 不在凍結的 schema 登記表裡")
+    return frozen
+
+
+def frozen_schema_json(output_schema: object) -> str:
+    """登記表裡凍結的 JSON schema 字串（送出的就是這一份），給 `fingerprints.schema_sha256`
+    算雜湊、記進 `derivation_run` 的來歷。
+
+    Raises:
+        TypeError: 不是 `llm_schemas.py` 最上層定義、登記表裡的模型類別。
+    """
+    frozen = _frozen_schema(output_schema)
+    if frozen is None:
+        raise TypeError("output_schema 必須是 radar/domain/llm_schemas.py 最上層定義的模型類別")
     return frozen
 
 
@@ -397,8 +412,9 @@ def check_llm_request(obj: object) -> LlmRequest:
 def snapshot_llm_request(obj: object) -> LlmRequest:
     """adapter 入口：檢查後，用讀到的值重建一份新的 `LlmRequest`，adapter 之後只讀這一份。
 
-    每個欄位只讀一次，副本建立時再完整驗證一次、重新由模型類別產生 JSON schema，所以檢查與
-    送出之間沒有時間差可以鑽（例如建好後才改凍結的 schema 字串）。
+    每個欄位只讀一次，副本建立時再完整驗證一次、從 import 時凍結的登記表重新取 schema 字串
+    （不重新由模型類別產生），所以檢查與送出之間沒有時間差可以鑽（例如建好後才改請求上的
+    schema 字串）。
 
     Raises:
         NotCloudSafeError, TypeError, ValueError: 同 `check_llm_request` 與 `LlmRequest`。
