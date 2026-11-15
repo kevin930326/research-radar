@@ -38,6 +38,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from radar.domain.ai_outputs import InputKind, PaperLlmSource, abstract_content_source
 from radar.domain.errors import ErrorCode
+from radar.domain.papers import AbstractSource
 from radar.domain.policy import ContentSource
 from radar.domain.processing import ProcessingFacts
 
@@ -253,6 +254,9 @@ class EmbeddingInput:
     input_kind: InputKind
     parts: tuple[tuple[str, ContentSource], ...]
     abstract_id: uuid.UUID | None
+    # 用到的摘要的來源（只看標題時是 None）：寫進 `embedding.abstract_source`，依來源移除照它刪
+    # （Story 2.12 審查後）。
+    abstract_source: AbstractSource | None = None
 
     @property
     def text(self) -> str:
@@ -283,6 +287,7 @@ def build_embedding_input(source: PaperLlmSource, input_kind: InputKind) -> Embe
             input_kind,
             (title_part, (content, abstract_content_source(abstract.source))),
             abstract.id,
+            abstract.source,
         )
     raise NoEmbeddingInputError(input_kind)
 
@@ -436,6 +441,8 @@ class NewEmbedding:
     vector: tuple[float, ...]
     input_sha256: str
     run_id: uuid.UUID
+    # 向量化當時用的摘要來源（只看標題是 None；Story 2.12 審查後）。
+    abstract_source: AbstractSource | None = None
 
     def __post_init__(self) -> None:
         if len(self.vector) != self.dimensions:

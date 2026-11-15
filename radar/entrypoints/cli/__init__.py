@@ -784,6 +784,11 @@ def _render_plan(result: LlmBatchPlanResult) -> list[str]:
     ]
     if result.deferred_budget:
         lines.append(f"預算放不下、這次不排：{result.deferred_budget:,} 筆")
+    if result.rerun_unestimated:
+        lines.append(
+            f"改版重跑不在這次估過的清單裡、這次不排：{result.rerun_unestimated:,} 筆"
+            "（下一次規劃會重新估）"
+        )
     if result.stop is PlanStop.HELD_MONTH_START:
         lines.append("月初窗口（台北時間每月 1 日早上），規劃延後；過了再跑一次")
     elif result.stop is PlanStop.BUDGET_TRIPPED:

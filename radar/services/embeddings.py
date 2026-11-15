@@ -32,10 +32,11 @@ ADR-0040，Story 2.8）。向量化不經 LLM 閘門。
    不回報嘗試的 provider（替身）整次呼叫當成一次嘗試記帳。
 8. 驗證向量（筆數、維度＝登記的維度、數字有限且在 halfvec 範圍內）；不符整批不寫。轉成 halfvec 後
    全是 0 的那一篇單獨標成失敗（`embed_response_invalid`）、不寫，其他篇照寫。
-9. 寫入（每篇一個短交易，等鎖最多 `lock_timeout_seconds`）：先鎖住論文那一列，重讀、重算
-   `input_sha256`；變了就把 run 改成 `failed`（`embed_input_changed`），run 已經被 sweep 收掉也
+9. 寫入（每篇一個短交易，等鎖最多 `lock_timeout_seconds`）：看摘要的先拿摘要來源的共用鎖
+   （依來源移除拿獨佔，Story 2.12 審查後），再鎖住論文那一列，重讀、重算 `input_sha256` 並核對
+   摘要來源；變了就把 run 改成 `failed`（`embed_input_changed`），run 已經被 sweep 收掉也
    不寫，等鎖逾時把 run 改成 `failed`（`embed_lock_timeout`），都對才把 run 改成 `succeeded` 並覆寫
-   `embedding`（主鍵（論文, 模型），一篇一個模型只有一列）。
+   `embedding`（主鍵（論文, 模型），一篇一個模型只有一列；連同用到的摘要來源）。
 
 兩個工作同時跑（例如 Procrastinate 把還活著的 worker 誤判失聯、工作被另一個 worker 領走）也只有
 一份有效的結果：取得資格與寫入都先鎖同一篇論文，每週更新改論文時也先鎖它，所以「核對指紋 → 寫入」
@@ -85,7 +86,8 @@ from radar.domain.embeddings import (
     report_attempts_to,
 )
 from radar.domain.errors import ErrorCode, LockWaitTimeoutError
-from radar.domain.fingerprints import embedding_input_sha256
+from radar.domain.fingerprints import abstract_source_lock_key, embedding_input_sha256
+from radar.domain.papers import AbstractSource
 from radar.domain.permissions import Action, require
 from radar.domain.policy import (
     CloudClearanceError,
@@ -384,6 +386,13 @@ def _current_sha256(candidate: EmbeddingCandidate) -> str | None:
     """這篇論文現在該用的輸入指紋；現在不該做或沒有內容時是 None。"""
     planned = _planned_input(candidate)
     return planned.sha256 if isinstance(planned, _Planned) else None
+
+
+def _current_abstract_source(candidate: EmbeddingCandidate) -> AbstractSource | None:
+    """這篇論文現在該用的輸入用到的摘要來源（只看標題、或現在不該做時是 None）。指紋只算文字，
+    同一段文字換了來源也要看得出來（Story 2.12 審查後）。"""
+    planned = _planned_input(candidate)
+    return planned.embedding_input.abstract_source if isinstance(planned, _Planned) else None
 
 
 def _clear(planned: _Planned, cloud_policy: CloudPolicy, tally: _Tally) -> CloudSafeText | None:
@@ -785,12 +794,23 @@ class _BatchRunner:
         """
         config = self._config
         planned = item.planned
+        abstract_source = planned.embedding_input.abstract_source
         try:
             with self._database.transaction_with_lock_timeout(config.lock_timeout_ms) as connection:
+                if abstract_source is not None:
+                    # 鎖論文之前先拿摘要來源的共用鎖（依來源移除拿獨佔，Story 2.12 審查後）：
+                    # 移除做完之後，下面的核對看得到這個來源的摘要已經不在，就不會再寫進向量。
+                    Database.transaction_lock_shared(
+                        connection, abstract_source_lock_key(abstract_source)
+                    )
                 candidate = find_embedding_candidate_for_update(
                     SystemViewer(), connection, config.model_id, planned.paper_id
                 )
-                if candidate is None or _current_sha256(candidate) != planned.sha256:
+                if (
+                    candidate is None
+                    or _current_sha256(candidate) != planned.sha256
+                    or _current_abstract_source(candidate) is not abstract_source
+                ):
                     update_derivation_run_failed(connection, run_id, ErrorCode.EMBED_INPUT_CHANGED)
                     self._tally.input_changed += 1
                     return
@@ -809,6 +829,7 @@ class _BatchRunner:
                             vector=tuple(vector),
                             input_sha256=planned.sha256,
                             run_id=run_id,
+                            abstract_source=abstract_source,
                         )
                     ],
                 )

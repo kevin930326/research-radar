@@ -54,12 +54,14 @@ from radar.domain.ai_outputs import (
     ResultStatus,
     RunKey,
     RunStatus,
+    abstract_source_usable,
     build_llm_input,
 )
 from radar.domain.audit import AuditActorRole, NewAuditEvent
 from radar.domain.budget import build_budget_status, month_window
 from radar.domain.llm_batches import LlmBatchConfig, PlanStop
 from radar.domain.papers import AbstractSource
+from radar.domain.policy import CloudPolicy
 from radar.services.llm_gateway import GatewayOutcome
 from tests.llm_support import budget_config
 
@@ -341,6 +343,8 @@ def test_counts_by_table_cover_every_removal_table() -> None:
         "research_model": 0,
         "construct_mention": 0,
         "hypothesis": 0,
+        "construct": 0,
+        "embedding": 0,
     }
     assert tuple(counts.by_table()) == REMOVAL_TABLES
 
@@ -513,3 +517,26 @@ def test_llm_input_carries_abstract_source_only_for_abstract_input() -> None:
         AbstractSource.SEMANTIC_SCHOLAR
     )
     assert build_llm_input(source, InputKind.TITLE).abstract_source is None
+
+
+def test_abstract_source_usable_requires_the_same_current_non_blank_cleared_source() -> None:
+    def paper(source: AbstractSource, content: str = "We study things.") -> PaperLlmSource:
+        abstract = CurrentAbstract(uuid.uuid4(), source, content)
+        return PaperLlmSource(PAPER, "A study of IS", abstract)
+
+    policy = CloudPolicy()
+    assert abstract_source_usable(paper(AbstractSource.OPENALEX), AbstractSource.OPENALEX, policy)
+    assert not abstract_source_usable(
+        paper(AbstractSource.SEMANTIC_SCHOLAR), AbstractSource.OPENALEX, policy
+    )
+    assert not abstract_source_usable(
+        paper(AbstractSource.OPENALEX, "   "), AbstractSource.OPENALEX, policy
+    )
+    assert not abstract_source_usable(
+        PaperLlmSource(PAPER, "A study of IS", None), AbstractSource.OPENALEX, policy
+    )
+    assert not abstract_source_usable(None, AbstractSource.OPENALEX, policy)
+    # 上傳的 PDF 預設不放行送雲端。
+    assert not abstract_source_usable(
+        paper(AbstractSource.UPLOADED_PDF), AbstractSource.UPLOADED_PDF, policy
+    )

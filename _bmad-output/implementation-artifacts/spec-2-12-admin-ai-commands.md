@@ -138,7 +138,7 @@ deferred: []
 
 ## Design Notes
 
-**`retry_of` 的鎖內規則（`_claim_locked`）：** 先查 running（有就 `SKIPPED`），再 `find_blocking_ai_result`：`None` → 照常新增（目前已經沒有拒收，等於平常流程）；`ACTIVE` → `SKIPPED`；`REJECTED` → `find_latest_ai_result(key).id == retry_of` 才往下（照常先試 `update_derivation_run_resumed` 接續、再新增），否則 `SKIPPED`。「最新一列表頭」而不是「最新一筆 run」：重跑被中斷只留下沒有表頭的 failed run，下一次 retry 仍可以跑；同一個確認過的 id 重送時已經有更新的表頭，不會再付錢。
+**`retry_of` 的鎖內規則（`_claim_locked`）：**（Codex 主審查後改成「只要帶 `retry_of` 就核對」，見文末「Codex 主審查後的修正」第 3 點；下面是原本的規則）先查 running（有就 `SKIPPED`），再 `find_blocking_ai_result`：`None` → 照常新增（目前已經沒有拒收，等於平常流程）；`ACTIVE` → `SKIPPED`；`REJECTED` → `find_latest_ai_result(key).id == retry_of` 才往下（照常先試 `update_derivation_run_resumed` 接續、再新增），否則 `SKIPPED`。「最新一列表頭」而不是「最新一筆 run」：重跑被中斷只留下沒有表頭的 failed run，下一次 retry 仍可以跑；同一個確認過的 id 重送時已經有更新的表頭，不會再付錢。
 
 **移除的擋下條件**（`--execute` 時在鎖內重查）：(a) 有 `running` 的 run 用這個來源——它回來會再寫一列；(b) 有論文的目前摘要仍是這個來源——下次規劃會用同一份摘要重新產生，刪了也白刪，而且新 run 可能在刪除後才寫入。兩者都沒有時，之後不可能再出現這個來源的新表頭，所以單一交易的刪除是完整的。順序寫進 ADR：先停用來源／移除摘要，再跑這個指令。來源不明的表頭（遷移前、摘要列已刪的）不刪、照計數印出。
 
@@ -181,7 +181,18 @@ deferred: []
 
 **是否建議再審**：true（patch 了 4 組 medium）。具體沒驗證到的風險：上限檢查現在每個候選多三次查詢（running／擋下／可接續），全庫規劃時多出的查詢量沒有量過；`retry_of` 改了閘門的取得資格邏輯，只有這次新加的測試看過。
 
-**驗證**：ruff、format、mypy、lint-imports、unit、arch、integration 全過（併入 2.11 的 6b8ef7a 後再全部重跑，數字見 PR 說明草稿）。
+**驗證**：ruff、format、mypy、lint-imports、unit、arch、integration 全過（併入 2.11 的 6b8ef7a 後再全部重跑；Codex 主審查修正後又全部重跑，數字見 PR 說明草稿）。
 
 **殘留風險**：移除不刪 `llm_call` 輸出原文、向量、構面名稱（ADR-0044 取捨、Kevin 決定）；來源不明的舊表頭不刪；超過上限時新論文也一起等。
 
+## Codex 主審查後的修正
+
+Codex 主審查（高 2、中 3）照 triage 修正，細節與鎖順序寫在 ADR-0044 文末「補充」。
+
+1. **摘要來源鎖**（高）：`domain/fingerprints.abstract_source_lock_key`；依來源移除拿獨佔（`services/admin_runs.remove_source_ai_outputs`），互動與 Batch 取得執行資格、接續（`llm_gateway._claim_locked`）、寫結果表頭（`ai_results._record`）、寫向量（`services/embeddings._BatchRunner` 的寫入）拿共用，拿到後用 `domain/ai_outputs.abstract_source_usable` 重新核對，不符就不寫（`ErrorCode.ABSTRACT_SOURCE_CHANGED`、`GatewayOutcome.INPUT_CHANGED`、`BatchClaimOutcome.INPUT_CHANGED`）。
+2. **向量與構面**（高，只做 a、b）：遷移 0018 另在 `embedding` 加 `abstract_source` 並回填；移除一併刪這個來源的向量（`repo/embeddings.delete_embeddings_by_abstract_source`）與沒人用的構面（`repo/ai_outputs.delete_ai_results_by_abstract_source` 找候選、`repo/constructs.delete_constructs` 刪）。`llm_call` 原文（c）列成 Kevin 決定，不改程式。
+3. **`retry_of` 一律核對**（中）：帶了就要「最新的平常流程表頭存在、是它、仍是 rejected」，否則 `SKIPPED`。
+4. **重跑上限只放行估過的**（中）：`RevisionEstimate.approved`；規劃每批在預算鎖內重讀版本，不在清單或費用不同的不排（`LlmBatchPlanResult.rerun_unestimated`）。和 triage「整次重新檢查」不同，理由見 ADR-0044 補充第 4 點。
+5. **在途 run 的來源**（中）：遷移 0018 用指紋辨識回填沒有表頭的 `running`／`llm_result_pending`；接續與寫表頭時補記來源（`update_derivation_run_resumed`、`update_derivation_run_abstract_source`）。
+
+需求改變而改的既有測試：`tests/unit/test_admin_runs.py::test_counts_by_table_cover_every_removal_table`（`REMOVAL_TABLES` 多了 construct、embedding）、`tests/integration/test_admin_runs.py::test_execute_removes_only_the_target_source`（構面改成會刪只被這個來源用到的）、`tests/integration/test_run_retry.py` 的 `test_retry_of_with_no_blocking_result_runs_normally` 改成 `test_retry_of_with_no_header_is_skipped`（原本的期望和第 3 點相反）。

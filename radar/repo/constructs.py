@@ -6,6 +6,8 @@
   `rebuild_canonical` 重算（不在這個 Story）。
 - 寫入只經 `upsert_constructs`（`repo/ai_outputs.create_ai_result` 寫研究模型時呼叫），一律依名稱
   排序、`ON CONFLICT DO NOTHING`：兩筆擷取同時寫同一批構面時，上鎖的順序一樣，不會互相等待成死結。
+- 刪除只經 `delete_constructs`：依來源移除刪完構面提及與假設後，刪掉已經確認沒有任何人用的構面
+  （Story 2.12 審查後、ADR-0044）。
 - 構面合併、代表的挑選規則、構面標籤的挑選函式都不在這裡（Epic 10；ADR-0034 只提案）。
 """
 
@@ -78,3 +80,18 @@ def upsert_constructs(connection: Connection, names: Iterable[str]) -> dict[str,
     if missing:  # ON CONFLICT 之後一定查得到（別的交易剛新增的也已經 commit）
         raise RuntimeError("新增構面之後查不到")
     return found
+
+
+def delete_constructs(connection: Connection, construct_ids: Iterable[uuid.UUID]) -> int:
+    """刪掉這些構面，回刪了幾列。只給依來源移除用（Story 2.12 審查後第 2 點、ADR-0044）：呼叫端
+    （`repo/ai_outputs.delete_ai_results_by_abstract_source`）在同一個交易裡已經用 `FOR UPDATE`
+    鎖住、確認它們沒有任何構面提及、假設、代表或人工合併判斷用到。在呼叫端開好的交易裡做，不
+    commit。
+    """
+    ids = sorted({str(construct_id) for construct_id in construct_ids})
+    if not ids:
+        return 0
+    result = connection.execute(
+        text("DELETE FROM construct WHERE id = ANY(CAST(:ids AS uuid[]))"), {"ids": ids}
+    )
+    return int(result.rowcount)

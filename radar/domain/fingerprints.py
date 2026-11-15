@@ -8,6 +8,8 @@
 - `run_lock_key`：取得執行資格時 advisory lock 的鍵（64 位元有號整數）。
 - `LLM_BATCH_BUDGET_LOCK_KEY`：Batch 規劃時計算預算預留的全域 advisory lock 鍵（固定名稱算出的
   64 位元有號整數，Story 2.9、ADR-0041）。
+- `abstract_source_lock_key`：每個摘要來源一把的 advisory lock 鍵（依來源移除獨佔、AI 寫入共用，
+  Story 2.12、ADR-0044）。
 - `taxonomy_content_sha256`：分類表會進 prompt 的內容的雜湊，登記在 `domain/taxonomy_hashes.py`，
   內容改了卻沒升版就對不上（Story 2.5、ADR-0033）。
 - `context_values_content_sha256`：情境值清單會影響結果的內容的雜湊，登記在
@@ -190,6 +192,20 @@ def named_lock_key(name: str) -> int:
 # Batch 規劃（Story 2.9、ADR-0041）：每一批的交易一開始拿這把獨佔交易級鎖，鎖裡讀「本月帳＋尚未結束
 # 的 Batch 預留」再決定放得下哪些；兩個規劃不會同時用掉同一份剩餘預算。
 LLM_BATCH_BUDGET_LOCK_KEY: Final = named_lock_key("llm_batch_budget")
+
+
+def abstract_source_lock_key(source: str) -> int:
+    """一個摘要來源（`openalex` 等）的交易級 advisory lock 鍵（Story 2.12 審查後、ADR-0044）：
+    依來源移除拿獨佔（`pg_advisory_xact_lock`），所有寫入這個來源衍生產出的路徑（互動與 Batch
+    取得執行資格／接續、寫 AI 表頭、寫向量）拿共用（`pg_advisory_xact_lock_shared`），並在鎖內
+    重新核對「這篇的目前摘要仍是這個來源、仍放行」。
+
+    Raises:
+        ValueError: `source` 不是非空字串。
+    """
+    if not isinstance(source, str) or not source:
+        raise ValueError("摘要來源要是非空字串")
+    return named_lock_key(f"abstract_source:{source}")
 
 
 # --- 分類表（Story 2.5、ADR-0033） ----------------------------------------------------------

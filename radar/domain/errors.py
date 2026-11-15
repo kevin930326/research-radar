@@ -110,6 +110,10 @@ class ErrorCode(StrEnum):
     # 沒了）：那筆 run 改 failed、不送（`derivation_run.failure_reason`）；整批都對不上時批次
     # 也記這個
     BATCH_INPUT_CHANGED = "batch_input_changed"
+    # 寫入前在摘要來源鎖裡核對（Story 2.12 審查後、ADR-0044）：送出時用的摘要來源已經不是這篇
+    # 目前的摘要（被移除、換成別的來源）或不再放行：不建 run／不寫表頭，run 改 failed
+    # （`derivation_run.failure_reason`），不再接續
+    ABSTRACT_SOURCE_CHANGED = "abstract_source_changed"
     # 送出時逾時、斷線、5xx、回應看不懂或非預期的例外（含一般的 TypeError、ValueError）：不知道
     # 供應商有沒有建好批次，標 `needs_attention`、不自動重送（沒有冪等鍵）；停在 submitting 太久
     # 也記這個。一定沒建立的另記：4xx 照狀態碼；送出前就丟的 `NotCloudSafeError` 記

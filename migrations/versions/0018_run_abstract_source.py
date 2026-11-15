@@ -8,9 +8,17 @@
 - 回填：表頭（三張）與 `batch_item` 記的 `abstract_id` 還接得到 `paper_abstract` 的 run，補上那一筆
   摘要的來源；接不到的（摘要列已刪）留 NULL，`remove-by-source` 印成「來源不明」。只補還是 NULL
   的列，做兩次結果一樣。
+- 回填在途的 run（審查後第 5 點）：還沒有表頭、也沒有 `batch_item` 的 `running`／
+  `llm_result_pending`（看摘要、不是向量化），用論文現在的標題與目前摘要、run 記的設定版本重算
+  輸入指紋（`domain/fingerprints.input_sha256`，指紋算進每段的來源），和 run 的一樣就補上目前摘要
+  的來源；不一樣（輸入已經變了，這些 run 也不會再被接續）留 NULL。
+- `embedding.abstract_source text NULL`（審查後第 2 點）：向量化當時用的摘要來源（只看標題的是
+  NULL），`remove-by-source` 照它刪向量。CHECK 同上三個值。回填：run 看摘要的向量，補上論文
+  **現在**的目前摘要的來源；限制：向量之後摘要換過來源的話會記成現在的來源（現在只有 OpenAlex
+  會寫入，ADR-0022），論文已經沒有目前摘要的留 NULL（不會被依來源刪掉，下一次向量化會重算）。
 
-和 `radar/repo/llm_ledger.py` 的表定義一致（`alembic check` 比對；CHECK 約束 autogenerate 不比，
-這裡照抄同一份條件）。可降版：降版刪掉這一欄（連同記下的來源）。
+和 `radar/repo/llm_ledger.py`、`radar/repo/embeddings.py` 的表定義一致（`alembic check` 比對；
+CHECK 約束 autogenerate 不比，這裡照抄同一份條件）。可降版：降版刪掉這兩欄（連同記下的來源）。
 
 版本：0018
 上一版：0017
@@ -20,6 +28,17 @@ from collections.abc import Sequence
 
 import sqlalchemy as sa
 from alembic import op
+
+from radar.domain.ai_outputs import (
+    CurrentAbstract,
+    InputKind,
+    LlmTask,
+    NoLlmInputError,
+    PaperLlmSource,
+    build_llm_input,
+)
+from radar.domain.fingerprints import input_sha256
+from radar.domain.papers import AbstractSource
 
 revision: str = "0018"
 down_revision: str | None = "0017"
@@ -40,6 +59,62 @@ BACKFILL = (
 )
 
 
+# 在途、還沒有表頭也沒有 batch_item、看摘要的 run，連同論文現在的標題與目前摘要。
+IN_FLIGHT = (
+    "SELECT r.id, r.paper_id, r.task, r.input_sha256, r.taxonomy_version,"
+    " r.context_values_version, p.title, a.id AS abstract_id, a.source, a.content"
+    " FROM derivation_run AS r JOIN paper AS p ON p.id = r.paper_id"
+    " JOIN paper_abstract AS a ON a.paper_id = r.paper_id AND a.is_current"
+    " WHERE r.abstract_source IS NULL AND r.task <> 'embed' AND r.input_kind = 'abstract'"
+    " AND (r.status = 'running'"
+    " OR (r.status = 'failed' AND r.failure_reason = 'llm_result_pending'))"
+    " AND NOT EXISTS (SELECT 1 FROM zh_summary AS h WHERE h.run_id = r.id)"
+    " AND NOT EXISTS (SELECT 1 FROM classification AS h WHERE h.run_id = r.id)"
+    " AND NOT EXISTS (SELECT 1 FROM research_model AS h WHERE h.run_id = r.id)"
+    " AND NOT EXISTS (SELECT 1 FROM batch_item AS b WHERE b.run_id = r.id)"
+)
+
+# 向量：run 看摘要的，補上論文現在的目前摘要的來源（只補 NULL 的列）。
+EMBEDDING_BACKFILL = (
+    "UPDATE embedding AS e SET abstract_source = a.source"
+    " FROM derivation_run AS r, paper_abstract AS a"
+    " WHERE r.id = e.run_id AND r.input_kind = 'abstract' AND e.item_type = 'paper'"
+    " AND a.paper_id = e.item_id AND a.is_current AND e.abstract_source IS NULL"
+)
+
+
+def backfill_in_flight(connection: sa.Connection) -> int:
+    """在途的 run 用輸入指紋辨識摘要來源（見模組說明），回補了幾筆。只補還是 NULL 的列。"""
+    filled = 0
+    for row in connection.execute(sa.text(IN_FLIGHT)).mappings().all():
+        source = AbstractSource(row["source"])
+        paper = PaperLlmSource(
+            paper_id=row["paper_id"],
+            title=row["title"],
+            abstract=CurrentAbstract(id=row["abstract_id"], source=source, content=row["content"]),
+        )
+        try:
+            current = build_llm_input(paper, InputKind.ABSTRACT)
+            fingerprint = input_sha256(
+                current.blocks,
+                LlmTask(row["task"]),
+                taxonomy_version=row["taxonomy_version"],
+                context_values_version=row["context_values_version"],
+            )
+        except NoLlmInputError, ValueError:
+            continue
+        if fingerprint != row["input_sha256"]:
+            continue
+        filled += connection.execute(
+            sa.text(
+                "UPDATE derivation_run SET abstract_source = :source"
+                " WHERE id = :id AND abstract_source IS NULL"
+            ),
+            {"id": row["id"], "source": source.value},
+        ).rowcount
+    return filled
+
+
 def upgrade() -> None:
     op.add_column("derivation_run", sa.Column("abstract_source", sa.Text(), nullable=True))
     op.create_check_constraint(
@@ -54,9 +129,20 @@ def upgrade() -> None:
         "abstract_source IS NULL OR task <> 'embed'",
     )
     op.execute(BACKFILL)
+    backfill_in_flight(op.get_bind())
+    op.add_column("embedding", sa.Column("abstract_source", sa.Text(), nullable=True))
+    op.create_check_constraint(
+        "ck_embedding_abstract_source",
+        "embedding",
+        "abstract_source IS NULL"
+        " OR abstract_source IN ('openalex', 'semantic_scholar', 'uploaded_pdf')",
+    )
+    op.execute(EMBEDDING_BACKFILL)
 
 
 def downgrade() -> None:
+    op.drop_constraint("ck_embedding_abstract_source", "embedding", type_="check")
+    op.drop_column("embedding", "abstract_source")
     op.drop_constraint(
         "ck_derivation_run_abstract_source_not_embed", "derivation_run", type_="check"
     )

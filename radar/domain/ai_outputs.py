@@ -26,7 +26,7 @@ from typing import TYPE_CHECKING, Any, Final, assert_never
 from radar.domain.errors import ErrorCode
 from radar.domain.llm_schemas import EvidenceType, SupportLevel
 from radar.domain.papers import AbstractSource, check_storable_text
-from radar.domain.policy import CloudPolicy, ContentSource
+from radar.domain.policy import CloudClearanceError, CloudPolicy, ContentSource, clear_for_cloud
 from radar.domain.taxonomy import KEY_PATTERN, UNCLASSIFIED, TaxonomyField
 
 if TYPE_CHECKING:
@@ -139,6 +139,8 @@ class DerivationRun:
     eval_run_id: uuid.UUID | None
     status: RunStatus
     failure_reason: str | None
+    # 送出時用的摘要來源（只看標題、或遷移 0018 前沒記到的是 None；Story 2.12）。
+    abstract_source: AbstractSource | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -625,6 +627,29 @@ def abstract_content_source(source: AbstractSource) -> ContentSource:
             return ContentSource.UPLOADED_PDF
         case _:
             assert_never(source)
+
+
+def abstract_source_usable(
+    paper: PaperLlmSource | None, source: AbstractSource, policy: CloudPolicy
+) -> bool:
+    """這篇論文的目前摘要仍是 `source`、內容不是空白、而且仍放行送雲端（Story 2.12 審查後、
+    ADR-0044）。寫入 `source` 衍生產出的路徑在摘要來源的共用鎖裡用它重新核對；論文不存在回 False。
+    """
+    if paper is None or paper.abstract is None:
+        return False
+    abstract = paper.abstract
+    if abstract.source is not AbstractSource(source) or not abstract.content.strip():
+        return False
+    try:
+        clear_for_cloud(
+            wrap_document(DocumentType.ABSTRACT, abstract.content),
+            abstract_content_source(abstract.source),
+            None,
+            policy,
+        )
+    except CloudClearanceError:
+        return False
+    return True
 
 
 def build_llm_input(source: PaperLlmSource, input_kind: InputKind) -> LlmInput:

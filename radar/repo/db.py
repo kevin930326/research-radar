@@ -244,6 +244,16 @@ class Database:
         """
         connection.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": key})
 
+    @staticmethod
+    def transaction_lock_shared(connection: Connection, key: int) -> None:
+        """在呼叫端開好的交易裡拿 `key` 的**共用**交易級 advisory lock
+        （`pg_advisory_xact_lock_shared`，會等）：共用彼此不擋，只和同一個鍵的獨佔鎖互斥。
+
+        交易結束時自動放掉；等待也受 `statement_timeout`（與 `lock_timeout`，有設時）限制。不開新
+        交易、不 commit。
+        """
+        connection.execute(text("SELECT pg_advisory_xact_lock_shared(:key)"), {"key": key})
+
     def ping(self) -> bool:
         """連得上並能執行 `SELECT 1` 回 True；連不上或查詢逾時回 False，不丟例外。
 

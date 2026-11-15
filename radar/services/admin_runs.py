@@ -7,28 +7,37 @@ FR-11、AD-26、ADR-0044）。重跑在 `services/run_retry.py`；改版預估�
 - `preview_source_removal`（只讀，一個交易）：送出時用了這個來源的摘要的表頭（各表各狀態）與細項、
   還在跑的 run、目前摘要仍是這個來源的論文、來源不明的表頭。
 - `remove_source_ai_outputs`：一個交易：先拿固定名稱的交易級 advisory lock（`source_removal`，兩個
-  同時執行時一個等另一個做完）→ 鎖內重查擋下條件（有這個來源的 running run，或有論文的目前摘要仍是
-  這個來源：刪了也會再長出來）→ 有就什麼都不刪、不寫稽核 → 沒有就先細項後表頭直接刪（不複製被刪的
-  內容）→ 有刪到才寫一筆 `audit_event`（系統身分，`detail` 只有來源與各表計數）。中途丟例外整個
-  交易退回。刪完再跑一次刪 0 列、不寫稽核。
+  同時執行時一個等另一個做完）→ 再拿這個摘要來源的**獨佔**鎖（`abstract_source_lock_key`；所有
+  寫入這個來源衍生產出的路徑拿共用鎖並在鎖內核對目前摘要，審查後第 1 點）→ 鎖內重查擋下條件
+  （有這個來源的 running run，或有論文的目前摘要仍是這個來源：刪了也會再長出來）→ 有就什麼都
+  不刪、不寫稽核 → 沒有就先細項後表頭直接刪（不複製被刪的內容）→ 有刪到才寫一筆
+  `audit_event`（系統身分，`detail` 只有來源與各表計數）。中途丟例外整個交易退回。刪完再跑
+  一次刪 0 列、不寫稽核。
 
-`derivation_run`、`llm_call`、`batch_item`、構面、向量、`paper_abstract`、人工判斷事件與稽核都不動；
-標題輸入與其他來源的表頭也不動。日誌只記來源與計數。
+另外刪只被這些表頭用到的構面、用這個來源的摘要算的向量（審查後第 2 點）。`derivation_run`、
+`llm_call`（含模型輸出原文，見 ADR-0044「要 Kevin 決定」）、`batch_item`、`paper_abstract`、人工
+判斷事件與稽核都不動；標題輸入與其他來源的表頭也不動。日誌只記來源與計數。
+
+移除拿到獨佔鎖時，寫入路徑要嘛已經 commit（看得到、會被刪或擋下），要嘛還在等鎖；它們拿到鎖之後
+會發現這個來源已經不是任何論文的目前摘要（擋下條件保證），就不寫。所以刪完之後不會再冒出這個來源
+的表頭或向量，除非又有論文的目前摘要是這個來源（來源重新啟用）。
 """
 
+import dataclasses
 import uuid
 from datetime import datetime
 
 import structlog
 
 from radar.domain.admin_runs import (
+    REMOVAL_TABLES,
     PaperAiReport,
     SourceRemovalPreview,
     SourceRemovalResult,
     removal_blocks,
     source_removal_audit,
 )
-from radar.domain.fingerprints import named_lock_key
+from radar.domain.fingerprints import abstract_source_lock_key, named_lock_key
 from radar.domain.papers import AbstractSource
 from radar.domain.permissions import Action, require
 from radar.domain.trial_runs import TrialTargets
@@ -40,6 +49,10 @@ from radar.repo.ai_outputs import (
 )
 from radar.repo.audit import create_audit_event
 from radar.repo.db import Database
+from radar.repo.embeddings import (
+    count_embeddings_by_abstract_source,
+    delete_embeddings_by_abstract_source,
+)
 from radar.repo.llm_ledger import count_running_runs_by_abstract_source
 from radar.repo.papers import count_papers_with_current_abstract_source
 from radar.services.ai_blocks import get_ai_blocks
@@ -104,8 +117,10 @@ def preview_source_removal(
     viewer = SystemViewer()
     with database.transaction() as connection:
         counts = count_ai_results_by_abstract_source(viewer, connection, source)
+        embeddings = count_embeddings_by_abstract_source(viewer, connection, source)
         running = count_running_runs_by_abstract_source(viewer, connection, source)
         current = count_papers_with_current_abstract_source(viewer, connection, source)
+    counts = dataclasses.replace(counts, embeddings=embeddings)
     return SourceRemovalPreview(source, counts, running, current)
 
 
@@ -125,6 +140,8 @@ def remove_source_ai_outputs(
     viewer = SystemViewer()
     with database.transaction() as connection:
         Database.transaction_lock(connection, SOURCE_REMOVAL_LOCK_KEY)
+        # 鎖順序：移除的全域鎖 → 摘要來源（獨佔）。寫入路徑只拿來源的共用鎖，不拿全域鎖。
+        Database.transaction_lock(connection, abstract_source_lock_key(source.value))
         running = count_running_runs_by_abstract_source(viewer, connection, source)
         current = count_papers_with_current_abstract_source(viewer, connection, source)
         blocks = removal_blocks(running, current)
@@ -136,7 +153,9 @@ def remove_source_ai_outputs(
                 current_papers=current,
             )
             return SourceRemovalResult(source, blocks, running, current)
-        deleted = delete_ai_results_by_abstract_source(connection, source)
+        removed = dict(delete_ai_results_by_abstract_source(connection, source))
+        removed["embedding"] = delete_embeddings_by_abstract_source(connection, source)
+        deleted = {table: removed.get(table, 0) for table in REMOVAL_TABLES}
         audit_id = None
         if any(deleted.values()):
             audit_id = create_audit_event(connection, source_removal_audit(source, deleted))
