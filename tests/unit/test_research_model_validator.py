@@ -2266,3 +2266,110 @@ def test_long_label_list_is_quick(unit: str) -> None:
         _labelled(H1_SENTENCE, quote, abstract=f"{LABELLED_ABSTRACT} {quote}.")
 
     assert time.perf_counter() - started < 2
+
+
+# --- Codex 主審查（PR #68）第 4～6 條 ------------------------------------------------------------
+# 第 4 條：輸入裡「名稱 (縮寫)」的縮寫，只給名稱完全一樣的構面；模型漏列較長的名稱時不能錯給尾端的
+# 另一個構面。
+
+
+def test_defined_abbreviation_is_not_given_to_a_construct_at_the_end_of_a_longer_name() -> None:
+    # Codex 的例子：模型只列 Trust、Perceived usefulness、Loyalty，沒列 Satisfaction with trust。
+    abstract = (
+        ABSTRACT + " H1: Trust affects perceived usefulness. We measure satisfaction with trust"
+        " (ST). ST significantly affects loyalty."
+    )
+    data = _with_loyalty(
+        _hypothesis(
+            sentence="H1: Trust affects perceived usefulness.",
+            cause="Trust",
+            effect="Perceived usefulness",
+            result_quote="ST significantly affects loyalty",
+            statistics=None,
+        )
+    )
+
+    content = _validate(data, _input(abstract=abstract))
+
+    assert content.hypotheses[0].support is SupportLevel.NOT_STATED
+    assert content.hypotheses[0].result_quote is None
+
+
+@pytest.mark.parametrize(
+    ("definition", "name_en", "abbreviation", "kept"),
+    [
+        ("perceived ease of use (PEOU)", "Perceived ease of use", "PEOU", True),
+        ("electronic word-of-mouth (eWOM)", "Electronic word-of-mouth", "eWOM", True),
+        ("customer loyalty (CL)", "Customer loyalty", "CL", True),
+        ("trust in technology (TT)", "Trust in technology", "TT", True),
+        ("information and communication technologies (ICTs)", "Communication technologies",
+         "ICTs", False),
+        # 名稱是 mobile banking usage，不是 Usage（模型漏列較長的名稱）。
+        ("mobile banking usage (MBU)", "Usage", "MBU", False),
+    ],
+)  # fmt: skip
+def test_defined_abbreviation_goes_only_to_the_construct_with_the_same_name(
+    definition: str, name_en: str, abbreviation: str, kept: bool
+) -> None:
+    result_quote = f"{abbreviation} rose significantly (β = 0.2)"
+    abstract = f"{ABSTRACT} We measure {definition}. {result_quote}."
+    data = _data()
+    data["constructs"].append(
+        {"name_en": name_en, "label_zh": "測試構面", "definition": None, "measurement": None}
+    )
+    data["hypotheses"] = [
+        _hypothesis(
+            sentence=f"We measure {definition}.",
+            cause=name_en,
+            effect="Perceived usefulness",
+            result_quote=result_quote,
+            statistics=None,
+        )
+    ]
+
+    content = _validate(data, _input(abstract=abstract))
+
+    expected = SupportLevel.SUPPORTED if kept else SupportLevel.NOT_STATED
+    assert content.hypotheses[0].support is expected
+
+
+# 第 5 條：量級縮寫的常見變體（12MM、12-M、12 mn）照縮寫填的數字整筆拒收。
+
+
+@pytest.mark.parametrize(
+    ("written", "sample_size"),
+    [
+        ("12MM bank customers", 12),
+        ("12 MM bank customers", 12),
+        ("12-M bank customers", 12),
+        ("12-k bank customers", 12),
+        ("12 mn bank customers", 12),
+        ("12 mln bank customers", 12),
+    ],
+)
+def test_sample_size_from_an_abbreviated_magnitude_variant_is_rejected(
+    written: str, sample_size: int
+) -> None:
+    abstract = ABSTRACT.replace("200 bank customers", written)
+    data = _data()
+    data["context"]["sample_size"] = sample_size
+    data["hypotheses"][0]["statistics"]["sample_size"] = None
+
+    assert (
+        _rejected(data, _input(abstract=abstract)) is ErrorCode.RESEARCH_MODEL_UNSUPPORTED_CONTENT
+    )
+
+
+# 第 6 條：研究問題後面只有一個斷點、接著大量結果寫法時，不能變成平方時間。
+
+
+def test_many_result_markers_after_one_clause_break_is_quick() -> None:
+    quote = "we examine whether trust, " + "zz find that " * 128_000
+    data = _data()
+    data["hypotheses"][0]["result_quote"] = quote.strip()
+    started = time.perf_counter()
+
+    with contextlib.suppress(OutputRejectedError):
+        _validate(data, _input(abstract=ABSTRACT + " " + quote))
+
+    assert time.perf_counter() - started < 2

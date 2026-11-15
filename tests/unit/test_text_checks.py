@@ -239,3 +239,49 @@ def test_long_abbreviated_magnitude_text_is_quick(unit: str) -> None:
     structured_numbers(text)
 
     assert time.perf_counter() - started < 2
+
+
+# Codex 主審查（PR #68）第 5 條：常見的量級縮寫變體（MM、Mn、mln、連字號接一個量級字母）也讀不懂。
+
+
+@pytest.mark.parametrize(
+    ("text", "unreadable"),
+    [
+        ("N = 12MM users", ("12", "12000000")),
+        ("12mm users", ("12",)),
+        ("12 MM users", ("12",)),
+        ("1.2 Mn users", ("1.2", "1200000")),
+        ("1.2mn users", ("1.2",)),
+        ("12-M users", ("12", "12000000")),
+        ("12-k users", ("12", "12000")),
+        ("3.5-B transactions", ("3.5",)),
+        ("12 mln users", ("12",)),
+        ("12 mil users", ("12",)),
+        ("2 bln transactions", ("2",)),
+        ("2 bil transactions", ("2",)),
+        ("12 mio users", ("12",)),
+    ],
+)
+def test_structured_numbers_skip_abbreviated_magnitude_variants(
+    text: str, unreadable: tuple[str, ...]
+) -> None:
+    found = structured_numbers(check_copy(text))
+
+    for value in unreadable:
+        assert _n(value) not in found, value
+
+
+@pytest.mark.parametrize(
+    ("text", "value"),
+    [
+        ("a 12-month study", "12"),
+        ("12 months", "12"),
+        ("a 5-MB file", "5"),
+        ("5 MB of data", "5"),
+        ("312 K-12 teachers", "312"),
+        ("200 M-Turk workers", "200"),
+        ("12 mmHg", "12"),
+    ],
+)
+def test_structured_numbers_still_read_numbers_before_longer_words(text: str, value: str) -> None:
+    assert _n(value) in structured_numbers(check_copy(text))

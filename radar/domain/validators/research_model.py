@@ -245,6 +245,8 @@ _REPORTED_AFTER_QUESTION: Final = re.compile(
     r")(?![a-z])"
 )
 _CLAUSE_BREAK: Final = re.compile(r"[,;:]|\s-\s|[.!?](?=\s|$)|(?<![a-z])(?:and|but|then)(?![a-z])")
+# `_REPORT_SUBJECT` 最長的寫法（`the findings also`、`these hypotheses also`）加上前後空白的上限。
+_MAX_SUBJECT_CHARS: Final = 40
 _REPORT_SUBJECT: Final = re.compile(
     r"(?:(?:we|it|they|h[0-9]+[a-z]?|(?:the|this) hypothesis|(?:the|these|our) hypotheses"
     r"|(?:the |our )?(?:results?|findings|data|analys[ie]s|evidence|estimates))(?: also)?)?"
@@ -262,7 +264,9 @@ def _result_after_question(quote: str, question_end: int, *, by_words: bool) -> 
         for marker in _REPORTED_AFTER_QUESTION.finditer(quote, question_end):
             # 結束位置不超過結果寫法開頭的斷點裡，最後一個。
             position = bisect.bisect_right(break_ends, marker.start())
-            if position == 0:
+            # 斷點到結果寫法太遠就不可能只是主詞，不切出來看（Codex 主審查第 6 條：同一個斷點後面
+            # 接大量結果寫法時，每次都切一段越來越長的字串會變成平方時間）。
+            if position == 0 or marker.start() - break_ends[position - 1] > _MAX_SUBJECT_CHARS:
                 continue
             subject = quote[break_ends[position - 1] : marker.start()].strip()
             if _REPORT_SUBJECT.fullmatch(subject):
@@ -663,47 +667,92 @@ def _without_parentheses(name_en: str) -> str:
         return ""
 
 
+# 「名稱 (縮寫)」的名稱最多看括號前幾個詞。
+_MAX_DEFINED_WORDS: Final = 8
+
+
+def _abbreviates(abbreviation: str, words: list[str]) -> bool:
+    """`abbreviation`（casefold）是 `words`（正規化名稱的詞）的縮寫：第一個詞不是虛詞；每個不是虛詞
+    的詞依序用掉縮寫的下一個字（等於它的第一個字母），可以再用掉同一個詞後面照順序出現的字
+    （`trust` → `tr`、`loyalty` → `loy`、`electronic wordofmouth` → `ewom`）；虛詞可以用、可以
+    不用；縮寫的字剛好用完。"""
+    if not words or words[0] in _SKIPPABLE:
+        return False
+    seen: dict[tuple[int, int], bool] = {}
+
+    def fits(word_index: int, used: int) -> bool:
+        if word_index == len(words):
+            return used == len(abbreviation)
+        key = (word_index, used)
+        if key not in seen:
+            word = words[word_index]
+            reachable: list[int] = []
+            if used < len(abbreviation) and abbreviation[used] == word[0]:
+                reachable.append(used + 1)
+                position = 1
+                for char in abbreviation[used + 1 :]:
+                    position = word.find(char, position) + 1
+                    if position == 0:
+                        break
+                    reachable.append(reachable[-1] + 1)
+            if word in _SKIPPABLE:
+                reachable.append(used)
+            seen[key] = any(fits(word_index + 1, next_used) for next_used in reachable)
+        return seen[key]
+
+    return fits(0, 0)
+
+
+def _defined_name(abbreviation: str, before: str) -> str | None:
+    """輸入裡「名稱 (縮寫)」的名稱：括號前面（`before`）正規化後，縮寫得出來的最短的最後幾個詞
+    （最多 `_MAX_DEFINED_WORDS` 個；`satisfaction with trust (ST)` 是 satisfaction with trust，
+    不是 trust）。縮寫字尾多一個小寫 s 也可以（`ICTs`）。找不到是 None。"""
+    try:
+        words = normalize_name(before).split()
+    except ValueError:  # 前面只有標點
+        return None
+    candidates = [abbreviation.casefold()]
+    if len(abbreviation) > 2 and abbreviation.endswith("s"):
+        candidates.append(abbreviation[:-1].casefold())
+    for count in range(1, min(len(words), _MAX_DEFINED_WORDS) + 1):
+        tail = words[-count:]
+        if any(_abbreviates(candidate, tail) for candidate in candidates):
+            return " ".join(tail)
+    return None
+
+
 def _construct_abbreviations(
     output: ResearchModelOutput, input_text: str
 ) -> dict[str, frozenset[str]]:
     """每個構面（正規化名稱）可以代表它的縮寫（casefold）：
 
     - 英文名的首字母（`Perceived usefulness` → `pu`；`Trust` 只有一個字母，沒有）；
-    - 輸入裡寫了「名稱 (縮寫)」，而且括號前面的文字正規化後以這個構面的名稱結尾（正規化名稱，或
-      英文名拿掉括號後的正規化名稱：`Trust (TR)` 也看 `trust`）。好幾個構面都對得上時只給名稱最長
-      的（`satisfaction with trust (ST)` 的 ST 給 Satisfaction with trust，不給 Trust）。
+    - 輸入裡寫了「名稱 (縮寫)」，而且那個名稱（`_defined_name`：縮寫得出來的最短的最後幾個詞）和
+      這個構面的名稱**完全一樣**（正規化名稱，或英文名拿掉括號後的正規化名稱：`Trust (TR)` 也看
+      `trust`）。Codex 主審查第 4 條：只看「括號前面以構面名稱結尾」時，模型漏列較長的名稱
+      （`satisfaction with trust (ST)` 而模型只列 Trust）就會把 ST 錯給 Trust；現在 ST 的名稱是
+      satisfaction with trust，和 Trust 不一樣，不給。
 
     縮寫一定要出現在輸入裡（首字母的縮寫也要結果原文或原句真的寫出來才用得上）；模型自己在英文名
     括號裡寫的縮寫不算，免得模型改名字就能把別的句子算成這條關係的結果。
     """
     found: dict[str, set[str]] = {}
-    tails: dict[str, set[str]] = {}
+    owners: dict[str, set[str]] = {}
     for construct in output.constructs:
         name = normalize_name(normalize_text(construct.name_en))
         found.setdefault(name, set()).update(_initials(construct.name_en))
-        tails.setdefault(name, {name}).update(
-            tail for tail in (_without_parentheses(construct.name_en),) if tail
-        )
+        for spelled in (name, _without_parentheses(construct.name_en)):
+            if spelled:
+                owners.setdefault(spelled, set()).add(name)
     definitions = (
         match for match in _DEFINED_ABBREVIATION.finditer(input_text) if _is_abbreviation(match[1])
     )
     for match in itertools.islice(definitions, _MAX_DEFINITIONS):
         line_start = input_text.rfind("\n", 0, match.start()) + 1
         before = input_text[max(line_start, match.start() - _DEFINITION_WINDOW) : match.start()]
-        try:
-            preceding = f" {normalize_name(before)}"
-        except ValueError:  # 前面只有標點
-            continue
-        matched = {
-            name: max(len(tail) for tail in candidates if preceding.endswith(f" {tail}"))
-            for name, candidates in tails.items()
-            if any(preceding.endswith(f" {tail}") for tail in candidates)
-        }
-        if matched:
-            longest = max(matched.values())
-            for name, length in matched.items():
-                if length == longest:
-                    found[name].add(match.group(1).casefold())
+        defined = _defined_name(match[1], before)
+        for name in owners.get(defined or "", ()):
+            found[name].add(match[1].casefold())
     return {name: frozenset(abbreviations) for name, abbreviations in found.items()}
 
 
