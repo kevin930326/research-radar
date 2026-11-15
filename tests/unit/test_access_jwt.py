@@ -9,7 +9,7 @@ import hashlib
 import hmac
 import json
 from collections.abc import Callable, Mapping
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
 
 import httpx2
@@ -133,6 +133,43 @@ def test_nbf_beyond_the_leeway_is_rejected(key: RSAKey) -> None:
     token = _sign(key, _claims(nbf=int((NOW + timedelta(seconds=120)).timestamp())))
 
     assert _rejected(token, _jwks(key)) is LoginRejection.ASSERTION_INVALID
+
+
+def test_nbf_exactly_at_the_leeway_is_accepted(key: RSAKey) -> None:
+    token = _sign(key, _claims(nbf=int((NOW + timedelta(seconds=60)).timestamp())))
+
+    assert _verify(token, _jwks(key)) == ADMIN
+
+
+def test_nbf_one_second_beyond_the_leeway_is_rejected(key: RSAKey) -> None:
+    token = _sign(key, _claims(nbf=int((NOW + timedelta(seconds=61)).timestamp())))
+
+    assert _rejected(token, _jwks(key)) is LoginRejection.ASSERTION_INVALID
+
+
+def test_exp_one_second_ahead_is_accepted(key: RSAKey) -> None:
+    # 剛好到期（exp == now）拒絕，見 test_bad_claims_are_rejected；早一秒還收。
+    token = _sign(key, _claims(exp=int((NOW + timedelta(seconds=1)).timestamp())))
+
+    assert _verify(token, _jwks(key)) == ADMIN
+
+
+@pytest.mark.parametrize("hours", [8, -5])
+def test_same_instant_in_another_timezone_gives_the_same_result(key: RSAKey, hours: int) -> None:
+    # 主機時鐘用哪個時區表示同一個瞬間，期限的判斷都一樣（比的是 Unix 秒數）。
+    local_now = NOW.astimezone(timezone(timedelta(hours=hours)))
+    edge = int((NOW + timedelta(seconds=60)).timestamp())
+
+    def verify(token: str) -> str:
+        return verify_access_jwt(
+            token, team_domain=TEAM, audience=AUDIENCE, fetch_jwks=lambda: _jwks(key), now=local_now
+        )
+
+    assert verify(_sign(key, _claims(nbf=edge))) == ADMIN
+    with pytest.raises(LoginRejectedError):
+        verify(_sign(key, _claims(nbf=edge + 1)))
+    with pytest.raises(LoginRejectedError):
+        verify(_sign(key, _claims(exp=int(NOW.timestamp()))))
 
 
 def test_right_key_is_picked_by_kid(key: RSAKey, other_key: RSAKey) -> None:
@@ -300,10 +337,15 @@ def test_header_that_is_not_json_object_is_rejected(key: RSAKey) -> None:
         {"exp": str(int((NOW + timedelta(hours=1)).timestamp()))},
         {"exp": float(int((NOW + timedelta(hours=1)).timestamp()))},
         {"exp": True},
+        {"exp": None},  # 明寫 null 和缺欄位一樣拒絕
+        {"exp": "1"},
         {"exp": _DROP},
         {"nbf": int((NOW + timedelta(minutes=5)).timestamp())},  # 還沒生效
         {"nbf": "0"},
+        {"nbf": "1"},
         {"nbf": True},
+        {"nbf": None},  # 有這個欄位就要是整數：null 不能當成「沒有 nbf」
+        {"nbf": float(int(NOW.timestamp()))},
         {"email": _DROP},
         {"email": ["admin@example.com"]},
         {"email": "not-an-email"},

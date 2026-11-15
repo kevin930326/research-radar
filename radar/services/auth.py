@@ -1,8 +1,10 @@
 """登入與 session（ADR-0008 第 2 項、ADR-0046、AD-23、Story 3.3）。
 
-- 入口函式（`authenticate_session`、`log_in_with_fake_login`、`list_fake_login_members`）自己不寫
-  資料：認出是哪位成員之後，交給以那位成員的 `MemberViewer` 當 actor 的公開函式寫
-  （`start_member_session`、`record_session_activity`、`end_session`）。
+- 入口函式（`authenticate_session`、`log_out_session`、`log_in_with_fake_login`、
+  `list_fake_login_members`）自己不寫資料：認出是哪位成員之後，交給以那位成員的 `MemberViewer`
+  當 actor 的公開函式寫（`start_member_session`、`record_session_activity`、`end_session`）。
+- 登出只看 token 雜湊，不要求 session 仍然有效：過期或成員已被移出名單的 session 也刪掉那一列
+  （不然之後調長期限或把人加回名單，已經登出的 token 會重新有效）。
 - 假登入先在交易外確認身分（試用環境要取 Access 的公鑰，不佔著交易等網路），再開交易找成員、
   建 session。身分確認是注入的函式（開發：`adapters/fake/login.py`；試用：Access 的 JWT），
   不建 Protocol（ADR-0001、ADR-0008 第 9 項）。
@@ -46,6 +48,7 @@ from radar.repo.sessions import (
     create_session,
     delete_session,
     find_active_session,
+    find_session_owner,
     update_session_last_seen,
 )
 
@@ -79,11 +82,23 @@ def record_session_activity(
     update_session_last_seen(connection, session_id=session_id, member_id=actor.member_id, now=now)
 
 
-def end_session(actor: MemberViewer, database: Database, *, session_id: uuid.UUID) -> None:
-    """登出：刪掉 `actor` 自己的這個 session（之後同一個 token 立刻失效）。"""
+def log_out_session(database: Database, token: str) -> None:
+    """登出：cookie 裡的 token 對到的 session 不管有沒有過期、成員還在不在允許名單，都刪掉。
+
+    格式不對或找不到就什麼都不做（登出一律成功）。
+    """
+    if not is_well_formed_token(token):
+        return
     with database.transaction() as connection:
-        deleted = delete_session(connection, session_id=session_id, member_id=actor.member_id)
-    if deleted:
+        owner = find_session_owner(connection, token_sha256(token))
+        if owner is None:
+            return
+        end_session(owner.viewer, connection, session_id=owner.session_id)
+
+
+def end_session(actor: MemberViewer, connection: Connection, *, session_id: uuid.UUID) -> None:
+    """刪掉 `actor` 自己的這個 session（之後同一個 token 立刻失效）。在呼叫端開好的交易裡做。"""
+    if delete_session(connection, session_id=session_id, member_id=actor.member_id):
         log.info("已登出", member_id=str(actor.member_id))
 
 

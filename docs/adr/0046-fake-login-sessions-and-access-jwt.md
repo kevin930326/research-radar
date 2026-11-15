@@ -57,17 +57,18 @@ Google 登入在 Epic 7 才做，但 Epic 3 之後的每個畫面都要知道「
 
 ## 決定
 
-1. **session 照 ADR-0008**：token 是 `secrets.token_urlsafe(32)`（256 位元），資料庫只存 SHA-256（`session.token_sha256`，bytea 32 位元組、UNIQUE）。cookie 是 `__Host-radar_session`（HttpOnly、Secure、SameSite=Lax、Path=/、沒有 Domain、Max-Age＝最長期限）。閒置 14 天、最長 30 天（`RADAR_SESSION_IDLE_DAYS`、`RADAR_SESSION_MAX_DAYS` 可調，最長不能比閒置短）；最後使用時間超過 5 分鐘才更新。查 session 時同時要求 `allowed_email` 還在，所以刪 session（撤銷）或刪名單（移出）都立刻失效。過期的列先留著，之後由清理工作刪。
+1. **session 照 ADR-0008**：token 是 `secrets.token_urlsafe(32)`（256 位元），資料庫只存 SHA-256（`session.token_sha256`，bytea 32 位元組、UNIQUE）。cookie 是 `__Host-radar_session`（HttpOnly、Secure、SameSite=Lax、Path=/、沒有 Domain、Max-Age＝最長期限）。閒置 14 天、最長 30 天（`RADAR_SESSION_IDLE_DAYS`、`RADAR_SESSION_MAX_DAYS` 可調，最長不能比閒置短）；最後使用時間超過 5 分鐘才更新。查 session 時同時要求 `allowed_email` 還在，所以刪 session（撤銷）或刪名單（移出）都立刻失效。期限的邊界：閒置恰好 14 天、建立恰好 30 天就算過期（`>` 不是 `>=`）。過期的列先留著，之後由清理工作刪；但登出只看 token 雜湊，過期或已移出名單的 session 登出時也刪掉那一列（不然之後調長期限或把人加回名單，已經登出的 token 會重新有效）。
 2. **三張新表**（遷移 0020）：`member`（顯示名稱、是否管理者、`google_sub` 可空 UNIQUE、第一次登入時間）、`allowed_email`（小寫 email UNIQUE、一位成員一個 email）、`session`。應用程式角色不能刪 `member`（會被判斷事件、稽核引用）；移出名單是刪 `allowed_email`。不改任何既有的表。
 3. **環境與開關**：選項 B。啟動時擋下：正式＋假登入、假登入＋Google 登入、試用＋假登入但缺 team 網域／audience／管理者 email／站台來源（或站台來源不是 https）。compose 的 api 明寫開發＋假登入，映像冒煙順便證明「開發＋假登入可以啟動」。
 4. **試用環境驗 Access 的 JWT**：選項 B，規則照搬 ADR-0008 第 1.3 項。
    - 標頭自己解析：`alg` 一定是字串 `RS256`、要有字串 `kid`、有 `crit` 就拒絕。
    - 公鑰只從 JWKS 的 `kty`、`n`、`e` 載入 RSA 公鑰；`use`／`alg` 有寫就要是 `sig`／`RS256`；不到 2048 位元的金鑰拒絕。
-   - 驗簽用 `joserfc.jwt.decode(token, key, algorithms=["RS256"])`（只驗簽），claims 全部自己檢查：`iss` 是字串且等於 `https://<team 網域>`；`aud` 是字串時完全相等，是陣列時每一項都是字串而且含設定的 audience；`exp`、`nbf` 是整數（布林不算）；`email` 轉小寫後格式正確，再和管理者 email 比對。
+   - 驗簽用 `joserfc.jwt.decode(token, key, algorithms=["RS256"])`（只驗簽），claims 全部自己檢查：`iss` 是字串且等於 `https://<team 網域>`；`aud` 是字串時完全相等，是陣列時每一項都是字串而且含設定的 audience；`exp` 一定要有、是整數（布林不算；`null` 和缺欄位一樣拒絕），而且要晚於現在；`nbf` 可以沒有這個欄位，有的話（含 `null`）一定要是整數，而且不能比現在晚超過 60 秒（容許主機時鐘慢一點，恰好 60 秒還收）；`email` 轉小寫後格式正確，再和管理者 email 比對。
+   - `Cf-Access-Jwt-Assertion` 最多一個：出現兩次以上一律拒絕（不管哪一個有效、排在哪裡）。
    - 只有管理者能登入：email 對到的成員要在允許名單而且是管理者；不然回 403，並在日誌印出要先執行的兩個指令（`radar members allow <管理者 email> --name <名稱>`、`radar members set-admin <管理者 email>`，email 用佔位字）。
    - 抓公鑰是注入的函式（正式用 httpx2 抓 `https://<team 網域>/cdn-cgi/access/certs`，測試傳假的），不建 port。joserfc 只在 `radar/adapters/`，api 行程只有試用環境才 import（延後 import，記憶體上限很緊）。
-5. **CSRF**：選項 B。站台來源是 `RADAR_SITE_ORIGIN`；開發環境沒設時是 `http://localhost:8000`、`http://127.0.0.1:8000`；其他環境沒設就拒絕所有會改資料的請求。GET 不改業務資料（只會更新 session 自己的最後使用時間，CSRF 利用不了）。
-6. **路由**：`GET /api/v1/me`（`{member_id, display_name}`，沒登入 401）、`POST /api/v1/auth/logout`（一律 204、清 cookie）；假登入開著才有 `GET`／`POST /api/v1/auth/fake-login`，沒開是 404 JSON。登入路由在 `mount_web` 之前裝；頁面殼已經掛上時裝路由會丟錯，避免路由被 `index.html` 蓋掉。
+5. **CSRF**：選項 B。`Origin` 要恰好一個而且在允許清單，重複出現（就算其中一個是對的）也拒絕。站台來源是 `RADAR_SITE_ORIGIN`；開發環境沒設時是 `http://localhost:8000`、`http://127.0.0.1:8000`；其他環境沒設就拒絕所有會改資料的請求。GET 不改業務資料（只會更新 session 自己的最後使用時間，CSRF 利用不了）。
+6. **路由**：`GET /api/v1/me`（`{member_id, display_name}`，沒登入 401）、`POST /api/v1/auth/logout`（一律 204、清 cookie；cookie 對到的 session 不管有沒有過期都刪）；假登入開著才有 `GET`／`POST /api/v1/auth/fake-login`，沒開是 404 JSON。登入路由在 `mount_web` 之前裝；頁面殼已經掛上時裝路由會丟錯，避免路由被 `index.html` 蓋掉。
 7. **CLI**：`radar members allow EMAIL --name NAME`、`radar members set-admin EMAIL`，選項 A（`SystemViewer`），真的改到資料才在同一個交易寫一筆 `audit_event`。輸出與日誌只有成員 ID，不印 email。
 
 ## 理由

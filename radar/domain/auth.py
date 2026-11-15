@@ -208,6 +208,7 @@ class LoginRejection(StrEnum):
     MEMBER_NOT_ALLOWED = "member_not_allowed"  # 開發：選的人不在允許名單
     MEMBER_CHOICE_NOT_ALLOWED = "member_choice_not_allowed"  # 試用：帶了 member_id（不能選人）
     ASSERTION_MISSING = "assertion_missing"  # 試用：沒有 Cf-Access-Jwt-Assertion
+    ASSERTION_DUPLICATED = "assertion_duplicated"  # Cf-Access-Jwt-Assertion 出現不只一次
     ASSERTION_INVALID = "assertion_invalid"  # 試用：格式、簽章、iss、aud、期限、演算法任一不對
     ACCESS_KEYS_UNAVAILABLE = "access_keys_unavailable"  # 試用：取不到 Access 的公鑰
     EMAIL_NOT_ADMIN = "email_not_admin"  # 試用：JWT 的 email 不是管理者 email
@@ -287,6 +288,19 @@ class AuthenticatedMember:
     display_name: str
     is_admin: bool
     last_seen_at: datetime
+
+    @property
+    def viewer(self) -> MemberViewer:
+        return MemberViewer(member_id=self.member_id, is_admin=self.is_admin)
+
+
+@dataclass(frozen=True, slots=True)
+class SessionOwner:
+    """某個 session 是哪位成員的（登出用：不管 session 有沒有過期、成員還在不在名單）。"""
+
+    session_id: uuid.UUID
+    member_id: uuid.UUID
+    is_admin: bool
 
     @property
     def viewer(self) -> MemberViewer:

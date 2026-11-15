@@ -66,6 +66,10 @@ INFRASTRUCTURE_EXCEPTIONS: dict[str, str] = {
     "radar.repo.sessions.find_active_session": (
         "由 cookie 的 token 雜湊認出是誰：查到之前沒有 viewer（ADR-0002 的列名例外）"
     ),
+    "radar.repo.sessions.find_session_owner": (
+        "登出時由 cookie 的 token 雜湊找 session 的擁有者（過期的也要刪）：查到之前沒有 viewer"
+        "（ADR-0002 的列名例外）；只回 session ID、成員 ID、是否管理者"
+    ),
 }
 
 

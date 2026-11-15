@@ -6,7 +6,8 @@
 - 成員從允許名單移除（`allowed_email` 沒有他的列）後，他的 session 立刻失效：查找時一起比對
   允許名單。撤銷（`radar members revoke`，Story 7.2）在同一個交易刪掉他的 session。
 - 查找沒有 viewer（ADR-0002 的列名例外）：要先查 session 才知道是誰；列在
-  `tests/arch/test_repo_rules.py` 的 `INFRASTRUCTURE_EXCEPTIONS`。
+  `tests/arch/test_repo_rules.py` 的 `INFRASTRUCTURE_EXCEPTIONS`。登出用的
+  `find_session_owner` 不看期限與允許名單：已經過期的 session 登出時也要刪掉那一列。
 - 寫入一律用 `text()` SQL；函式收呼叫端開好的交易連線，不 commit。
 """
 
@@ -28,7 +29,12 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.postgresql import BYTEA
 
-from radar.domain.auth import TOKEN_SHA256_BYTES, AuthenticatedMember, SessionPolicy
+from radar.domain.auth import (
+    TOKEN_SHA256_BYTES,
+    AuthenticatedMember,
+    SessionOwner,
+    SessionPolicy,
+)
 from radar.repo.models import Base
 
 # --- 表的定義（`alembic check` 拿來和資料庫比對；遷移 0020 建表） -----------------------------
@@ -71,6 +77,14 @@ _FIND_ACTIVE: Final = text(
     " JOIN allowed_email AS a ON a.member_id = s.member_id"
     " WHERE s.token_sha256 = :token_sha256"
     " AND s.last_seen_at > :idle_cutoff AND s.created_at > :max_cutoff"
+)
+
+# 登出用：只看 token 雜湊，不管期限與允許名單（過期或被移出名單的 session 也要刪得掉）。
+_FIND_OWNER: Final = text(
+    "SELECT s.id, s.member_id, m.is_admin"
+    " FROM session AS s"
+    " JOIN member AS m ON m.id = s.member_id"
+    " WHERE s.token_sha256 = :token_sha256"
 )
 
 
@@ -142,6 +156,25 @@ def find_active_session(
         display_name=str(display_name),
         is_admin=bool(is_admin),
         last_seen_at=last_seen_at,
+    )
+
+
+def find_session_owner(connection: Connection, token_sha256: bytes) -> SessionOwner | None:
+    """雜湊是 `token_sha256` 的 session 與它的成員，不管有沒有過期、成員還在不在允許名單；
+    找不到回 None。登出用（之後交給 `delete_session` 刪）。
+
+    Raises:
+        ValueError: `token_sha256` 不是 32 位元組。
+    """
+    _check_digest(token_sha256)
+    row = connection.execute(_FIND_OWNER, {"token_sha256": token_sha256}).one_or_none()
+    if row is None:
+        return None
+    session_id, member_id, is_admin = row.tuple()
+    return SessionOwner(
+        session_id=uuid.UUID(str(session_id)),
+        member_id=uuid.UUID(str(member_id)),
+        is_admin=bool(is_admin),
     )
 
 

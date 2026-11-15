@@ -7,9 +7,10 @@ AR-65 選項 A、ADR-0008（第 1.3 項的驗簽規則照搬）、ADR-0046。不
   `use` 有寫就要是 `sig`、`alg` 有寫就要是 `RS256`，金鑰至少 2048 位元。
 - 驗簽交給 joserfc（`jwt.decode` 只驗簽、不驗 claims），允許的演算法只有 `RS256`。
 - claims 全部自己檢查型別與值：`iss` 是字串而且等於 `https://<team 網域>`；`aud` 是字串時要完全
-  相等，是陣列時每一項都是字串而且含設定的 audience，其他型別一律拒絕；`exp` 是整數而且還沒到；
-  `nbf` 有的話是整數而且已經到了（容許主機時鐘慢 `NOT_BEFORE_LEEWAY`，`exp` 不容許）；
-  `email` 是字串、轉成小寫後格式正確。
+  相等，是陣列時每一項都是字串而且含設定的 audience，其他型別一律拒絕；`exp` 一定要有、是整數
+  （布林不算）而且還沒到；`nbf` 可以沒有這個欄位，有的話（含 `null`）一定要是整數而且已經到了
+  （容許主機時鐘慢 `NOT_BEFORE_LEEWAY`，恰好 60 秒還收；`exp` 不容許）；`email` 是字串、轉成
+  小寫後格式正確。
 - 公鑰取得是注入的函式（`fetch_jwks`）：正式由 `fetch_access_jwks` 經 httpx2 取，測試傳假的函式，
   不連 Cloudflare（ADR-0008 第 9 項的做法，不另建 port）。
 
@@ -23,7 +24,7 @@ import json
 import re
 from collections.abc import Callable, Mapping
 from datetime import datetime, timedelta
-from typing import Any, Final
+from typing import Any, Final, TypeGuard
 
 import httpx2
 import structlog
@@ -131,6 +132,11 @@ def _modulus_bits(n: str) -> int:
     return int.from_bytes(raw, "big").bit_length()
 
 
+def _is_int(value: object) -> TypeGuard[int]:
+    """JSON 的整數：`int` 而且不是布林（bool 是 int 的子類別，不算數字）。"""
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
 def _check_audience(value: object, audience: str) -> bool:
     # 公開的值，不必比較固定時間；hmac.compare_digest 遇到非 ASCII 字串會丟 TypeError。
     if isinstance(value, str):
@@ -176,17 +182,15 @@ def verify_access_jwt(
     if not _check_audience(claims.get("aud"), audience):
         raise _invalid("aud")
     timestamp = now.timestamp()
+    # `exp` 一定要有；缺欄位與 null 都不是整數，一樣拒絕。
     expires = claims.get("exp")
-    # bool 是 int 的子類別，不算數字。
-    if isinstance(expires, bool) or not isinstance(expires, int) or expires <= timestamp:
+    if not _is_int(expires) or expires <= timestamp:
         raise _invalid("exp")
-    not_before = claims.get("nbf")
-    if not_before is not None and (
-        isinstance(not_before, bool)
-        or not isinstance(not_before, int)
-        or not_before > timestamp + NOT_BEFORE_LEEWAY.total_seconds()
-    ):
-        raise _invalid("nbf")
+    # `nbf` 可以沒有這個欄位；有這個欄位（含 null）就一定要是整數。
+    if "nbf" in claims:
+        not_before = claims["nbf"]
+        if not _is_int(not_before) or not_before > timestamp + NOT_BEFORE_LEEWAY.total_seconds():
+            raise _invalid("nbf")
     email = claims.get("email")
     try:
         return normalize_email(email)

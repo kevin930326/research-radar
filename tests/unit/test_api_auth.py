@@ -59,15 +59,15 @@ class FakeAuth:
 
     login_error: Exception | None = None
     tokens_seen: list[str | None] = field(default_factory=list)
-    logged_out: list[AuthenticatedMember] = field(default_factory=list)
+    logged_out: list[str] = field(default_factory=list)
     login_requests: list[FakeLoginRequest] = field(default_factory=list)
 
     def authenticate(self, token: str | None) -> AuthenticatedMember | None:
         self.tokens_seen.append(token)
         return MEMBER if token == GOOD_TOKEN else None
 
-    def log_out(self, member: AuthenticatedMember) -> None:
-        self.logged_out.append(member)
+    def log_out(self, token: str) -> None:
+        self.logged_out.append(token)
 
     def list_members(self) -> Sequence[MemberSummary]:
         return [MemberSummary(member_id=MEMBER_ID, display_name="測試甲")]
@@ -200,6 +200,23 @@ def test_rejected_fake_login_is_403_without_cookie(error: Exception) -> None:
     assert "set-cookie" not in response.headers
 
 
+@pytest.mark.parametrize(
+    "assertions", [["valid-jwt", "other-jwt"], ["other-jwt", "valid-jwt"], ["same", "same"]]
+)
+def test_duplicate_access_assertion_headers_are_403_without_logging_in(
+    assertions: list[str],
+) -> None:
+    auth = FakeAuth()
+    headers = [("Origin", ORIGIN), *((ACCESS_ASSERTION_HEADER, value) for value in assertions)]
+
+    response = _client(auth).post("/api/v1/auth/fake-login", json={}, headers=headers)
+
+    assert response.status_code == 403
+    assert response.json() == {"detail": "login_rejected"}
+    assert auth.login_requests == []
+    assert "set-cookie" not in response.headers
+
+
 def test_missing_admin_member_is_403_and_logs_the_two_commands(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -254,6 +271,29 @@ def test_fake_login_with_wrong_or_missing_origin_is_403_and_creates_nothing(
     assert response.status_code == 403
     assert response.json() == {"detail": "origin_rejected"}
     assert auth.login_requests == []
+    assert "set-cookie" not in response.headers
+
+
+@pytest.mark.parametrize(
+    "origins",
+    [
+        [ORIGIN, "https://evil.example.com"],
+        ["https://evil.example.com", ORIGIN],
+        [ORIGIN, ORIGIN],
+    ],
+)
+@pytest.mark.parametrize("path", ["/api/v1/auth/fake-login", "/api/v1/auth/logout"])
+def test_duplicate_origin_headers_are_403(origins: list[str], path: str) -> None:
+    auth = FakeAuth()
+    headers = [("Origin", origin) for origin in origins]
+    headers.append(("Cookie", f"{SESSION_COOKIE}={GOOD_TOKEN}"))
+
+    response = _client(auth).post(path, json={"member_id": str(MEMBER_ID)}, headers=headers)
+
+    assert response.status_code == 403
+    assert response.json() == {"detail": "origin_rejected"}
+    assert auth.login_requests == []
+    assert auth.logged_out == []
     assert "set-cookie" not in response.headers
 
 
@@ -313,13 +353,28 @@ def test_logout_ends_the_session_and_clears_the_cookie() -> None:
 
     assert response.status_code == 204
     assert response.content == b""
-    assert auth.logged_out == [MEMBER]
+    assert auth.logged_out == [GOOD_TOKEN]
     cookie = _session_cookie(response.headers["set-cookie"])
     assert cookie["__name__"] == SESSION_COOKIE
     assert cookie["max-age"] == "0"
     assert cookie["path"] == "/"
     assert "secure" in cookie
     assert "httponly" in cookie
+
+
+def test_logout_does_not_require_a_valid_session() -> None:
+    # 過期或被移出名單的 session：authenticate 認不出來，但登出仍要把 token 交給 log_out 刪掉。
+    auth = FakeAuth()
+    expired = "x" * 43
+
+    response = _client(auth).post(
+        "/api/v1/auth/logout", headers={"Origin": ORIGIN, **_cookie_header(expired)}
+    )
+
+    assert response.status_code == 204
+    assert auth.logged_out == [expired]
+    assert auth.tokens_seen == []
+    assert _session_cookie(response.headers["set-cookie"])["max-age"] == "0"
 
 
 def test_logout_without_session_is_still_204() -> None:

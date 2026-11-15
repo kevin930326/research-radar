@@ -3,7 +3,8 @@
 用 `build_auth_routes` 接真的資料庫，時鐘由測試控制。涵蓋：開發環境假登入、資料庫只存 token 的
 SHA-256、閒置與最長期限、撤銷（刪 session）、移出允許名單、不在名單的成員、Origin、登出後 token
 失效、試用環境只有管理者能登入（金鑰對由測試自己產生、公鑰清單由假函式給，不連 Cloudflare）、
-管理者不存在時印出兩個指令、日誌不出現管理者 email，以及 Epic 7 前半段：試用環境 session 的成員寫進
+管理者不存在時印出兩個指令、日誌不出現管理者 email、期限的精確邊界與時區、已經失效的 session
+登出時也刪掉，以及 Epic 7 前半段：試用環境 session 的成員寫進
 `judgment_event.member_id`。資料全是測試自己編的（`*@example.com`、假名字）。
 """
 
@@ -12,7 +13,7 @@ import json
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from functools import partial
 from typing import Any
 
@@ -190,6 +191,61 @@ def test_session_expires_after_14_idle_days(
     assert _me(dev_client, token).status_code == 401
 
 
+@pytest.mark.parametrize(
+    ("idle", "status"),
+    [
+        (timedelta(days=14) - timedelta(seconds=1), 200),  # 到期前一秒
+        (timedelta(days=14), 401),  # 恰好閒置 14 天就失效
+        (timedelta(days=14, seconds=1), 401),
+    ],
+)
+def test_idle_deadline_boundary(
+    database: Database, dev_client: TestClient, clock: Clock, idle: timedelta, status: int
+) -> None:
+    token = _dev_login(dev_client, _allow(database, "member.one@example.com", "測試甲"))
+
+    clock.advance(idle)
+
+    assert _me(dev_client, token).status_code == status
+
+
+@pytest.mark.parametrize(
+    ("age", "status"),
+    [
+        (timedelta(days=30) - timedelta(seconds=1), 200),  # 到期前一秒
+        (timedelta(days=30), 401),  # 建立滿 30 天就失效，就算最近才用過
+        (timedelta(days=30, seconds=1), 401),
+    ],
+)
+def test_max_age_deadline_boundary(
+    database: Database, dev_client: TestClient, clock: Clock, age: timedelta, status: int
+) -> None:
+    token = _dev_login(dev_client, _allow(database, "member.one@example.com", "測試甲"))
+    for _ in range(2):  # 第 13、26 天各用一次，讓閒置期限不先到
+        clock.advance(timedelta(days=13))
+        assert _me(dev_client, token).status_code == 200
+
+    clock.advance(age - timedelta(days=26))
+
+    assert _me(dev_client, token).status_code == status
+
+
+def test_deadlines_do_not_depend_on_the_clock_timezone(
+    db: TestDatabase, database: Database, dev_client: TestClient, clock: Clock
+) -> None:
+    # 主機時鐘用哪個時區表示同一個瞬間，存進去的時間與期限的判斷都一樣。
+    taipei, new_york = timezone(timedelta(hours=8)), timezone(timedelta(hours=-5))
+    clock.now = START.astimezone(taipei)
+    first = _dev_login(dev_client, _allow(database, "member.one@example.com", "測試甲"))
+    second = _dev_login(dev_client, _allow(database, "member.two@example.com", "測試乙"))
+    assert [row[3] for row in _sessions(db)] == [START, START]
+
+    clock.now = (START + timedelta(days=14) - timedelta(seconds=1)).astimezone(new_york)
+    assert _me(dev_client, first).status_code == 200
+    clock.now = (START + timedelta(days=14)).astimezone(taipei)
+    assert _me(dev_client, second).status_code == 401
+
+
 def test_active_session_still_expires_after_30_days(
     database: Database, dev_client: TestClient, clock: Clock
 ) -> None:
@@ -277,6 +333,38 @@ def test_logout_makes_the_token_useless(
     # 別人的 session 不受影響。
     assert _me(dev_client, other).status_code == 200
     assert len(_sessions(db)) == 1
+
+
+@pytest.mark.parametrize("why", ["idle", "max_age", "removed_from_allowlist"])
+def test_logout_deletes_a_session_that_is_no_longer_valid(
+    db: TestDatabase, database: Database, dev_client: TestClient, clock: Clock, why: str
+) -> None:
+    member_id = _allow(database, "member.one@example.com", "測試甲")
+    token = _dev_login(dev_client, member_id)
+    other_id = _allow(database, "member.two@example.com", "測試乙")
+    _dev_login(dev_client, other_id)
+    if why == "idle":
+        clock.advance(timedelta(days=14, minutes=1))
+    elif why == "max_age":
+        execute(
+            db,
+            "UPDATE session SET created_at = %s WHERE member_id = %s",
+            START - timedelta(days=31),
+            member_id,
+        )
+    else:
+        execute(db, "DELETE FROM allowed_email WHERE member_id = %s", member_id)
+    assert _me(dev_client, token).status_code == 401
+
+    response = dev_client.post(
+        "/api/v1/auth/logout",
+        headers={"Origin": DEV_ORIGIN, "Cookie": f"{SESSION_COOKIE}={token}"},
+    )
+
+    assert response.status_code == 204
+    # 已經失效的 session 也要刪掉那一列：之後調長期限或把人加回名單，這個 token 都不會再有效。
+    # 別人的 session（就算一樣過期了）不受影響。
+    assert [row[1] for row in _sessions(db)] == [other_id]
 
 
 # --- Epic 7 前半段：session 的成員就是判斷事件的成員 -----------------------------------------

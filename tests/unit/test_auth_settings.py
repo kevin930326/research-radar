@@ -1,17 +1,21 @@
 """登入設定的組合（Story 3.3、ADR-0046）：三種環境＋Google 登入、試用環境缺項逐一、天數、來源格式、
-`.env.example` 列齊、api `main()` 設定錯了回 1 並印原因、開發＋假登入走得到組裝。
+`.env.example` 列齊、api `main()` 設定錯了回 1 並印原因、開發＋假登入走得到組裝、`main()` 真正的
+掛載順序（登入路由在頁面殼之前）。
 
 管理者 email 一律用 `admin@example.com` 這類假值；不連資料庫、不起 uvicorn。
 """
 
 import json
+import signal
 import subprocess
 import sys
 from functools import partial
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
+import uvicorn
+from fastapi.testclient import TestClient
 
 import radar.entrypoints.api.main as api_main
 from radar.config import ConfigError, env_name, load_auth_settings
@@ -142,6 +146,51 @@ def test_fake_login_with_google_login_does_not_start(environment: str) -> None:
         "RADAR_FAKE_LOGIN 與 RADAR_GOOGLE_LOGIN 不能同時開（假登入與 Google 登入不能並存）"
         in problems
     )
+
+
+_COEXIST = "RADAR_FAKE_LOGIN 與 RADAR_GOOGLE_LOGIN 不能同時開（假登入與 Google 登入不能並存）"
+_PRODUCTION_FAKE = (
+    "正式環境（RADAR_ENVIRONMENT 是 production 或沒設定）不能開假登入（RADAR_FAKE_LOGIN）"
+)
+
+
+@pytest.mark.parametrize(
+    ("environment", "fake", "google", "expected"),
+    [
+        # 可以啟動時 expected 是假登入的模式（None＝沒有假登入）；不能啟動時是問題清單。
+        ("development", False, False, None),
+        ("development", False, True, None),
+        ("development", True, False, FakeLoginMode.PICK_MEMBER),
+        ("development", True, True, [_COEXIST]),
+        ("trial", False, False, None),
+        ("trial", False, True, None),
+        ("trial", True, False, FakeLoginMode.ACCESS_ADMIN),
+        ("trial", True, True, [_COEXIST]),
+        ("production", False, False, None),
+        ("production", False, True, None),
+        ("production", True, False, [_PRODUCTION_FAKE]),
+        ("production", True, True, [_COEXIST, _PRODUCTION_FAKE]),
+    ],
+)
+def test_every_environment_and_login_switch_combination(
+    environment: str, fake: bool, google: bool, expected: FakeLoginMode | list[str] | None
+) -> None:
+    # 試用環境要的 Access 設定一律給齊，結果只取決於環境與兩個開關。
+    environ = {
+        **TRIAL,
+        "RADAR_ENVIRONMENT": environment,
+        "RADAR_FAKE_LOGIN": str(fake).lower(),
+        "RADAR_GOOGLE_LOGIN": str(google).lower(),
+    }
+
+    if isinstance(expected, list):
+        assert _problems(environ) == expected
+        return
+    settings = load_auth_settings(environ)
+    assert settings.environment is Environment(environment)
+    assert settings.fake_login is fake
+    assert settings.google_login is google
+    assert fake_login_mode(settings) is expected
 
 
 def test_google_login_alone_is_allowed() -> None:
@@ -398,6 +447,65 @@ def test_api_main_with_development_fake_login_reaches_assembly(
     assert routes.allowed_origins == DEVELOPMENT_ORIGINS
     assert routes.cookie_max_age == 30 * 24 * 3600
     assert _startup_problems(capsys.readouterr().out) == []
+
+
+class _CapturedServer:
+    """頂替 uvicorn.Server：記下組好的 app，不開連接埠。"""
+
+    apps: ClassVar[list[Any]] = []
+
+    def __init__(self, config: Any) -> None:
+        self.should_exit = False
+        _CapturedServer.apps.append(config.app)
+
+    def run(self) -> None:
+        return None
+
+
+def test_api_main_mounts_web_after_the_auth_routes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # 走真正的 main()：真的組登入路由、真的掛前端（臨時目錄），只換掉資料庫與伺服器啟動。
+    # 日後 main() 若把 mount_web 提前，新的 API 路徑會被頁面殼或 404 蓋掉，這裡就會失敗。
+    _set_env(monkeypatch, {"RADAR_ENVIRONMENT": "development", "RADAR_FAKE_LOGIN": "true"})
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    shell = "<!doctype html><title>shell</title>"
+    (dist / "index.html").write_text(shell, encoding="utf-8")
+
+    class _Probes:
+        ping = staticmethod(lambda: True)
+        schema_state = staticmethod(lambda: None)
+        database = object()  # 下面的請求都不會碰到資料庫
+
+    def fake_build(_settings: Any, *, pool_size: int, migrations_dir: Path | None = None) -> Any:
+        return _Probes()
+
+    monkeypatch.setattr(api_main, "build_readiness_probes", fake_build)
+    monkeypatch.setattr(api_main, "WEB_DIST", dist)
+    monkeypatch.setattr(uvicorn, "Server", _CapturedServer)
+    _CapturedServer.apps.clear()
+    handlers = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGINT)}
+    try:
+        assert api_main.main() == 0
+    finally:
+        for sig, handler in handlers.items():
+            signal.signal(sig, handler)
+
+    (app,) = _CapturedServer.apps
+    client = TestClient(app, base_url="http://localhost:8000")
+    origin = {"Origin": "http://localhost:8000"}
+    me = client.get("/api/v1/me")
+    logout = client.post("/api/v1/auth/logout", headers=origin)
+    # 本文多一個欄位：路由在才會回 422（不在的話是 404），而且不碰資料庫。
+    fake_login = client.post("/api/v1/auth/fake-login", json={"extra": 1}, headers=origin)
+
+    assert (me.status_code, logout.status_code, fake_login.status_code) == (401, 204, 422)
+    assert me.json() == {"detail": "not_authenticated"}
+    assert fake_login.headers["content-type"].startswith("application/json")
+    assert shell not in me.text + fake_login.text
+    # 頁面殼確實掛上了。
+    assert client.get("/guide").text == shell
 
 
 def test_api_main_with_trial_fake_login_reaches_assembly_without_logging_admin_email(

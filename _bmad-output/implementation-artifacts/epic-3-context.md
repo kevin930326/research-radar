@@ -148,6 +148,9 @@
 
 - 3.2 緊接在 3.1 之後，之後每個前端 Story 都依賴它。後端鏈：3.3 → 3.4 → 3.6 → 3.7／3.13／3.16。前端：3.5 依賴 3.2、3.3；3.8 依賴 3.5、3.6；3.9 依賴 3.7、3.8；3.14 依賴 3.7、3.13；3.17 依賴 3.8、3.14、3.16；3.19 依賴 3.1～3.18。
 - **依賴 Epic 2**：3.6（AI 區塊、`effective_*` view、`judgment_event`）與 3.18（備份要數 AI 產出與向量）依賴 Epic 2，而 Epic 2 目前還是 backlog；3.11 要用 API 重驗 2.7 的「人工值優先」。
+- **3.3 留下的 Epic 7 前半段驗收（3.11、3.17 各補一個測試）**：3.3 做的時候還沒有任何成員寫入的端點，所以只證明了「session 認到的成員 ID 就是 `radar members allow` 建的那一筆、`google_sub` 是空的，而且這個 ID 寫得進 `judgment_event`」，測試是自己呼叫 repo 寫入（`tests/integration/test_sessions.py::test_trial_session_member_is_the_judgment_event_member`）。PR #69 把這條驗收記為「部分完成」。
+  - 3.11（修正分類）：補一個整合測試，試用環境假登入（驗 Access JWT）→ 經修正分類的 API 端點寫入 → 寫進去的判斷事件掛在 `allow` 建的 member ID 上、那位成員的 `google_sub` 是空的。
+  - 3.17（加入／移出與我的文獻庫）：同樣補一個，經加入文獻庫的端點寫入 → 文獻庫那一列掛在 `allow` 建的 member ID 上、`google_sub` 是空的（3.16 先有表與 API）。
 - 依賴 Epic 1：計數方塊（1.10）、`counted_paper`、快照、`sweep` 登記清單；3.1 的前端檢查加進 1.2 的 CI。
 - 3.19 開工前要提醒安裝 `insecure-defaults`、`differential-review`、`supply-chain-risk-auditor`。
 - 會留給之後 epic 接上的入口：
