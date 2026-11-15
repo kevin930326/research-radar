@@ -2,6 +2,7 @@
 （不連資料庫、不跑 Procrastinate worker；環境變數只用測試值）。
 """
 
+from datetime import timedelta
 from functools import partial
 from typing import Any
 
@@ -14,7 +15,9 @@ from radar.adapters.jobs import retry_stalled_jobs
 from radar.domain.jobs import SWEEP
 from radar.domain.settings import Settings
 from radar.entrypoints.bootstrap import build_worker
+from radar.entrypoints.worker import tasks as worker_tasks
 from radar.entrypoints.worker.tasks import register_tasks
+from radar.services.llm_gateway import expire_stale_runs
 
 APP_URL = "postgresql://radar_app@db:5432/radar"
 HEARTBEAT_URL = "https://hc.example.test/ping/abc"
@@ -130,3 +133,25 @@ def test_heartbeat_constructor_defaults_match_settings_defaults() -> None:
         defaults.heartbeat_retry_wait_max,
         defaults.heartbeat_retry_after_max,
     )
+
+
+def test_sweep_task_expires_stale_llm_runs_with_configured_age(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # sweep 是唯一把卡住的互動 derivation_run 改成 failed 的地方：一定要傳 expire_runs。
+    captured: dict[str, Any] = {}
+
+    def fake_sweep(*args: Any, **kwargs: Any) -> None:
+        captured.update(kwargs)
+
+    monkeypatch.setattr(worker_tasks, "sweep", fake_sweep)
+    parts = build_worker(SETTINGS, queue_pool_size=2, app_pool_size=3, heartbeat_urls={})
+    register_tasks(parts.job_app.app, parts, SETTINGS)
+
+    parts.job_app.app.tasks[SWEEP.name].func()
+
+    expire_runs = captured["expire_runs"]
+    assert isinstance(expire_runs, partial)
+    assert expire_runs.func is expire_stale_runs
+    assert expire_runs.args[1] is parts.database
+    assert expire_runs.args[2] == timedelta(seconds=SETTINGS.llm_run_stale_after)

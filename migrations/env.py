@@ -11,8 +11,12 @@ from alembic import context
 from sqlalchemy import Connection
 
 # 把各表的定義登記到 Base.metadata（alembic check 比對用）。
+import radar.repo.ai_outputs  # zh_summary、classification、research_model
 import radar.repo.api_calls  # api_call
+import radar.repo.audit  # audit_event
 import radar.repo.ingest_staging  # ingest_staging
+import radar.repo.judgments  # judgment_event
+import radar.repo.llm_ledger  # derivation_run、llm_call
 import radar.repo.papers  # paper、external_id、paper_abstract、paper_keyword
 import radar.repo.raw_fetches  # raw_fetch
 import radar.repo.snapshots  # snapshot

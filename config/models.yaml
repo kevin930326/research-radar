@@ -1,0 +1,64 @@
+# 模型與價格（AD-8、ADR-0009）：費用由 radar/domain/pricing.py 依這份計算。
+#
+# 價格查證：2026-11-12 讀官方價格頁（source_url），來源 ADR-0009；
+# 2026-11-14 以 Claude Code 的 claude-api skill 交叉確認（模型表快取 2026-11-03），數字一致。
+# 價格變了只改這份；第一次全庫 AI 跑完後，照 PRD §11 第 11 項用帳本的實際數字再對一次。
+#
+# 金額與倍率一律寫成字串（加引號）：YAML 的浮點數會失真，讀設定時不收數字。
+
+verified_on: 2026-11-12
+cross_checked_on: 2026-11-14
+source_url: "https://platform.claude.com/docs/en/about-claude/pricing"
+
+# 單次呼叫的總輸入（input + 快取寫入 + 快取讀取，含系統提示）超過這個數字，
+# 整次改用長上下文的價格（輸入與輸出都換）。
+long_context_threshold_tokens: 100000
+# 閘門的保護：預估輸入超過這個數字就不送出（llm_input_too_large），
+# 除非那個工作的 allow_over_input_limit 是 true。
+max_input_tokens: 100000
+
+# 快取讀取＝輸入價 × 0.1；快取寫入＝輸入價 × 2（回應不分 5 分鐘／1 小時，
+# 本專案不設快取，保守按 1 小時寫入的 2 倍算）。
+cache_read_multiplier: "0.1"
+cache_write_multiplier: "2"
+# Batch API：所有 token 五折。
+batch_multiplier: "0.5"
+
+# 離線估計輸入 token（不呼叫 count_tokens）：UTF-8 位元組數 ÷ bytes_per_token ＋ overhead_tokens，
+# 無條件進位。這是保守估計（寧可估多）：位元組級的 tokenizer 最壞一個位元組一個 token，
+# 所以 bytes_per_token 取 1；overhead_tokens 涵蓋訊息框架與角色標記。
+token_estimate:
+  bytes_per_token: "1"
+  overhead_tokens: 64
+
+# 每百萬 tokens 的價格（美元）。模型 ID 必須在 radar/domain/llm.py 的 ALLOWED_MODELS 裡。
+models:
+  claude-haiku-5-5:
+    # 官方寫「不早於」2027-10-07 退役（ADR-0009 第 5 點），比 ADR-0003 的 2027-12 重新決定點早；
+    # 到時照換模型的流程（候選 → 評估 → radar runs promote）換。
+    retires_not_before: 2027-10-07
+    input_usd_per_mtok: "0.10"
+    output_usd_per_mtok: "0.50"
+    long_context_input_usd_per_mtok: "0.50"
+    long_context_output_usd_per_mtok: "2.50"
+
+# 六個工作各用哪個模型（一種工作一個設定）。
+tasks:
+  zh_summary:
+    model: claude-haiku-5-5
+    allow_over_input_limit: false
+  classify:
+    model: claude-haiku-5-5
+    allow_over_input_limit: false
+  extract_model:
+    model: claude-haiku-5-5
+    allow_over_input_limit: false
+  merge_judge:
+    model: claude-haiku-5-5
+    allow_over_input_limit: false
+  qa_answer:
+    model: claude-haiku-5-5
+    allow_over_input_limit: false
+  eval_judge:
+    model: claude-haiku-5-5
+    allow_over_input_limit: false

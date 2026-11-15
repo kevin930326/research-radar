@@ -1,0 +1,25 @@
+# 每月預算（NFR-3、ADR-0009、ADR-0031）：閘門的預算檢查（BudgetGuard）與 `radar costs` 讀這份。
+#
+# 「本月」是台北時間的月份：[當月 1 日 00:00, 下月 1 日 00:00)。本月已花＝這段時間內所有
+# llm_call 的費用（含評估與 Batch），依工作代碼分。下個月一到自然歸零、恢復准許。
+#
+# 金額一律寫成字串（加引號）、單位美元：YAML 的浮點數會失真，讀設定時不收數字。
+
+# Anthropic 那邊 Research Radar 專用 workspace 的每月上限（NFR-3）。程式不會去改它，
+# 只拿來確認熔斷線比它低；它是應用層熔斷之外的第二道。
+workspace_limit_usd: "70"
+
+# 應用層熔斷線（NFR-3）：本月合計到達這個數字，全部 LLM 工作都不准呼叫（到達即擋），
+# 問答進入「只檢索」。必須低於 workspace_limit_usd。寫 "0" 表示全部停（功能預算寫 "0" 只停那個工作）。
+monthly_breaker_usd: "50"
+
+# 各功能（工作代碼）的每月預算：某個工作本月花費到達它的預算，只擋那個工作。
+# null＝這個工作沒有個別上限，只受熔斷線管。PRD 與 ADR 都沒有寫各功能的數字，
+# 數字待 Kevin 定，定了只改這份。六個工作都要列出來。
+task_budgets_usd:
+  zh_summary: null
+  classify: null
+  extract_model: null
+  merge_judge: null
+  qa_answer: null
+  eval_judge: null

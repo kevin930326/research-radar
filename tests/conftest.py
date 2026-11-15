@@ -15,6 +15,7 @@ from typing import Any
 
 import pytest
 
+from radar.domain import prompt_hashes
 from tests import vcr_settings
 from tests.database import TestDatabase, create_database, drop_database, migrate
 
@@ -39,6 +40,20 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
         if top == "integration":
             # 只限制 connect：建 socket、bind 本機埠（例如找空埠）仍可以。
             item.add_marker(pytest.mark.allow_hosts(LOCAL_HOSTS))
+
+
+@pytest.fixture(autouse=True)
+def restore_prompt_hashes() -> Iterator[None]:
+    """每個測試結束都還原 `radar/domain/prompt_hashes.py` 的登記表。
+
+    測試會暫時登記自己編的 prompt 檔（`tests/llm_support.py`、`tests/prompt_support.py`）；
+    `radar/` 裡只有 policy 與 prompt loader 讀它，沒有程式改它（架構測試守著）。
+    """
+    saved = (prompt_hashes.CURRENT_PROMPT_VERSIONS, prompt_hashes.PROMPT_FILE_HASHES)
+    try:
+        yield
+    finally:
+        prompt_hashes.CURRENT_PROMPT_VERSIONS, prompt_hashes.PROMPT_FILE_HASHES = saved
 
 
 @pytest.fixture
