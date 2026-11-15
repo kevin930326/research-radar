@@ -19,7 +19,7 @@ repo 準備公開（放履歷，同時公開的 repo 跑 GitHub Actions 不計�
 
 ## 決定
 
-用 MIT（選項 A）。授權全文在 repo 根目錄的 `LICENSE`。
+用 MIT（選項 A）。授權全文在 repo 根目錄的 `LICENSE`；檔案內容只放標準的 MIT 全文，不加別的說明，GitHub 才認得出是 MIT（多加一段就會顯示成認不出的授權）。
 
 MIT 只涵蓋這個專案自己寫的程式與文件。下面這些是別人的東西，照各自的授權，不因為放在這個 repo 就變成 MIT：
 
