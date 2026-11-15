@@ -826,6 +826,7 @@
 - **SQLSTATE 57014（query_canceled）**：PostgreSQL 回報「這一句被取消」的錯誤碼，`statement_timeout` 到了就是它；向量化在等鎖時收到它也當成「等鎖逾時」處理（ADR-0040）。
 - **跨日重查**：額度占好後、第一次送出前若已過了 UTC 午夜，就放掉前一天的占用、照新的一天的用量重新檢查一次，放得下才送（ADR-0040）。
 - **研究問題的前置語**：句子裡 `we examine whether` 前面的那段字（例如 `In this study, `）；要是這篇研究自己的說法，換成 `Other researchers report that` 這種別人的說法，後面的結果就不算（ADR-0039）。
+- **取消舊的 CI 執行（concurrency）**：同一個 PR 又推了新的 commit 時，GitHub 自動把還在跑的上一次檢查停掉，只留最新的那一次；省分鐘數，代價是被取消的那個 commit 沒有結果。
 - **保守上限（批次預留）**：每筆 Batch 請求「最多可能花多少」：輸入估多一點、輸出算滿 `max_tokens`；還沒有結果的 Batch 先把這個數字從剩餘預算扣掉，像訂位（ADR-0041）。
 - **`batch_submission`（Batch 的狀態表）**：一次送給 Anthropic 的一批請求的紀錄，狀態從 `queued`（排好）→ `submitting`（送出中）→ `submitted`（對方收下、拿到 batch ID）→ `ended` → `imported`；出事是 `failed` 或 `needs_attention`（ADR-0041）。
 - **`batch_item`（批次裡的一筆）**：批次裡的一個請求，對到一筆 `derivation_run`；它的 id 就是送給 Anthropic 的 `custom_id`（ADR-0041）。
