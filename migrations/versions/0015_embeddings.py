@@ -13,12 +13,14 @@ ADR-0040）。
   唯一索引（上面那個索引含 prompt_version，NULL 擋不到）。
 - `api_call`：`source` 多一個 `workers_ai`；新增 `estimated_input_tokens`（只有 workers_ai 有值：
   Workers AI 不回報用量，記自己估的 token）。
+- 新增 `embedding_quota_hold`（額度占用）：每次 Workers AI 嘗試送出前占住的估計 token，嘗試結束換成
+  那次嘗試的 `api_call`；過了 `expires_at` 還在的（行程中斷）由下一次占用轉成用量。
 
 和 `radar/repo/embeddings.py`、`radar/repo/llm_ledger.py`、`radar/repo/api_calls.py` 的表定義一致
 （`alembic check` 比對；HNSW 是運算式索引，`alembic check` 只比名稱，完整定義由 integration
 測試核對）；
 CHECK 約束 autogenerate 不比，這裡照抄同一份條件。可降版：降版會刪掉全部向量、向量化的
-`derivation_run` 與 `workers_ai` 的 `api_call`，再把約束改回 0014 的樣子。
+`derivation_run`、額度占用與 `workers_ai` 的 `api_call`，再把約束改回 0014 的樣子。
 
 版本：0015
 上一版：0014
@@ -171,8 +173,34 @@ def upgrade() -> None:
         "(source = 'workers_ai') = (estimated_input_tokens IS NOT NULL)",
     )
 
+    # 額度占用：每次嘗試前占住、嘗試後換成 api_call（兩個 worker 不會同時用掉同一份剩餘額度）。
+    op.create_table(
+        "embedding_quota_hold",
+        sa.Column("id", sa.Uuid(), server_default=sa.text("uuidv7()"), nullable=False),
+        sa.Column("estimated_input_tokens", sa.Integer(), nullable=False),
+        sa.Column("reserved_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("expires_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.PrimaryKeyConstraint("id", name="pk_embedding_quota_hold"),
+        sa.CheckConstraint(
+            "estimated_input_tokens >= 0",
+            name="ck_embedding_quota_hold_estimated_input_tokens_not_negative",
+        ),
+        sa.CheckConstraint(
+            "expires_at > reserved_at", name="ck_embedding_quota_hold_expires_after_reserved"
+        ),
+    )
+    op.create_index("ix_embedding_quota_hold_expires_at", "embedding_quota_hold", ["expires_at"])
+
 
 def downgrade() -> None:
+    op.drop_index("ix_embedding_quota_hold_expires_at", table_name="embedding_quota_hold")
+    op.drop_table("embedding_quota_hold")
     op.drop_constraint(
         "ck_api_call_estimated_input_tokens_iff_workers_ai", "api_call", type_="check"
     )

@@ -16,6 +16,13 @@ Story 2.8）。
 - 408、429、5xx、連線錯誤與逾時由 stamina 指數退避重試；帶 `Retry-After` 時照對方給的秒數等，要等的
   超過 `retry_after_max_seconds` 就不再重試（不提早重送）。重試用完丟 `EmbeddingTransientError`。
   401、403、404 丟 `EmbeddingConfigurationError`；其他 4xx 丟 `EmbeddingRequestError`；都不重試。
+- 總時限（`api.total_timeout_seconds`，含所有重試與等待）：剩下的時間不到 0 就不開始新的嘗試；每次
+  嘗試的各階段逾時取 min(`timeout_seconds`, 剩下的秒數)；重試前要等的會超過總時限就不等、不再試；
+  回應用串流讀，收到標頭與每一塊資料後都看一次總時限，過了就中斷（對方一直慢慢送也停得下來）。
+  總時限到了丟 `EmbeddingTransientError`。最壞的結束時間見 `WorkersAiApi.request_limit_seconds`。
+- 每次 HTTP 嘗試前後呼叫服務交給的 `AttemptHooks`（`domain.embeddings.current_attempt_hooks`）：
+  嘗試前 `before()`（額度放不下時丟 `EmbeddingQuotaReachedError`，原樣丟出、不送、不再重試），
+  嘗試後 `after(EmbeddingAttempt)`（送出與否、狀態碼、會不會計費）。不在服務的區塊裡呼叫時照常送。
 - token 與 account id 以 `SecretStr` 存在這個物件的私有欄位，送出前才取值：`repr`、錯誤訊息
   都不含它們，也不含完整網址
   （網址裡有 account id；stamina 重試時會把例外寫進日誌）。httpx 的例外不串在我們的例外後面。
@@ -24,7 +31,9 @@ Story 2.8）。
 """
 
 import json
-from collections.abc import Sequence
+import random
+import time
+from collections.abc import Callable, Sequence
 from types import TracebackType
 from typing import Any, Self
 
@@ -35,12 +44,16 @@ from pydantic import SecretStr
 from radar.adapters.heartbeat import parse_retry_after
 from radar.domain.embeddings import (
     MAX_BATCH_SIZE,
+    AttemptHooks,
+    EmbeddingAttempt,
     EmbeddingConfigurationError,
+    EmbeddingError,
     EmbeddingRequestError,
     EmbeddingResponseError,
     EmbeddingTransientError,
     WorkersAiApi,
     check_embedding_vectors,
+    current_attempt_hooks,
 )
 from radar.domain.llm import check_cloud_safe_text, check_cloud_safe_texts
 from radar.domain.policy import CloudSafeText, cloud_text
@@ -59,6 +72,8 @@ class _RetryableWorkersAiError(Exception):
         self.reason = reason
         self.http_status = http_status
         self.retry_after = retry_after
+        # 下一次重試要等的會超過總時限（`backoff` 設），所以不再試。
+        self.deadline_reached = False
 
 
 class WorkersAiEmbeddingProvider:
@@ -74,7 +89,9 @@ class WorkersAiEmbeddingProvider:
         dimensions: int,
         query_instruction: str | None = None,
         transport: httpx2.BaseTransport | None = None,
+        monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
+        """`monotonic`：算總時限用的時鐘（秒）；測試換成假的，不必真的等。"""
         if not isinstance(account_id, SecretStr) or not account_id.get_secret_value():
             raise ValueError("account_id 要是不是空的 SecretStr")
         if not isinstance(api_token, SecretStr) or not api_token.get_secret_value():
@@ -89,6 +106,7 @@ class WorkersAiEmbeddingProvider:
         self._model_id = model_id
         self._dimensions = dimensions
         self._query_instruction = query_instruction
+        self._monotonic = monotonic
         self._client = httpx2.Client(timeout=api.timeout_seconds, transport=transport)
 
     def __repr__(self) -> str:
@@ -152,9 +170,31 @@ class WorkersAiEmbeddingProvider:
 
     def _run(self, body: dict[str, Any], *, count: int) -> list[list[float]]:
         retry = self._api.retry
+        hooks = current_attempt_hooks()
+        deadline = self._monotonic() + self._api.total_timeout_seconds
+        attempts = 0
+
+        def backoff(error: Exception) -> bool | float:
+            """stamina 的退避判斷：不重試回 False；要重試回要等的秒數（不會等過總時限）。"""
+            if not isinstance(error, _RetryableWorkersAiError):
+                return False
+            if self._retry_after_too_long(error):
+                return False
+            wait = error.retry_after
+            if wait is None:
+                wait = min(
+                    retry.wait_max_seconds,
+                    retry.wait_initial_seconds * 2 ** (attempts - 1)
+                    + random.uniform(0, retry.wait_jitter_seconds),
+                )
+            if self._monotonic() + wait >= deadline:
+                error.deadline_reached = True
+                return False
+            return wait
+
         try:
             for attempt in stamina.retry_context(
-                on=self._backoff,
+                on=backoff,
                 attempts=retry.attempts,
                 timeout=None,
                 wait_initial=retry.wait_initial_seconds,
@@ -162,7 +202,8 @@ class WorkersAiEmbeddingProvider:
                 wait_jitter=retry.wait_jitter_seconds,
             ):
                 with attempt:
-                    response = self._post_once(body)
+                    attempts += 1
+                    content = self._attempt(body, deadline, hooks)
         except _RetryableWorkersAiError as exc:
             if self._retry_after_too_long(exc):
                 raise EmbeddingTransientError(
@@ -170,20 +211,16 @@ class WorkersAiEmbeddingProvider:
                     f" {retry.retry_after_max_seconds:g} 秒",
                     http_status=exc.http_status,
                 ) from None
+            if exc.deadline_reached:
+                raise EmbeddingTransientError(
+                    f"{exc.reason}；再等就超過總時限"
+                    f" {self._api.total_timeout_seconds:g} 秒，不再重試",
+                    http_status=exc.http_status,
+                ) from None
             raise EmbeddingTransientError(
                 f"重試用完仍失敗（{exc.reason}）", http_status=exc.http_status
             ) from None
-        return _parse_response(response, count=count, dimensions=self._dimensions)
-
-    def _backoff(self, error: Exception) -> bool | float:
-        """stamina 的退避判斷：不重試回 False；照一般退避回 True；照 `Retry-After` 回秒數。"""
-        if not isinstance(error, _RetryableWorkersAiError):
-            return False
-        if error.retry_after is None:
-            return True
-        if self._retry_after_too_long(error):
-            return False
-        return error.retry_after
+        return _parse_response(content, count=count, dimensions=self._dimensions)
 
     def _retry_after_too_long(self, error: _RetryableWorkersAiError) -> bool:
         return (
@@ -191,46 +228,99 @@ class WorkersAiEmbeddingProvider:
             and error.retry_after > self._api.retry.retry_after_max_seconds
         )
 
+    def _deadline_error(self) -> EmbeddingTransientError:
+        return EmbeddingTransientError(
+            f"超過總時限 {self._api.total_timeout_seconds:g} 秒，不再嘗試"
+        )
+
+    def _attempt(self, body: dict[str, Any], deadline: float, hooks: AttemptHooks | None) -> bytes:
+        """一次 HTTP 嘗試，前後呼叫 `hooks`；回 200 的回應內容。"""
+        if self._monotonic() >= deadline:
+            raise self._deadline_error()
+        if hooks is not None:
+            hooks.before()  # 額度放不下時丟 EmbeddingQuotaReachedError：不送、不再重試
+        remaining = deadline - self._monotonic()
+        if remaining <= 0:
+            if hooks is not None:
+                hooks.after(EmbeddingAttempt(sent=False, http_status=None, billable=False))
+            raise self._deadline_error()
+        status: int | None = None
+        billable = True
+        try:
+            status, content = self._post_once(
+                body, min(self._api.timeout_seconds, remaining), deadline
+            )
+        except _RetryableWorkersAiError as exc:
+            status = exc.http_status
+            raise
+        except EmbeddingConfigurationError as exc:
+            # 驗證或路徑就被拒，沒有跑模型：不計用量。
+            status, billable = exc.http_status, False
+            raise
+        except EmbeddingError as exc:
+            status = exc.http_status
+            raise
+        finally:
+            if hooks is not None:
+                hooks.after(EmbeddingAttempt(sent=True, http_status=status, billable=billable))
+        return content
+
     def _url(self) -> str:
         account_id = self.__account_id.get_secret_value()
         return f"{self._api.base_url}/accounts/{account_id}/ai/run/{self._model_id}"
 
-    def _post_once(self, body: dict[str, Any]) -> httpx2.Response:
-        """送一次請求；可重試的失敗丟 `_RetryableWorkersAiError`。訊息只有錯誤類別或狀態碼。"""
+    def _post_once(
+        self, body: dict[str, Any], timeout: float, deadline: float
+    ) -> tuple[int, bytes]:
+        """送一次請求，回（狀態碼, 200 的回應內容）；可重試的失敗丟 `_RetryableWorkersAiError`。
+
+        回應用串流讀：收到標頭與每一塊資料後都看一次總時限，過了丟 `EmbeddingTransientError`。
+        訊息只有錯誤類別或狀態碼。
+        """
+        status: int | None = None
         try:
-            response = self._client.post(
+            with self._client.stream(
+                "POST",
                 self._url(),
                 json=body,
                 headers={"Authorization": f"Bearer {self.__api_token.get_secret_value()}"},
-            )
+                timeout=httpx2.Timeout(timeout),
+            ) as response:
+                status = response.status_code
+                if status in RETRY_STATUSES or status >= 500:
+                    raise _RetryableWorkersAiError(
+                        f"HTTP {status}",
+                        http_status=status,
+                        retry_after=parse_retry_after(response.headers.get("Retry-After")),
+                    )
+                if status in CONFIGURATION_STATUSES:
+                    raise EmbeddingConfigurationError(f"HTTP {status}", http_status=status)
+                if status != 200:
+                    raise EmbeddingRequestError(f"HTTP {status}", http_status=status)
+                chunks: list[bytes] = []
+                if self._monotonic() >= deadline:
+                    raise EmbeddingTransientError("讀回應時超過總時限", http_status=status)
+                for chunk in response.iter_bytes():
+                    chunks.append(chunk)
+                    if self._monotonic() >= deadline:
+                        raise EmbeddingTransientError("讀回應時超過總時限", http_status=status)
         except httpx2.TransportError as exc:
             # 連線錯誤、逾時、連線中斷：可以再試。訊息只帶類別名稱（httpx 的訊息可能帶網址）。
-            raise _RetryableWorkersAiError(type(exc).__name__, http_status=None) from None
+            raise _RetryableWorkersAiError(type(exc).__name__, http_status=status) from None
         except httpx2.HTTPError as exc:
             # 例如回應的壓縮格式解不開：對方已經回應，不重試。
-            raise EmbeddingResponseError(type(exc).__name__) from None
-        status = response.status_code
-        if status in RETRY_STATUSES or status >= 500:
-            raise _RetryableWorkersAiError(
-                f"HTTP {status}",
-                http_status=status,
-                retry_after=parse_retry_after(response.headers.get("Retry-After")),
-            )
-        if status in CONFIGURATION_STATUSES:
-            raise EmbeddingConfigurationError(f"HTTP {status}", http_status=status)
-        if status != 200:
-            raise EmbeddingRequestError(f"HTTP {status}", http_status=status)
-        return response
+            raise EmbeddingResponseError(type(exc).__name__, http_status=status) from None
+        return status, b"".join(chunks)
 
 
-def _parse_response(response: httpx2.Response, *, count: int, dimensions: int) -> list[list[float]]:
+def _parse_response(content: bytes, *, count: int, dimensions: int) -> list[list[float]]:
     """解析 200 的回應信封（見模組說明）。不符丟 `EmbeddingResponseError`（帶狀態碼 200）。"""
 
     def bad(reason: str) -> EmbeddingResponseError:
-        return EmbeddingResponseError(reason, http_status=response.status_code)
+        return EmbeddingResponseError(reason, http_status=200)
 
     try:
-        envelope = json.loads(response.content.decode("utf-8"))
+        envelope = json.loads(content.decode("utf-8"))
     except UnicodeDecodeError, ValueError, RecursionError:
         raise bad("回應不是 JSON") from None
     if not isinstance(envelope, dict):

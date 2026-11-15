@@ -9,6 +9,8 @@ from sqlalchemy import Connection, Engine, create_engine, make_url, text
 from sqlalchemy.exc import DBAPIError, SQLAlchemyError
 from sqlalchemy.pool import QueuePool
 
+from radar.domain.errors import LockWaitTimeoutError
+
 log = structlog.get_logger(__name__)
 
 # --- advisory lock 的鍵 -----------------------------------------------------------------------
@@ -26,10 +28,19 @@ log = structlog.get_logger(__name__)
 # 值是 ASCII「RRAW」（Research Radar raw）。
 INGEST_WRITE_LOCK_KEY: Final = 0x5252_4157
 
+# 向量化的額度占用（ADR-0040）：每次 Workers AI 嘗試前，在短交易裡拿這把獨佔交易級鎖
+# （`Database.transaction_lock`，會等、受 `lock_timeout` 限制），讀「今天已用＋占用中」
+# 再新增占用；兩個 worker 不會同時通過同一份剩餘額度的檢查。值是 ASCII「RREM」。
+EMBEDDING_QUOTA_LOCK_KEY: Final = 0x5252_454D
+
 # LLM 閘門取得執行資格的鎖（ADR-0009 第 4 步、ADR-0030）：鍵是 `domain/fingerprints.run_lock_key`
 # 由（對象, 工作, prompt 版本, 模型, input_sha256）算出的 64 位元雜湊，用阻塞的獨佔交易級鎖
 # （`Database.transaction_lock`），交易結束自動放掉。雜湊和上面的固定鍵撞到的機率約 2^-64；
 # 真的撞到也只是多等一下，不會算錯。
+
+# 等鎖逾時的 SQLSTATE：55P03 lock_not_available（`lock_timeout`）；57014 query_canceled
+# （`statement_timeout` 比 `lock_timeout` 先到時，等鎖的那一句被取消）。
+_LOCK_TIMEOUT_SQLSTATES: Final = frozenset({"55P03", "57014"})
 
 # 這條連線（`pg_backend_pid()`）是不是還持有 bigint 鍵的獨佔 session 級 advisory lock。
 # pg_locks 把 bigint 鍵拆成高 32 位元（classid）與低 32 位元（objid），objsubid = 1。
@@ -133,6 +144,33 @@ class Database:
         """
         with self._engine.begin() as connection:
             yield connection
+
+    @contextmanager
+    def transaction_with_lock_timeout(self, lock_timeout_ms: int) -> Iterator[Connection]:
+        """同 `transaction()` 開一個交易，一開始 `SET LOCAL lock_timeout`（只在這個交易有效）。
+
+        裡面任何一句等列鎖、advisory lock 或唯一索引上別人還沒 commit 的列超過 `lock_timeout_ms`
+        毫秒，就退回整個交易、丟 `LockWaitTimeoutError`（`statement_timeout` 先到而取消的那一句
+        也算）。其他錯誤原樣往上丟。
+
+        Raises:
+            ValueError: `lock_timeout_ms` 不是正整數。
+            LockWaitTimeoutError: 等鎖超過時限（交易已退回）。
+        """
+        if type(lock_timeout_ms) is not int or lock_timeout_ms < 1:
+            raise ValueError("lock_timeout_ms 要是正整數")
+        try:
+            with self._engine.begin() as connection:
+                connection.execute(
+                    text("SELECT set_config('lock_timeout', :value, true)"),
+                    {"value": f"{lock_timeout_ms}ms"},
+                )
+                yield connection
+        except DBAPIError as exc:
+            if not _is_lock_timeout(exc):
+                raise
+            # 例外訊息可能含主機與帳號，不串原例外。
+            raise LockWaitTimeoutError() from None
 
     @staticmethod
     @contextmanager
@@ -238,6 +276,10 @@ class Database:
                 return None
             rows = connection.execute(text("SELECT version_num FROM alembic_version"))
             return frozenset(str(value) for value in rows.scalars())
+
+
+def _is_lock_timeout(exc: DBAPIError) -> bool:
+    return getattr(exc.orig, "sqlstate", None) in _LOCK_TIMEOUT_SQLSTATES
 
 
 def _unlock_or_discard(connection: Connection, key: int) -> None:

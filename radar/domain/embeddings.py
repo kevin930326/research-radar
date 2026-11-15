@@ -8,18 +8,25 @@
   才接起來（`policy.join_cloud_safe_texts`）。
 - 用量：Workers AI 的向量回應沒有 usage 欄位，`api_call` 記的是自己估的 token
   （`estimate_embedding_tokens`：
-  每段 UTF-8 位元組 ÷ `bytes_per_token` 無條件進位，再加每段固定的 `overhead_tokens_per_text`），
-  刻意偏高估；額度判斷（`quota_allows`）也用這個估計換算 neurons。
+  每段 UTF-8 位元組 ÷ `bytes_per_token` 無條件進位，再加每段固定的 `overhead_tokens_per_text`）。
+  除數是經驗值（`config/embeddings.yaml`），沒有保守上界的依據，要用 20 篇試跑對照 Cloudflare
+  後台的 neurons 校正；額度判斷（`quota_allows`）也用這個估計換算 neurons。
+- 每次 HTTP 嘗試（含 adapter 內部的重試）前後，adapter 呼叫服務透過 `report_attempts_to` 交給它的
+  `AttemptHooks`：嘗試前占住額度（放不下就丟 `EmbeddingQuotaReachedError`、不送），嘗試後把占用轉成
+  這次嘗試的用量（`EmbeddingAttempt`）。
 - 模型回的向量當作使用者輸入驗證（`check_embedding_vectors`）：筆數、維度、數字有限、在 halfvec 的
-  範圍內；不符整批不寫。
+  範圍內、轉成 halfvec 精度後不是全 0；不符整批不寫。
 - 錯誤型別（`EmbeddingError` 與子類別）帶 `domain/errors.py` 的原因代碼；訊息只有固定的原因
   與狀態碼，
   不含網址、account id、token 或文字內容。
 """
 
 import math
+import struct
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import ROUND_CEILING, Decimal
@@ -81,7 +88,11 @@ class WorkersAiApi(BaseModel):
     model_config = _FROZEN
 
     base_url: str
+    # 單一次 HTTP 嘗試各階段（連線、送出、每次讀取）的逾時秒數。
     timeout_seconds: float = Field(gt=0, le=300)
+    # 一次 `embed_documents`／`embed_query` 含所有重試與等待的總時限（秒）：時限到了不再開始新的
+    # 嘗試、不再等，正在讀的回應也在下一塊資料到時中斷（見 `request_limit_seconds`）。
+    total_timeout_seconds: float = Field(default=480, gt=0, le=3600)
     retry: EmbeddingRetry
 
     @field_validator("base_url")
@@ -97,15 +108,19 @@ class WorkersAiApi(BaseModel):
         return value.rstrip("/")
 
     @property
-    def worst_case_seconds(self) -> float:
-        """一次 `embed_documents` 最久大約要多久：每次嘗試都等到逾時，每次重試前都等最久
-        （退避上限＋抖動與 `Retry-After` 上限取大的）。逾時是 httpx 每個階段各自的上限，所以是估計。
+    def request_limit_seconds(self) -> float:
+        """一次 `embed_documents` 從開始到結束最久多久（上限，不是估計）。
+
+        adapter 的做法（`radar/adapters/workers_ai`）：
+        - 總時限剩下的秒數不到 0 就不開始新的嘗試；每次嘗試的各階段逾時取
+          min(`timeout_seconds`, 剩下的秒數)，所以「連線」一定在總時限內結束。
+        - 重試前要等的秒數（退避或 `Retry-After`）會超過總時限就不等、不再試。
+        - 回應用串流一塊一塊讀，收到標頭與每一塊之後都看一次總時限，過了就中斷
+          （對方一直慢慢送少量資料也停得下來）。
+        所以最壞是：連線剛好在總時限結束，接著「送出」與「等標頭」各等滿一次逾時：
+        總時限 ＋ 2 × `timeout_seconds`。
         """
-        retry = self.retry
-        longest_wait = max(
-            retry.wait_max_seconds + retry.wait_jitter_seconds, retry.retry_after_max_seconds
-        )
-        return retry.attempts * self.timeout_seconds + (retry.attempts - 1) * longest_wait
+        return self.total_timeout_seconds + 2 * self.timeout_seconds
 
 
 class EmbeddingQuota(BaseModel):
@@ -184,6 +199,27 @@ class EmbeddingConfig(BaseModel):
     api: WorkersAiApi
     quota: EmbeddingQuota
     token_estimate: EmbeddingTokenEstimate
+    # 取得執行資格、寫入時等論文那一列的鎖，以及占用額度時等額度鎖的上限（秒，`lock_timeout`）。
+    # 等不到：取得資格 → 當成別的工作正在做（`busy`，不送）；寫入 → 這篇標成失敗；占用額度 → 丟錯。
+    lock_timeout_seconds: float = Field(default=2, gt=0, le=60)
+
+    @property
+    def lock_timeout_ms(self) -> int:
+        """`lock_timeout_seconds` 換成毫秒（PostgreSQL 的 `lock_timeout` 用）。"""
+        return max(1, math.ceil(self.lock_timeout_seconds * 1000))
+
+    @property
+    def run_limit_seconds(self) -> float:
+        """一筆向量化的 `derivation_run` 從建立到結束最久多久：要小於 sweep 的時限
+        （`RADAR_LLM_RUN_STALE_AFTER`），否則還在等回應的 run 會被誤判逾時收掉。
+
+        一批裡第一篇取得資格後，還要等其他篇取得資格（每篇最多等一次鎖）、整個請求
+        （`api.request_limit_seconds`）、最後一次嘗試的記帳（最多等一次鎖）、每篇寫入（每篇最多等
+        一次鎖）。鎖以外的 SQL 是毫秒級，不另外算。也當作額度占用的有效期限：過了這個時間，
+        占用的那次嘗試一定已經結束（或行程已經不在）。
+        """
+        lock_waits = 2 * self.batch_size + 2
+        return self.api.request_limit_seconds + lock_waits * self.lock_timeout_seconds
 
 
 # --- 輸入 ---------------------------------------------------------------------------------------
@@ -246,10 +282,11 @@ def build_embedding_input(source: PaperLlmSource, input_kind: InputKind) -> Embe
 
 
 def estimate_embedding_tokens(texts: Sequence[str], estimate: EmbeddingTokenEstimate) -> int:
-    """這些文字送去向量化大約是幾個 token：保守估計（偏高）。
+    """這些文字送去向量化大約是幾個 token（估計值）。
 
     每段 ceil(UTF-8 位元組 ÷ `bytes_per_token`) ＋ `overhead_tokens_per_text`，加總。
-    英文平均約 4 個位元組一個 token，設 3 是刻意高估；中文一個字 3 個位元組，約一個 token。
+    除數是經驗值（見 `config/embeddings.yaml`）：縮寫、罕見詞、符號或多語文字的切法可能和英文平均
+    不同，沒有「一定偏高」的保證；要用 20 篇試跑對照 Cloudflare 後台的 neurons 校正。
     """
     total = 0
     for text in texts:
@@ -267,11 +304,70 @@ def quota_allows(used_tokens: int, next_tokens: int, quota: EmbeddingQuota) -> b
 
 
 @dataclass(frozen=True, slots=True)
-class EmbeddingApiCall:
-    """一次向量化請求的紀錄（`api_call`，`source`＝`workers_ai`）。
+class EmbeddingAttempt:
+    """一次 HTTP 嘗試的結果，adapter 在每次嘗試之後交給 `AttemptHooks.after`。
 
-    - `http_status`：最後一次嘗試的狀態碼；沒有回應（連線錯誤、逾時）是 None。
-    - `estimated_input_tokens`：自己估的 token（Workers AI 不回報用量）；失敗也照記（保守）。
+    - `sent`：請求有沒有送出去；False＝嘗試前就停下（例如總時限到了），不記用量、只放掉占用。
+    - `http_status`：這次嘗試的狀態碼；沒有回應（連線錯誤、逾時）是 None。
+    - `billable`：可能已經用掉 neurons（要照估計記用量）。只有設定錯（401、403、404：驗證或路徑
+      就被拒，沒有跑模型）與沒送出是 False。
+    """
+
+    sent: bool
+    http_status: int | None
+    billable: bool
+
+
+@dataclass(frozen=True, slots=True)
+class AttemptHooks:
+    """服務交給 adapter 的兩個回呼（不是 interface：只有服務會建它）。
+
+    - `before()`：每次 HTTP 嘗試之前呼叫（含重試）。今天的額度放不下這次嘗試時丟
+      `EmbeddingQuotaReachedError`，adapter 原樣丟出、不送這一次、不再重試。
+    - `after(attempt)`：每次嘗試之後呼叫（成功、失敗、沒送出都會），把占用轉成這次嘗試的用量。
+    """
+
+    before: Callable[[], None]
+    after: Callable[[EmbeddingAttempt], None]
+
+
+_ATTEMPT_HOOKS: ContextVar[AttemptHooks | None] = ContextVar(
+    "embedding_attempt_hooks", default=None
+)
+
+
+@contextmanager
+def report_attempts_to(hooks: AttemptHooks) -> Iterator[None]:
+    """區塊裡（同一個執行緒、同一個 context）的向量化呼叫，每次 HTTP 嘗試都回報給 `hooks`。
+
+    用 `ContextVar`：兩個執行緒共用同一個 provider 時各自回報給自己的服務，不會串在一起；
+    port 的方法簽名不變（替身不回報，服務把整次呼叫當成一次嘗試記帳）。
+    """
+    token = _ATTEMPT_HOOKS.set(hooks)
+    try:
+        yield
+    finally:
+        _ATTEMPT_HOOKS.reset(token)
+
+
+def current_attempt_hooks() -> AttemptHooks | None:
+    """目前要回報的 `AttemptHooks`；不在 `report_attempts_to` 區塊裡是 None（adapter 照常送）。"""
+    return _ATTEMPT_HOOKS.get()
+
+
+class EmbeddingQuotaReachedError(Exception):
+    """今天（UTC）的額度放不下下一次嘗試：不送、不再重試（不算失敗，下一次續跑）。"""
+
+    def __init__(self) -> None:
+        super().__init__("今天的估計用量加上這次嘗試會超過停下的比例")
+
+
+@dataclass(frozen=True, slots=True)
+class EmbeddingApiCall:
+    """一次向量化 HTTP 嘗試的紀錄（`api_call`，`source`＝`workers_ai`）。
+
+    - `http_status`：這次嘗試的狀態碼；沒有回應（連線錯誤、逾時）是 None。
+    - `estimated_input_tokens`：自己估的 token（Workers AI 不回報用量）；失敗也照記。
     - `cost_usd` 一律記 0：在免費額度內，用量到設定的比例就停（ADR-0040）。
     """
 
@@ -429,7 +525,8 @@ def check_embedding_vectors(raw: object, *, count: int, dimensions: int) -> list
     """模型回的向量當作使用者輸入驗證，回轉成 float 的向量。
 
     要是 `count` 筆、每筆剛好 `dimensions` 個數字；數字是 int 或 float（不收 bool）、有限、
-    絕對值不超過 halfvec 的上限 65504。
+    絕對值不超過 halfvec 的上限 65504；轉成 halfvec 的半精度之後至少一個分量不是 0（全 0 的向量
+    沒有方向，餘弦距離算不出來、HNSW 餘弦索引也不收；絕對值小於約 3e-8 的數字轉成半精度會變成 0）。
 
     Raises:
         EmbeddingResponseError: 任何一項不符（訊息只說哪一項，不含數值）。
@@ -454,8 +551,16 @@ def check_embedding_vectors(raw: object, *, count: int, dimensions: int) -> list
             if not math.isfinite(number) or abs(number) > HALFVEC_MAX:
                 raise EmbeddingResponseError(f"第 {index} 筆向量有非有限或超出範圍的數字")
             vector.append(number)
+        if not any(_to_half(number) for number in vector):
+            raise EmbeddingResponseError(f"第 {index} 筆向量轉成 halfvec 後全是 0")
         vectors.append(vector)
     return vectors
+
+
+def _to_half(number: float) -> float:
+    """轉成 IEEE 半精度（halfvec 存的精度）再轉回來；呼叫前已確認在 ±65504 內。"""
+    half: float = struct.unpack("<e", struct.pack("<e", number))[0]
+    return half
 
 
 # --- 一次執行的結果與報表 -----------------------------------------------------------------------
@@ -476,10 +581,13 @@ class EmbedRunResult:
 
     - `embedded`：這次寫入（新增或覆寫）向量的論文篇數。
     - `estimated_tokens`：這次記進 `api_call` 的估計 token（含失敗的請求）。
-    - `requests`：這次送了幾次請求（`embed_documents` 呼叫次數）。
+    - `requests`：這次送出幾次 HTTP 請求（含 adapter 內部的重試；不回報每次嘗試的替身，
+      每次呼叫算一次）。
     - `not_applicable`：`plan_for` 說不做；`unchanged`：`input_sha256` 沒變；`no_input`：沒有可送的
       內容；`blocked`：放行擋下；`busy`：同一份輸入另一個工作正在跑；`input_changed`：寫入前核對
       發現輸入又變了（這次不寫，下一次重算）；`failed`：這次標成失敗的篇數。
+    - `has_failures`：這次有沒有失敗（停在 `failed`，或有任何一篇標成失敗）。單篇被拒時其他論文
+      照做、停下的原因可能是 `completed`，但這次仍算失敗（CLI 結束碼 1、背景工作記成失敗）。
     """
 
     stop: EmbedStop
@@ -494,6 +602,10 @@ class EmbedRunResult:
     input_changed: int = 0
     failed: int = 0
     failure_reason: ErrorCode | None = None
+
+    @property
+    def has_failures(self) -> bool:
+        return self.stop is EmbedStop.FAILED or self.failed > 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -542,7 +654,7 @@ def render_backlog_estimate(
     lines = [
         f"向量化估算（模型 {model_id}；只用本地資料，沒有送任何請求）",
         f"還要建或重算向量的論文：{backlog.papers:,} 篇",
-        f"估計共 {backlog.estimated_tokens:,} token（估計值，偏高）",
+        f"估計共 {backlog.estimated_tokens:,} token（估計值，還沒和 Cloudflare 後台對照）",
     ]
     if backlog.papers:
         average = math.ceil(backlog.estimated_tokens / backlog.papers)
@@ -561,15 +673,19 @@ def render_backfill_report(
 
     推算用這次的平均（`estimated_tokens ÷ embedded`）乘以還沒做的篇數；這次一篇都沒寫時改用
     本地估計。token 都是估計值（Workers AI 不回報用量），實際用量看 Cloudflare 後台。
+    停下的原因不是 `failed` 但有論文標成失敗時，第二行寫出失敗篇數與原因。
     """
     stop = _STOP_TEXT[result.stop]
     if result.stop is EmbedStop.FAILED and result.failure_reason is not None:
         stop = f"{stop}（{result.failure_reason.value}）"
-    lines = [
-        f"向量化結束（模型 {model_id}）：{stop}",
+    lines = [f"向量化結束（模型 {model_id}）：{stop}"]
+    if result.stop is not EmbedStop.FAILED and result.failed:
+        reason = "" if result.failure_reason is None else f"（{result.failure_reason.value}）"
+        lines.append(f"這次有 {result.failed:,} 篇失敗{reason}，結束碼 1")
+    lines += [
         f"這次寫入向量：{result.embedded:,} 篇（送出 {result.requests:,} 次請求）",
         f"這次估計用了：{result.estimated_tokens:,} token"
-        "（估計值，偏高；Workers AI 不回報用量，實際用量看 Cloudflare 後台的 neurons）",
+        "（估計值；Workers AI 不回報用量，實際用量看 Cloudflare 後台的 neurons）",
     ]
     if result.embedded:
         average = Decimal(result.estimated_tokens) / result.embedded

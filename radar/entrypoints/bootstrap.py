@@ -184,16 +184,18 @@ def build_embedding_provider(
 
     Raises:
         ConfigError: 缺少 `RADAR_CLOUDFLARE_ACCOUNT_ID` 或 `RADAR_CLOUDFLARE_API_TOKEN`（訊息只列
-            環境變數名稱）；或一次請求最久要等的時間（逾時與重試等待加總）不小於
-            `RADAR_LLM_RUN_STALE_AFTER`（還在等回應的 run 會被 sweep 誤判逾時收掉）。
+            環境變數名稱）；或一筆向量化的 run 最久會跑多久（`EmbeddingConfig.run_limit_seconds`：
+            請求的總時限＋2 次逾時＋鎖等待）不小於 `RADAR_LLM_RUN_STALE_AFTER`（還在等回應的 run
+            會被 sweep 誤判逾時收掉）。
     """
-    worst_case = embedding_config.api.worst_case_seconds
-    if worst_case >= settings.llm_run_stale_after:
+    run_limit = embedding_config.run_limit_seconds
+    if run_limit >= settings.llm_run_stale_after:
         raise ConfigError(
             [
-                "config/embeddings.yaml 的 api（逾時 × 嘗試次數＋重試等待）最久約"
-                f" {worst_case:g} 秒，要小於 {env_name('llm_run_stale_after')}"
-                f"（{settings.llm_run_stale_after} 秒）"
+                "config/embeddings.yaml 的一筆向量化最久約"
+                f" {run_limit:g} 秒（api.total_timeout_seconds＋2 × api.timeout_seconds＋"
+                "(2 × batch_size＋2) × lock_timeout_seconds），要小於"
+                f" {env_name('llm_run_stale_after')}（{settings.llm_run_stale_after} 秒）"
             ]
         )
     account_id = settings.cloudflare_account_id

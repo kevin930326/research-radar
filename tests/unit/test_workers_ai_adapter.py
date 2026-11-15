@@ -23,11 +23,16 @@ from pydantic import SecretStr
 
 from radar.adapters.workers_ai import WorkersAiEmbeddingProvider
 from radar.domain.embeddings import (
+    AttemptHooks,
+    EmbeddingAttempt,
     EmbeddingConfigurationError,
+    EmbeddingQuotaReachedError,
     EmbeddingRequestError,
     EmbeddingResponseError,
     EmbeddingTransientError,
     WorkersAiApi,
+    current_attempt_hooks,
+    report_attempts_to,
 )
 from radar.domain.errors import ErrorCode
 from radar.domain.llm import NotCloudSafeError
@@ -420,3 +425,197 @@ def test_plain_strings_are_rejected_as_secrets() -> None:
             model_id=MODEL,
             dimensions=DIMENSIONS,
         )
+
+
+# --- 審查後的修正：每次嘗試回報、總時限（Codex 高 1、中 3） ---------------------------------
+
+
+class _Hooks:
+    """記下 adapter 每次嘗試前後的回報；`deny_from` 起（從 1 起算）嘗試前丟額度不夠。"""
+
+    def __init__(self, *, deny_from: int | None = None) -> None:
+        self.deny_from = deny_from
+        self.before_calls = 0
+        self.attempts: list[EmbeddingAttempt] = []
+
+    def before(self) -> None:
+        self.before_calls += 1
+        if self.deny_from is not None and self.before_calls >= self.deny_from:
+            raise EmbeddingQuotaReachedError()
+
+    def after(self, attempt: EmbeddingAttempt) -> None:
+        self.attempts.append(attempt)
+
+    def hooks(self) -> AttemptHooks:
+        return AttemptHooks(before=self.before, after=self.after)
+
+
+class _FakeClock:
+    """假的單調時鐘（秒）；transport 裡往前撥，模擬每次請求花掉的時間。"""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def _timed_provider(
+    handler: Callable[[httpx2.Request], httpx2.Response],
+    clock: _FakeClock,
+    **api: Any,
+) -> WorkersAiEmbeddingProvider:
+    values: dict[str, Any] = {
+        "base_url": "https://api.cloudflare.example/client/v4",
+        "timeout_seconds": 30,
+        "total_timeout_seconds": 100,
+        "retry": {
+            "attempts": 5,
+            "wait_initial_seconds": 1,
+            "wait_max_seconds": 30,
+            "wait_jitter_seconds": 1,
+            "retry_after_max_seconds": 120,
+        },
+    }
+    values.update(api)
+    return WorkersAiEmbeddingProvider(
+        SecretStr(FAKE_ACCOUNT),
+        SecretStr(FAKE_TOKEN),
+        WorkersAiApi.model_validate(values),
+        model_id=MODEL,
+        dimensions=DIMENSIONS,
+        transport=httpx2.MockTransport(handler),
+        monotonic=clock,
+    )
+
+
+def test_every_attempt_is_reported_including_internal_retries() -> None:
+    # 第一次讀取逾時（對方可能已經算了 neurons）、第二次成功：兩次都回報、都可能計費。
+    recorder = Recorder(httpx2.ReadTimeout("slow"), _ok(1))
+    hooks = _Hooks()
+
+    with report_attempts_to(hooks.hooks()):
+        assert _provider(recorder).embed_documents([_safe("a")]) == _vectors(1)
+
+    assert hooks.before_calls == 2
+    assert hooks.attempts == [
+        EmbeddingAttempt(sent=True, http_status=None, billable=True),
+        EmbeddingAttempt(sent=True, http_status=200, billable=True),
+    ]
+
+
+def test_configuration_error_attempt_is_not_billable() -> None:
+    hooks = _Hooks()
+    with report_attempts_to(hooks.hooks()), pytest.raises(EmbeddingConfigurationError):
+        _provider(Recorder(httpx2.Response(401))).embed_documents([_safe("a")])
+    assert hooks.attempts == [EmbeddingAttempt(sent=True, http_status=401, billable=False)]
+
+
+def test_retry_server_error_attempts_are_reported_with_their_status() -> None:
+    hooks = _Hooks()
+    recorder = Recorder(httpx2.Response(503), httpx2.Response(429), _ok(1))
+    with report_attempts_to(hooks.hooks()):
+        _provider(recorder).embed_documents([_safe("a")])
+    assert [attempt.http_status for attempt in hooks.attempts] == [503, 429, 200]
+    assert all(attempt.billable and attempt.sent for attempt in hooks.attempts)
+
+
+def test_quota_refused_before_a_retry_sends_nothing_more() -> None:
+    # 第二次嘗試前額度放不下：原樣丟出，不送、不再重試；第一次嘗試照樣回報。
+    recorder = Recorder(httpx2.Response(503), _ok(1))
+    hooks = _Hooks(deny_from=2)
+
+    with report_attempts_to(hooks.hooks()), pytest.raises(EmbeddingQuotaReachedError):
+        _provider(recorder).embed_documents([_safe("a")])
+
+    assert len(recorder.requests) == 1
+    assert hooks.attempts == [EmbeddingAttempt(sent=True, http_status=503, billable=True)]
+
+
+def test_without_hooks_the_adapter_still_works() -> None:
+    assert current_attempt_hooks() is None
+    assert _provider(Recorder(_ok(1))).embed_documents([_safe("a")]) == _vectors(1)
+
+
+def test_total_timeout_stops_retrying_before_the_next_wait_would_pass_it() -> None:
+    # 總時限 100 秒：每次請求花 45 秒、都回 503。第 2 次結束在 90 秒，再等（≥ 1 秒）就到 91 秒以上；
+    # 第 3 次只剩不到 10 秒——還是會試，但各階段逾時縮成剩下的秒數；第 3 次結束時已過總時限，不再等。
+    clock = _FakeClock()
+    timeouts: list[float] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        timeouts.append(request.extensions["timeout"]["read"])
+        clock.now += 45
+        return httpx2.Response(503)
+
+    with pytest.raises(EmbeddingTransientError) as caught:
+        _timed_provider(handler, clock).embed_documents([_safe("a")])
+
+    assert timeouts == [30, 30, 10]
+    assert clock.now == 135
+    assert "總時限 100 秒" in str(caught.value)
+    assert caught.value.http_status == 503
+
+
+def test_retry_after_beyond_the_total_timeout_is_not_waited_for() -> None:
+    clock = _FakeClock()
+    recorder = Recorder(httpx2.Response(429, headers={"Retry-After": "110"}), _ok(1))
+
+    with pytest.raises(EmbeddingTransientError) as caught:
+        _timed_provider(recorder, clock).embed_documents([_safe("a")])
+
+    assert len(recorder.requests) == 1
+    assert "總時限 100 秒" in str(caught.value)
+
+
+def test_slow_trickling_response_is_cut_at_the_total_timeout() -> None:
+    # 對方一直慢慢送少量資料（每一塊都在單次讀取逾時內到）：收到每一塊後看總時限，過了就中斷。
+    clock = _FakeClock()
+    body = json.dumps(_envelope(_vectors(1))).encode()
+
+    def trickle() -> Iterator[bytes]:
+        for start in range(0, len(body), 8):
+            clock.now += 20
+            yield body[start : start + 8]
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(200, content=trickle())
+
+    hooks = _Hooks()
+    with report_attempts_to(hooks.hooks()), pytest.raises(EmbeddingTransientError) as caught:
+        _timed_provider(handler, clock).embed_documents([_safe("a")])
+
+    assert "總時限" in str(caught.value)
+    assert clock.now == 100  # 第 5 塊（100 秒）到時就停，不再讀下去
+    assert hooks.attempts == [EmbeddingAttempt(sent=True, http_status=200, billable=True)]
+
+
+def test_no_attempt_starts_after_the_total_timeout() -> None:
+    # before() 等了很久（例如等額度鎖）：回來時總時限已過，不送，回報「沒送出」。
+    clock = _FakeClock()
+    recorder = Recorder(_ok(1))
+
+    def slow_before() -> None:
+        clock.now += 200
+
+    attempts: list[EmbeddingAttempt] = []
+    hooks = AttemptHooks(before=slow_before, after=attempts.append)
+    with report_attempts_to(hooks), pytest.raises(EmbeddingTransientError):
+        _timed_provider(recorder, clock).embed_documents([_safe("a")])
+
+    assert recorder.requests == []
+    assert attempts == [EmbeddingAttempt(sent=False, http_status=None, billable=False)]
+
+
+def test_request_limit_bounds_a_full_run_of_the_slowest_attempts() -> None:
+    # 每次請求都花滿逾時（30 秒）並失敗：結束時間不超過 request_limit_seconds（100＋2 × 30）。
+    clock = _FakeClock()
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        clock.now += request.extensions["timeout"]["read"]
+        raise httpx2.ReadTimeout("slow")
+
+    provider = _timed_provider(handler, clock)
+    with pytest.raises(EmbeddingTransientError):
+        provider.embed_documents([_safe("a")])
+    assert clock.now <= provider._api.request_limit_seconds

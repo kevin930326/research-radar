@@ -24,7 +24,6 @@ from radar.domain.cube import UnknownJournalError
 from radar.domain.database_requirements import DatabaseRequirementsError
 from radar.domain.embeddings import (
     EmbeddingConfigurationError,
-    EmbedStop,
     render_backfill_report,
     render_backlog_estimate,
 )
@@ -334,7 +333,8 @@ def embeddings_backfill(
     token，並照這次的平均推算全庫還要多少 token、幾天。
 
     --estimate 只讀資料庫，不需要 Cloudflare 的 token。設定錯誤、讀不到資料庫、token 或帳號
-    不對、這次有一批失敗：退出碼 1；錯誤只印類別或狀態碼，不印 token、帳號或連線字串。
+    不對、這次有一批失敗或有任何一篇標成失敗（其他論文照做）：退出碼 1；錯誤只印類別或狀態碼，
+    不印 token、帳號或連線字串。
     """
     configure_logging()
     if estimate and limit is not None:
@@ -396,7 +396,7 @@ def embeddings_backfill(
         _fail(f"推算剩下的篇數失敗（{type(exc).__name__}）；細節見日誌", [])
     for line in render_backfill_report(result, backlog, config.quota, config.model_id):
         typer.echo(line)
-    if result.stop is EmbedStop.FAILED:
+    if result.has_failures:
         raise typer.Exit(1)
 
 

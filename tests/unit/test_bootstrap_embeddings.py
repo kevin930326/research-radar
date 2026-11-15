@@ -75,26 +75,28 @@ def test_api_and_worker_processes_do_not_load_the_workers_ai_adapter() -> None:
 
 
 def test_request_longer_than_the_sweep_limit_is_a_config_error() -> None:
-    # 一次請求最久要等的時間不小於 sweep 的時限時，還在等回應的 run 會被誤判逾時收掉。
+    # 一筆向量化的 run 最久會跑的時間不小於 sweep 的時限時，還在等回應的 run 會被誤判逾時收掉。
+    # 審查後的修正（Codex 中 3）：用含總時限與鎖等待的 run_limit_seconds 核對（480＋2 × 60＋
+    # (2 × 32＋2) × 2＝732 秒）。
     settings = load_settings(
         {
             **BASE_ENV,
             "RADAR_CLOUDFLARE_ACCOUNT_ID": FAKE_ACCOUNT,
             "RADAR_CLOUDFLARE_API_TOKEN": FAKE_TOKEN,
-            "RADAR_LLM_RUN_STALE_AFTER": "780",
+            "RADAR_LLM_RUN_STALE_AFTER": "732",
         }
     )
-    assert CONFIG.api.worst_case_seconds == 780
+    assert CONFIG.run_limit_seconds == 732
 
     with pytest.raises(ConfigError) as info:
         build_embedding_provider(settings, CONFIG)
 
     [problem] = info.value.problems
-    assert "最久約 780 秒" in problem
-    assert "RADAR_LLM_RUN_STALE_AFTER（780 秒）" in problem
+    assert "最久約 732 秒" in problem
+    assert "RADAR_LLM_RUN_STALE_AFTER（732 秒）" in problem
     assert FAKE_TOKEN not in problem
 
 
 def test_default_settings_leave_room_for_the_longest_request() -> None:
     settings = load_settings(BASE_ENV)
-    assert CONFIG.api.worst_case_seconds < settings.llm_run_stale_after
+    assert CONFIG.run_limit_seconds < settings.llm_run_stale_after

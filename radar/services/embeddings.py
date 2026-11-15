@@ -12,29 +12,37 @@ ADR-0040，Story 2.8）。向量化不經 LLM 閘門。
 
 湊滿一批（`batch_size`，最多 32）或看完時送一批：
 
-5. 額度：今天（UTC 00:00 起）`api_call` 記的估計 token 加上這一批的估計，換成 neurons 超過
+5. 額度占用（短交易，拿額度鎖）：今天（UTC 00:00 起）`api_call` 記的估計 token、其他 worker
+   占用中（還沒回應）的估計 token，加上這一批的估計，換成 neurons 超過
    `daily_free_neurons × stop_at_ratio` 就停下（`quota_reached`，記警告、不算失敗、不寫任何列），
-   留到下一次續跑（下一次每週更新排入的工作，或 Kevin 再跑一次回填指令）。
-6. 取得執行資格（每篇一個短交易，立刻 commit）：先鎖住論文那一列再重讀；別的工作已經寫好同一份
-   輸入 → `unchanged`，輸入又變了 → `input_changed`，都不是才新增一筆 `running` 的
-   `derivation_run`（task＝embed）；同一份輸入另一個工作正在跑（部分唯一索引）→ `busy`。
-   這三種都不送，也不算進 `limit`。
-7. 呼叫 `provider.embed_documents`（不開著交易）。
-8. 自己的短交易記一筆 `api_call`（`workers_ai`、估計 token；失敗也照記，設定錯記 0）。
-9. 驗證向量（筆數、維度＝登記的維度、數字有限且在 halfvec 範圍內）。
-10. 寫入（每篇一個短交易）：先鎖住論文那一列，重讀、重算 `input_sha256`；變了就把 run 改成
-    `failed`（`embed_input_changed`），run 已經被 sweep 收掉也不寫，都對才把 run 改成 `succeeded`
-    並覆寫 `embedding`（主鍵（論文, 模型），一篇一個模型只有一列）。
+   留到下一次續跑（下一次每週更新排入的工作，或 Kevin 再跑一次回填指令）；放得下就新增一筆占用
+   （第一次嘗試用）。
+6. 取得執行資格（每篇一個短交易，立刻 commit，等鎖最多 `lock_timeout_seconds`）：先鎖住論文那一列
+   再重讀；別的工作已經寫好同一份輸入 → `unchanged`，輸入又變了 → `input_changed`，都不是才新增
+   一筆 `running` 的 `derivation_run`（task＝embed）；同一份輸入另一個工作正在跑（部分唯一索引）
+   或等鎖逾時 → `busy`。這幾種都不送，也不算進 `limit`（重送時略過的不再扣，見 `_split`）。
+7. 呼叫 `provider.embed_documents`（不開著交易）。adapter 每次 HTTP 嘗試（含內部重試）前後回報
+   （`report_attempts_to`）：第一次嘗試用第 5 步的占用，之後每次重試前再占一次（放不下 →
+   `EmbeddingQuotaReachedError`，這批的 run 改成 `failed`（`embed_quota_reached`）、停下
+   `quota_reached`）；每次嘗試後在同一個短交易裡刪掉占用、記一筆 `api_call`（`workers_ai`、
+   那次嘗試當下的時間與 UTC 日期、估計 token；失敗也照記，設定錯記 0）。不回報嘗試的 provider
+   （替身）整次呼叫當成一次嘗試記帳。
+8. 驗證向量（筆數、維度＝登記的維度、數字有限且在 halfvec 範圍內、轉成 halfvec 後不是全 0）。
+9. 寫入（每篇一個短交易，等鎖最多 `lock_timeout_seconds`）：先鎖住論文那一列，重讀、重算
+   `input_sha256`；變了就把 run 改成 `failed`（`embed_input_changed`），run 已經被 sweep 收掉也
+   不寫，等鎖逾時把 run 改成 `failed`（`embed_lock_timeout`），都對才把 run 改成 `succeeded` 並覆寫
+   `embedding`（主鍵（論文, 模型），一篇一個模型只有一列）。
 
 兩個工作同時跑（例如 Procrastinate 把還活著的 worker 誤判失聯、工作被另一個 worker 領走）也只有
 一份有效的結果：取得資格與寫入都先鎖同一篇論文，每週更新改論文時也先鎖它，所以「核對指紋 → 寫入」
 之間不會被插隊；同一份輸入只有一個工作拿得到資格，舊輸入算的向量蓋不掉新的。
 
-失敗：暫時性錯誤、回應不對 → 這一批的 run 改成 `failed`（帶原因代碼），整批不寫、停下
-（`failed`）。請求不合法（4xx）→ 多篇的一批改成一篇一篇重送，單獨一篇還是被拒就標成失敗、這次
+失敗：暫時性錯誤（含總時限到了）、回應不對 → 這一批的 run 改成 `failed`（帶原因代碼），整批不寫、
+停下（`failed`）。請求不合法（4xx）→ 多篇的一批改成一篇一篇重送，單獨一篇還是被拒就標成失敗、這次
 略過，其他照做（不停下）。設定錯（401、403、404）→ 同樣收尾後原樣丟出。寫入或其他非預期的錯 →
 盡量把還在跑的 run 改成 `failed`（`embed_failed`）後原樣丟出。還停在 `running` 的 run 由 sweep
-照互動呼叫的時限收掉。
+照互動呼叫的時限收掉。有任何一篇標成失敗時，其他論文照做，但結果的 `has_failures` 是 True
+（CLI 結束碼 1、背景工作記成失敗）。
 
 `estimate_embedding_backlog` 走同樣的 1～4 步，只用本地資料估還要做幾篇、幾個 token，不送任何請求。
 """
@@ -42,20 +50,23 @@ ADR-0040，Story 2.8）。向量化不經 LLM 閘門。
 import uuid
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import structlog
 
 from radar.domain.embeddings import (
     EMBED_DOCUMENTS_OPERATION,
     EMBED_SEPARATOR,
+    AttemptHooks,
     EmbeddingApiCall,
+    EmbeddingAttempt,
     EmbeddingBacklog,
     EmbeddingCandidate,
     EmbeddingConfig,
     EmbeddingConfigurationError,
     EmbeddingError,
     EmbeddingInput,
+    EmbeddingQuotaReachedError,
     EmbeddingRequestError,
     EmbedRunResult,
     EmbedStop,
@@ -66,8 +77,9 @@ from radar.domain.embeddings import (
     check_embedding_vectors,
     estimate_embedding_tokens,
     quota_allows,
+    report_attempts_to,
 )
-from radar.domain.errors import ErrorCode
+from radar.domain.errors import ErrorCode, LockWaitTimeoutError
 from radar.domain.fingerprints import embedding_input_sha256
 from radar.domain.permissions import Action, require
 from radar.domain.policy import (
@@ -80,8 +92,13 @@ from radar.domain.policy import (
 from radar.domain.processing import ProcessingTask, plan_for
 from radar.domain.viewer import SystemViewer, Viewer
 from radar.ports import EmbeddingProvider
-from radar.repo.api_calls import create_embedding_api_call, get_embedding_tokens_since
-from radar.repo.db import Database
+from radar.repo.api_calls import (
+    create_embedding_quota_hold,
+    delete_embedding_quota_hold,
+    delete_expired_embedding_quota_holds,
+    get_embedding_quota_usage,
+)
+from radar.repo.db import EMBEDDING_QUOTA_LOCK_KEY, Database
 from radar.repo.embeddings import (
     find_embedding_candidate_for_update,
     find_embedding_model_dimensions,
@@ -134,7 +151,8 @@ class _Tally:
     input_changed: int = 0
     failed: int = 0
     failure_reason: ErrorCode | None = None
-    # 挑中後在取得執行資格時才略過的（別的工作做好了、輸入又變了、正在跑）：不算進 `limit`。
+    # 挑中後在第一次取得執行資格時才略過的（別的工作做好了、輸入又變了、正在跑）：不算進 `limit`。
+    # 重送（`_split`）時才略過的不算在這裡：那些已經送出過一次，仍算這次送的篇數。
     skipped_at_claim: int = 0
 
     def reached(self, limit: int | None) -> bool:
@@ -229,6 +247,7 @@ def embed_papers(
     result = tally.result(stop or EmbedStop.COMPLETED)
     log.info(
         "向量化結束",
+        has_failures=result.has_failures,
         model_id=config.model_id,
         stop=result.stop.value,
         embedded=result.embedded,
@@ -376,8 +395,72 @@ def _clear(planned: _Planned, cloud_policy: CloudPolicy, tally: _Tally) -> Cloud
     return join_cloud_safe_texts(parts, EMBED_SEPARATOR)
 
 
+@dataclass(frozen=True, slots=True)
+class _Hold:
+    """一筆額度占用（`embedding_quota_hold`）。"""
+
+    id: uuid.UUID
+    reserved_at: datetime
+
+
+class _AttemptLedger:
+    """一次 `embed_documents` 呼叫的額度占用與記帳（7）。
+
+    - 開始前已經有第 5 步的占用（第一次嘗試用）。
+    - adapter 每次嘗試前呼叫 `hooks.before`：第一次用現成的占用；之後每次重試前再占一次，
+      放不下就丟 `EmbeddingQuotaReachedError`（adapter 不送、不再重試）。
+    - adapter 每次嘗試後呼叫 `hooks.after`：刪掉占用、記一筆那次嘗試的 `api_call`（同一個交易），
+      時間是那次嘗試開始的時間（跨過 UTC 午夜的重試記在各自的日期）。
+    - provider 回來或丟錯之後呼叫 `close`：還有沒結清的占用（provider 沒有回報嘗試，例如替身）就把
+      整次呼叫當成一次嘗試記帳；`release` 是一篇都沒取得資格、什麼都沒送時放掉占用。
+    """
+
+    def __init__(self, runner: _BatchRunner, hold: _Hold) -> None:
+        self._runner = runner
+        self._hold: _Hold | None = hold
+        self._attempt_at = hold.reserved_at
+        self._reported = False
+        self.tokens = 0
+        self.run_ids: list[uuid.UUID] = []
+        self.hooks = AttemptHooks(before=self._before, after=self._after)
+
+    def _before(self) -> None:
+        now = self._runner.now()
+        if not self._reported and self._hold is not None:
+            self._reported = True
+            self._attempt_at = now
+            return
+        self._reported = True
+        hold = self._runner.reserve(self.tokens, now)
+        if hold is None:
+            raise EmbeddingQuotaReachedError()
+        self._hold = hold
+        self._attempt_at = now
+
+    def _after(self, attempt: EmbeddingAttempt) -> None:
+        hold, self._hold = self._hold, None
+        if hold is not None:
+            self._runner.settle(hold, attempt, self.tokens, self._attempt_at)
+
+    def close(self, http_status: int | None, *, billable: bool) -> None:
+        """provider 回來或丟錯之後：沒結清的占用照整次呼叫的結果記帳。記不進去時盡量把這批的 run
+        收掉，再原樣丟出（占用留著，過期後轉成用量）。"""
+        if self._hold is None:
+            return
+        try:
+            self._after(EmbeddingAttempt(sent=True, http_status=http_status, billable=billable))
+        except BaseException:
+            self._runner.fail_runs(self.run_ids, ErrorCode.EMBED_FAILED)
+            raise
+
+    def release(self) -> None:
+        """什麼都沒送：放掉占用，不記用量。"""
+        if self._hold is not None:
+            self._after(EmbeddingAttempt(sent=False, http_status=None, billable=False))
+
+
 class _BatchRunner:
-    """5～10：送一批。回停下的原因（額度、失敗），可以繼續時回 None。"""
+    """5～9：送一批。回停下的原因（額度、失敗），可以繼續時回 None。"""
 
     def __init__(
         self,
@@ -398,138 +481,203 @@ class _BatchRunner:
         self._clock = clock
         self._tally = tally
 
-    def __call__(self, items: Sequence[_Item]) -> EmbedStop | None:
+    def __call__(self, items: Sequence[_Item], *, resend: bool = False) -> EmbedStop | None:
         config = self._config
-        viewer = SystemViewer()
-        # 5. 額度。
+        # 5. 額度：占住這一批（取得資格前的篇數估計，不會比真的送出的少）。
         estimated = estimate_embedding_tokens(
             [item.planned.embedding_input.text for item in items], config.token_estimate
         )
-        now = self._now()
-        day_start = now.astimezone(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
-        with self._database.transaction() as connection:
-            used = get_embedding_tokens_since(viewer, connection, day_start)
-        if not quota_allows(used, estimated, config.quota):
-            log.warning(
-                "Workers AI 今天的估計用量到了停下的比例，向量化先停下，留到下一次續跑",
-                used_tokens=used,
-                next_tokens=estimated,
-                stop_at_neurons=str(config.quota.stop_at_neurons),
-            )
+        hold = self.reserve(estimated, self.now())
+        if hold is None:
             return EmbedStop.QUOTA_REACHED
+        ledger = _AttemptLedger(self, hold)
 
         # 6. 取得執行資格：每篇自己一個短交易，先鎖論文、重讀、核對，再新增 running 的 run。
         claimed: list[tuple[_Item, uuid.UUID]] = []
-        for item in items:
-            run_id = self._claim(item)
-            if run_id is not None:
-                claimed.append((item, run_id))
+        try:
+            for item in items:
+                run_id = self._claim(item, resend=resend)
+                if run_id is not None:
+                    claimed.append((item, run_id))
+        except BaseException:
+            self.fail_runs([run_id for _, run_id in claimed], ErrorCode.EMBED_FAILED)
+            ledger.release()
+            raise
         if not claimed:
+            ledger.release()
             return None
         run_ids = [run_id for _, run_id in claimed]
-        tokens = estimate_embedding_tokens(
+        ledger.run_ids = run_ids
+        ledger.tokens = estimate_embedding_tokens(
             [item.planned.embedding_input.text for item, _ in claimed], config.token_estimate
         )
 
-        # 7、8、9. 呼叫（不開著交易）、記用量、驗證。
-        called_at = self._now()
-        self._tally.requests += 1
+        # 7、8. 呼叫（不開著交易；每次嘗試前後記帳）、驗證。
         try:
-            raw = self._provider.embed_documents([item.text for item, _ in claimed])
+            with report_attempts_to(ledger.hooks):
+                raw = self._provider.embed_documents([item.text for item, _ in claimed])
+        except EmbeddingQuotaReachedError:
+            ledger.close(None, billable=False)
+            self.fail_runs(run_ids, ErrorCode.EMBED_QUOTA_REACHED)
+            log.warning(
+                "重試途中今天的估計用量到了停下的比例，這一批不寫，留到下一次續跑",
+                papers=len(run_ids),
+            )
+            return EmbedStop.QUOTA_REACHED
         except EmbeddingRequestError as exc:
+            ledger.close(exc.http_status, billable=True)
             if len(claimed) > 1:
-                return self._split(exc, tokens, called_at, claimed)
-            self._skip_one(exc, tokens, called_at, run_ids)
+                return self._split(exc, claimed)
+            self._skip_one(exc, run_ids)
             return None
         except EmbeddingError as exc:
-            return self._failed(exc, exc.http_status, tokens, called_at, run_ids)
+            configuration = isinstance(exc, EmbeddingConfigurationError)
+            ledger.close(exc.http_status, billable=not configuration)
+            return self._failed(exc, exc.http_status, run_ids)
         except BaseException:
-            self._record_call(None, tokens, called_at, run_ids)
-            self._fail_runs(run_ids, ErrorCode.EMBED_FAILED)
+            ledger.close(None, billable=True)
+            self.fail_runs(run_ids, ErrorCode.EMBED_FAILED)
             raise
-        # provider 回來了就是 200；向量不對也記這一次請求的用量。
+        # provider 回來了就是 200；向量不對也照記這一次請求的用量。
+        ledger.close(200, billable=True)
         try:
             vectors = check_embedding_vectors(raw, count=len(claimed), dimensions=self._dimensions)
         except EmbeddingError as exc:
-            return self._failed(exc, 200, tokens, called_at, run_ids)
-        self._record_call(200, tokens, called_at, run_ids)
+            return self._failed(exc, 200, run_ids)
 
-        # 10. 寫入：每篇自己一個短交易，先鎖論文、核對輸入沒變、run 還是 running 才寫。
+        # 9. 寫入：每篇自己一個短交易，先鎖論文、核對輸入沒變、run 還是 running 才寫。
         try:
             for (item, run_id), vector in zip(claimed, vectors, strict=True):
                 self._write_one(item, run_id, vector)
         except BaseException as exc:
             log.error("寫入向量失敗", error_type=type(exc).__name__)
-            self._fail_runs(run_ids, ErrorCode.EMBED_FAILED)
+            self.fail_runs(run_ids, ErrorCode.EMBED_FAILED)
             raise
         return None
 
-    def _claim(self, item: _Item) -> uuid.UUID | None:
+    # --- 額度占用與記帳 ---------------------------------------------------------------------
+
+    def reserve(self, tokens: int, now: datetime) -> _Hold | None:
+        """5／每次重試前：短交易裡拿額度鎖，把過期的占用轉成用量，「今天已用＋占用中＋這次」放得下
+        就新增一筆占用；放不下回 None（記警告）。
+
+        占用的有效期限是 `config.run_limit_seconds`：過了這麼久那次嘗試一定已經結束，還在就是行程
+        中斷沒回來記帳，由下一次占用照估計轉成那天的用量（保守，當作已計費）。
+
+        Raises:
+            LockWaitTimeoutError: 等額度鎖超過 `lock_timeout_seconds`。
+        """
+        config = self._config
+        day_start = now.astimezone(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
+        with self._database.transaction_with_lock_timeout(config.lock_timeout_ms) as connection:
+            Database.transaction_lock(connection, EMBEDDING_QUOTA_LOCK_KEY)
+            delete_expired_embedding_quota_holds(connection, now)
+            used, held = get_embedding_quota_usage(SystemViewer(), connection, day_start)
+            if not quota_allows(used + held, tokens, config.quota):
+                log.warning(
+                    "Workers AI 今天的估計用量到了停下的比例，向量化先停下，留到下一次續跑",
+                    used_tokens=used,
+                    held_tokens=held,
+                    next_tokens=tokens,
+                    stop_at_neurons=str(config.quota.stop_at_neurons),
+                )
+                return None
+            hold_id = create_embedding_quota_hold(
+                connection,
+                tokens,
+                reserved_at=now,
+                expires_at=now + timedelta(seconds=config.run_limit_seconds),
+            )
+        return _Hold(hold_id, now)
+
+    def settle(
+        self, hold: _Hold, attempt: EmbeddingAttempt, tokens: int, called_at: datetime
+    ) -> None:
+        """每次嘗試後：同一個短交易裡刪掉占用、記一筆 `api_call`（沒送出就只刪占用）。"""
+        call = None
+        if attempt.sent:
+            call = EmbeddingApiCall(
+                operation=EMBED_DOCUMENTS_OPERATION,
+                http_status=attempt.http_status,
+                estimated_input_tokens=tokens if attempt.billable else 0,
+                called_at=called_at,
+            )
+        with self._database.transaction() as connection:
+            delete_embedding_quota_hold(connection, hold.id, call)
+        if call is not None:
+            self._tally.requests += 1
+            self._tally.estimated_tokens += call.estimated_input_tokens
+
+    # --- 各步驟 -----------------------------------------------------------------------------
+
+    def _claim(self, item: _Item, *, resend: bool) -> uuid.UUID | None:
         """6：鎖住論文、重讀；別的工作已經寫好同一份輸入 → `unchanged`，輸入又變了 →
-        `input_changed`（下一次照新的輸入做），同一份輸入正在跑 → `busy`；都不是才回新的 run id。
+        `input_changed`（下一次照新的輸入做），同一份輸入正在跑或等鎖逾時 → `busy`；都不是才回
+        新的 run id。
 
         鎖論文讓這一步和別的工作的寫入（也先鎖論文）排隊：等到鎖時，對方要嘛還在跑（running 擋下
         → busy），要嘛已經寫好（重讀看得到 → unchanged），不會兩個工作都送同一份輸入。
+        `resend`：這篇已經送出過一次（`_split` 重送）；略過時不扣這次送的篇數（`limit`）。
         """
         config = self._config
         planned = item.planned
-        with self._database.transaction() as connection:
-            candidate = find_embedding_candidate_for_update(
-                SystemViewer(), connection, config.model_id, planned.paper_id
-            )
-            if candidate is not None and candidate.current_sha256 == planned.sha256:
-                self._tally.unchanged += 1
-                self._tally.skipped_at_claim += 1
-                return None
-            if candidate is None or _current_sha256(candidate) != planned.sha256:
-                self._tally.input_changed += 1
-                self._tally.skipped_at_claim += 1
-                return None
-            run_id = create_embed_derivation_run(
-                connection,
-                NewEmbedRun(
-                    paper_id=planned.paper_id,
-                    model=config.model_id,
-                    input_sha256=planned.sha256,
-                    input_kind=planned.embedding_input.input_kind,
-                    params={"dimensions": self._dimensions, "batch_size": config.batch_size},
-                    code_version=self._code_version,
-                ),
-            )
+        try:
+            with self._database.transaction_with_lock_timeout(config.lock_timeout_ms) as connection:
+                candidate = find_embedding_candidate_for_update(
+                    SystemViewer(), connection, config.model_id, planned.paper_id
+                )
+                if candidate is not None and candidate.current_sha256 == planned.sha256:
+                    self._tally.unchanged += 1
+                    self._skipped(resend)
+                    return None
+                if candidate is None or _current_sha256(candidate) != planned.sha256:
+                    self._tally.input_changed += 1
+                    self._skipped(resend)
+                    return None
+                run_id = create_embed_derivation_run(
+                    connection,
+                    NewEmbedRun(
+                        paper_id=planned.paper_id,
+                        model=config.model_id,
+                        input_sha256=planned.sha256,
+                        input_kind=planned.embedding_input.input_kind,
+                        params={"dimensions": self._dimensions, "batch_size": config.batch_size},
+                        code_version=self._code_version,
+                    ),
+                )
+        except LockWaitTimeoutError:
+            log.info("取得執行資格時等論文的鎖逾時，這篇這次不送")
+            run_id = None
         if run_id is None:
             self._tally.busy += 1
-            self._tally.skipped_at_claim += 1
+            self._skipped(resend)
         return run_id
 
+    def _skipped(self, resend: bool) -> None:
+        if not resend:
+            self._tally.skipped_at_claim += 1
+
     def _split(
-        self,
-        exc: EmbeddingRequestError,
-        tokens: int,
-        called_at: datetime,
-        claimed: list[tuple[_Item, uuid.UUID]],
+        self, exc: EmbeddingRequestError, claimed: list[tuple[_Item, uuid.UUID]]
     ) -> EmbedStop | None:
         """一批被拒（請求不合法）：可能只是其中一篇的問題。這批的 run 收掉，改成一篇一篇重送，
-        讓有問題的那一篇不會擋住後面所有論文。"""
-        run_ids = [run_id for _, run_id in claimed]
-        self._record_call(exc.http_status, tokens, called_at, run_ids)
-        self._fail_runs(run_ids, exc.code)
+        讓有問題的那一篇不會擋住後面所有論文。重送時才略過的（別的工作做好了等）不扣這次送的篇數。
+        """
+        self.fail_runs([run_id for _, run_id in claimed], exc.code)
         log.warning(
             "向量化請求不合法，這一批改成一篇一篇重送",
             http_status=exc.http_status,
             papers=len(claimed),
         )
         for item, _ in claimed:
-            stop = self([item])
+            stop = self([item], resend=True)
             if stop is not None:
                 return stop
         return None
 
-    def _skip_one(
-        self, exc: EmbeddingRequestError, tokens: int, called_at: datetime, run_ids: list[uuid.UUID]
-    ) -> None:
+    def _skip_one(self, exc: EmbeddingRequestError, run_ids: list[uuid.UUID]) -> None:
         """單獨一篇被拒（請求不合法）：這篇標成失敗、這次略過，其他論文照做（不停下）。"""
-        self._record_call(exc.http_status, tokens, called_at, run_ids)
-        self._fail_runs(run_ids, exc.code)
+        self.fail_runs(run_ids, exc.code)
         self._tally.failed += len(run_ids)
         self._tally.failure_reason = exc.code
         log.error(
@@ -537,21 +685,13 @@ class _BatchRunner:
         )
 
     def _failed(
-        self,
-        exc: EmbeddingError,
-        http_status: int | None,
-        tokens: int,
-        called_at: datetime,
-        run_ids: list[uuid.UUID],
+        self, exc: EmbeddingError, http_status: int | None, run_ids: list[uuid.UUID]
     ) -> EmbedStop:
-        """這一批失敗：記用量、run 改成 `failed`、整批不寫；設定錯原樣丟出，其他停下這次。
+        """這一批失敗：run 改成 `failed`、整批不寫；設定錯原樣丟出，其他停下這次。
 
-        設定錯（401、403、404）是驗證或路徑就被拒，沒有跑模型，記 0 個估計 token（不佔今天的額度）；
-        其他失敗可能已經算了 neurons，照估計記。
+        用量已經在每次嘗試後記過（設定錯是驗證或路徑就被拒、沒有跑模型，記 0 個估計 token）。
         """
-        configuration = isinstance(exc, EmbeddingConfigurationError)
-        self._record_call(http_status, 0 if configuration else tokens, called_at, run_ids)
-        self._fail_runs(run_ids, exc.code)
+        self.fail_runs(run_ids, exc.code)
         self._tally.failed += len(run_ids)
         self._tally.failure_reason = exc.code
         log.error(
@@ -560,76 +700,67 @@ class _BatchRunner:
             http_status=http_status,
             papers=len(run_ids),
         )
-        if configuration:
+        if isinstance(exc, EmbeddingConfigurationError):
             raise exc
         return EmbedStop.FAILED
 
-    def _now(self) -> datetime:
+    def now(self) -> datetime:
         now = self._clock()
         if now.tzinfo is None or now.utcoffset() is None:
             raise ValueError("時鐘要回帶時區的時間")
         return now
 
-    def _record_call(
-        self, http_status: int | None, tokens: int, called_at: datetime, run_ids: list[uuid.UUID]
-    ) -> None:
-        """8：自己的短交易記一筆 `api_call`。記不進去時盡量把 run 收掉，再原樣丟出。"""
-        try:
-            with self._database.transaction() as connection:
-                create_embedding_api_call(
-                    connection,
-                    EmbeddingApiCall(
-                        operation=EMBED_DOCUMENTS_OPERATION,
-                        http_status=http_status,
-                        estimated_input_tokens=tokens,
-                        called_at=called_at,
-                    ),
-                )
-        except BaseException:
-            self._fail_runs(run_ids, ErrorCode.EMBED_FAILED)
-            raise
-        self._tally.estimated_tokens += tokens
-
     def _write_one(self, item: _Item, run_id: uuid.UUID, vector: list[float]) -> None:
-        """10：一篇一個短交易。先鎖論文再重讀、重算指紋：
+        """9：一篇一個短交易。先鎖論文再重讀、重算指紋：
 
         - 變了 → run 改成 `failed`（`embed_input_changed`），不寫，下一次照新的輸入重算；
-        - run 已經不是 `running`（sweep 判定逾時收掉了）→ 不寫，下一次重算；
+        - run 已經不是 `running`（sweep 判定逾時收掉了）→ 不寫、算失敗，下一次重算；
+        - 等鎖逾時 → run 改成 `failed`（`embed_lock_timeout`）、算失敗，下一次重算；
         - 都對 → run 改成 `succeeded`、覆寫向量（主鍵是（論文, 模型），一篇一個模型只會有一列）。
 
         鎖論文讓核對到寫入之間不會被每週更新或另一個向量化工作插隊：舊輸入算的向量不會蓋掉新的。
         """
         config = self._config
         planned = item.planned
-        with self._database.transaction() as connection:
-            candidate = find_embedding_candidate_for_update(
-                SystemViewer(), connection, config.model_id, planned.paper_id
-            )
-            if candidate is None or _current_sha256(candidate) != planned.sha256:
-                update_derivation_run_failed(connection, run_id, ErrorCode.EMBED_INPUT_CHANGED)
-                self._tally.input_changed += 1
-                return
-            if not update_derivation_run_succeeded(connection, run_id):
-                log.warning("向量化的 run 已經被收掉（逾時），這一篇這次不寫")
-                self._tally.failed += 1
-                return
-            upsert_embeddings(
-                connection,
-                [
-                    NewEmbedding(
-                        item_id=planned.paper_id,
-                        model_id=config.model_id,
-                        dimensions=self._dimensions,
-                        vector=tuple(vector),
-                        input_sha256=planned.sha256,
-                        run_id=run_id,
-                    )
-                ],
-            )
+        try:
+            with self._database.transaction_with_lock_timeout(config.lock_timeout_ms) as connection:
+                candidate = find_embedding_candidate_for_update(
+                    SystemViewer(), connection, config.model_id, planned.paper_id
+                )
+                if candidate is None or _current_sha256(candidate) != planned.sha256:
+                    update_derivation_run_failed(connection, run_id, ErrorCode.EMBED_INPUT_CHANGED)
+                    self._tally.input_changed += 1
+                    return
+                if not update_derivation_run_succeeded(connection, run_id):
+                    log.warning("向量化的 run 已經被收掉（逾時），這一篇這次不寫")
+                    self._tally.failed += 1
+                    self._tally.failure_reason = ErrorCode.LLM_RUN_EXPIRED
+                    return
+                upsert_embeddings(
+                    connection,
+                    [
+                        NewEmbedding(
+                            item_id=planned.paper_id,
+                            model_id=config.model_id,
+                            dimensions=self._dimensions,
+                            vector=tuple(vector),
+                            input_sha256=planned.sha256,
+                            run_id=run_id,
+                        )
+                    ],
+                )
+        except LockWaitTimeoutError:
+            log.warning("寫入向量時等論文的鎖逾時，這一篇這次不寫")
+            self.fail_runs([run_id], ErrorCode.EMBED_LOCK_TIMEOUT)
+            self._tally.failed += 1
+            self._tally.failure_reason = ErrorCode.EMBED_LOCK_TIMEOUT
+            return
         self._tally.embedded += 1
 
-    def _fail_runs(self, run_ids: list[uuid.UUID], reason: ErrorCode) -> None:
+    def fail_runs(self, run_ids: list[uuid.UUID], reason: ErrorCode) -> None:
         """盡量把這批 `running` 的 run 改成 `failed`；這一步也失敗只記日誌（sweep 之後收）。"""
+        if not run_ids:
+            return
         try:
             with self._database.transaction() as connection:
                 for run_id in run_ids:

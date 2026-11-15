@@ -70,6 +70,10 @@ class EmbeddingProvider(Protocol):
     一次最多 `radar.domain.embeddings.MAX_BATCH_SIZE`（32）段；切批是 services 的事。
     失敗丟 `radar.domain.embeddings.EmbeddingError` 的子類別（暫時性、設定錯、請求不合法、
     回應不對），訊息不含金鑰、帳號與網址。
+    真實的實作在每次 HTTP 嘗試（含內部重試）前後呼叫目前的
+    `radar.domain.embeddings.current_attempt_hooks()`（服務用 `report_attempts_to` 交給它），
+    讓服務每次嘗試前占住額度、嘗試後記用量；`before()` 丟的 `EmbeddingQuotaReachedError` 原樣丟出、
+    不送、不再重試。不回報的實作（替身），服務把整次呼叫當成一次嘗試記帳。
     """
 
     @property

@@ -22,9 +22,9 @@ import radar.entrypoints.worker.tasks as worker_tasks
 from radar.adapters.fake import FakeEmbeddingProvider, FakeHeartbeat
 from radar.adapters.fake.jobs import FakeJobQueue, QueuedJob
 from radar.config import ConfigError
-from radar.domain.embeddings import EmbeddingResponseError
+from radar.domain.embeddings import EmbeddingRequestError, EmbeddingResponseError
 from radar.domain.jobs import EMBED_PAPERS, RUN_WEEKLY_UPDATE
-from radar.domain.policy import CloudSafeText
+from radar.domain.policy import CloudSafeText, cloud_text
 from radar.domain.settings import Settings
 from radar.entrypoints.bootstrap import WorkerParts, build_worker
 from radar.repo.db import Database
@@ -230,3 +230,36 @@ def test_embed_task_is_not_retried_by_the_queue(
     assert tasks[EMBED_PAPERS.name].retry_strategy is None
     assert tasks[EMBED_PAPERS.name].queue == "ai"
     assert tasks[RUN_WEEKLY_UPDATE.name].retry_strategy is not None
+
+
+class _RejectsPaperOne(_ClosingFake):
+    """送出的這一批裡有論文 1 就回請求不合法（400），其他照常（審查後的修正，Codex 中 4）。"""
+
+    def embed_documents(self, texts: Sequence[CloudSafeText]) -> list[list[float]]:
+        vectors = super().embed_documents(texts)
+        if any("Paper 1 " in cloud_text(text) for text in texts):
+            raise EmbeddingRequestError("HTTP 400", http_status=400)
+        return vectors
+
+
+def test_single_rejected_paper_makes_the_job_fail_after_finishing_the_rest(
+    db: TestDatabase, monkeypatch: pytest.MonkeyPatch, config_dir: Path
+) -> None:
+    database = Database(db.app_url, connect_timeout=5, pool_size=1)
+    for n in (1, 2):
+        create_paper(
+            database,
+            doi=f"10.1/p{n}",
+            openalex_id=f"W{n}",
+            title=f"Paper {n} on platform adoption",
+            abstract=f"Abstract {n}: teams adopt platforms.",
+        )
+    task = _task(db, monkeypatch, config_dir)
+    provider = _RejectsPaperOne()
+    _use_fake(monkeypatch, provider)
+
+    with pytest.raises(worker_tasks.EmbeddingJobFailedError, match="embed_request_invalid"):
+        task()
+
+    assert provider.closed
+    assert _count(db, "embedding") == 1

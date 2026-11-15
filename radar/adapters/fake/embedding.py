@@ -6,6 +6,8 @@
 - 和真的 adapter 一樣一次最多 32 段（`MAX_BATCH_SIZE`），超過丟 `ValueError`：服務沒切批，
   測試就會發現。
 - 每次呼叫記在 `document_calls`、`query_calls`。
+- 不呼叫 `current_attempt_hooks()`（不回報每次嘗試）：服務把整次呼叫當成一次嘗試記帳。要測每次
+  嘗試的記帳，用真的 adapter 配 `httpx2.MockTransport`，或在子類別裡自己呼叫。
 真正的 Workers AI adapter 是 `radar.adapters.workers_ai`（Story 2.8）。
 """
 

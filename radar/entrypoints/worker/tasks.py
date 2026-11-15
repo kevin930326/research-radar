@@ -14,7 +14,6 @@ import procrastinate
 
 from radar.adapters.jobs import register_job
 from radar.config import ConfigError, load_domain_config, load_embedding_config
-from radar.domain.embeddings import EmbedStop
 from radar.domain.jobs import EMBED_PAPERS, RUN_WEEKLY_UPDATE, SWEEP, WEEKLY_UPDATE
 from radar.domain.scope import ScopeSettings
 from radar.domain.settings import Settings
@@ -38,7 +37,8 @@ from radar.services.weekly_update import (
 
 
 class EmbeddingJobFailedError(Exception):
-    """向量化這次有一批失敗（原因代碼已記在 `derivation_run` 與日誌）。讓工作層記成失敗並重試。"""
+    """向量化這次有一批失敗或有論文標成失敗（原因代碼已記在 `derivation_run` 與日誌）。
+    讓工作層記成失敗（不重試）。"""
 
     def __init__(self, reason: str) -> None:
         self.reason = reason
@@ -128,7 +128,8 @@ def register_tasks(app: procrastinate.App, parts: WorkerParts, settings: Setting
                 code_version=code_version(),
                 clock=lambda: datetime.now(UTC),
             )
-        if result.stop is EmbedStop.FAILED:
+        if result.has_failures:
+            # 單篇被拒時其他論文照做、停下的原因可能是 completed，仍記成失敗（ADR-0040）。
             reason = "" if result.failure_reason is None else result.failure_reason.value
             raise EmbeddingJobFailedError(reason)
 

@@ -24,8 +24,12 @@ from typer.testing import CliRunner, Result
 import radar.entrypoints.cli as cli
 from radar.adapters.fake import FakeEmbeddingProvider
 from radar.adapters.workers_ai import WorkersAiEmbeddingProvider
-from radar.domain.embeddings import EmbeddingConfig, EmbeddingTransientError
-from radar.domain.policy import CloudSafeText
+from radar.domain.embeddings import (
+    EmbeddingConfig,
+    EmbeddingRequestError,
+    EmbeddingTransientError,
+)
+from radar.domain.policy import CloudSafeText, cloud_text
 from radar.domain.settings import Settings
 from radar.repo.db import Database
 from tests.database import ROOT, TestDatabase, migrate
@@ -297,3 +301,29 @@ def test_projection_failure_after_writing_still_reports_what_was_done(
     assert "推算剩下的篇數失敗（RuntimeError）" in result.output
     assert "db went away" not in result.output
     assert execute(db, "SELECT count(*) FROM embedding") == [(3,)]
+
+
+class _RejectsPaperOne(_ClosingFake):
+    """送出的這一批裡有論文 1 就回請求不合法（400），其他照常（審查後的修正，Codex 中 4）。"""
+
+    def embed_documents(self, texts: Sequence[CloudSafeText]) -> list[list[float]]:
+        vectors = super().embed_documents(texts)
+        if any("Paper 1 " in cloud_text(text) for text in texts):
+            raise EmbeddingRequestError("HTTP 400", http_status=400)
+        return vectors
+
+
+def test_single_rejected_paper_finishes_the_rest_but_exits_1(
+    db: TestDatabase, env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 被拒的那一篇略過、其他照做（停下的原因是「做完了」），但這次有失敗：結束碼 1、報告寫出來。
+    _fake_model(db, env)
+    monkeypatch.setattr(cli, "build_embedding_provider", lambda *_: _RejectsPaperOne())
+
+    result = _backfill()
+
+    assert result.exit_code == 1
+    lines = _lines(result.output)
+    assert lines[0] == "向量化結束（模型 fake-embedding）：要做的論文都做完了"
+    assert lines[1] == "這次有 1 篇失敗（embed_request_invalid），結束碼 1"
+    assert execute(db, "SELECT count(*) FROM embedding") == [(2,)]

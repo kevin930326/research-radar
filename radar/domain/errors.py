@@ -2,9 +2,19 @@
 
 值是小寫加底線的字串，會寫進資料庫（例如 2.2 的 `derivation_run`、`llm_call`）與日誌，
 寫出去之後不改名；新增代碼時加在這裡。
+
+另有 `LockWaitTimeoutError`：`repo/db.Database.transaction_with_lock_timeout` 等鎖逾時丟的例外
+（放在 domain，services 不必 import 資料庫套件就能攔）。
 """
 
 from enum import StrEnum, unique
+
+
+class LockWaitTimeoutError(Exception):
+    """交易裡等鎖超過 `lock_timeout`；丟出時交易已經退回。訊息固定，不帶連線資訊。"""
+
+    def __init__(self) -> None:
+        super().__init__("等鎖超過時限，這個交易已退回")
 
 
 @unique
@@ -87,3 +97,7 @@ class ErrorCode(StrEnum):
     EMBED_RESPONSE_INVALID = "embed_response_invalid"
     EMBED_INPUT_CHANGED = "embed_input_changed"  # 寫入前核對：送出後標題或摘要又變了，這篇不寫
     EMBED_FAILED = "embed_failed"  # 向量化服務自己出錯（例如寫入的交易失敗），run 改 failed
+    # 重試途中今天的額度放不下下一次嘗試：這一批不寫、不算失敗，下一次續跑
+    EMBED_QUOTA_REACHED = "embed_quota_reached"
+    # 寫入前等論文那一列的鎖超過 lock_timeout：這篇不寫，下一次重算
+    EMBED_LOCK_TIMEOUT = "embed_lock_timeout"

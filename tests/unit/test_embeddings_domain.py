@@ -439,11 +439,13 @@ def test_quota_that_leaves_no_usable_tokens_is_rejected() -> None:
         _quota(daily_free_neurons=1, stop_at_ratio="0.0001", neurons_per_million_input_tokens=1075)
 
 
-def test_worst_case_seconds_adds_every_timeout_and_the_longest_waits() -> None:
+def test_request_limit_is_the_total_timeout_plus_two_phase_timeouts() -> None:
+    # 審查後的修正（Codex 中 3）：總時限涵蓋所有重試與等待，嘗試次數與重試等待不再加進去。
     api = WorkersAiApi.model_validate(
         {
             "base_url": "https://api.cloudflare.com/client/v4",
             "timeout_seconds": 60,
+            "total_timeout_seconds": 480,
             "retry": {
                 "attempts": 5,
                 "wait_initial_seconds": 1,
@@ -453,7 +455,85 @@ def test_worst_case_seconds_adds_every_timeout_and_the_longest_waits() -> None:
             },
         }
     )
-    # 5 次 × 60 秒，加上 4 次重試前各等 max(30＋1, 120) 秒。
-    assert api.worst_case_seconds == 5 * 60 + 4 * 120
-    single = api.model_copy(update={"retry": api.retry.model_copy(update={"attempts": 1})})
-    assert single.worst_case_seconds == 60
+    assert api.request_limit_seconds == 480 + 2 * 60
+    more_attempts = api.model_copy(update={"retry": api.retry.model_copy(update={"attempts": 10})})
+    assert more_attempts.request_limit_seconds == 600
+
+
+# --- 審查後的修正（Codex 中 3、4、6、7） -------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        [0.0, 0.0, 0.0],
+        [0, 0, 0],
+        [1e-9, -1e-9, 0.0],  # 轉成半精度會下溢成 0
+        [2.9e-8, 0.0, -2.9e-8],
+    ],
+)
+def test_vector_that_is_all_zero_at_halfvec_precision_is_rejected(row: list[float]) -> None:
+    with pytest.raises(EmbeddingResponseError, match="全是 0"):
+        check_embedding_vectors([[0.1, 0.2, 0.3], row], count=2, dimensions=3)
+
+
+def test_vector_with_one_component_that_survives_halfvec_is_accepted() -> None:
+    # 1e-7 轉成半精度是最小的次正規數（約 1.19e-7），不是 0。
+    assert check_embedding_vectors([[0.0, 1e-7, 1e-9]], count=1, dimensions=3) == [
+        [0.0, 1e-7, 1e-9]
+    ]
+
+
+def test_has_failures_covers_single_failed_papers_without_a_failed_stop() -> None:
+    assert not EmbedRunResult(stop=EmbedStop.COMPLETED).has_failures
+    assert not EmbedRunResult(stop=EmbedStop.QUOTA_REACHED).has_failures
+    assert EmbedRunResult(stop=EmbedStop.COMPLETED, failed=1).has_failures
+    assert EmbedRunResult(stop=EmbedStop.LIMIT_REACHED, failed=2).has_failures
+    assert EmbedRunResult(stop=EmbedStop.FAILED).has_failures
+
+
+def test_backfill_report_names_single_failures_even_when_completed() -> None:
+    result = EmbedRunResult(
+        stop=EmbedStop.COMPLETED,
+        embedded=2,
+        estimated_tokens=60,
+        requests=4,
+        failed=1,
+        failure_reason=ErrorCode.EMBED_REQUEST_INVALID,
+    )
+    lines = render_backfill_report(result, EmbeddingBacklog(1, 30, 0), _quota(), "m")
+    assert lines[0] == "向量化結束（模型 m）：要做的論文都做完了"
+    assert lines[1] == "這次有 1 篇失敗（embed_request_invalid），結束碼 1"
+
+
+def test_report_texts_no_longer_promise_an_overestimate() -> None:
+    result = EmbedRunResult(stop=EmbedStop.COMPLETED, embedded=1, estimated_tokens=30)
+    backlog = EmbeddingBacklog(1, 30, 0)
+    text = "\n".join(
+        render_backfill_report(result, backlog, _quota(), "m")
+        + render_backlog_estimate(backlog, _quota(), "m")
+    )
+    assert "偏高" not in text
+    assert "保證" not in text
+    assert "估計值" in text
+
+
+def test_shipped_config_bounds_a_run_below_the_default_sweep_limit() -> None:
+    config = load_embedding_config({"RADAR_CONFIG_DIR": str(ROOT / "config")})
+    assert config.api.total_timeout_seconds == 480
+    assert config.lock_timeout_seconds == 2
+    assert config.lock_timeout_ms == 2000
+    # 480＋2 × 60＋(2 × 32＋2) × 2
+    assert config.api.request_limit_seconds == 600
+    assert config.run_limit_seconds == 732
+    assert config.run_limit_seconds < load_settings({"DATABASE_URL": DB_URL}).llm_run_stale_after
+    assert config.token_estimate.bytes_per_token == Decimal(3)
+
+
+def test_shipped_config_explains_the_divisor_and_its_calibration() -> None:
+    text = (ROOT / "config" / "embeddings.yaml").read_text(encoding="utf-8")
+    assert "經驗值" in text
+    assert "20 篇試跑" in text
+    assert "neurons" in text
+    assert "偏高" not in text
+    assert "保守）" not in text
