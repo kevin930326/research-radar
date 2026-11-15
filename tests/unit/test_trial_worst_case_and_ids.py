@@ -9,6 +9,7 @@
 都不碰資料庫、不連網路；金額與論文 ID 都是自己編的。
 """
 
+import dataclasses
 import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -27,6 +28,7 @@ from radar.domain.trial_runs import (
     TrialItem,
     TrialItemStatus,
     TrialPlanItem,
+    TrialPlanKind,
     TrialReport,
     format_trial_ids,
     parse_trial_ids_file,
@@ -85,8 +87,8 @@ def test_estimate_line_says_worst_case_with_retries() -> None:
     lines = render_trial_estimate(TrialEstimate((plan, plan), attempts=3), status)
 
     assert lines[0] == (
-        "預估：會交給閘門 2 項，費用上限 0.003072 美元（含重試的最壞情況：每項最多送 3 次；"
-        "已經有結果、會略過的也算進去）"
+        "預估：會交給閘門 2 項，費用上限 0.003072 美元（只算會呼叫模型的 2 項；"
+        "含重試的最壞情況：每項最多送 3 次）"
     )
 
 
@@ -250,3 +252,43 @@ def test_ids_file_has_the_same_limit() -> None:
     text = "".join(f"{uuid.UUID(int=n)}\n" for n in range(MAX_TRIAL_PAPERS + 1))
     with pytest.raises(TrialArgumentError, match="一次最多"):
         parse_trial_ids_file(text)
+
+
+# --- Story 2.11 確認審查 D1：接續與略過的不算進上限 -----------------------------------------
+
+
+def test_resume_and_skip_items_are_listed_apart_and_left_out_of_the_cap() -> None:
+    call = _plan("0.000512", 3)
+    resume = dataclasses.replace(call, task=LlmTask.ZH_SUMMARY, kind=TrialPlanKind.RESUME)
+    skip = dataclasses.replace(call, task=LlmTask.EXTRACT_MODEL, kind=TrialPlanKind.SKIP)
+    estimate = TrialEstimate((resume, call, skip), attempts=3)
+    status = build_budget_status(
+        budget_config(), month_window(datetime(2026, 11, 15, tzinfo=UTC)), {}
+    )
+
+    assert [item.calls_model for item in estimate.items] == [False, True, False]
+    assert estimate.max_cost_usd == Decimal("0.001536")
+    assert [estimate.count(kind) for kind in TrialPlanKind] == [1, 1, 1]
+    lines = render_trial_estimate(estimate, status)
+    assert lines[0] == (
+        "預估：會交給閘門 3 項，費用上限 0.001536 美元（只算會呼叫模型的 1 項；"
+        "含重試的最壞情況：每項最多送 3 次）"
+    )
+    assert lines[1] == (
+        "另外接續 1 項（用存下的輸出，不呼叫模型、不再記帳）、略過 1 項（已經有結果或正在跑）："
+        "不算進上限，執行時也不會呼叫模型"
+    )
+    assert lines[2].startswith("本月（2026-11，台北時間）")
+
+
+def test_only_resume_and_skip_means_a_zero_cap() -> None:
+    resume = dataclasses.replace(_plan("0.000512"), kind=TrialPlanKind.RESUME)
+    status = build_budget_status(
+        budget_config(), month_window(datetime(2026, 11, 15, tzinfo=UTC)), {}
+    )
+
+    lines = render_trial_estimate(TrialEstimate((resume,)), status)
+
+    assert lines[0].startswith(
+        "預估：會交給閘門 1 項，費用上限 0.000000 美元（只算會呼叫模型的 0 項"
+    )

@@ -66,7 +66,10 @@ Batch 價的保守上限。不寫任何列、不建 provider、不看預算。
     否則串流結果，用 `custom_id` 對回 item，逐項經閘門的 `import_llm_batch_result` 匯入（不認得的
     custom_id 與讀不到 custom_id 的行只計數）。串流讀完先核對供應商的 `request_counts`：讀到的項數
     （不重複的 custom_id＋讀不到 custom_id 的行）比它少就當成被截短，記錯誤、批次留 `ended`、這次
-    不判缺項，下次重讀（審查後）；夠了，還 `running` 的才 → `batch_result_missing`。
+    不判缺項，下次重讀（審查後）；同一個供應商 batch ID 連續 `incomplete_results_attention_after`
+    次（預設 3）都比它少，就條件式 `ended` → `needs_attention`（`batch_results_incomplete`），交給
+    人工確認：`--fail` 接受缺項、`--provider-batch-id` 再讀（`submitted` → `ended` 時次數歸零；
+    確認審查 D2）。夠了，還 `running` 的才 → `batch_result_missing`。
     最後條件式 `ended` → `imported`（同一句確認這批已經沒有 `running` 的 run、ID 沒換）。串流途中
     斷線：記成這批的錯誤，批次留 `ended`，下一次接著做（已匯入的項目 run 已經不是 `running`，不重
     記帳）。
@@ -174,6 +177,7 @@ from radar.repo.llm_batches import (
     update_batch_submission_needs_attention,
     update_batch_submission_requeued,
     update_batch_submission_resolved_failed,
+    update_batch_submission_results_incomplete,
     update_batch_submission_resumed,
     update_batch_submission_submitted,
     update_batch_submission_submitting,
@@ -1163,10 +1167,11 @@ def count_llm_batch_running_runs(
 
 
 def list_llm_batch_pending_papers(
-    actor: Viewer, database: Database, batch_submission_ids: Collection[uuid.UUID]
+    actor: Viewer, database: Database, batch_submission_ids: Collection[uuid.UUID] | None
 ) -> list[uuid.UUID]:
-    """這幾批裡寫結果失敗、等互動接續（`llm_result_pending`）的 run 屬於哪些論文（`radar batches
-    wait` 結束前印）。
+    """這幾批（`None`＝全部的批次）裡寫結果失敗、等互動接續（`llm_result_pending`）的 run 屬於哪些
+    論文（`radar batches wait` 結束前印；沒有目標時查全部，確認審查 D3）。之後已經有更新的 run 的
+    不算（見 `repo.list_batch_pending_paper_ids`）。
 
     Raises:
         PermissionDeniedError: `actor` 不是系統工作（不碰資料庫）。
@@ -1334,16 +1339,12 @@ def _poll_one(
                 return out
             expected = results_incomplete(status, read)
             if expected is not None:
-                # 串流正常結束但行數不夠（被截短）：不判缺項，批次留 ended，下次重讀。
+                # 串流正常結束但行數不夠（被截短）：不判缺項，批次留 ended，下次重讀；同一個 ID 連續
+                # 對不上到設定的次數就交給人工確認（確認審查 D2）。
                 out.error = f"BatchResultsIncomplete（讀到 {read}／{expected} 項）"
-                log.error(
-                    "Batch 結果讀到的項數比供應商的計數少，這次不判缺項、下次重讀",
-                    batch_submission_id=str(row.id),
-                    read=read,
-                    expected=expected,
+                return _results_incomplete(
+                    database, setup, out, provider_batch_id, read=read, expected=expected
                 )
-                out.status = _current_status(database, row.id)
-                return out
             out.counts.missing = _release_running(
                 database, row.id, provider_batch_id, ErrorCode.BATCH_RESULT_MISSING
             )
@@ -1369,6 +1370,48 @@ def _poll_one(
         missing=counts.missing,
         unavailable=counts.unavailable,
     )
+    return out
+
+
+def _results_incomplete(
+    database: Database,
+    setup: LlmBatchSetup,
+    out: BatchPollRow,
+    provider_batch_id: str,
+    *,
+    read: int,
+    expected: int,
+) -> BatchPollRow:
+    """讀到的項數比供應商的計數少：記一次（`incomplete_reads` 加一），連續
+    `incomplete_results_attention_after` 次就 `ended` → `needs_attention`
+    （`batch_results_incomplete`），否則批次留 `ended`、下次重讀。這批已經不是 `ended` 或換了 ID
+    時不改，照重讀的狀態回報。"""
+    attention_after = setup.batches.incomplete_results_attention_after
+    with database.transaction() as connection:
+        counted = update_batch_submission_results_incomplete(
+            connection, out.batch_submission_id, provider_batch_id, attention_after=attention_after
+        )
+    if counted is None:
+        out.status = _current_status(database, out.batch_submission_id)
+        return out
+    out.status, times = counted
+    if out.status is BatchSubmissionStatus.NEEDS_ATTENTION:
+        log.error(
+            "Batch 結果連續幾次都比供應商的計數少，標 needs_attention（要人工確認）",
+            batch_submission_id=str(out.batch_submission_id),
+            read=read,
+            expected=expected,
+            incomplete_reads=times,
+        )
+    else:
+        log.error(
+            "Batch 結果讀到的項數比供應商的計數少，這次不判缺項、下次重讀",
+            batch_submission_id=str(out.batch_submission_id),
+            read=read,
+            expected=expected,
+            incomplete_reads=times,
+            attention_after=attention_after,
+        )
     return out
 
 

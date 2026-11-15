@@ -980,7 +980,8 @@ def batches_wait(
 
     目標是開始時 submitted／ended 的批次，或 --id 指定的。每次檢查印一行「已結束 X 批、還在跑
     Y 批」。設定錯、讀不到資料庫、最後一次有錯誤、有 needs_attention（沒有目標時也看全庫的）、
-    目標批次裡還有寫結果失敗等接續的項目（llm_result_pending，印論文 ID 與接續方式）：退出碼 1。
+    目標批次裡還有寫結果失敗等接續的項目（llm_result_pending，印論文 ID 與接續方式；沒有目標時看
+    全部的批次）：退出碼 1。
     Ctrl-C：退出碼 130，重跑接著收、不重複匯入。
     """
     configure_logging()
@@ -1003,18 +1004,26 @@ def batches_wait(
                 )
             ]
         if not targets:
+            # 上次的 wait 收完了才結束、重跑時沒有目標：上次留下的 needs_attention 與等接續的
+            # 結果（全部的批次）都還要看，不能當成成功（確認審查 D3）。
             stuck = list_llm_batches(
                 SystemViewer(), database, {BatchSubmissionStatus.NEEDS_ATTENTION}
             )
-            if not stuck:
+            left_pending = list_llm_batch_pending_papers(SystemViewer(), database, None)
+            if not stuck and not left_pending:
                 typer.echo("沒有要等的批次（submitted／ended）")
                 return
-            typer.echo("沒有要等的批次（submitted／ended），但有批次要人工確認：", err=True)
-            for stuck_row in stuck:
-                typer.echo(f"  {stuck_row.id}", err=True)
-            typer.echo(
-                "radar batches resolve <批次 id> --provider-batch-id <ID> 或 --fail", err=True
-            )
+            if stuck:
+                typer.echo("沒有要等的批次（submitted／ended），但有批次要人工確認：", err=True)
+                for stuck_row in stuck:
+                    typer.echo(f"  {stuck_row.id}", err=True)
+                typer.echo(
+                    "radar batches resolve <批次 id> --provider-batch-id <ID> 或 --fail", err=True
+                )
+            if left_pending:
+                if not stuck:
+                    typer.echo("沒有要等的批次（submitted／ended）", err=True)
+                _echo_pending(left_pending)
             raise typer.Exit(1)
         with ExitStack() as stack:
             open_provider = _lazy_provider(settings, stack)
@@ -1066,16 +1075,22 @@ def batches_wait(
             err=True,
         )
     if pending:
-        # 帳記了、輸出存著，只差寫結果：Batch 不會重排，要用互動接續（不再呼叫模型、不再記帳）。
-        typer.echo(
-            f"有 {len(pending)} 篇論文的結果還沒寫好（寫入失敗、等接續）：用 radar runs trial"
-            " <論文 ID>… 接續（會先印預估、要確認；這幾項用存下的輸出，不再呼叫模型）",
-            err=True,
-        )
-        for paper_id in pending:
-            typer.echo(f"  {paper_id}", err=True)
+        _echo_pending(pending)
     if attention or pending or not result.healthy:
         raise typer.Exit(1)
+
+
+def _echo_pending(pending: list[uuid.UUID]) -> None:
+    """等接續的論文 ID 與接續方式。帳記了、輸出存著，只差寫結果：Batch 不會重排，要用互動接續
+    （那幾項不再呼叫模型、不再記帳）。"""
+    typer.echo(
+        f"有 {len(pending)} 篇論文的結果還沒寫好（寫入失敗、等接續）：用 radar runs trial"
+        " <論文 ID>… 接續（會先印預估、要確認；等接續的那幾項用存下的輸出，不再呼叫模型；"
+        "同一篇其他沒有結果的工作會照常呼叫）",
+        err=True,
+    )
+    for paper_id in pending:
+        typer.echo(f"  {paper_id}", err=True)
 
 
 def _check_wait_targets(targets: list[uuid.UUID], rows: list[BatchSubmission]) -> None:

@@ -167,3 +167,24 @@ def test_upgrade_again_after_batches_were_imported(db: TestDatabase) -> None:
     assert rows[submitted] == (None, None, True)
     check = _alembic(db, "check")
     assert check.returncode == 0, check.stdout + check.stderr
+
+
+def test_incomplete_reads_defaults_to_zero_and_is_never_negative(db: TestDatabase) -> None:
+    """`incomplete_reads`（確認審查 D2）：新的列是 0、不能是負的；降版刪掉、升版加回來。"""
+    submission_id = _submission(db, "submitted")
+
+    assert _app(
+        db, "SELECT incomplete_reads FROM batch_submission WHERE id = %s", submission_id
+    ) == [(0,)]
+    with pytest.raises(psycopg.errors.CheckViolation):
+        _submission(db, "submitted", incomplete_reads=-1)
+
+    down = _alembic(db, "downgrade", "0016")
+
+    assert down.returncode == 0, down.stdout + down.stderr
+    assert "incomplete_reads" not in _columns(db)
+    migrate(db)
+    assert "incomplete_reads" in _columns(db)
+    assert _app(
+        db, "SELECT incomplete_reads FROM batch_submission WHERE id = %s", submission_id
+    ) == [(0,)]

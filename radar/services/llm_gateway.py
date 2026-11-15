@@ -13,7 +13,9 @@
 4. 離線保守估計輸入 token；超過 `max_input_tokens` 而且工作沒允許 → `TOO_LARGE`。
    呼叫端帶了 `confirmed_key`（試跑確認過的鍵，Story 2.10）而這次算出的 `RunKey` 不一樣（輸入、
    prompt 版本或模型在確認後變了）→ 丟 `ConfirmedRequestChangedError`，還沒寫任何列、不呼叫模型。
-   鍵是從這次真的要送的內容算的，所以核對過就保證送出的就是確認時的那份。
+   鍵是從這次真的要送的內容算的，所以核對過就保證送出的就是確認時的那份。呼叫端帶
+   `call_allowed=False`（試跑確認時這一項是接續或略過，Story 2.11 確認審查 D1）時，第 5 步只接續、
+   不新增 run（沒有可接續的就 `SKIPPED`），一定不呼叫模型。
 5. 取得執行資格的短交易：advisory lock → 再問一次 `should_run`（有 `active`、平常流程的
    `rejected` 或 `running` 就 `SKIPPED`）→ 有 `llm_result_pending` 的 run 就改回 `running` 接續，
    否則新增 `running` 的 `derivation_run`（部分唯一索引兜底），立刻 commit。評估（帶
@@ -341,9 +343,12 @@ def run_llm_job(
     budget_allows: Callable[[LlmTask], bool],
     eval_run_id: uuid.UUID | None = None,
     confirmed_key: RunKey | None = None,
+    call_allowed: bool = True,
 ) -> GatewayResult:
     """照 AD-8 的固定步驟跑一件 LLM 工作（見模組說明）。`confirmed_key` 有值時，這次算出的
-    `RunKey` 要和它一樣才往下（第 4 步之後、取得執行資格之前核對）。
+    `RunKey` 要和它一樣才往下（第 4 步之後、取得執行資格之前核對）。`call_allowed` 是 False 時
+    （試跑確認時這一項是接續或略過，Story 2.11 確認審查 D1）第 5 步只接續、不新增 run，所以一定
+    不會呼叫模型；沒有可接續的就 `SKIPPED`。
 
     Raises:
         PermissionDeniedError: `actor` 不是系統工作（不碰資料庫）。
@@ -399,8 +404,10 @@ def run_llm_job(
         # 確認之後輸入（例如補上摘要）、prompt 版本或模型變了：不呼叫、不寫列（Story 2.10）。
         raise ConfirmedRequestChangedError(confirmed_key, key)
 
-    # 5. 取得執行資格（短交易，立刻 commit）。
-    claim = _acquire(database, config, prepared, eval_run_id, resume_only=resume_only)
+    # 5. 取得執行資格（短交易，立刻 commit）。不准呼叫時和預算不准一樣只接續、不新增。
+    claim = _acquire(
+        database, config, prepared, eval_run_id, resume_only=resume_only or not call_allowed
+    )
     if claim is None:
         # 預算不准而且鎖裡已經沒有可接續的 run（別人接續完、或已經有結果）：照預算不准回報。
         return GatewayResult(

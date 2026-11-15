@@ -82,6 +82,9 @@ class LlmBatchConfig(BaseModel):
     - `month_start_hold_hours`：台北時間每月 1 日 00:00 到這個鐘點以前，整次規劃延後（Anthropic
       的 workspace 上限可能還在用 UTC 的上個月，ADR-0031 取捨）；0 表示不延後。
     - `poll_interval_minutes`：`radar batches wait` 每幾分鐘查一次供應商（預設 10）。
+    - `incomplete_results_attention_after`：同一個供應商 batch ID 連續幾次讀到的結果項數比供應商的
+      計數少，就把批次標 `needs_attention`（`batch_results_incomplete`），交給 `radar batches
+      resolve`（預設 3；Story 2.11 確認審查 D2）。
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -92,6 +95,9 @@ class LlmBatchConfig(BaseModel):
     # `radar batches wait` 每幾分鐘查一次（1～1,440；Story 2.11）。有預設值，舊的設定檔照樣讀得
     # 進來。
     poll_interval_minutes: int = Field(default=10, ge=1, le=1440, strict=True)
+    # 結果被截短多半是偶發（斷線），重讀一兩次就補齊；一直對不上代表供應商的計數和結果檔本身不一致，
+    # 再讀也一樣，要有人工出口（1～100；有預設值，舊的設定檔照樣讀得進來）。
+    incomplete_results_attention_after: int = Field(default=3, ge=1, le=100, strict=True)
 
 
 def in_month_start_hold(now: datetime, hours: int) -> bool:

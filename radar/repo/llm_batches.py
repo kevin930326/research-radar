@@ -63,6 +63,9 @@ batch_submission_table = Table(
     # 遷移 0017（Story 2.11）：看到供應商 `ended` 的時間、匯入做完的時間。
     Column("ended_at", DateTime(timezone=True)),
     Column("imported_at", DateTime(timezone=True)),
+    # 遷移 0017（Story 2.11 確認審查 D2）：同一個供應商 batch ID 連續幾次讀到的結果項數比供應商的
+    # 計數少（`submitted` → `ended` 時歸零）。
+    Column("incomplete_reads", Integer, nullable=False, server_default=text("0")),
     Index(
         "uq_batch_submission_provider_batch_id",
         "provider_batch_id",
@@ -106,6 +109,7 @@ batch_submission_table = Table(
     ),
     CheckConstraint("item_count >= 0", name="item_count_not_negative"),
     CheckConstraint("estimated_max_cost_usd >= 0", name="estimated_max_cost_usd_not_negative"),
+    CheckConstraint("incomplete_reads >= 0", name="incomplete_reads_not_negative"),
 )
 
 batch_item_table = Table(
@@ -237,24 +241,36 @@ def count_batch_running_runs(
 
 
 def list_batch_pending_paper_ids(
-    viewer: SystemViewer, connection: Connection, batch_submission_ids: Iterable[uuid.UUID]
+    viewer: SystemViewer,
+    connection: Connection,
+    batch_submission_ids: Iterable[uuid.UUID] | None,
 ) -> list[uuid.UUID]:
-    """這幾批裡寫結果失敗、等互動接續的 run（`failed`／`llm_result_pending`：帳記了、輸出存著，表頭
-    還沒寫）屬於哪些論文，不重複、依論文 id（`radar batches wait` 結束前印，Story 2.11 審查後）。
+    """這幾批（`None`＝全部的批次）裡寫結果失敗、等互動接續的 run（`failed`／`llm_result_pending`：
+    帳記了、輸出存著，表頭還沒寫）屬於哪些論文，不重複、依論文 id（`radar batches wait` 結束前印，
+    Story 2.11 審查後）。同一篇同一個工作之後已經有更新的平常流程 run（例如 prompt 升版後重跑過）
+    的不算：那筆的鍵已經不是現在的，接續不到，列出來只會讓 wait 一直以 1 結束（確認審查 D3）。
 
     Raises:
         TypeError: `viewer` 不是 `SystemViewer`。
     """
     visible = visible_to_system_only(viewer)
+    scope = "" if batch_submission_ids is None else " AND i.batch_submission_id = ANY(:ids)"
     rows = connection.execute(
         text(
             "SELECT DISTINCT r.paper_id"
             " FROM batch_item AS i JOIN derivation_run AS r ON r.id = i.run_id"
-            f" WHERE {visible} AND i.batch_submission_id = ANY(:ids)"
+            f" WHERE {visible}{scope}"
             " AND r.status = 'failed' AND r.failure_reason = :pending"
+            " AND NOT EXISTS ("
+            " SELECT 1 FROM derivation_run AS newer"
+            " WHERE newer.paper_id = r.paper_id AND newer.task = r.task"
+            " AND newer.eval_run_id IS NULL AND newer.created_at > r.created_at)"
             " ORDER BY r.paper_id"
         ),
-        {"ids": list(batch_submission_ids), "pending": ErrorCode.LLM_RESULT_PENDING.value},
+        {
+            "ids": None if batch_submission_ids is None else list(batch_submission_ids),
+            "pending": ErrorCode.LLM_RESULT_PENDING.value,
+        },
     ).all()
     return [uuid.UUID(str(paper_id)) for (paper_id,) in rows]
 
@@ -628,12 +644,13 @@ def update_batch_submission_needs_attention(
 def update_batch_submission_ended(
     connection: Connection, batch_submission_id: uuid.UUID, provider_batch_id: str
 ) -> bool:
-    """`submitted` → `ended`（供應商那邊處理完了），記 `ended_at`；不是 `submitted`、或供應商
-    batch ID 已經不是查到的那個就不改、回 False（Story 2.11）。"""
+    """`submitted` → `ended`（供應商那邊處理完了），記 `ended_at`、`incomplete_reads` 歸零（人工
+    確認後重新開始數）；不是 `submitted`、或供應商 batch ID 已經不是查到的那個就不改、回 False
+    （Story 2.11）。"""
     result = connection.execute(
         text(
             "UPDATE batch_submission SET status = 'ended', ended_at = clock_timestamp(),"
-            " updated_at = clock_timestamp()"
+            " incomplete_reads = 0, updated_at = clock_timestamp()"
             " WHERE id = :id AND status = 'submitted' AND provider_batch_id = :batch_id"
         ),
         {"id": batch_submission_id, "batch_id": provider_batch_id},
@@ -658,6 +675,47 @@ def update_batch_submission_imported(
         {"id": batch_submission_id, "batch_id": provider_batch_id},
     )
     return result.rowcount == 1
+
+
+def update_batch_submission_results_incomplete(
+    connection: Connection,
+    batch_submission_id: uuid.UUID,
+    provider_batch_id: str,
+    *,
+    attention_after: int,
+) -> tuple[BatchSubmissionStatus, int] | None:
+    """這次讀到的結果項數比供應商的計數少：`incomplete_reads` 加一；加完到了 `attention_after` 就
+    同一句 `ended` → `needs_attention`（`batch_results_incomplete`）。回（之後的狀態, 次數）；不是
+    `ended`、或供應商 batch ID 已經不是 `provider_batch_id` 就不改、回 None（Story 2.11 確認審查
+    D2）。
+
+    Raises:
+        ValueError: `attention_after` 不是至少 1 的整數。
+    """
+    if type(attention_after) is not int or attention_after < 1:
+        raise ValueError("attention_after 要是至少 1 的整數")
+    # SET 右邊的欄位都是改之前的值，所以三個 CASE 看的是同一個「加一之後」的次數。
+    row = connection.execute(
+        text(
+            "UPDATE batch_submission SET incomplete_reads = incomplete_reads + 1,"
+            " status = CASE WHEN incomplete_reads + 1 >= :limit THEN 'needs_attention'"
+            " ELSE status END,"
+            " failure_reason = CASE WHEN incomplete_reads + 1 >= :limit THEN :reason"
+            " ELSE failure_reason END,"
+            " updated_at = clock_timestamp()"
+            " WHERE id = :id AND status = 'ended' AND provider_batch_id = :batch_id"
+            " RETURNING status, incomplete_reads"
+        ),
+        {
+            "id": batch_submission_id,
+            "batch_id": provider_batch_id,
+            "limit": attention_after,
+            "reason": ErrorCode.BATCH_RESULTS_INCOMPLETE.value,
+        },
+    ).one_or_none()
+    if row is None:
+        return None
+    return BatchSubmissionStatus(row[0]), int(row[1])
 
 
 def update_batch_submission_attention_on_not_found(

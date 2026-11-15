@@ -21,3 +21,10 @@ month_start_hold_hours: 8
 # 批次 1 小時內做完、最長 24 小時；10 分鐘一次，一天最多 144 次查詢（Story 2.11、ADR-0043）。
 # worker 的 poll-batches 照 deploy/crontab（每 15 分鐘），不看這個值。
 poll_interval_minutes: 10
+# 同一批（同一個供應商 batch ID）連續幾次讀到的結果項數比供應商的計數（request_counts）少，就把批次
+# 標 needs_attention（batch_results_incomplete），交給 `radar batches resolve`（1～100）。被截短多半
+# 是偶發的斷線，重讀一兩次就補齊；一直對不上代表計數和結果檔本身不一致，再讀也一樣。取 3：給兩次
+# 重讀的機會，cron（每 15 分鐘）約 45 分鐘、`radar batches wait`（每 10 分鐘）約 30 分鐘後進
+# needs_attention；也和 wait「連續 3 次查詢都有錯誤就停」一致，wait 停下時印的是 resolve 的指令
+# （Story 2.11 確認審查 D2、ADR-0043）。
+incomplete_results_attention_after: 3

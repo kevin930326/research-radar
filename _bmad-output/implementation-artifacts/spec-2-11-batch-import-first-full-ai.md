@@ -28,6 +28,21 @@ deferred:
       （不重複的 custom_id＋讀不到 custom_id 的行），少於供應商計數就記錯誤、批次留 ended、下次重讀，
       不判缺項（test_truncated_results_are_not_treated_as_missing_and_are_read_again）。剩下「截在最後
       一行中間」最多一項會被判缺項，寫在 ADR-0043 取捨。
+  - summary: >-
+      常態運作時 llm_result_pending 沒有人接續：cron 的 poll-batches 只在寫表頭失敗的那一輪不送心跳，
+      下一輪批次已經 imported、心跳恢復；那筆 run 規劃時是 RESUMABLE（Batch 不重排），也沒有排程接續，
+      那篇的那項 AI 結果會一直缺著。
+    evidence: |-
+      確認審查 D4（Opus，887f5bf）讀碼確認：poll_llm_batches 只列 submitted／ended；
+      list_batch_pending_paper_ids 只有 radar batches wait 呼叫；規劃見到可接續的 run 回 RESUMABLE。
+      不是這次引入；第一次全庫由 Kevin 用 wait 收（D3 之後重跑也會提示），不受影響。
+    location: >-
+      radar/services/llm_batches.py poll_llm_batches／radar/entrypoints/worker/tasks.py poll_batches_job
+    severity: low
+    status: 'open'
+    resolution: >-
+      開每週自動規劃（Kevin 決定 2.11-1）之前處理：例如 poll 結束時全庫有等接續的 run 就不送心跳，
+      或排程自動接續（走互動閘門的接續路徑，不再呼叫模型、不再記帳）。ADR-0043 取捨有寫。
 ---
 
 <intent-contract>
@@ -179,6 +194,14 @@ deferred:
   - `[medium]` `[patch]` `wait` 只看最後一輪，`llm_result_pending` 被掩蓋 — 結束前查目標批次，有就印論文 ID 與 `radar runs trial`、退出碼 1。
   - `[medium]` `[patch]` 0017 降版再升版違反 CHECK — 升版先用 `updated_at` 回填。
   - `[medium]` `[patch]` PR 說明的 `| tee` 吃掉退出碼 — PR 說明改用 `set -o pipefail` 並立即檢查。
+
+### 2026-11-16 — Opus 確認審查（887f5bf）
+- verdicts: 4 findings — high 0, medium 2, low 2；全部同意（triage：docs/runs/epic-2b/reviews/2.11-triage.md 最後一節）
+- findings:
+  - `[medium]` `[patch]` D1：PR 說明叫 Kevin「預估不是 0 就按 n」，但試跑預估把略過與接續也算進上限，永遠不是 0 — 試跑預估把每項分成會呼叫／接續／略過，上限只算會呼叫的，接續與略過另列一行；確認時是接續或略過的項目執行時帶 `call_allowed=False`（閘門只接續或略過、不新增 run），所以仍不超過確認的上限；PR 說明改看「只算會呼叫模型的 N 項」。
+  - `[medium]` `[patch]` D2：供應商計數一直比結果檔多時沒有出口 — 同一個供應商 batch ID 連續 `incomplete_results_attention_after`（預設 3）次讀不夠，就 `ended` → `needs_attention`（`batch_results_incomplete`），交給 `resolve`；次數記在 `batch_submission.incomplete_reads`（加在 0017），`submitted` → `ended` 時歸零。
+  - `[low]` `[patch]` D3：`wait` 沒有目標時不看 `llm_result_pending` — 沒有目標時也查全部批次裡等接續的 run（之後已有更新 run 的不算），有就印論文 ID 與接續方式、退出碼 1；PR 說明第 6 步改正。
+  - `[low]` `[defer]` D4：常態運作時 `llm_result_pending` 沒人接續 — 不改程式，記進 frontmatter `deferred`、ADR-0043 取捨。
 
 ## Design Notes
 

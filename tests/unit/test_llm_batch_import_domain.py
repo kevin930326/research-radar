@@ -8,12 +8,14 @@
 import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
 
 from radar.adapters.fake import FakeLlmProvider, fake_batch_status, fake_completion
 from radar.adapters.fake.llm import FakeRepliesExhaustedError
+from radar.config import load_llm_batch_config
 from radar.domain.ai_outputs import LlmTask, ResultStatus, RunStatus
 from radar.domain.budget import BUDGET_TIMEZONE
 from radar.domain.llm import (
@@ -424,3 +426,32 @@ def test_queued_batches_are_part_of_the_confirmed_total() -> None:
         "",
         "這次會送出：2 筆，保守上限合計 0.5000 美元",
     ]
+
+
+# --- 確認審查 D2 ------------------------------------------------------------------------------
+
+
+def test_incomplete_results_attention_after_has_a_default_and_bounds() -> None:
+    base: dict[str, object] = {
+        "weekly_planning_enabled": False,
+        "max_requests_per_batch": 500,
+        "month_start_hold_hours": 8,
+    }
+
+    assert LlmBatchConfig.model_validate(base).incomplete_results_attention_after == 3
+    assert (
+        LlmBatchConfig.model_validate(
+            {**base, "incomplete_results_attention_after": 1}
+        ).incomplete_results_attention_after
+        == 1
+    )
+    for bad in (0, 101, "3", 2.5, True):
+        with pytest.raises(ValidationError):
+            LlmBatchConfig.model_validate({**base, "incomplete_results_attention_after": bad})
+
+
+def test_repo_config_sets_incomplete_results_attention_after_to_three() -> None:
+    root = Path(__file__).resolve().parents[2]
+    config = load_llm_batch_config({"RADAR_CONFIG_DIR": str(root / "config")})
+
+    assert config.incomplete_results_attention_after == 3

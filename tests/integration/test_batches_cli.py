@@ -6,6 +6,7 @@ provider 換成假的（批次 ID、狀態與結果行不是真的錄的，形�
 不連網路；環境變數只用測試值；論文與回覆都是測試自己編的。
 """
 
+import dataclasses
 import logging
 import shutil
 import uuid
@@ -711,3 +712,44 @@ def test_wait_exits_1_while_a_result_is_left_waiting_to_resume(
     assert "radar runs trial" in result.output
     assert str(items[0].key.paper_id) in result.output
     assert len(ledger(db)) == 3  # 接續不用再付錢：帳都在
+
+
+def test_rerun_without_targets_still_reports_results_left_waiting_to_resume(
+    db: TestDatabase, database: Database, env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """確認審查 D3：第一次 wait 已經把批次收到 imported、因為等接續的結果以 1 結束；重跑時沒有
+    submitted／ended，也不能以 0 結束，要再印論文 ID 與接續方式。同一篇同一個工作之後有更新的 run
+    （例如 prompt 升版後重跑過）時，那筆接續不到，就不再列。"""
+    submission_id = submitted_batch(database, batch_setup())
+    items = list(by_task(database, submission_id).values())
+    real = ai_results.record_batch_llm_result
+    calls = {"n": 0}
+
+    def broken_once(*args: object, **kwargs: object) -> object:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("寫表頭壞了")
+        return real(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(llm_gateway, "record_batch_llm_result", broken_once)
+    built = _use(monkeypatch, _closing([succeeded(item) for item in items]))
+    _sleeps(monkeypatch)
+    assert _invoke(["batches", "wait"]).exit_code == 1
+    assert _status_of(db, submission_id) == "imported"
+    opened = len(built)
+
+    rerun = _invoke(["batches", "wait"])
+
+    assert rerun.exit_code == 1, rerun.output
+    assert "沒有要等的批次" in rerun.output
+    assert "radar runs trial" in rerun.output
+    assert str(items[0].key.paper_id) in rerun.output
+    assert len(built) == opened  # 沒有目標：不建 provider
+
+    newer = dataclasses.replace(items[0].key, prompt_version=items[0].key.prompt_version + 1)
+    insert_run(db, newer, status="succeeded")
+
+    after = _invoke(["batches", "wait"])
+
+    assert after.exit_code == 0, after.output
+    assert "radar runs trial" not in after.output

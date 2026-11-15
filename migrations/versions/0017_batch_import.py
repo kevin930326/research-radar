@@ -13,9 +13,13 @@ ADR-0043）。
   `imported` 的列兩欄是空的，會違反 CHECK。所以加 CHECK 前先回填：這兩種狀態的列，空的
   `ended_at`／`imported_at` 用 `updated_at`（最後一次狀態轉移的時間：`imported` 的列就是匯入做完
   的時間，`ended` 的列就是看到結束的時間；不會早於送出時間，是手上最接近的值；Story 2.11 審查後）。
+- `batch_submission.incomplete_reads`（Story 2.11 確認審查 D2）：同一個供應商 batch ID 連續幾次讀到
+  的結果項數比供應商的計數少；NOT NULL、預設 0、CHECK 不能是負的。到了設定的次數就把批次標
+  `needs_attention`（`batch_results_incomplete`），交給人工確認。既有的列用預設值 0（還沒數過）。
 
 和 `radar/repo/llm_ledger.py`、`radar/repo/llm_batches.py` 的表定義一致（`alembic check` 比對；
-CHECK 約束 autogenerate 不比，這裡照抄同一份條件）。可降版：降版刪掉兩欄（連同裡面的時間）與索引。
+CHECK 約束 autogenerate 不比，這裡照抄同一份條件）。可降版：降版刪掉三欄（連同裡面的時間與次數）
+與索引。
 
 版本：0017
 上一版：0016
@@ -46,6 +50,15 @@ def upgrade() -> None:
     op.add_column(
         "batch_submission", sa.Column("imported_at", sa.DateTime(timezone=True), nullable=True)
     )
+    op.add_column(
+        "batch_submission",
+        sa.Column("incomplete_reads", sa.Integer(), server_default=sa.text("0"), nullable=False),
+    )
+    op.create_check_constraint(
+        "ck_batch_submission_incomplete_reads_not_negative",
+        "batch_submission",
+        "incomplete_reads >= 0",
+    )
     # 降版再升版時，已經 ended／imported 的列要先有時間才加得上 CHECK（見模組說明）。
     op.execute(
         "UPDATE batch_submission SET ended_at = updated_at"
@@ -72,6 +85,10 @@ def downgrade() -> None:
         "ck_batch_submission_imported_at_once_imported", "batch_submission", type_="check"
     )
     op.drop_constraint("ck_batch_submission_ended_at_once_ended", "batch_submission", type_="check")
+    op.drop_constraint(
+        "ck_batch_submission_incomplete_reads_not_negative", "batch_submission", type_="check"
+    )
+    op.drop_column("batch_submission", "incomplete_reads")
     op.drop_column("batch_submission", "imported_at")
     op.drop_column("batch_submission", "ended_at")
     op.drop_index("uq_llm_call_batch_run_id", table_name="llm_call")
