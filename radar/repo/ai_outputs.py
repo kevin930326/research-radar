@@ -7,7 +7,7 @@ ADR-0015、ADR-0030）。
   `rejected` 沒有內容、有值時不是空白，CHECK 擋）；2.5 在 `classification` 加
   `dropped_label_count`、新增 `classification_label`（遷移 0012，一列一個標籤）；`rejected` 沒有計數
   由 CHECK 擋，`rejected` 底下沒有標籤、標籤不 UPDATE 則由 `NewAiResult`／`create_ai_result` 保證
-  （程式，不是資料庫）；2.6 在 `research_model` 加論文層級的內容欄位與三個計數、新增
+  （程式，不是資料庫）；2.6 在 `research_model` 加論文層級的內容欄位與四個計數、新增
   `construct_mention`、`hypothesis`（遷移 0013；構面本身在 `repo/constructs.py`，寫研究模型時經
   `upsert_constructs` 新增）；`rejected` 沒有內容與計數由 CHECK 擋。
 - 同一篇論文、同一種語言最多一筆 `active`（部分唯一索引）。內容不 UPDATE：重跑就新增一列，
@@ -242,7 +242,8 @@ construct_mention_table = Table(
         name="reliability_range",
     ),
 )
-# 一條關係；因與果指向原本的構面。`sentence_sha256` 是正規化後原句的雜湊（「不同原句」用）。
+# 一條關係；因與果指向原本的構面。`sentence_sha256` 是來源句子（原句在輸入裡所在的完整句子）的
+# 雜湊（「不同原句」用；片段和完整版算同一句）。
 hypothesis_table = Table(
     "hypothesis",
     Base.metadata,

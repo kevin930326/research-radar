@@ -22,8 +22,9 @@
 8. 每個數字（樣本數、題數、α、CR、AVE、β、p）都要是輸入裡的數字（`structured_numbers`：只有完整
    量級、科學記號算出完整的值、`= - 0.42` 是負數）；英文名的每個英文詞與數字、繁中標籤裡的英文詞
    與數字都要在輸入出現（2.4 的編造判準）→ `research_model_unsupported_content`。
-9. 同一句（來源句子的雜湊相同：完整版與片段算同一句）、同一條關係（因、果相同）出現兩次而值
-   （證據類型、改過的支持與否、統計數字）不同 → `research_model_conflicting_hypothesis`。
+9. 同一句（來源句子的雜湊相同：完整版與片段算同一句）、同一條關係（因、果相同）出現兩次而模型
+   給的值（證據類型、支持與否、統計數字；不是這裡改過的值）不同
+   → `research_model_conflicting_hypothesis`。
 
 **不拒收、改值並計數**：
 
@@ -32,8 +33,8 @@
   的 Republic of Korea）→ 空值，`unsupported_context_value_count`（FR-3 擷取規則 4：不推測）。
 - 證據類型不是實證檢定卻判了支持與否（含 `not_stated`）→ `not_determined`；實證檢定卻給
   `not_determined` → `not_stated`；判定了（supported 等）卻沒有可以採信的結果原文 `result_quote`
-  （有文字、在輸入裡、寫出了結果）→ `not_stated`；`corrected_support_count`（擷取規則 1、2）。
-  只數存下來的假設。
+  （有文字、在輸入裡、寫出了結果、提到這條關係的因或果）→ `not_stated`；
+  `corrected_support_count`（擷取規則 1、2）。只數存下來的假設。
 - p 值不是輸入寫出的確切值（只寫 `p < .01` 這種門檻）→ 空值；選填原文欄位只有標點（`-`）→ 空值；
   `cleared_value_count`。
 - 同一句、同一條關係、值都一樣的重複只留第一筆（擷取規則 3）。
@@ -45,7 +46,7 @@ import math
 import re
 import unicodedata
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal
 from typing import Final
 
@@ -167,8 +168,12 @@ def _quote_found(quote: str, segments: tuple[str, ...]) -> bool:
 
 
 # 句子的結尾：`.`、`!`、`?`（可以再接引號或右括號），後面是空白或段落結尾。`.01`、`3.5` 的點後面
-# 接數字，不算。
-_SENTENCE_END: Final = re.compile(r"[.!?][\"')\]]*(?=\s|$)")
+# 接數字，不算；`U.S.`、`U.K.`、`e.g.`、`i.e.`、`et al.`、`vs.` 的點也不算（確認審查；段落已經
+# casefold）。代價：真的以這些縮寫結尾的句子會和下一句算成同一句。
+_SENTENCE_END: Final = re.compile(
+    r"(?<!\bu\.s)(?<!\bu\.k)(?<!\be\.g)(?<!\bi\.e)(?<!\bet al)(?<!\bvs)"
+    r"[.!?][\"')\]]*(?=\s|$)"
+)
 _SENTENCE_TRIM: Final = " .,;:!?"
 
 
@@ -191,7 +196,8 @@ def _source_sentence(quote: str, segments: tuple[str, ...]) -> str:
 
 # 寫出檢定結果的跡象（`result_quote` 要有其中一種）：統計量（β、p、t、r、F…接比較符號），或結果
 # 用語（supported、significant、found、show…）。只是提出假設的寫法（we hypothesize、we expect、
-# is expected to…）沒有統計量時不算。
+# is expected to、H1 posits、`H1:`、we test whether、is proposed to…）沒有統計量時不算；`H1:` 後面
+# 直接接 supported 這類判定時是結果。
 _RESULT_STATISTIC: Final = re.compile(
     r"(?<![a-z0-9])(?:p|β|beta|b|r|r2|t|f|z|χ2|chi2|or|coefficient)\s?(?:<=|>=|[=<>≤≥])"
 )
@@ -201,8 +207,14 @@ _RESULT_WORD: Final = re.compile(
     r"|demonstrat(?:e|es|ed)|results?|rejected)(?![a-z])"
 )
 _HYPOTHESIS_ONLY: Final = re.compile(
-    r"(?<![a-z])(?:we (?:hypothesi[sz]e|expect|predict|propose|posit)"
-    r"|(?:is|are) (?:expected|predicted|hypothesi[sz]ed) to|hypothesi[sz]ed that)(?![a-z])"
+    r"(?<![a-z])(?:"
+    r"(?:we (?:hypothesi[sz]e|expect|predict|propose|posit)"
+    r"|we (?:test|examine|investigate|explore|ask) whether"
+    r"|(?:is|are) (?:expected|predicted|hypothesi[sz]ed|proposed|posited) to"
+    r"|(?:hypothesi[sz]ed|proposed|posited) that"
+    r"|h[0-9]+[a-z]? (?:posits|proposes|predicts|states|suggests|argues|expects))(?![a-z])"
+    r"|h[0-9]+[a-z]?\s?:(?!\s?(?:(?:is|was|were) )?(?:supported|not supported|partially supported"
+    r"|rejected|confirmed)(?![a-z])))"
 )
 
 
@@ -231,11 +243,17 @@ def _p_comparators(value: Decimal, text: str) -> set[str]:
     return found
 
 
-def _p_value_is_exact(value: Decimal, sentence: str, input_text: str) -> bool:
-    """模型給的 p 值是輸入寫出的**確切值**：先看假設原句，原句沒有這個 p 值才看整個輸入；寫成
-    `p = 值`（或 `p: 值`）才算，只寫門檻（`p < .01`）或根本沒寫成 p 值都不算。"""
-    comparators = _p_comparators(value, check_copy(sentence)) or _p_comparators(value, input_text)
-    return bool(comparators & _EXACT_P)
+def _p_value_is_exact(
+    value: Decimal, sentence: str, result_quote: str | None, input_text: str
+) -> bool:
+    """模型給的 p 值是輸入寫出的**確切值**：依序看假設原句、（可以採信的）結果原文、整個輸入，
+    第一個寫了這個 p 值的地方算數；寫成 `p = 值`（或 `p: 值`）才算，只寫門檻（`p < .01`）或根本
+    沒寫成 p 值都不算。"""
+    for text in (check_copy(sentence), check_copy(result_quote or ""), input_text):
+        comparators = _p_comparators(value, text)
+        if comparators:
+            return bool(comparators & _EXACT_P)
+    return False
 
 
 def _has_control_or_format(text: str) -> bool:
@@ -448,70 +466,96 @@ def _construct_content(construct: ConstructOutput) -> ConstructMentionContent:
     )
 
 
-def _result_quote(hypothesis: HypothesisOutput, quote_segments: tuple[str, ...]) -> str | None:
-    """可以採信的結果原文：有文字、正規化後在輸入裡、而且寫出了檢定結果（`_reports_result`）。"""
+def _mentions_relation(text: str, cause: str, effect: str) -> bool:
+    """`text` 提到這條關係的因或果（構面名稱 `normalize_name` 之後，整個詞對得上）。"""
+    try:
+        name = f" {normalize_name(text)} "
+    except ValueError:  # 只有標點的字串；`_quote_text` 已擋下，保險起見
+        return False
+    return any(f" {construct} " in name for construct in (cause, effect) if construct)
+
+
+def _result_quote(
+    hypothesis: HypothesisOutput, quote_segments: tuple[str, ...], cause: str, effect: str
+) -> str | None:
+    """可以採信的結果原文：有文字、正規化後在輸入裡、寫出了檢定結果（`_reports_result`），而且
+    提到這條關係的因或果（`cause`、`effect` 已正規化）。"""
     text = _quote_text(hypothesis.result_quote)
     if text is None:
         return None
     quote = quote_key(text).strip(_QUOTE_TRIM)
     if not _quote_found(quote, quote_segments) or not _reports_result(quote):
         return None
+    if not _mentions_relation(text, cause, effect):
+        return None
     return text
+
+
+@dataclass(frozen=True, slots=True)
+class _KeptHypothesis:
+    """存下來的一條假設和它的計數（改了支持與否、清了幾個值）；`quote_downgraded`：因為沒有可以
+    採信的結果原文才改成 `not_stated`。"""
+
+    content: HypothesisContent
+    changed: bool
+    cleared: int
+    quote_downgraded: bool
 
 
 def _hypotheses_content(
     output: ResearchModelOutput, quote_segments: tuple[str, ...], input_text: str
 ) -> tuple[tuple[HypothesisContent, ...], int, int]:
-    """改過支持與否、清掉只寫門檻的 p 值、去掉重複的假設，和（改了幾條支持與否, 清了幾個 p 值）
+    """改過支持與否、清掉只寫門檻的 p 值、去掉重複的假設，和（改了幾條支持與否, 清了幾個值）
     （只數存下來的）。
 
     - 判定了支持與否（擷取規則 1、2 改過之後）卻沒有可以採信的結果原文 → `not_stated`（擷取規則
       1「報告了結果才判定」），算進改了幾條。
-    - p 值不是輸入寫出的確切值（只寫 `p < .01` 這種門檻）→ 空值，算進清了幾個。
-    - 同一句（來源句子相同，片段與完整版算同一句）、同一條關係只留第一筆。
+    - p 值不是輸入寫出的確切值（只寫 `p < .01` 這種門檻）→ 空值；效果類型只有標點 → 空值；都算進
+      清了幾個。
+    - 同一句（來源句子相同，片段與完整版算同一句）、同一條關係只留一筆：模型給的值一樣時留第一
+      筆，但第一筆的結果原文不能採信、後面的可以時換成後面那筆（序號不變）。
 
     Raises:
-        OutputRejectedError: 同一句、同一條關係的值互相衝突。
+        OutputRejectedError: 同一句、同一條關係，模型給的值（證據類型、支持與否、統計數字）互相
+            衝突；比的是模型原本給的值，不是這裡改過的值。
     """
-    kept: list[HypothesisContent] = []
-    seen: dict[tuple[str, str, str], tuple[object, ...]] = {}
-    corrected = cleared = 0
+    kept: list[_KeptHypothesis] = []
+    seen: dict[tuple[str, str, str], tuple[tuple[object, ...], int]] = {}
     for index, hypothesis in enumerate(output.hypotheses):
+        cause = normalize_name(hypothesis.cause)
+        effect = normalize_name(hypothesis.effect)
         support, changed = _corrected_support(hypothesis)
         result_quote = None
+        quote_downgraded = False
         if support in DECIDED_SUPPORT:
-            result_quote = _result_quote(hypothesis, quote_segments)
+            result_quote = _result_quote(hypothesis, quote_segments, cause, effect)
             if result_quote is None:
-                support, changed = SupportLevel.NOT_STATED, True
+                support, changed, quote_downgraded = SupportLevel.NOT_STATED, True, True
         statistics = hypothesis.statistics
         beta = _optional_decimal(None if statistics is None else statistics.beta)
         p_value = _optional_decimal(None if statistics is None else statistics.p_value)
         p_cleared = p_value is not None and not _p_value_is_exact(
-            p_value, hypothesis.sentence, input_text
+            p_value, hypothesis.sentence, result_quote, input_text
         )
         if p_cleared:
             p_value = None
         sample_size = None if statistics is None else statistics.sample_size
-        effect_type = None if statistics is None else _quote_text(statistics.effect_type)
+        raw_effect_type = None if statistics is None else statistics.effect_type
+        effect_type = _quote_text(raw_effect_type)
         sentence = normalize_text(hypothesis.sentence)
         source = _source_sentence(quote_key(sentence).strip(_QUOTE_TRIM), quote_segments)
         sentence_sha256 = hypothesis_sentence_sha256(source)
-        cause = normalize_name(hypothesis.cause)
-        effect = normalize_name(hypothesis.effect)
         key = (sentence_sha256, cause, effect)
-        values = (hypothesis.evidence_type, support, beta, p_value, sample_size, effect_type)
-        if key in seen:
-            if seen[key] != values:
-                raise _reject(
-                    ErrorCode.RESEARCH_MODEL_CONFLICTING_HYPOTHESIS,
-                    f"hypotheses[{index}] 和前面同一句、同一條關係的值不一樣",
-                )
-            continue
-        seen[key] = values
-        corrected += int(changed)
-        cleared += int(p_cleared)
-        kept.append(
-            HypothesisContent(
+        original = (
+            hypothesis.evidence_type,
+            hypothesis.support,
+            None if statistics is None else statistics.beta,
+            None if statistics is None else statistics.p_value,
+            sample_size,
+            _optional_text(raw_effect_type),
+        )
+        entry = _KeptHypothesis(
+            content=HypothesisContent(
                 ordinal=len(kept) + 1,
                 sentence=sentence,
                 sentence_sha256=sentence_sha256,
@@ -524,21 +568,39 @@ def _hypotheses_content(
                 sample_size=sample_size,
                 effect_type=effect_type,
                 result_quote=result_quote,
-            )
+            ),
+            changed=changed,
+            cleared=int(p_cleared) + int(_is_punctuation_only(raw_effect_type)),
+            quote_downgraded=quote_downgraded,
         )
-    return tuple(kept), corrected, cleared
+        if key in seen:
+            first_values, position = seen[key]
+            if first_values != original:
+                raise _reject(
+                    ErrorCode.RESEARCH_MODEL_CONFLICTING_HYPOTHESIS,
+                    f"hypotheses[{index}] 和前面同一句、同一條關係的值不一樣",
+                )
+            if kept[position].quote_downgraded and not quote_downgraded:
+                ordinal = kept[position].content.ordinal
+                kept[position] = replace(entry, content=replace(entry.content, ordinal=ordinal))
+            continue
+        seen[key] = (original, len(kept))
+        kept.append(entry)
+    return (
+        tuple(entry.content for entry in kept),
+        sum(entry.changed for entry in kept),
+        sum(entry.cleared for entry in kept),
+    )
 
 
 def _cleared_quote_count(output: ResearchModelOutput) -> int:
-    """只有標點、清成空值的選填原文欄位數（假設原句必填、另外要 3 個詞，不在這裡）。"""
+    """論文與構面層級只有標點、清成空值的選填原文欄位數（假設的效果類型在 `_hypotheses_content`
+    數，只數存下來的；假設原句必填、另外要 3 個詞，不在這裡）。"""
     values: list[str | None] = [output.limitations, output.future_research]
     for construct in output.constructs:
         values.append(construct.definition)
         if construct.measurement is not None:
             values += [construct.measurement.scale_source, construct.measurement.item_location]
-    for hypothesis in output.hypotheses:
-        if hypothesis.statistics is not None:
-            values.append(hypothesis.statistics.effect_type)
     return sum(_is_punctuation_only(value) for value in values)
 
 
@@ -634,7 +696,7 @@ def validate_research_model(
 
     # 不拒收：情境值；9. 擷取規則 1～3（衝突才拒收）。
     context, dropped, unsupported = _resolve_context(output, context_values, quote_segments)
-    hypotheses, corrected, cleared_p = _hypotheses_content(output, quote_segments, input_text)
+    hypotheses, corrected, cleared = _hypotheses_content(output, quote_segments, input_text)
     return ResearchModelContent(
         is_review_or_meta_analysis=output.is_review_or_meta_analysis,
         country=context[ContextField.COUNTRY],
@@ -647,7 +709,7 @@ def validate_research_model(
         dropped_context_value_count=dropped,
         unsupported_context_value_count=unsupported,
         corrected_support_count=corrected,
-        cleared_value_count=cleared_p + _cleared_quote_count(output),
+        cleared_value_count=cleared + _cleared_quote_count(output),
         constructs=tuple(_construct_content(construct) for construct in output.constructs),
         hypotheses=hypotheses,
     )

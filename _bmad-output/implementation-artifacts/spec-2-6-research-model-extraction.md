@@ -185,6 +185,22 @@ deferred:
   - `[medium]` `[patch]` Kevin 決定 5 採 B — schema 與 prompt v1 加 `result_quote`（判定支持與否時必填），沒有或不可信 → `not_stated` 並計數；直接改 v1、重新登記雜湊
   - `[low]` `[patch]` 選填原文欄位只有標點 — 存 null、計數
 
+### 2026-11-15 — Opus 確認審查（8af9734）
+- verdicts: 11 findings — high 0, medium 2, low 9
+- findings:
+  - `[medium]` `[patch]` 輸出端 `9.9 x 10-7`、`9.9 * 10-7`、`9.9·10+3` 整段跳過，2.4 也跟著變鬆 — 讀輸出時有科學記號或 `^` 就回報讀不懂；2.4 相對 a5bbc1f 只剩「同一負數的等價寫法」一種變寬
+  - `[medium]` `[patch]` 結果原文的假設句判準太窄、可以和這條關係無關 — 補 `H1 posits`、`H1:`、`we test whether`、`is proposed to` 等寫法；結果原文要提到因或果
+  - `[low]` `[patch]` `U.S.`、`e.g.` 等縮寫的點被當句尾 — 排除 U.S.、U.K.、e.g.、i.e.、et al.、vs.
+  - `[low]` `[patch]` 驗證器自己改的值造成衝突、整篇拒收 — 衝突比對用模型原本給的值，留結果原文可以採信的那筆
+  - `[low]` `[patch]` p 值沒先看結果原文 — 依序看原句、結果原文、整個輸入
+  - `[low]` `[defer]` 括號形式的指數（`10^(-2)`）仍留下碎片 — 留給 Kevin
+  - `[low]` `[defer]` `12M`、`10k` 縮寫與 prompt 規則 5「不換算」矛盾 — 牽涉 prompt 規則，列 Kevin 決定
+  - `[low]` `[defer]` 清單外較長名稱（Chinese Taipei、Hong Kong Chinese、West Indian）— 清單草案定版時補
+  - `[low]` `[patch]` `cleared_value_count` 把去掉的重複也算進去 — 只數存下來的
+  - `[low]` `[patch]` 過時說明文字 — 同步
+  - `[low]` `[reject]` 遷移 0013 原地修改 — 只影響 radar-ci 測試庫，真實 radar 庫沒套用過 0013；2.7 用一般 merge 接 2.6
+  - 另修：`normalize_name` 最後的 NFKC 把 casefold 拆開的字合回去（`ὐ`），結果不是 casefold（2.7 回報）— NFKC 後再 casefold
+
 ## Design Notes
 
 **schema v1 欄位（`ResearchModelOutput`，全部必填、可空的給 null、`extra="forbid"`）：**
@@ -210,7 +226,7 @@ deferred:
 
 **`normalize_name`：** NFKC → 去掉縮寫的括號（括號內 1～15 個字元、沒有空白、至少一個大寫字母，**而且是前面幾個詞的首字母**（可跳過虛詞、多一個小寫 s），如 `Perceived Usefulness (PU)`；`Trust (Vendor)` 留著，審查後改）→ casefold → 拿掉撇號與各種連字號 → 其餘標點與符號換成空白 → 空白縮成一個、去頭尾 → 再 NFKC。不做字根還原。
 
-**遷移 0013：** `research_model` 加 `is_review_or_meta_analysis boolean`、`country`／`industry`／`research_design`／`unit_of_analysis text`（CHECK key 寫法）、`sample_size integer`（≥1）、`limitations`／`future_research text`（非空白）、三個計數 `integer`（≥0）；CHECK `rejected` 時內容與計數全 NULL。`construct`（`id` uuidv7、`normalized_name` UNIQUE 非空白、`canonical_id` NOT NULL FK 自己、`created_at`；canonical 索引）。`construct_mention`（`research_model_id` FK、`construct_id` FK、`name_en`、`label_zh` NOT NULL、`definition`、量測六欄（數字 CHECK）；UNIQUE(`research_model_id`, `construct_id`)、`construct_id` 索引）。`hypothesis`（`research_model_id` FK、`ordinal`、`sentence`、`sentence_sha256`、`cause_construct_id`／`effect_construct_id` FK、`evidence_type`／`support` CHECK、CHECK `(evidence_type = 'empirical_test') = (support <> 'not_determined')`、CHECK cause ≠ effect、`beta`、`p_value`（0～1）、`sample_size`（≥1）、`effect_type`；UNIQUE(`research_model_id`, `ordinal`)、UNIQUE（`research_model_id`, `sentence_sha256`, cause, effect，短名）、兩個構面外鍵索引）。
+**遷移 0013：** `research_model` 加 `is_review_or_meta_analysis boolean`、`country`／`industry`／`research_design`／`unit_of_analysis text`（CHECK key 寫法）、`sample_size integer`（≥1）、`limitations`／`future_research text`（非空白）、三個計數 `integer`（≥0；Codex 審查後加 `cleared_value_count`，共四個）；CHECK `rejected` 時內容與計數全 NULL。`construct`（`id` uuidv7、`normalized_name` UNIQUE 非空白、`canonical_id` NOT NULL FK 自己、`created_at`；canonical 索引）。`construct_mention`（`research_model_id` FK、`construct_id` FK、`name_en`、`label_zh` NOT NULL、`definition`、量測六欄（數字 CHECK）；UNIQUE(`research_model_id`, `construct_id`)、`construct_id` 索引）。`hypothesis`（`research_model_id` FK、`ordinal`、`sentence`、`sentence_sha256`、`cause_construct_id`／`effect_construct_id` FK、`evidence_type`／`support` CHECK、CHECK `(evidence_type = 'empirical_test') = (support <> 'not_determined')`、CHECK cause ≠ effect、`beta`、`p_value`（0～1）、`sample_size`（≥1）、`effect_type`；UNIQUE(`research_model_id`, `ordinal`)、UNIQUE（`research_model_id`, `sentence_sha256`, cause, effect，短名）、兩個構面外鍵索引）。
 
 **`max_tokens` 2048（Codex 審查後改 2560，見 ADR-0034 決定 11）：** 一個構面約 35～75 tokens（有定義時較多；量測欄位多半是一個 `null`），一條假設約 75 tokens。10 個構面＋10 條假設＋情境與兩個原文欄位約 1,500 tokens，留三成餘裕。思考關掉。保守每秒 50 tokens，2048 tokens 約 41 秒，加輸入處理仍低於 60 秒逾時；單次輸出費用上限 2048 × 0.50／百萬＝0.001 美元。ADR-0031 的費用上限測試看的是 `PromptSettings` 的最大值 64,000，不受影響。超過的輸出截斷 → `llm_truncated` 拒收（關係超過約 14 條的摘要少見）。
 
