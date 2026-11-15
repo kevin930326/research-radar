@@ -16,7 +16,8 @@
    `ecommerce`、`users'` 與 `users` 一樣。
 5. 其餘標點與符號（Unicode P*、S* 類）換成空白。
 6. 空白縮成一個、去頭尾。
-7. 再做一次 NFKC。
+7. 再做一次 NFKC；NFKC 把 casefold 拆開的字合回去、合出來的字又分大小寫時（例如希臘字母 `ὐ`
+   U+1F50），再 casefold 一次：結果一定不分大小寫，這種少見的字會留著拆開的寫法。
 
 **不做字根還原**（`trusting` 不會變成 `trust`）：會把不同的概念誤併，而且拆不回來（ADR-0012）。
 """
@@ -98,4 +99,5 @@ def normalize_name(name: str) -> str:
     text = text.casefold()
     text = "".join(_fold(char) for char in text)
     text = _WHITESPACE.sub(" ", text).strip()
-    return unicodedata.normalize("NFKC", text)
+    # 再 casefold：例如 U+1F50，casefold 拆成 υ + 結合符號，NFKC 又合回分大小寫的 U+1F50。
+    return unicodedata.normalize("NFKC", text).casefold()

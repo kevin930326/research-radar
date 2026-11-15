@@ -147,3 +147,12 @@ def test_normalized_name_has_no_case_or_outer_or_double_spaces(name: str) -> Non
     assert result == result.strip()
     assert "  " not in result
     assert result.casefold() == result
+
+
+@pytest.mark.parametrize("name", ["ὐ", "Trust ὐ", "ὒ ΰ ᾈ", "ǅ ẞ ﬃ"])
+def test_letters_that_nfkc_recomposes_stay_casefolded(name: str) -> None:
+    # 確認審查：U+1F50（ὐ）casefold 會拆開、最後的 NFKC 又合回分大小寫的字，結果原本不是 casefold。
+    result = normalize_name(name)
+
+    assert result.casefold() == result
+    assert normalize_name(result) == result

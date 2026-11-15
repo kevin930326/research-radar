@@ -5,8 +5,11 @@
 - 科學記號（`4.2 × 10^-2`、`10⁻²`、`10^-3`）：`numbers` 整段不取（不把 4.2、10、2 當成輸入裡的
   數字）；`structured_numbers` 算出完整的值（0.042）。
 - `structured_numbers`（研究模型的結構化數值用）只有完整量級：`12 million` 只有 12000000。
-- 2.4 中文重點的行為：錯的正號、科學記號的碎片不再放行（更嚴）；原本被誤拒、寫對負號的寫法
-  （輸入 `= - 0.42`、輸出 `-0.42`）現在對得上。2.4 原本的測試斷言都沒改。
+- 輸出（`numbers` 沒有 `keep_unscaled`）裡有科學記號或 `^`，一律回報讀不懂：`9.9 x 10-7`、
+  `9.9 * 10-7`、`9.9·10+3` 這種 `has_unsupported_number` 沒擋到的寫法也拒收（確認審查）。
+- 2.4 中文重點相對 a5bbc1f：只放寬一種——同一個負數的等價寫法（輸入 `= - 0.42`、輸出 `-0.42`，
+  或反過來）；其他都是變嚴（錯的正號、科學記號的碎片、輸出裡任何科學記號）。2.4 原本的測試
+  斷言都沒改。
 """
 
 import time
@@ -112,6 +115,35 @@ def test_input_vocabulary_of_zh_summary_still_keeps_unscaled_numbers() -> None:
 def test_zh_summary_no_longer_accepts_a_wrong_sign_or_a_fragment(
     method: str, abstract: str
 ) -> None:
+    with pytest.raises(OutputRejectedError) as caught:
+        _numbers_only(method, abstract)
+
+    assert caught.value.code is ErrorCode.ZH_SUMMARY_UNSUPPORTED_CONTENT
+
+
+@pytest.mark.parametrize("text", ["9.9 x 10-7", "9.9 X 10-7", "9.9 * 10-7", "9.9·10+3", "10^-3"])
+def test_scientific_notation_in_output_is_unreadable(text: str) -> None:
+    # 確認審查：整段不取數字之後沒東西可核對；輸出（沒有 keep_unscaled）要回報讀不懂。
+    assert numbers(check_copy(text))[1] is True
+    assert numbers(check_copy(text), keep_unscaled=True)[1] is False
+
+
+@pytest.mark.parametrize("text", ["β = 0.42", "3 - 5 years", "a 2 x 10 grid", "10-15 minutes"])
+def test_ordinary_numbers_in_output_are_readable(text: str) -> None:
+    assert numbers(check_copy(text))[1] is False
+
+
+@pytest.mark.parametrize(
+    ("method", "abstract"),
+    [
+        ("效果為 9.9 x 10-7", "The effect was small."),
+        ("效果為 9.9 * 10-7", "The effect was small."),
+        ("效果為 9.9·10+3", "The effect was small."),
+        # 輸入寫了同一個科學記號也不放行（a5bbc1f 時碎片都對得上會過；這裡變嚴）。
+        ("效果為 9.9 x 10-7", "The effect was 9.9 x 10-7."),
+    ],
+)
+def test_zh_summary_rejects_scientific_notation_in_the_output(method: str, abstract: str) -> None:
     with pytest.raises(OutputRejectedError) as caught:
         _numbers_only(method, abstract)
 

@@ -248,9 +248,13 @@ def numbers(text: str, *, keep_unscaled: bool = False) -> tuple[set[Number], boo
 
     單位（萬、million…）乘進數值；`keep_unscaled`（輸入用）時也留下沒乘的數字，所以摘要寫
     「12 million」時輸出寫 12 或 1200 萬都對得上，輸出寫「12 萬」只會是 120000。科學記號與含 `^`
-    的寫法整段不取（不會把「4.2 × 10^-2」的 4.2 當成輸入裡的數字）；「= - 0.42」讀成 -0.42。"""
+    的寫法整段不取（不會把「4.2 × 10^-2」的 4.2 當成輸入裡的數字）；「= - 0.42」讀成 -0.42。
+
+    輸出（沒有 `keep_unscaled`）裡有科學記號或 `^`（`9.9 x 10-7`、`9.9 * 10-7`、`9.9·10+3`）時
+    回報讀不懂：整段不取數字後就沒東西可以核對，不能因此放行（確認審查）。`structured_numbers`
+    讀的是輸入，不看這個旗標。"""
     found: set[Number] = set()
-    unreadable = False
+    unreadable = not keep_unscaled and ("^" in text or _SCIENTIFIC.search(text) is not None)
     for match in _NUMBER.finditer(_prepared_for_numbers(text)):
         exponent = match["exponent"] or ""
         percent = match["percent"] is not None

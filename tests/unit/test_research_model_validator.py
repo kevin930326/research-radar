@@ -634,6 +634,58 @@ def test_quote_spanning_two_sentences_hashes_both_sentences() -> None:
     assert content.hypotheses[0].sentence_sha256 == hypothesis_sentence_sha256(expected)
 
 
+@pytest.mark.parametrize(
+    "lead",
+    [
+        "Using data from U.S. firms,",
+        "Using data from U.K. firms,",
+        "For large banks, e.g. HSBC,",
+        "For older users, i.e. retirees,",
+        "Following Smith et al. and others,",
+        "Comparing apps vs. websites,",
+    ],
+)
+def test_abbreviation_periods_do_not_end_the_source_sentence(lead: str) -> None:
+    # 確認審查：U.S.、e.g. 的點原本被當成句尾，同一句的片段和完整版又算成兩句。
+    fragment = "we find that perceived usefulness raises trust"
+    full = f"{lead} {fragment}."
+    data = _data()
+    data["hypotheses"] += [
+        _hypothesis(sentence=full, result_quote=fragment, statistics=None),
+        _hypothesis(sentence=fragment, result_quote=fragment, statistics=None),
+    ]
+
+    content = _validate(data, _input(abstract=ABSTRACT + " " + full))
+
+    assert len(content.hypotheses) == 2
+    assert content.hypotheses[1].sentence_sha256 == hypothesis_sentence_sha256(
+        quote_key(full).strip(" .,;:")
+    )
+
+
+def test_duplicate_is_compared_by_the_values_the_model_gave() -> None:
+    # 確認審查：模型給的值一樣，只是其中一筆的結果原文不能採信、被改成 not_stated，原本會被當成
+    # 衝突、整篇拒收。現在比模型原本給的值，留結果原文可以採信的那筆。
+    weak = "One limitation is the single-country sample"
+    fragment = "Perceived usefulness positively affects trust"
+    later_weak = _data()
+    later_weak["hypotheses"].append(_hypothesis(sentence=fragment, result_quote=weak))
+    first_weak = _data()
+    first_weak["hypotheses"].insert(0, _hypothesis(sentence=fragment, result_quote=weak))
+
+    for data in (later_weak, first_weak):
+        content = _validate(data)
+
+        assert len(content.hypotheses) == 1
+        kept = content.hypotheses[0]
+        assert (kept.ordinal, kept.support, kept.result_quote) == (
+            1,
+            SupportLevel.SUPPORTED,
+            SENTENCE,
+        )
+        assert content.corrected_support_count == 0
+
+
 # --- 數字 -----------------------------------------------------------------------------------------
 
 
@@ -794,6 +846,10 @@ def test_invalid_text_is_rejected(path: str, value: str) -> None:
         ("constructs.0.label_zh", "知覺有用性 2"),
         ("constructs.0.label_zh", "Enjoyment 有用性"),
         ("constructs.0.label_zh", "有用性 5 題"),
+        # 確認審查：科學記號整段不取數字，輸出裡有就當讀不懂。
+        ("constructs.0.label_zh", "有用性 9.9 x 10-7"),
+        ("constructs.0.label_zh", "有用性 9.9 * 10-7"),
+        ("constructs.0.label_zh", "有用性 9.9·10+3"),
     ],
 )
 def test_invented_words_or_numbers_in_names_are_rejected(path: str, value: str) -> None:
@@ -1194,6 +1250,22 @@ def test_p_value_threshold_in_the_sentence_wins_over_an_exact_value_elsewhere() 
     assert content.cleared_value_count == 1
 
 
+def test_p_value_in_the_result_quote_wins_over_an_exact_value_elsewhere() -> None:
+    # 確認審查：原句沒寫 p 值時先看結果原文，結果原文寫的是門檻，別處的 p = .01 不算。
+    result = SENTENCE.replace("p = .01", "p < .01").rstrip(".")
+    abstract = ABSTRACT.replace("p = .01", "p < .01") + " Loyalty rose with age (p = .01)."
+    data = _data()
+    data["hypotheses"][0] |= {
+        "sentence": "Perceived usefulness positively affects trust",
+        "result_quote": result,
+    }
+
+    content = _validate(data, _input(abstract=abstract))
+
+    assert content.hypotheses[0].p_value is None
+    assert content.cleared_value_count == 1
+
+
 def test_p_value_not_written_as_p_is_cleared() -> None:
     # 0.01 只是別的數字（不是 p 值）：不當成確切的 p 值。
     sentence = "Perceived usefulness positively affects trust (β = 0.42)"
@@ -1319,6 +1391,39 @@ def test_longer_other_names_do_not_count_as_written(
         ),
         ("Trust is expected to increase loyalty", " Trust is expected to increase loyalty."),
         ("One limitation is the single-country sample", ""),  # 在輸入裡，但沒寫結果
+        # 確認審查：常見的假設句寫法（poc_26 情境一）。
+        (
+            "H1 posits that trust has a significant effect on loyalty",
+            " H1 posits that trust has a significant effect on loyalty.",
+        ),
+        (
+            "H2 predicts that trust significantly increases loyalty",
+            " H2 predicts that trust significantly increases loyalty.",
+        ),
+        (
+            "H1: trust significantly increases loyalty",
+            " H1: trust significantly increases loyalty.",
+        ),
+        ("H1a: trust shows a positive effect", " H1a: trust shows a positive effect."),
+        (
+            "We test whether trust significantly increases loyalty",
+            " We test whether trust significantly increases loyalty.",
+        ),
+        (
+            "we examine whether trust results in loyalty",
+            " Specifically, we examine whether trust results in loyalty.",
+        ),
+        ("Trust is proposed to increase loyalty", " Trust is proposed to increase loyalty."),
+        # 確認審查：結果原文要提到這條關係（PU → trust）的因或果（poc_26 情境二）。
+        (
+            "Results show that satisfaction increases loyalty",
+            " Results show that satisfaction increases loyalty.",
+        ),
+        (
+            "The findings have implications for theory",
+            " The findings have implications for theory.",
+        ),
+        ("H1 was supported", " H1 was supported."),
     ],
 )
 def test_decided_support_without_a_reported_result_becomes_not_stated(
@@ -1339,13 +1444,23 @@ def test_decided_support_without_a_reported_result_becomes_not_stated(
     ("result_quote", "abstract_extra", "support"),
     [
         (SENTENCE, "", "supported"),
-        ("H1 was supported", " H1 was supported.", "supported"),
+        ("H1 on trust was supported", " H1 on trust was supported.", "supported"),
+        ("H1 (trust): supported", " H1 (trust): supported.", "supported"),
         (
-            "the effect was not significant",
-            " However, the effect was not significant.",
+            "the effect on trust was not significant",
+            " However, the effect on trust was not significant.",
             "not_supported",
         ),
-        ("Results partially support H2", " Results partially support H2.", "partially_supported"),
+        (
+            "Results partially support H2 on trust",
+            " Results partially support H2 on trust.",
+            "partially_supported",
+        ),
+        (
+            "Perceived Usefulness (PU) was found to matter",
+            " Perceived Usefulness (PU) was found to matter.",
+            "supported",
+        ),
         (
             "we found that trust increases loyalty",
             " Overall, we found that trust increases loyalty.",
@@ -1422,6 +1537,18 @@ def test_punctuation_only_quote_field_is_cleared_and_counted(path: str, value: s
         "hypotheses.0.statistics.effect_type": content.hypotheses[0].effect_type,
     }[path]
     assert stored is None
+    assert content.cleared_value_count == 1
+
+
+def test_cleared_effect_type_of_a_dropped_duplicate_is_not_counted() -> None:
+    # 確認審查：只數存下來的；重複的那筆被去掉，它的效果類型不算。
+    data = _data()
+    data["hypotheses"][0]["statistics"]["effect_type"] = "-"
+    data["hypotheses"].append(copy.deepcopy(data["hypotheses"][0]))
+
+    content = _validate(data)
+
+    assert len(content.hypotheses) == 1
     assert content.cleared_value_count == 1
 
 
