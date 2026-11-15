@@ -143,7 +143,7 @@ for path in /healthz /readyz; do
   [[ "${status}" == 200 ]] || fail "${path} 回 ${status}，不是 200"
 done
 
-# ----- 成員版前端（Story 3.1、ADR-0029）-----
+# ----- 成員版前端（Story 3.1、ADR-0036）-----
 # 映像裡有 web/dist：/ 回頁面殼並帶 CSP；/api/ 底下找不到的路徑仍是 404，不回頁面殼。
 root_status=$(http_status "${API_URL}/")
 echo "/ → ${root_status}"

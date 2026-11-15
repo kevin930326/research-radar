@@ -1,7 +1,7 @@
 # api 與 worker 共用的映像；compose 用 command 決定跑哪一個。
 FROM ghcr.io/astral-sh/uv:0.13.7 AS uv
 
-# 成員版前端（Story 3.1、ADR-0029）：在建置機的原生架構上建（產物是靜態檔，和映像架構無關），
+# 成員版前端（Story 3.1、ADR-0036）：在建置機的原生架構上建（產物是靜態檔，和映像架構無關），
 # 最後一段只複製 web/dist。安全標頭檔是 vite.config.ts 讀的唯一來源，所以一起複製。
 FROM --platform=$BUILDPLATFORM node:26-trixie-slim AS web
 WORKDIR /web
@@ -42,7 +42,7 @@ WORKDIR /app
 COPY migrations ./migrations
 # 領域設定（期刊清單、OpenAlex 設定）：api、worker、CLI 啟動時驗證，預設讀工作目錄下的 config/。
 COPY config ./config
-# 成員版前端的建置結果：api 以工作目錄下的 web/dist 送出頁面殼與靜態檔（ADR-0029）。
+# 成員版前端的建置結果：api 以工作目錄下的 web/dist 送出頁面殼與靜態檔（ADR-0036）。
 COPY --from=web /web/dist ./web/dist
 USER radar
 EXPOSE 8000
