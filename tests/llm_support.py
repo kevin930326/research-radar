@@ -8,6 +8,7 @@ import threading
 import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +18,7 @@ from radar.adapters.fake import FakeLlmProvider
 from radar.config import load_models_config
 from radar.domain import prompt_hashes
 from radar.domain.ai_outputs import CallMode, GatewayConfig, LlmTask
+from radar.domain.budget import BudgetConfig
 from radar.domain.fingerprints import prompt_sha256, schema_sha256
 from radar.domain.llm import LlmRequest, LlmResult, frozen_schema_json
 from radar.domain.papers import PaperOrigin, ParsedPaper
@@ -212,3 +214,55 @@ class GatedProvider:
         if self.before_reply is not None:
             self.before_reply()
         return self.inner.complete(request)
+
+
+# --- 預算（Story 2.3）：設定與假帳本 -----------------------------------------------------------
+
+
+def budget_config(**budgets: str | None) -> BudgetConfig:
+    """熔斷線 50、workspace 上限 70；沒給的工作沒有個別上限。"""
+    task_budgets: dict[str, str | None] = {task.value: None for task in LlmTask}
+    task_budgets.update(budgets)
+    return BudgetConfig.model_validate(
+        {"workspace_limit_usd": "70", "monthly_breaker_usd": "50", "task_budgets_usd": task_budgets}
+    )
+
+
+def insert_ledger(
+    db: TestDatabase,
+    paper_id: uuid.UUID,
+    task: LlmTask,
+    cost: str,
+    at: datetime,
+    *,
+    is_batch: bool = False,
+    eval_run_id: uuid.UUID | None = None,
+) -> None:
+    """假帳本：一筆做完的 `derivation_run` 加一筆 `llm_call`（`created_at`＝`at`）。"""
+    run_id = execute(
+        db,
+        "INSERT INTO derivation_run (paper_id, task, prompt_version, prompt_sha256, model,"
+        " input_sha256, input_kind, params, code_version, call_mode, eval_run_id, status,"
+        " finished_at, created_at)"
+        " VALUES (%s, %s, 1, %s, %s, %s, 'abstract', '{}'::jsonb, 'test', %s, %s, 'succeeded',"
+        " %s, %s) RETURNING id",
+        paper_id,
+        task.value,
+        "a" * 64,
+        "claude-haiku-5-5",
+        uuid.uuid4().hex * 2,
+        "batch" if is_batch else "interactive",
+        eval_run_id,
+        at,
+        at,
+    )[0][0]
+    execute(
+        db,
+        "INSERT INTO llm_call (run_id, input_tokens, output_tokens, cache_creation_input_tokens,"
+        " cache_read_input_tokens, cost_usd, price_tier, is_batch, created_at)"
+        " VALUES (%s, 0, 0, 0, 0, %s, 'standard', %s, %s)",
+        run_id,
+        Decimal(cost),
+        is_batch,
+        at,
+    )

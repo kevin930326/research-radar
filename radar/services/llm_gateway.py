@@ -4,7 +4,10 @@
 
 1. 從資料列推出要送的文字與來源（`build_llm_input`），每段經 `clear_for_cloud` 放行
    → 沒有輸入 `NO_INPUT`；放行擋下 `BLOCKED`（帶原因代碼）。
-2. 預算檢查（注入的 `budget_allows`；真正的 BudgetGuard 在 2.3）→ 不准 `DEFERRED_BUDGET`。
+2. 預算檢查（`budget_allows`；正式程式一律傳 `services/budget.py` 的 `BudgetGuard(...)`，
+   `tests/arch/test_budget_guard_wiring.py` 守；測試可以傳 lambda）→ 不准時只接續同一組鍵的
+   `llm_result_pending` run（不呼叫模型、不再記帳），沒有就 `DEFERRED_BUDGET`：不讀 prompt、
+   不寫任何列、不呼叫模型、不算失敗。讀帳本失敗或時鐘沒有時區時例外原樣丟出（不呼叫模型）。
 3. 讀 prompt（`prompts/<工作>/v<N>.md`；policy 核對 domain 寫死的雜湊登記才放行）、算
    `input_sha256`、組 `LlmRequest`。
 4. 離線保守估計輸入 token；超過 `max_input_tokens` 而且工作沒允許 → `TOO_LARGE`。
@@ -24,6 +27,11 @@
 記帳之後（8、9）出非預期的錯（驗證函式丟了 `OutputRejectedError` 以外的例外、寫入的交易失敗）
 時，帳照記，run 改成 `failed`（`llm_result_pending`），例外原樣丟出；下一次同一組鍵從存下的輸出
 接續 8、9，不再呼叫模型、不再記帳（ADR-0030）。只支援互動呼叫；Batch 由 Batch 的 Story 另做。
+
+預算檢查是「呼叫前看帳本」，帳在第 7 步才記，所以同時在途的呼叫彼此看不到（熔斷線與每個功能預算
+都一樣）：超支上限＝同時在途的呼叫數（worker 與所有呼叫閘門的 CLI 等行程加起來）× 單次最大費用
+（約 0.042 美元；只在帳都記得進去、沒有工作打開 `allow_over_input_limit` 時成立，ADR-0031 決定 6）。
+Anthropic workspace 的每月上限是第二道。
 """
 
 import uuid
@@ -70,6 +78,7 @@ from radar.domain.llm import (
 from radar.domain.permissions import Action, require
 from radar.domain.policy import CloudClearanceError, CloudSafeText, clear_for_cloud, cloud_text
 from radar.domain.pricing import estimate_input_tokens, llm_call_cost
+from radar.domain.prompts import PromptIntegrityError
 from radar.domain.viewer import SystemViewer, Viewer
 from radar.ports import LlmProvider
 from radar.repo.ai_outputs import find_blocking_ai_result
@@ -78,6 +87,7 @@ from radar.repo.llm_ledger import (
     create_derivation_run,
     create_llm_call,
     find_llm_call_output,
+    find_resumable_derivation_run_id,
     find_running_derivation_run_id,
     update_derivation_run_failed,
     update_derivation_run_failed_or_pending,
@@ -86,7 +96,7 @@ from radar.repo.llm_ledger import (
 )
 from radar.repo.papers import find_paper_llm_source
 from radar.services.ai_results import record_llm_result
-from radar.services.prompt_loader import LoadedPrompt, load_prompt
+from radar.services.prompt_loader import LoadedPrompt, current_prompt_version, load_prompt
 
 # `GatewayConfig` 定義在 domain（bootstrap 不能 import services），從這裡也拿得到。
 __all__ = [
@@ -196,6 +206,9 @@ def run_llm_job(
         LookupError: 論文不存在。
         PromptIntegrityError, PromptFormatError: prompt 檔或登記不對（還沒寫任何列）。
         LlmConfigurationError: 金鑰、權限或模型設定不對（run 已改成 `failed`）。
+        ValueError: 預算檢查的時鐘回了沒有時區的時間（`BudgetGuard`；還沒呼叫模型、沒寫任何列）。
+        Exception: 預算檢查讀帳本時的資料庫錯誤原樣丟出（fail closed：不呼叫模型、不回
+            `DEFERRED_BUDGET`，由工作層重試）。
         Exception: 記帳後驗證或寫結果失敗（帳照記，run 盡量改成 `failed`／`llm_result_pending`，
             下一次接續），原樣往上丟。
     """
@@ -227,8 +240,11 @@ def run_llm_job(
         log.info("LLM 輸入放行擋下", task=task.value, source=exc.source.value, reason=exc.reason)
         return GatewayResult(GatewayOutcome.BLOCKED, reason=exc.reason)
 
-    # 2. 預算檢查。
-    if not budget_allows(task):
+    # 2. 預算檢查。不准時只剩一條路：同一組鍵已經付過錢、只差寫結果的 run（`llm_result_pending`）
+    # 照樣接續，因為接續不呼叫模型、不再記帳（ADR-0031）；其餘一律 DEFERRED_BUDGET（不讀 prompt、
+    # 不寫任何列）。
+    resume_only = not budget_allows(task)
+    if resume_only and not _has_resumable_run(database, config, job, llm_input, eval_run_id):
         return GatewayResult(GatewayOutcome.DEFERRED_BUDGET)
 
     # 3. prompt、指紋、請求。
@@ -253,9 +269,14 @@ def run_llm_job(
         return GatewayResult(GatewayOutcome.TOO_LARGE, reason=ErrorCode.LLM_INPUT_TOO_LARGE)
 
     # 5. 取得執行資格（短交易，立刻 commit）。
-    claim = _acquire(database, config, job, key, prompt, llm_input, eval_run_id)
+    claim = _acquire(
+        database, config, job, key, prompt, llm_input, eval_run_id, resume_only=resume_only
+    )
     if claim is None:
-        return GatewayResult(GatewayOutcome.SKIPPED)
+        # 預算不准而且鎖裡已經沒有可接續的 run（別人接續完、或已經有結果）：照預算不准回報。
+        return GatewayResult(
+            GatewayOutcome.DEFERRED_BUDGET if resume_only else GatewayOutcome.SKIPPED
+        )
     run_id = claim.run_id
     if claim.saved is not None:
         # 接續：模型已經回應、帳已經記過，只做 8、9。
@@ -367,9 +388,12 @@ def _acquire(
     prompt: LoadedPrompt,
     llm_input: LlmInput,
     eval_run_id: uuid.UUID | None,
+    *,
+    resume_only: bool = False,
 ) -> _Claim | None:
     """取得執行資格：同一個短交易裡上鎖、重問 `should_run`、接續 `llm_result_pending` 的 run 或
-    新增 `running`。不用跑回 None。"""
+    新增 `running`。不用跑回 None。`resume_only`（預算不准）時只接續、不新增，沒有可接續的就回
+    None，所以預算不准時一定不會呼叫模型。"""
     viewer = SystemViewer()
     settings = prompt.settings
     params: dict[str, object] = {
@@ -399,6 +423,8 @@ def _acquire(
             if saved is None:  # 改回 running 的條件已經要求有存下的輸出
                 raise RuntimeError("接續的 derivation_run 沒有存下的輸出")
             return _Claim(resumed, saved)
+        if resume_only:
+            return None
         run_id = create_derivation_run(
             connection,
             NewDerivationRun(
@@ -414,6 +440,32 @@ def _acquire(
             ),
         )
     return None if run_id is None else _Claim(run_id, None)
+
+
+def _has_resumable_run(
+    database: Database,
+    config: GatewayConfig,
+    job: LlmJob,
+    llm_input: LlmInput,
+    eval_run_id: uuid.UUID | None,
+) -> bool:
+    """預算不准時用：這組鍵（評估時還要同一個 `eval_run_id`）有沒有可接續的 `llm_result_pending`
+    run。只讀登記表的目前版本、不讀 prompt 檔；這個工作沒有登記 prompt 時當作沒有。"""
+    try:
+        version = current_prompt_version(job.task)
+    except PromptIntegrityError:
+        return False
+    task = LlmTask(job.task)
+    fingerprint = input_sha256(
+        llm_input.blocks,
+        task,
+        taxonomy_version=job.taxonomy_version,
+        context_values_version=job.context_values_version,
+    )
+    key = RunKey(job.paper_id, task, version, config.models.task_model(task).model, fingerprint)
+    with database.transaction() as connection:
+        found = find_resumable_derivation_run_id(SystemViewer(), connection, key, eval_run_id)
+    return found is not None
 
 
 def _fail_run(database: Database, run_id: uuid.UUID, reason: ErrorCode) -> None:
