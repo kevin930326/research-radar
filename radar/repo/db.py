@@ -125,6 +125,9 @@ class Database:
             pool_timeout=connect_timeout,
             # 借出前先確認連線還活著；資料庫重啟過也不會拿到斷掉的連線。
             pool_pre_ping=True,
+            # 資料庫出錯時，例外訊息不附查詢參數（預設會附 `[parameters: ...]`）：參數可能是
+            # email 或 token 雜湊，api 的例外日誌會把整段訊息記進 stdout（ADR-0046）。
+            hide_parameters=True,
             connect_args=_connect_args(url, connect_timeout),
         )
 
