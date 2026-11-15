@@ -5,6 +5,8 @@
 - 前端建置結果（`web/dist`）裡真的存在的檔案照送；`/api/` 以外找不到的 GET／HEAD 一律回
   `index.html`（頁面殼），由瀏覽器裡的路由決定顯示哪一頁，固定網址才打得開。
 - `/api/` 底下找不到的路徑，不管什麼方法（含 TRACE、CONNECT 與自訂方法）都回 404 JSON。
+- 已註冊的 API 路徑（/healthz、/readyz、FastAPI 的 /docs、/redoc、/openapi.json）用了不支援的方法
+  回 405，`Allow` 寫實際支援的方法；頁面殼不接手這些路徑。
 """
 
 import json
@@ -16,7 +18,7 @@ import structlog
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, Response
 from starlette.concurrency import run_in_threadpool
-from starlette.routing import Route
+from starlette.routing import BaseRoute, Match, Route
 from starlette.types import Receive, Scope, Send
 
 SECURITY_HEADERS_FILE = "security_headers.json"
@@ -95,17 +97,34 @@ def mount_web(app: FastAPI, web_dist: Path) -> None:
         )
         return
 
+    # 掛上之前已經註冊的路由：路徑對、方法不對時要回 405，不是落到頁面殼。
+    api_routes = list(app.router.routes)
     # 用 Starlette 的 Route（不是 FastAPI 的 api_route），端點又是類別：Starlette 對函式端點
     # 預設只收 GET，類別（ASGI 程式）端點不給 methods 才不受方法清單限制。
-    app.router.routes.append(Route("/{path:path}", _WebShell(root, index), include_in_schema=False))
+    app.router.routes.append(
+        Route("/{path:path}", _WebShell(root, api_routes), include_in_schema=False)
+    )
+
+
+def _allowed_methods(routes: list[BaseRoute], scope: Scope) -> set[str]:
+    """路徑對得上的已註冊路由所支援的方法；沒有路由對得上路徑就回空集合。
+
+    走到「其餘路徑」代表沒有路由完全對上；對得上路徑的（Match.PARTIAL）就是方法不對。
+    """
+    allowed: set[str] = set()
+    for route in routes:
+        match, _ = route.matches(scope)
+        if match is not Match.NONE:
+            allowed |= getattr(route, "methods", None) or set()
+    return allowed
 
 
 class _WebShell:
     """「其餘路徑」的 ASGI 端點：建置資料夾裡的檔案照送；其餘非 `/api/` 的路徑回頁面殼。"""
 
-    def __init__(self, root: Path, index: Path) -> None:
+    def __init__(self, root: Path, api_routes: list[BaseRoute]) -> None:
         self._root = root
-        self._index = index
+        self._api_routes = api_routes
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         request = Request(scope, receive)
@@ -115,12 +134,20 @@ class _WebShell:
 
     def _respond(self, request: Request) -> Response:
         path: str = request.path_params["path"]
+        allowed = _allowed_methods(self._api_routes, request.scope)
+        if allowed:
+            raise HTTPException(status_code=405, headers={"Allow": ", ".join(sorted(allowed))})
         if _is_api_path(path):
             raise HTTPException(status_code=404)
         if request.method not in SHELL_METHODS:
             raise HTTPException(status_code=405, headers={"Allow": "GET, HEAD"})
         found = _file_inside(self._root, path) if path else None
-        if found is not None and found != self._index:
+        # 每次都重新檢查頁面殼：掛上之後被換成指到外面的符號連結，就不送。
+        index = _file_inside(self._root, INDEX_FILE)
+        if found is not None and found != index:
             return FileResponse(found)
-        # 直接要 /index.html 也走這裡，同樣帶 no-cache。
-        return FileResponse(self._index, headers=SHELL_HEADERS)
+        if index is None:
+            log.warning("頁面殼不在建置資料夾裡，不送出", path=path)
+            raise HTTPException(status_code=404)
+        # 直接要 /index.html 也走這裡，同樣帶 no-cache。送的是解析後的實體檔，不再經過連結。
+        return FileResponse(index, headers=SHELL_HEADERS)

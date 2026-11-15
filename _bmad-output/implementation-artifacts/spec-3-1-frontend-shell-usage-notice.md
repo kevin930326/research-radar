@@ -174,9 +174,18 @@ deferred:
   - `[medium]` `[patch]` 頁面殼 `index.html` 本身是符號連結時，可送出建置資料夾外的檔案（`index.is_file()` 會跟著連結走，回頁面殼時沒經過 `_file_inside()`） — 已修：`mount_web()` 改用 `_file_inside(root, "index.html")` 找頁面殼，不在建置資料夾裡就不掛前端、記一筆警告，api 照常啟動；補 unit 測試（指到外面不掛、指到建置資料夾裡照常送）。
   - `[medium]` `[patch]` ESLint 的資料來源限制擋不住動態 `import("../datasource/api")`、`import("#datasource-impl")` 與別名呼叫 `const b = globalThis; b.fetch()` — 已修：`no-restricted-syntax` 對 `ImportExpression` 的字串與 template literal 套和靜態 import 同一組路徑；`no-restricted-properties` 改成任何物件的 `.fetch` 都擋（含解構）；`src/datasource/` 例外不變。補 5 個違反檔與 2 個允許檔，`src/lint.test.ts` 逐一斷言。
   - `[medium]` `[patch]` 站內連結檢查只看畫面上沒有「找不到這一頁」，真的 HTTP 404（例如 404 JSON）會被放過 — 已修：新增 `e2e/landing.ts`，文件導航的回應必須 2xx（轉址的中間段與 304 除外），落點要等網址落定在頁面清單裡、有 h1、沒有「找不到這一頁」；補兩個反例，證明導到回 404 JSON 的網址與頁面清單外的網址都會被判失敗。
-  - `[medium]` `[defer]` 「重新整理」沒驗證點擊有效、載入中沒驗證 300ms 延遲 — 同意是缺口，延後到 3.14：使用須知不載入任何資料，目前沒有能真的觸發等待與失敗的路由；只為測試加假路由會把測試專用程式放進正式建置。3.14（第一個有資料載入的畫面）用真的資料請求驗證。與上一輪 Verification 第 4 條同一件事。
+  - `[medium]` `[defer]` 「重新整理」沒驗證點擊有效、載入中沒驗證 300ms 延遲 — 同意是缺口，延後到 3.14：沒有 DOM 測試環境（沒裝 jsdom／testing-library），也沒有會載入資料的頁面（靜態渲染做不到點擊與計時，e2e 也沒有能觸發等待與失敗的畫面）。3.14（第一個有資料載入的畫面）用真的資料請求以瀏覽器測試驗證，已掛到 `epic-3-context.md` 的 3.14。與上一輪 Verification 第 4 條同一件事。
   - `[low]` `[patch]` 直接要 `/index.html` 不帶 `Cache-Control: no-cache` — 上一輪判 reject，Codex 再提出後改修（改動很小）：送出的檔案就是頁面殼時一律帶 `no-cache`；補 unit 測試（GET、HEAD 都帶，`/assets/*` 不帶）。
   - `[low]` `[patch]` `/api/` 底下的 TRACE、CONNECT 回 405 不是 404 — 已修：「其餘路徑」改成不設方法清單的 Starlette `Route`（端點是 ASGI 類別，Starlette 才不預設只收 GET），`/api/` 任何方法（含自訂方法）都 404 JSON；補 unit 測試（HEAD、OPTIONS、TRACE、CONNECT、PROPFIND、PURGE）。
+
+### 2026-11-15 — Opus 修正確認（8c20195）
+- verdicts: 5 findings — high 0, medium 1, low 4；patch 5
+- findings:
+  - `[medium]` `[patch]` `/healthz`、`/readyz` 的非 GET 方法掉進頁面殼：HEAD /readyz 未就緒時回 200＋HTML — 已修：`app.py` 另外登記兩條的 HEAD 路由（同一個函式，狀態碼與標頭和 GET 一樣、不帶 body、不進 API 文件）；`web.py` 的頁面殼先看路徑是否對得上已註冊的路由（/healthz、/readyz、/docs、/redoc、/openapi.json，以及之後的 API 路由），對得上就回 405、`Allow` 寫該路徑實際支援的方法。補 unit 測試（HEAD /readyz 未就緒 503、就緒 200；HEAD /healthz 200 且不是 HTML；POST／PUT／DELETE／TRACE／OPTIONS／PROPFIND 回 405 且 `Allow: GET, HEAD`；/docs 等 POST 回 405；HEAD 不進 API 文件）。
+  - `[low]` `[patch]` 頁面殼只在掛上時檢查符號連結 — 已修：每次送頁面殼前再 `_file_inside(root, "index.html")`，不合格回 404 JSON（帶全站安全標頭）並記警告；送出的是解析後的實體檔。補 unit 測試（掛上後換成指到外面的連結 → GET／HEAD 都 404、不洩內容）。
+  - `[low]` `[patch]` ESLint 擋不到非字串的動態 import 與 XMLHttpRequest — 已修：`src/`（`datasource/` 除外）動態 `import()` 的參數不是純字串（有插值的樣板字串、字串相加、變數）就報錯；`XMLHttpRequest` 加進 `no-restricted-globals` 與 `no-restricted-properties`。設定檔註解寫明這是防呆不是安全邊界、`.fetch` 誤擋 `query.fetch()` 時在該資料夾開例外。補 5 個違反檔與 1 個允許檔，`src/lint.test.ts` 逐一斷言。
+  - `[low]` `[patch]` 站內連結檢查的按鈕點完立刻比網址，非同步換頁會跳過落點檢查 — 已修：點完先用 `page.waitForURL` 等網址離開原頁（上限 1 秒，只吞逾時錯誤），有換頁就跑 `expectValidLanding`；既有檢查不變。
+  - `[low]` `[patch]` 第 4 條延後理由不精準、3.14 沒掛上 — 已修：上面 Codex 主審查第 4 條的理由改寫；`epic-3-context.md` 的 3.14 加上待辦。
 
 ## Design Notes
 

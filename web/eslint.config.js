@@ -2,6 +2,9 @@
 // 1. src/ 裡資料來源層以外的程式不得 fetch（含任何物件上的 .fetch，例如別名 `const b = globalThis;
 //    b.fetch()`）、不得 import datasource/api、datasource/static 或 #datasource-impl
 //    （靜態與動態 import() 都算；只能用入口與 types.ts）。
+//    動態 import() 的參數必須是純字串（不得有插值、字串相加、變數），不得用 XMLHttpRequest。
+//    這是防呆，不是安全邊界：只擋得住寫法上靜態可判斷的情況。`.fetch` 全面禁止若誤擋
+//    TanStack Query 的 query.fetch()，到時在該資料夾開例外。
 // 2. 介面文字只走 i18n：JSX 裡不得有寫死的文字（i18next/no-literal-string），
 //    src/ 與 e2e/ 的字串裡不得有寫死的中文。
 // lint-fixtures/ 是故意違反規則的檔案，不在正式檢查範圍；src/lint.test.ts 用 ESLint 程式介面對它跑。
@@ -32,6 +35,19 @@ const DYNAMIC_IMPORT_SELECTORS = DATASOURCE_IMPL_PATTERNS.flatMap((pattern) => [
   // import(`../datasource/api`)
   { selector: `ImportExpression TemplateElement[value.raw=/${forSelector(pattern)}/]`, message: DATASOURCE_MESSAGE },
 ]);
+// 動態 import() 的參數不是純字串就擋：路徑不是寫死的，上面的路徑比對就看不出來。
+const NON_LITERAL_IMPORT_MESSAGE =
+  "動態 import() 的參數必須是寫死的字串，路徑才檢查得到（ADR-0010 第 1 點）。";
+const NON_LITERAL_IMPORT_SELECTORS = [
+  // import(path)、import("../" + name)、import(f())
+  {
+    selector: "ImportExpression[source.type!='Literal'][source.type!='TemplateLiteral']",
+    message: NON_LITERAL_IMPORT_MESSAGE,
+  },
+  // import(`../${name}`)
+  { selector: "ImportExpression > TemplateLiteral.source[expressions.length>0]", message: NON_LITERAL_IMPORT_MESSAGE },
+];
+const XHR_MESSAGE = "頁面與元件不得用 XMLHttpRequest，請經過 datasource（ADR-0010 第 1 點）。";
 
 export default defineConfig(
   {
@@ -73,14 +89,28 @@ export default defineConfig(
     files: ["**/src/**/*.{ts,tsx}"],
     ignores: ["**/src/datasource/**"],
     rules: {
-      "no-restricted-globals": ["error", { name: "fetch", message: FETCH_MESSAGE }],
+      // new XMLHttpRequest() 也算直接連網路。
+      "no-restricted-globals": [
+        "error",
+        { name: "fetch", message: FETCH_MESSAGE },
+        { name: "XMLHttpRequest", message: XHR_MESSAGE },
+      ],
       // 不限物件名稱：window.fetch、globalThis.fetch、別名 b.fetch、const { fetch } = self 都擋。
-      "no-restricted-properties": ["error", { property: "fetch", message: FETCH_MESSAGE }],
+      "no-restricted-properties": [
+        "error",
+        { property: "fetch", message: FETCH_MESSAGE },
+        { property: "XMLHttpRequest", message: XHR_MESSAGE },
+      ],
       "no-restricted-imports": [
         "error",
         { patterns: DATASOURCE_IMPL_PATTERNS.map((regex) => ({ regex, message: DATASOURCE_MESSAGE })) },
       ],
-      "no-restricted-syntax": ["error", ...CJK_SELECTORS, ...DYNAMIC_IMPORT_SELECTORS],
+      "no-restricted-syntax": [
+        "error",
+        ...CJK_SELECTORS,
+        ...DYNAMIC_IMPORT_SELECTORS,
+        ...NON_LITERAL_IMPORT_SELECTORS,
+      ],
     },
   },
 );

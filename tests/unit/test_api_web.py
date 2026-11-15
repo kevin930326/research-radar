@@ -295,3 +295,79 @@ def test_missing_web_dist_logs_warning_and_starts(tmp_path: Path) -> None:
     assert client.get("/").status_code == 404
     assert client.get("/notice").status_code == 404
     assert any(entry["log_level"] == "warning" for entry in logs)
+
+
+# Opus 修正確認（PR #61 第二輪）：/healthz、/readyz 收 HEAD，其他方法回 405、不落到頁面殼。
+@pytest.mark.parametrize(("ready", "status"), [(False, 503), (True, 200)])
+def test_head_readyz_matches_get_status(web_dist: Path, ready: bool, status: int) -> None:
+    client = TestClient(create_app(readiness_check=lambda: ready, web_dist=web_dist))
+
+    response = client.head("/readyz")
+
+    assert response.status_code == status
+    assert response.content == b""
+    assert response.headers["content-type"] == "application/json"
+    _assert_security_headers(response.headers)
+
+
+def test_head_readyz_without_web_dist_matches_get_status() -> None:
+    client = TestClient(create_app(readiness_check=lambda: False))
+
+    assert client.head("/readyz").status_code == 503
+
+
+def test_head_healthz_is_200_and_not_the_shell(client: TestClient) -> None:
+    response = client.head("/healthz")
+
+    assert response.status_code == 200
+    assert response.content == b""
+    assert response.headers["content-type"] == "application/json"
+    assert "cache-control" not in response.headers
+
+
+@pytest.mark.parametrize("method", ["POST", "PUT", "DELETE", "TRACE", "OPTIONS", "PROPFIND"])
+@pytest.mark.parametrize("path", ["/healthz", "/readyz"])
+def test_health_routes_reject_other_methods_with_405(
+    client: TestClient, method: str, path: str
+) -> None:
+    response = client.request(method, path)
+
+    assert response.status_code == 405
+    assert response.headers["allow"] == "GET, HEAD"
+    assert not response.headers.get("content-type", "").startswith("text/html")
+    _assert_security_headers(response.headers)
+
+
+@pytest.mark.parametrize("path", ["/docs", "/redoc", "/openapi.json"])
+def test_framework_routes_reject_post_with_405(client: TestClient, path: str) -> None:
+    response = client.post(path)
+
+    assert response.status_code == 405
+    assert response.headers["allow"] == "GET, HEAD"
+
+
+def test_health_routes_head_is_not_in_the_api_schema(client: TestClient) -> None:
+    paths = client.get("/openapi.json").json()["paths"]
+
+    assert set(paths["/healthz"]) == {"get"}
+    assert set(paths["/readyz"]) == {"get"}
+
+
+# 掛上之後 index.html 被換成指到外面的符號連結：每次請求都重新檢查，不送外面的檔案。
+def test_index_swapped_for_outside_symlink_after_mount_is_404(
+    web_dist: Path, client: TestClient
+) -> None:
+    index = web_dist / "index.html"
+    index.unlink()
+    index.symlink_to(web_dist.parent / "secret.txt")
+
+    with structlog.testing.capture_logs():
+        for method in ("GET", "HEAD"):
+            for path in ("/", "/notice", "/index.html"):
+                response = client.request(method, path)
+                assert response.status_code == 404, (method, path)
+                assert "outside" not in response.text
+                assert not response.headers.get("content-type", "").startswith("text/html")
+                _assert_security_headers(response.headers)
+    # 建置資料夾裡真的存在的檔案照送。
+    assert client.get("/assets/index-abc123.js").text == ASSET

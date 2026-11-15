@@ -89,6 +89,31 @@ describe("project lint rules", () => {
     expect(await ruleIds("hooks/destructured-fetch.ts")).toContain("no-restricted-properties");
   });
 
+  // Opus 修正確認（PR #61 第二輪）：動態 import() 的參數不是純字串、XMLHttpRequest 也要擋。
+  it("blocks a dynamic import with an interpolated template literal", async () => {
+    expect(await ruleIds("pages/InterpolatedImportPage.tsx")).toContain("no-restricted-syntax");
+  });
+
+  it("blocks a dynamic import built by string concatenation", async () => {
+    expect(await ruleIds("components/ConcatImport.tsx")).toContain("no-restricted-syntax");
+  });
+
+  it("blocks a dynamic import of a variable in a hook", async () => {
+    expect(await ruleIds("hooks/variable-import.ts")).toContain("no-restricted-syntax");
+  });
+
+  it("blocks new XMLHttpRequest in a component", async () => {
+    expect(await ruleIds("components/XhrRequest.tsx")).toContain("no-restricted-globals");
+  });
+
+  it("blocks new window.XMLHttpRequest in a page", async () => {
+    expect(await ruleIds("pages/WindowXhrPage.tsx")).toContain("no-restricted-properties");
+  });
+
+  it("allows a dynamic import of the datasource entry written as a plain template literal", async () => {
+    expect(await ruleIds("pages/AllowedTemplateDynamic.tsx")).toEqual([]);
+  });
+
   it("allows a dynamic import of the datasource entry", async () => {
     expect(await ruleIds("pages/AllowedDynamic.tsx")).toEqual([]);
   });

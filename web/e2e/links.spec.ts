@@ -1,6 +1,8 @@
 // (7) 站內連結檢查（AR-67）：pages.ts 的每一頁（加上「找不到這一頁」）把連結與按鈕點一遍，
 // 每個落點都必須是有效頁面（landing.ts：HTTP 成功、在頁面清單裡、有 h1、沒有「找不到這一頁」）。
 // 之後每個 Story 都要通過。
+import { errors } from "@playwright/test";
+
 import { TEXT } from "./expected.ts";
 import { expect, test } from "./fixtures.ts";
 import { expectDocumentResponsesOk, expectValidLanding, recordDocumentResponses } from "./landing.ts";
@@ -8,6 +10,8 @@ import { MISSING_PATH, SITES } from "./pages.ts";
 
 const NOT_FOUND = TEXT["common:states.notFound.message"];
 const member = SITES[0]!;
+// 按鈕點完等換頁的上限；不換頁的按鈕（例如切換選項）每個都會等滿這段時間。
+const BUTTON_NAVIGATION_WAIT_MS = 1_000;
 
 for (const site of SITES) {
   for (const path of [...site.pages, MISSING_PATH]) {
@@ -50,6 +54,14 @@ for (const site of SITES) {
         await open();
         const before = page.url();
         await page.locator("main button").nth(index).click();
+        // 換頁可能是非同步的（點完才發請求、才導航）：先短暫等網址離開原頁，等不到就當作沒換頁。
+        try {
+          await page.waitForURL((url) => url.toString() !== before, { timeout: BUTTON_NAVIGATION_WAIT_MS });
+        } catch (error) {
+          if (!(error instanceof errors.TimeoutError)) {
+            throw error;
+          }
+        }
         await page.waitForLoadState();
         const label = `${path} button ${index}`;
         expectDocumentResponsesOk(responses, label);

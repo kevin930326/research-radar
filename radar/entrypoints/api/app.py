@@ -85,6 +85,11 @@ def create_app(readiness_check: Callable[[], bool], *, web_dist: Path | None = N
             return JSONResponse({"status": "ready"})
         return JSONResponse({"status": "not_ready"}, status_code=503)
 
+    # FastAPI 的 GET 路由不會自動收 HEAD；另外登記 HEAD（同一個函式，狀態碼與標頭和 GET 一樣，
+    # 伺服器不送 body），不放進 API 文件。
+    app.add_api_route("/healthz", healthz, methods=["HEAD"], include_in_schema=False)
+    app.add_api_route("/readyz", readyz, methods=["HEAD"], include_in_schema=False)
+
     # 前端的「其餘路徑回頁面殼」一定要排在所有 API 路由後面。
     if web_dist is not None:
         mount_web(app, web_dist)
