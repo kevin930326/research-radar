@@ -53,7 +53,7 @@ Story 1.1 之前沒有 CI：檢查只在 Kevin 的 Mac 手動跑，映像只在 
 
 全部選 B。
 
-1. **觸發**：所有分支的 `push`，以及所有 `pull_request`。
+1. **觸發**：所有分支的 `push`，以及所有 `pull_request`。（2026-11-15 改成 `push` 只看 `main`，見最後的「補充」。）
 2. **三個 job**
    - `checks`（`ubuntu-24.04`）：依序跑 ruff（風格、排版）、mypy、import-linter、pytest（`unit`、`integration`、`arch` 分三次）、gitleaks、pip-audit；任何一步失敗，整個 job 就失敗。前面的檢查失敗時，後面的檢查一般就不跑，但 gitleaks 與 pip-audit 例外（`if: ${{ !cancelled() }}`）：秘密外洩與有漏洞的套件不能因為別的檢查先失敗而沒被回報。
    - `image`（matrix：`ubuntu-24.04` 建 amd64、`ubuntu-24.04-arm` 建 arm64）：`needs: checks`。建映像 → `.github/scripts/smoke.sh` 冒煙 → push 事件才登入並以 `<完整 commit SHA>-<架構>` 推 GHCR。
@@ -76,7 +76,7 @@ Story 1.1 之前沒有 CI：檢查只在 Kevin 的 Mac 手動跑，映像只在 
 
 1. **原生執行機才真的驗證了 Arm**：Oracle 主機是 Arm，冒煙跑在真的 Arm CPU 上，比模擬器可信，也快。
 2. **冒煙通過才推**：GHCR 上的每個 `<sha>` 標籤都保證在兩種架構上起得來；換版（AD-29）拉的就是它。
-3. **只在 push 推**：標籤的 SHA 一定是某次真的推上來的 commit。PR 分支的每個 commit 本來就會觸發 push，映像由那一次推。
+3. **只在 push 推**：標籤的 SHA 一定是某次真的推上來的 commit。PR 分支的每個 commit 本來就會觸發 push，映像由那一次推。（2026-11-15 改：只有 `main` 的 commit 推映像，見補充。）
 4. **不用 secret、權限最小、action 釘 SHA**：workflow 被改壞或某個 action 被入侵時，能做的事最少。
 5. **網路封鎖預設開**：之後串 OpenAlex、Claude 的 Story 一不小心連到外面，CI 會直接失敗，而不是默默花額度或因網路不穩時好時壞。
 
@@ -88,15 +88,32 @@ Story 1.1 之前沒有 CI：檢查只在 Kevin 的 Mac 手動跑，映像只在 
 - **冒煙只起 `db` 與 `api`**：worker 與 RustFS 還沒有對外的健康檢查，等之後的 Story 需要時再加。Story 1.3 讓沒遷移的 `/readyz` 回 503，屆時冒煙要先跑 `radar migrate`。
 - **CI 的固定檢查還不完整**：`alembic check`（Story 1.3）、OpenAPI 差異、prompt 版本清單、前端檢查（Epic 3）由各自的 Story 加進 `checks`。
 - **`image` 在 pull_request 事件也拿著 `packages: write`**：權限是寫在 job 上的，PR 事件不會推映像，但權限還在。接受這個取捨：拆成兩個 job 要多建一次映像；而且來自 fork 的 PR，GitHub 本來就只給唯讀的 token。
-- **GHCR 的標籤只增不減**：每個分支的每次 push 都會多三個標籤（`<sha>-amd64`、`<sha>-arm64`、`<sha>`），目前沒有保留期或清理規則；私有 package 的儲存空間算在帳號的額度裡。要不要設清理規則、保留多久，留給 Kevin 決定。
+- **GHCR 的標籤只增不減**：每個分支的每次 push（2026-11-15 起只有 `main`，見補充）都會多三個標籤（`<sha>-amd64`、`<sha>-arm64`、`<sha>`），目前沒有保留期或清理規則；私有 package 的儲存空間算在帳號的額度裡。要不要設清理規則、保留多久，留給 Kevin 決定。
 - **gitleaks、pip-audit 升版要手動改**：gitleaks 的版本與 SHA-256 在 workflow；pip-audit 跟著 `uv.lock`。
 
 ## Kevin 2026-11-14 的確認
 
-- **CI 對所有分支的 push 都跑**（不縮成只跑 `main` 與 PR）、**GHCR 的舊標籤先不清理**：Kevin 2026-11-14 接受（「取捨」最後兩項留給 Kevin 決定的事）。分鐘數或儲存空間吃緊時再改。
+- **CI 對所有分支的 push 都跑**（不縮成只跑 `main` 與 PR；這一項 2026-11-15 改了，見補充）、**GHCR 的舊標籤先不清理**：Kevin 2026-11-14 接受（「取捨」最後兩項留給 Kevin 決定的事）。分鐘數或儲存空間吃緊時再改。
 
 ## 名詞
 
 - **原生執行機**：CPU 架構和要建的映像一樣的 CI 機器（amd64 用 Intel／AMD 的機器、arm64 用 Arm 的機器），不靠模擬。
 - **QEMU**：在一種 CPU 上模擬另一種 CPU 的軟體；能在 amd64 上建 arm64 映像，但慢，也不保證真的 Arm 機器跑得動。
 - **預期失敗（strict xfail）**：先寫明「這個測試應該失敗」；真的失敗才算過，意外通過反而算錯。
+
+## 補充（Kevin 2026-11-15）：push 只看 main，同一個 PR 的舊執行會被取消
+
+「取捨」裡留給 Kevin 決定的那一項，現在定了。
+
+- **發生什麼事**：11 月 14、15 兩天，自動執行的幾條線一共跑了 261 次 CI，用掉 2,696 分鐘（每月額度 3,000）。其中 pull_request 事件的 1,015 分鐘（約 38%）和 push 事件跑的是同一個 commit。
+- **決定**：
+  1. `push` 只在 `main` 觸發；分支上的 commit 由 `pull_request` 檢查一次。疊在別的分支上的 PR 照樣檢查（`pull_request` 不限目標分支）。
+  2. 加 `concurrency`：同一個 PR 有新的 commit 時，取消還在跑的舊執行。`main` 的每次執行各自一組（group 用 `run_id`），彼此不排隊、不取消。不用 `github.ref` 分組：同一組沒設取消時 GitHub 只保留一個等待中的執行，連續合併時中間那一次會被取消。
+- **放棄了什麼**：
+  - PR 分支的 commit 不再推映像，只有 `main` 的 commit 有映像。目前沒有任何流程用到分支的映像。
+  - 還沒開 PR 的分支推上去不會跑 CI：要看 CI 結果就先開 PR（草稿也可以）。
+  - PR 的檢查對象是 GitHub 產生的「合併後」commit，不是分支的 commit 本身；合併進 `main` 之後 `main` 的 push 會再完整跑一次。
+  - 連續推兩次時，前一個 commit 沒有 CI 結果（被取消）。
+  - PR 和目標分支有合併衝突時，`pull_request` 不會觸發，那個 PR 完全沒有 CI；衝突解掉才會跑（以前分支的 push 還會跑一次）。
+- **沒有改的**：各 job 的內容、映像的標籤規則、不用 repo secret、action 釘 commit SHA。
+- **之後還不夠省的話**（都還沒做）：`image` 只在 `main` 跑、`web` 只在動到 `web/` 時跑、自動執行的每個 Story 修正集中成一次推送。

@@ -808,3 +808,4 @@
 - **嚴格首字母**：縮寫剛好是名稱裡每個實詞的第一個字母（`system satisfaction` → SS、`perceived ease of use` → PEOU）；輸入寫「名稱 (縮寫)」時，有嚴格首字母對得上的較長名稱優先，免得 SS 被算成只有 satisfaction（ADR-0039）。
 - **子句開頭**：一個小句的起點，例如段落開頭、逗號或分號後面；`H1 was supported` 這類直接陳述要在子句開頭，前面接 `We dispute that`、`Other researchers report that` 這種別人的說法就不算（ADR-0039）。
 - **研究問題的前置語**：句子裡 `we examine whether` 前面的那段字（例如 `In this study, `）；要是這篇研究自己的說法，換成 `Other researchers report that` 這種別人的說法，後面的結果就不算（ADR-0039）。
+- **取消舊的 CI 執行（concurrency）**：同一個 PR 又推了新的 commit 時，GitHub 自動把還在跑的上一次檢查停掉，只留最新的那一次；省分鐘數，代價是被取消的那個 commit 沒有結果。
