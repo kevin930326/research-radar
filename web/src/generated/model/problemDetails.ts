@@ -10,7 +10,7 @@ import type { ProblemDetailsCode } from './problemDetailsCode.ts';
  * 錯誤回應（RFC 9457）。`code` 只會是 api 會回的代碼（`PROBLEM_STATUS` 的鍵）。
  */
 export interface ProblemDetails {
-  type: string;
+  type: 'about:blank';
   title: string;
   status: number;
   code: ProblemDetailsCode;

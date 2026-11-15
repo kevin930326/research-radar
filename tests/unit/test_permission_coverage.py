@@ -2,23 +2,29 @@
 
 - 根目錄的 `openapi.json` 和程式產生的一樣（CI 另外有一步重新輸出後 `git diff`）。
 - `openapi.json` 的每個端點都在登記表（`tests/permissions/cases.py`）：有換人測試或寫了理由的豁免。
-- app 上沒有躲在 `openapi.json` 外面的 API 路由。
+- app 上沒有躲在 `openapi.json` 外面的 API 路由；真正的 `main()` 組出來的 app 也一樣。
 - **示範**：加一個只在這裡存在的端點，框架真的報「這個端點沒有換人測試」；登記之後就不報。
-- 換人測試的判定（404 或空清單）與金絲雀檢查，對故意寫錯（會洩漏）的端點真的會失敗。
+- 換人測試的判定（404 或空清單）與金絲雀檢查，對故意寫錯（會洩漏）的端點真的會失敗；對照（A 自己
+  拿得到）擋住「路徑打錯也是 404」的假通過。
 真的資料庫、真的兩位成員的版本在 `tests/integration/test_permissions.py`。
 """
 
 import json
+import signal
 import uuid
 from datetime import UTC, datetime
-from typing import cast
+from pathlib import Path
+from typing import Any, ClassVar, cast
 
 import pytest
+import uvicorn
 from fastapi import APIRouter, FastAPI, Request
 from fastapi.testclient import TestClient
 from httpx2 import Response
 
+import radar.entrypoints.api.main as api_main
 from radar.adapters.fake.login import pick_member_identity
+from radar.config import env_name
 from radar.domain.auth import AuthenticatedMember
 from radar.domain.auth_settings import AuthSettings, Environment
 from radar.domain.errors import ErrorCode
@@ -42,6 +48,7 @@ from tests.permissions.framework import (
     Member,
     PermissionContext,
     assert_hidden_from_other_member,
+    assert_visible_to_owner,
     coverage_problems,
     endpoints_in_openapi,
     response_texts,
@@ -103,6 +110,55 @@ def test_no_api_route_is_hidden_from_openapi() -> None:
     assert routes_missing_from_openapi(build_schema_app()) == []
 
 
+class _CapturedServer:
+    """頂替 uvicorn.Server：記下 main() 組好的 app，不開連接埠。"""
+
+    apps: ClassVar[list[Any]] = []
+
+    def __init__(self, config: Any) -> None:
+        self.should_exit = False
+        _CapturedServer.apps.append(config.app)
+
+    def run(self) -> None:
+        return None
+
+
+class _Probes:
+    ping = staticmethod(lambda: True)
+    schema_state = staticmethod(lambda: None)
+    database = object()  # 只組裝、不送請求，不會碰到資料庫
+
+
+def test_real_main_assembly_matches_openapi(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # 走真正的 main()（開發環境＋假登入，端點最多的組合；前端也掛上），只換掉資料庫與伺服器啟動。
+    # main() 若另外裝了沒經 install_api_routes 的路由，這裡的端點清單就會和 openapi.json 不同。
+    for name in AuthSettings.model_fields:
+        monkeypatch.delenv(env_name(name), raising=False)
+    monkeypatch.setenv("DATABASE_URL", "postgresql://radar_app@db:5432/radar")
+    monkeypatch.setenv("RADAR_CONFIG_DIR", str(OPENAPI_PATH.parent / "config"))
+    monkeypatch.setenv("RADAR_ENVIRONMENT", "development")
+    monkeypatch.setenv("RADAR_FAKE_LOGIN", "true")
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    (dist / "index.html").write_text("<!doctype html><title>shell</title>", encoding="utf-8")
+    monkeypatch.setattr(api_main, "build_readiness_probes", lambda *_a, **_k: _Probes())
+    monkeypatch.setattr(api_main, "WEB_DIST", dist)
+    monkeypatch.setattr(uvicorn, "Server", _CapturedServer)
+    _CapturedServer.apps.clear()
+    handlers = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGINT)}
+    try:
+        assert api_main.main() == 0
+    finally:
+        for sig, handler in handlers.items():
+            signal.signal(sig, handler)
+
+    (app,) = _CapturedServer.apps
+    assert endpoints_in_openapi(app.openapi()) == endpoints_in_openapi(_committed_openapi())
+    assert routes_missing_from_openapi(app) == []
+
+
 # --- 示範：新增端點沒有換人測試時，框架真的會報錯 ---------------------------------------------
 
 
@@ -128,17 +184,33 @@ def test_new_endpoint_passes_once_it_is_registered() -> None:
     document = _schema_app_with_test_only_endpoint().openapi()
     extra = EndpointRegistry()
 
-    @extra.case("GET", TEST_ONLY_PATH)
+    def _control(ctx: PermissionContext) -> Response:
+        return ctx.as_owner("GET", "/api/v1/test-only-notes/1")
+
+    @extra.case("GET", TEST_ONLY_PATH, control=_control)
     def _note(ctx: PermissionContext) -> Response:
         return ctx.as_other("GET", "/api/v1/test-only-notes/1")
 
     assert coverage_problems(document, {**REGISTRY.cases, **extra.cases}) == []
 
 
+def test_cross_member_case_without_control_is_reported() -> None:
+    document = _schema_app_with_test_only_endpoint().openapi()
+    extra = EndpointRegistry()
+
+    @extra.case("GET", TEST_ONLY_PATH)
+    def _note(ctx: PermissionContext) -> Response:
+        return ctx.as_other("GET", "/api/v1/test-only-notes/1")
+
+    assert coverage_problems(document, {**REGISTRY.cases, **extra.cases}) == [
+        f"換人測試要有對照（成員 A 自己拿得到）：GET {TEST_ONLY_PATH}"
+    ]
+
+
 def test_registered_endpoint_missing_from_openapi_is_reported() -> None:
     extra = EndpointRegistry()
 
-    @extra.case("DELETE", "/api/v1/gone")
+    @extra.case("DELETE", "/api/v1/gone", exempt="測試")
     def _gone(ctx: PermissionContext) -> Response:
         return ctx.as_other("DELETE", "/api/v1/gone")
 
@@ -255,6 +327,34 @@ def test_cross_member_check_fails_for_a_leaky_endpoint(path: str) -> None:
 
     with pytest.raises(AssertionError, match="成員 B"):
         assert_hidden_from_other_member(ctx.as_other("GET", path))
+
+
+def test_owner_control_passes_for_the_owner() -> None:
+    ctx = _context(_notes_client(leaky=False))
+
+    assert_visible_to_owner(ctx.as_owner("GET", f"/api/v1/test-only-notes/{NOTE_ID}"))
+    assert_visible_to_owner(ctx.as_owner("GET", "/api/v1/test-only-notes"))
+
+
+def test_owner_control_catches_a_wrong_path() -> None:
+    # 路徑打錯：成員 B 拿到 404，換人測試會通過；對照讓 A 也打同一個錯路徑，就會失敗。
+    ctx = _context(_notes_client(leaky=False))
+    wrong = f"/api/v1/test-only-note/{NOTE_ID}"
+
+    assert_hidden_from_other_member(ctx.as_other("GET", wrong))
+    with pytest.raises(AssertionError, match="對照失敗"):
+        assert_visible_to_owner(ctx.as_owner("GET", wrong))
+
+
+def test_owner_control_catches_an_empty_owner_list() -> None:
+    with pytest.raises(AssertionError, match="對照失敗"):
+        assert_visible_to_owner(Response(200, json={"items": []}))
+
+
+def test_cross_member_check_rejects_a_leaked_total() -> None:
+    with pytest.raises(AssertionError, match="筆數"):
+        assert_hidden_from_other_member(Response(200, json={"items": [], "total": 1}))
+    assert_hidden_from_other_member(Response(200, json={"items": [], "total": 0}))
 
 
 def test_cross_member_check_rejects_403_and_401() -> None:

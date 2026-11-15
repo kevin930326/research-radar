@@ -5,8 +5,9 @@
 
 - 金絲雀：B 的回應（本文與標頭）與這段期間的日誌，都不能出現金絲雀字串，也不能出現 A 的
   session token。
-- 換人測試：沒有豁免的端點，B 打 A 的資料要得到 404 或空清單。目前的端點都豁免（理由寫在登記表），
-  所以這一組現在沒有用例；第一個會回成員資料的端點（Story 3.6 起）加進登記表後就會跑。
+- 換人測試：沒有豁免的端點，B 打 A 的資料要得到 404 或空清單；接著對照，A 自己打同一筆資料要
+  拿得到。目前的端點都豁免（理由寫在登記表），所以這一組現在沒有用例；第一個會回成員資料的端點
+  （Story 3.6 起）加進登記表後就會跑。
 資料全是測試自己編的（`*@example.com`、假名字）。
 """
 
@@ -35,6 +36,7 @@ from tests.permissions.framework import (
     Member,
     PermissionContext,
     assert_hidden_from_other_member,
+    assert_visible_to_owner,
     response_texts,
     secrets_found,
 )
@@ -106,7 +108,8 @@ def test_other_member_never_sees_the_canary(
     assert CANARY_EMAIL in emails
 
     response = case.call(context)
-    logs = capsys.readouterr().out
+    captured = capsys.readouterr()
+    logs = captured.out + captured.err
 
     # B 的 session 是有效的：這個請求真的是以成員 B 的身分送的。
     assert response.status_code != 401, response.text
@@ -119,7 +122,9 @@ def test_other_member_never_sees_the_canary(
 def test_other_member_gets_404_or_an_empty_list(
     case: EndpointCase, context: PermissionContext
 ) -> None:
+    assert case.control is not None  # coverage_problems 已經要求沒有豁免的端點要有對照
     assert_hidden_from_other_member(case.call(context))
+    assert_visible_to_owner(case.control(context))
 
 
 def test_other_member_session_is_really_the_other_member(context: PermissionContext) -> None:

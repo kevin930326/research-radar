@@ -461,7 +461,8 @@ def test_new_api_paths_still_return_json_after_web_is_mounted(
 
     assert response.status_code == status
     # 成功是 application/json，錯誤是 RFC 9457 的 application/problem+json（Story 3.4）。
-    assert response.headers["content-type"] in {"application/json", "application/problem+json"}
+    expected = "application/json" if status < 400 else "application/problem+json"
+    assert response.headers["content-type"] == expected
     assert SHELL not in response.text
     # 對照：一般頁面仍是頁面殼。
     assert client.get("/guide").text == SHELL

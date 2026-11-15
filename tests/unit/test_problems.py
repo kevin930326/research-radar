@@ -6,6 +6,7 @@
 """
 
 import json
+from collections.abc import Callable
 from http import HTTPStatus
 from typing import get_args
 
@@ -14,7 +15,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 from httpx2 import Response
 
-from radar.domain.auth import FakeLoginRequest, NewSession
+from radar.domain.auth import FakeLoginRequest, LoginRejectedError, LoginRejection, NewSession
 from radar.domain.auth_settings import FakeLoginMode
 from radar.domain.errors import ErrorCode
 from radar.entrypoints.api.app import REQUEST_ID_HEADER, create_app
@@ -46,7 +47,13 @@ def _never_log_in(_request: FakeLoginRequest) -> NewSession:
     raise AssertionError("本文驗證失敗時不該走到登入")
 
 
-def _app_with_auth() -> FastAPI:
+def _reject_login(_request: FakeLoginRequest) -> NewSession:
+    raise LoginRejectedError(LoginRejection.NO_MEMBER_CHOSEN)
+
+
+def _app_with_auth(
+    log_in: Callable[[FakeLoginRequest], NewSession] = _never_log_in,
+) -> FastAPI:
     app = create_app(readiness_check=lambda: True)
     install_auth_routes(
         app,
@@ -56,7 +63,7 @@ def _app_with_auth() -> FastAPI:
             allowed_origins=frozenset({ORIGIN}),
             cookie_max_age=60,
             fake_login=FakeLoginRoutes(
-                mode=FakeLoginMode.PICK_MEMBER, list_members=list, log_in=_never_log_in
+                mode=FakeLoginMode.PICK_MEMBER, list_members=list, log_in=log_in
             ),
         ),
     )
@@ -124,6 +131,18 @@ def test_not_authenticated_is_401_problem_with_no_store() -> None:
 
     _assert_problem(response, "not_authenticated", 401)
     assert response.headers["cache-control"] == "no-store"
+
+
+def test_fake_login_options_and_rejections_are_not_cached() -> None:
+    # 選人清單與登入被拒都和登入狀態有關，瀏覽器與中間的快取都不能存。
+    client = TestClient(_app_with_auth(_reject_login), base_url=ORIGIN)
+    options = client.get("/api/v1/auth/fake-login")
+    rejected = client.post("/api/v1/auth/fake-login", json={}, headers={"Origin": ORIGIN})
+
+    assert options.status_code == 200
+    assert options.headers["cache-control"] == "no-store"
+    _assert_problem(rejected, "login_rejected", 403)
+    assert rejected.headers["cache-control"] == "no-store"
 
 
 def test_unexpected_exception_is_500_problem_without_details(

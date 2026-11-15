@@ -34,3 +34,16 @@ def test_export_schema_fails_without_writing_when_generation_fails(
 
     assert result.exit_code == 1
     assert not output.exists()
+
+
+def test_export_schema_refuses_output_that_is_not_json(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output = tmp_path / "openapi.json"
+    # 標準函式庫的 `this` 模組：退出碼 0，但印的是一段文字，不是 JSON。
+    monkeypatch.setattr(export_schema_module, "OPENAPI_MODULE", "this")
+
+    result = runner.invoke(app, ["export-schema", "--output", str(output)])
+
+    assert result.exit_code == 1
+    assert not output.exists()

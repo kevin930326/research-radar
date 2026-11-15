@@ -5,6 +5,7 @@
 `demo-openapi.json` 在 Story 3.7 加。
 """
 
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -47,5 +48,11 @@ def export_schema(
         sys.stderr.write(result.stderr.decode("utf-8", errors="replace"))
         log.error("產生 openapi.json 失敗，沒有寫檔", returncode=result.returncode)
         raise typer.Exit(1)
+    try:
+        json.loads(result.stdout)
+    except ValueError:
+        # 子行程多印了別的東西（例如有人在 import 時 print）：寫進去會壞掉前端型別的產生。
+        log.error("產生的 openapi.json 不是合法的 JSON，沒有寫檔")
+        raise typer.Exit(1) from None
     output.write_bytes(result.stdout)
     typer.echo(f"已寫入 {output}")

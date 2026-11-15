@@ -297,6 +297,7 @@
         "properties": {
           "type": {
             "type": "string",
+            "const": "about:blank",
             "title": "Type"
           },
           "title": {

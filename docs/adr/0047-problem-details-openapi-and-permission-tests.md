@@ -68,7 +68,8 @@ Story 3.3 之後 api 有六個端點，但錯誤格式各寫各的：路由回 `
 
 5. **換人測試的框架**（選項 A）：`tests/permissions/framework.py`（框架）＋`tests/permissions/cases.py`（登記表）。
    - 每個端點登記一次：`@REGISTRY.case("方法", "路徑樣板")` 裝飾一個「成員 B 怎麼呼叫它」的函式（可以先替成員 A 建私人資料）；豁免換人測試要寫 `exempt="理由"`，理由不能空白。
-   - `tests/unit/test_permission_coverage.py`：`openapi.json` 的端點清單和登記表必須完全一致（沒登記的端點、登記了卻不存在的端點、空白理由都失敗）；`openapi.json` 必須等於程式產生的；app 上不能有藏在 `openapi.json` 外面的路由（`include_in_schema=False` 只准健康檢查的 HEAD 與 FastAPI 的文件頁）。
+   - 沒豁免的端點還要登記對照（`control=`）：成員 A 自己打同一筆資料要拿得到（200 且有內容）。沒有對照，路徑打錯或資料沒建成得到的 404 也會讓換人測試通過；`coverage_problems` 把「沒豁免卻沒有對照」也算問題。B 拿到空清單時，`total` 也必須沒有或是 0（不透露 A 的資料筆數）。
+   - `tests/unit/test_permission_coverage.py`：`openapi.json` 的端點清單和登記表必須完全一致（沒登記的端點、登記了卻不存在的端點、空白理由、沒有對照都失敗）；`openapi.json` 必須等於程式產生的；app 上不能有藏在 `openapi.json` 外面的路由（`include_in_schema=False` 只准健康檢查的 HEAD、FastAPI 的文件頁與前端的頁面殼）。真正的 `main()` 組出來的 app（只換掉資料庫與伺服器啟動）也拿來和 `openapi.json` 比對，在 `main()` 另外裝路由會被抓到。
    - 示範：測試裡加一個只在測試存在的端點，框架報「這個端點沒有換人測試：GET /api/v1/test-only-notes/{note_id}」；登記之後就不報。判定函式對故意寫錯（忘了檢查擁有者）的端點也真的失敗。
    - 預期結果是 **404（代碼 `not_found`）或空清單（`items == []`）**；403、401、200 有資料都算失敗（ADR-0002）。
    - `tests/integration/test_permissions.py`：真的資料庫、兩位成員經開發環境假登入取得 session，對每個沒豁免的端點跑換人測試。目前六個端點都豁免（理由在登記表：健康檢查不讀成員資料、`/me` 只回自己、登出只刪自己的 session、假登入是開發與試用專用的登入流程），所以這一組現在沒有用例；第一個會回成員資料的端點（3.6 起）登記後就會跑。

@@ -3,7 +3,7 @@ title: 'Story 3.4：權限測試的框架'
 type: 'feature'
 created: '2026-11-15'
 baseline_revision: '3270ef5a1ea01b23899b164fb8d3a21c39805331'
-status: 'in-progress'
+status: 'done'
 review_loop_iteration: 0
 followup_review_recommended: false
 context:
@@ -13,7 +13,28 @@ context:
   - '{project-root}/docs/adr/0010-frontend-stack.md'
   - '/Users/kevin/Documents/research-radar/docs/runs/epic-3b/brief-3-4.md'
 warnings: ['oversized']
-deferred: []
+deferred:
+  - summary: >-
+      `/docs`、`/redoc`、`/openapi.json` 在正式環境照樣公開，列出完整 schema（含正式環境沒有的假登入路由）。
+    evidence: |-
+      FastAPI 預設行為，Epic 1 起就是這樣，不是 3.4 引入；要不要在正式環境關掉（docs_url=None 等）是部署決定，列入 PR 的「要 Kevin 決定」。
+    location: >-
+      radar/entrypoints/api/app.py create_app
+    severity: low
+  - summary: >-
+      未預期例外的 traceback 照舊進日誌；若例外訊息含使用者輸入（例如 pydantic 的 input_value），會跟著進日誌。
+    evidence: |-
+      既有的中介層行為（Epic 1）；3.4 的回應模型都由伺服器端資料建立，不是使用者輸入。之後若有端點把使用者輸入放進回應模型，要再看。
+    location: >-
+      radar/entrypoints/api/app.py 未預期例外的中介層
+    severity: low
+  - summary: >-
+      金絲雀目前只放在 email；之後每張私人資料表要不要放 CANARY 靠各 Story 照 epic-3-context.md 做。
+    evidence: |-
+      現在沒有其他私人資料表；共用的「替 A 建含金絲雀的資料」函式要等第一張私人資料表（3.6 起）出現再做，避免沒有實作就先建介面。
+    location: >-
+      tests/permissions/framework.py、_bmad-output/implementation-artifacts/epic-3-context.md
+    severity: low
 ---
 
 <intent-contract>
@@ -27,7 +48,7 @@ deferred: []
 ## Boundaries & Constraints
 
 **Always:**
-- 只在 worktree `/Users/kevin/Documents/research-radar/.claude/worktrees/epic3b`；本機 pytest 一律加 `RADAR_TEST_ADMIN_DATABASE_URL=postgresql://postgres@127.0.0.1:1/postgres`；npm／npx 一律加 `NPM_CONFIG_REGISTRY=https://registry.yarnpkg.com`，這個網址不進任何 commit 的檔。
+- 只在 worktree `/Users/kevin/Documents/research-radar/.claude/worktrees/epic3b`；本機 pytest 一律加 `RADAR_TEST_ADMIN_DATABASE_URL=postgresql://postgres@127.0.0.1:1/postgres`；npm／npx 一律照 brief 的別名設定跑（那個網址不寫進任何 commit 的檔）。
 - 和另一條線共用的檔只加最少的行、加在尾端：`radar/domain/errors.py`（檔尾）、`radar/entrypoints/cli/__init__.py`（一行 import＋一行註冊）、`.github/workflows/ci.yml`、`docs/adr/README.md`、`docs/glossary.md`、`sprint-status.yaml`。
 - 錯誤回應只有 `type`（固定 `about:blank`）、`title`（HTTP 狀態的標準英文片語）、`status`、`code`；不回 `detail`、不回例外訊息、不回驗證錯誤的輸入值。headers（`Allow`、`Cache-Control: no-store`）照留。
 - `openapi.json` 的錯誤代碼列舉只含 api 會回的代碼（`problems.py` 的對照表），不是整個 `ErrorCode`：另一條線加 LLM 代碼時 `openapi.json` 不會變。
@@ -60,7 +81,7 @@ deferred: []
 
 - `radar/entrypoints/api/app.py` -- `create_app(readiness_check, *, web_dist)`（簽名不改：`tests/integration/test_shutdown.py` 的 `SLOW_APP_SCRIPT` 換掉 `api_main.create_app`）；中介層的 500 目前是 `PlainTextResponse`，改成 problem；例外處理器在這裡掛，所以所有 app（含只用 `create_app` 的測試）都是 RFC 9457。
 - `radar/entrypoints/api/web.py` -- `_WebShell` 丟 `HTTPException(404/405)`，經 ExceptionMiddleware 的處理器變 problem，不用改。
-- `radar/entrypoints/api/auth.py` -- 四條路由；`HTTPException(status, detail=ErrorCode.X.value)` 改成 `ApiProblem(ErrorCode.X)`；路由回 JSONResponse、沒有 response model（orval 只會得到 `unknown`），改成回 Pydantic 模型、標頭用注入的 `Response` 設。模組 docstring 的「3.4 換成 RFC 9457」那句更新。
+- `radar/entrypoints/api/auth.py` -- 四條路由；`HTTPException(status, detail=ErrorCode.X.value)` 改成 `ApiProblemError(ErrorCode.X)`；路由回 JSONResponse、沒有 response model（orval 只會得到 `unknown`），改成回 Pydantic 模型、標頭用注入的 `Response` 設。模組 docstring 的「3.4 換成 RFC 9457」那句更新。
 - `radar/entrypoints/api/main.py` -- `install_auth_routes(app, build_auth_routes(...))` 改成 `install_api_routes(app, auth_routes=...)`。
 - `radar/domain/errors.py` -- `ErrorCode`（`StrEnum`）；檔尾已有 3.3 的四個 api 代碼。
 - `radar/entrypoints/cli/__init__.py` -- `app.add_typer(members_app, name="members")` 那一行之後加註冊；`_fail` 私有。CLI 根 callback 會先 `load_domain_config()`。
@@ -78,18 +99,18 @@ deferred: []
 
 **Execution:**
 - `radar/domain/errors.py` -- 檔尾加 `NOT_FOUND`、`METHOD_NOT_ALLOWED`、`REQUEST_INVALID`、`REQUEST_REJECTED`、`INTERNAL_ERROR`。
-- `radar/entrypoints/api/problems.py`（新）-- `PROBLEM_STATUS: Mapping[ErrorCode, HTTPStatus]`（api 會回的代碼 → 狀態）、`ProblemDetails` 模型（四個必填欄位、`code` 的 schema 列舉＝對照表的鍵）、`ApiProblem(code, headers)` 例外（代碼不在表裡就丟 `ValueError`）、`problem_response(code, headers)`、`code_for_status(status)`（框架丟的 `HTTPException` 用：401/404/405/422 對到代碼，其他 4xx → `request_rejected`，5xx → `internal_error`）、`install_problem_handlers(app)`（`ApiProblem`、`StarletteHTTPException`、`RequestValidationError`）、`PROBLEM_RESPONSES`（OpenAPI 的 `default` 回應）與 `problem_openapi(app)`（把 `default` 回應只留 `application/problem+json`）。
+- `radar/entrypoints/api/problems.py`（新）-- `PROBLEM_STATUS: Mapping[ErrorCode, HTTPStatus]`（api 會回的代碼 → 狀態）、`ProblemDetails` 模型（四個必填欄位、`code` 的 schema 列舉＝對照表的鍵）、`ApiProblemError(code, *, headers)` 例外（代碼不在表裡就丟 `ValueError`）、`problem_response(code, headers)`、`code_for_status(status)`（框架丟的 `HTTPException` 用：401/404/405/422 對到代碼，其他 4xx → `request_rejected`，5xx → `internal_error`）、`install_problem_handlers(app)`（`ApiProblemError`、`StarletteHTTPException`、`RequestValidationError`）、`PROBLEM_RESPONSES`（OpenAPI 的 `default` 回應）與 `problem_openapi(app)`（把 `default` 回應只留 `application/problem+json`）。
 - `radar/entrypoints/api/app.py` -- `FastAPI(responses=PROBLEM_RESPONSES)`、`install_problem_handlers`、500 改成 `problem_response(INTERNAL_ERROR)`、`app.openapi` 換成 `problem_openapi`。
-- `radar/entrypoints/api/auth.py` -- 改用 `ApiProblem`；`/me`、`GET/POST /auth/fake-login` 回 Pydantic 模型（`MemberResponse`、`FakeLoginOptionsResponse`、`FakeLoginResultResponse`），回應內容與標頭不變。
-- `radar/entrypoints/api/routes.py`（新）-- `install_api_routes(app, *, auth_routes)`：所有 API router 只在這裡裝（今天只有登入路由）。
+- `radar/entrypoints/api/auth.py` -- 改用 `ApiProblemError`；`/me`、`GET/POST /auth/fake-login` 回 Pydantic 模型（`MemberResponse`、`FakeLoginOptionsResponse`、`FakeLoginResultResponse`），回應內容與標頭不變。
+- `radar/entrypoints/api/main.py` -- 新增 `install_api_routes(app, *, auth_routes)`：所有 API router 只在這裡裝（今天只有登入路由）；`main()` 改呼叫它。
 - `radar/entrypoints/api/main.py` -- 改呼叫 `install_api_routes`。
 - `radar/entrypoints/api/openapi.py`（新）-- `build_schema_app()`（`create_app`＋`install_api_routes`，登入路由用不會被呼叫的替身、假登入路由打開，所以清單是全集）、`render_openapi() -> str`（`indent=2`、`ensure_ascii=False`、結尾換行）、`main()` 印到標準輸出。
 - `radar/entrypoints/cli/export_schema.py`（新）＋`radar/entrypoints/cli/__init__.py`（一行 import＋一行 `app.command("export-schema")(export_schema)`）-- 子行程跑 `sys.executable -m radar.entrypoints.api.openapi`，成功就寫 `--output`（預設 `openapi.json`），失敗退出碼 1。
 - `openapi.json`（新，根目錄）-- `radar export-schema` 輸出。
-- `tests/permissions/framework.py`（新）-- `Endpoint`、`EndpointCase`（`call`、`exempt_reason`）、`EndpointRegistry`＋`endpoint_case` 裝飾器、`endpoints_in_openapi(doc)`、`coverage_problems(doc, registry)`（缺的報「這個端點沒有換人測試：…」、多的報「登記了 openapi.json 沒有的端點：…」、豁免理由空白也報）、`assert_hidden_from_other_member(response)`、`CANARY`、`assert_no_secret(texts, secrets)`、`PermissionContext`（成員 A／B 的 ID 與 token、`as_other(...)` 自動帶 B 的 cookie 與 Origin）。
-- `tests/permissions/cases.py`（新）-- 目前五個端點的登記（全部豁免並寫理由，都有實際呼叫給金絲雀測試用）。
+- `tests/permissions/framework.py`（新）-- `Endpoint`、`EndpointCase`（`call`、`exempt_reason`）、`EndpointRegistry`（`REGISTRY.case(method, path, *, exempt=None, control=None)` 裝飾器）、`endpoints_in_openapi(doc)`、`coverage_problems(doc, registry)`（缺的報「這個端點沒有換人測試：…」、多的報「登記了 openapi.json 沒有的端點：…」、豁免理由空白、沒豁免卻沒有對照也報）、`assert_hidden_from_other_member(response)`、`assert_visible_to_owner(response)`（對照）、`CANARY`、`response_texts(response)`、`secrets_found(texts, secrets)`、`PermissionContext`（成員 A／B 的 ID 與 token、`as_other(...)` 自動帶 B 的 cookie 與 Origin、`as_owner(...)` 給對照用）。
+- `tests/permissions/cases.py`（新）-- 目前六個端點的登記（全部豁免並寫理由，都有實際呼叫給金絲雀測試用）。
 - `tests/unit/test_permission_coverage.py`（新）-- 根目錄 `openapi.json` 與登記表一致；`openapi.json` 等於 `render_openapi()`；`/api` 底下沒有藏在 schema 外的路由；示範：加測試用端點後框架報錯、登記後就過；`assert_hidden_from_other_member` 對 404 problem、空清單通過，對 200 有資料、401、403 失敗；金絲雀檢查對洩漏的回應失敗。
-- `tests/unit/test_problems.py`（新）-- I/O 矩陣的 404／405／422／401／500、對照表、`ApiProblem` 拒收表外代碼、openapi 的 `default` 回應只有 problem+json、代碼列舉不含 LLM 代碼。
+- `tests/unit/test_problems.py`（新）-- I/O 矩陣的 404／405／422／401／500、對照表、`ApiProblemError` 拒收表外代碼、openapi 的 `default` 回應只有 problem+json、代碼列舉不含 LLM 代碼。
 - `tests/unit/test_cli_export_schema.py`（新）-- 寫檔、內容等於 `render_openapi()`、子行程失敗回 1。
 - `tests/integration/test_permissions.py`（新）-- 真的資料庫：A（email 是金絲雀）、B 兩位成員假登入；每個登記的端點以 B 呼叫，回應與日誌沒有金絲雀與 A 的 token；每個沒豁免的端點跑換人測試（目前沒有，3.6 起加）。
 - 既有測試的斷言改成 problem 格式（Code Map 列的那幾行）。
@@ -108,7 +129,36 @@ deferred: []
 
 ## Spec Change Log
 
+- 2026-11-15（審查後）：Code Map 與 Tasks 的名稱改成和實作一致：`ApiProblem` → `ApiProblemError`；`install_api_routes` 放在 `main.py`（不另開 `routes.py`，既有測試 monkeypatch `api_main.install_auth_routes`，放在 main.py 才不必改那些測試）；`endpoint_case`／`assert_no_secret` → `REGISTRY.case`／`response_texts`＋`secrets_found`；端點數五 → 六；加上審查後新增的對照（`control=`、`as_owner`、`assert_visible_to_owner`）。intent-contract 段落沒改（只把 npm 別名的網址拿掉，見 Review Triage Log）。
+
 ## Review Triage Log
+
+### 2026-11-15 — Review pass
+- verdicts: 38 findings（verification 2、blind 15、edge 13、intent 8；合併重複後 23 列）— medium 4，其餘 low；intent 的 8 項是描述性
+- findings:
+  - `[medium]` `[patch]` （verification）`GET /api/v1/auth/fake-login` 與登入被拒的 403 沒有測試斷言 `Cache-Control: no-store` — 新增 `test_fake_login_options_and_rejections_are_not_cached`（選人清單 200 與 `login_rejected` 403）。
+  - `[low]` `[patch]` （verification＋edge）掛上前端後的參數化測試，content-type 改成「兩種都可以」太寬 — 改成依狀態推出預期值（< 400 是 `application/json`，否則 `application/problem+json`）。
+  - `[medium]` `[patch]` （blind＋edge）換人測試沒有對照組：路徑打錯、資料沒建成也得到 404，會白白通過 — 登記加 `control=`（成員 A 用 `ctx.as_owner` 打同一筆資料，要 200 且有內容，`assert_visible_to_owner`）；`coverage_problems` 回報「沒豁免卻沒有對照」；整合測試先跑 B、再跑對照；補四個單元測試（對照通過、錯路徑被抓到、A 的清單是空的被抓到、沒對照被回報）。「和不存在的 ID 的 404 逐位元組相同」不另外比：problem 本文只有代碼，沒有 ID 相關內容。
+  - `[medium]` `[patch]` （blind＋edge）沒有測試跑 `main()` 實際組出來的 app — 新增 `test_real_main_assembly_matches_openapi`（換掉資料庫與 uvicorn.Server，前端也掛上），比對端點並跑 `routes_missing_from_openapi`；過程中發現頁面殼的路由（攤開後是 `/{path}`）會被誤報，加進 `FRAMEWORK_PATHS`。
+  - `[medium]` `[patch]` （blind）committed 的 spec 寫進了 npm 別名的網址，違反 brief — 從 spec 拿掉；但它已在 push 過的 1fae31f 裡，不能改寫歷史，如實寫進 PR 說明。其他 committed 檔逐一 grep 過，沒有。
+  - `[low]` `[reject]` （blind）spec 寫進本機絕對路徑 — brief 本來就在 repo 外，和 3.3 相同處理。
+  - `[low]` `[patch]` （blind＋edge×4）spec 的名稱、檔案位置、端點數和實作不一致 — 見 Spec Change Log。
+  - `[low]` `[patch]` （edge）B 拿到空清單時其他欄位（`total`）可能透露 A 的資料筆數 — `assert_hidden_from_other_member` 要求 `total` 沒有或是 0；補測試。`next_cursor` 不另外檢查（空清單時沒有下一頁，Conventions 的游標沒有資料內容）。
+  - `[low]` `[patch]` （blind）金絲雀測試只讀 stdout — 改成 stdout＋stderr 一起查。
+  - `[low]` `[patch]` （blind）`ProblemDetails.type` 寫成 `str`，前端型別表達不出固定值 — 改成 `Literal["about:blank"]`，重新輸出 openapi.json、重新產生 orval（`type: 'about:blank'`）。`status` 不限制範圍：只有 `problem_response` 建立它，狀態都來自對照表或框架例外。
+  - `[low]` `[patch]` （blind＋edge）`radar export-schema` 沒確認子行程輸出是合法 JSON — 寫檔前先 `json.loads`，失敗退出碼 1 且不寫檔；補測試（用標準函式庫的 `this` 模組當壞輸出）。原子寫入、依工作目錄的預設路徑不改：CI 與本機都在 repo 根目錄跑，失敗時 git 看得到差異。
+  - `[low]` `[patch]` （blind）`problem_response` 的 docstring 說會丟 `KeyError`，但傳 `status` 時不查表 — docstring 改成兩種情況各丟什麼。
+  - `[low]` `[reject]` （blind＋edge×2）`code_for_status` 對 1xx～3xx、`HTTPException(304)` 會帶本文 — 框架與我們的程式都不會丟 < 400 的 HTTPException；為假設情況加分支不划算。
+  - `[low]` `[reject]` （blind）錯誤回應沒有預設 `Cache-Control: no-store` — 錯誤本文只有代碼，沒有私人內容；和登入有關的 401／403 已經帶 no-store。改預設會影響所有錯誤回應，超出這個 Story。
+  - `[low]` `[reject]` （blind）豁免沒有任何檢查（例如路徑有 `{..._id}` 不准豁免） — 規則容易誤判；豁免理由寫在登記表、PR 審查看得到；現在全部是 6 個沒有 ID 參數的端點。
+  - `[low]` `[reject]` （blind）`NETWORK_ALLOWED` 的豁免以模組為單位，範圍太大 — 是既有 arch 規則的粒度，改規則結構超出這個 Story；`export_schema.py` 只 import `subprocess`，PR 說明列為要 Kevin 決定（另一個做法是 import-linter 例外）。
+  - `[low]` `[reject]` （blind）換人測試目前是「got empty parameter set」跳過，報告裡容易看漏 — 測試 docstring、ADR、epic-3-context、PR 說明都寫明目前是預期的空集合；第一個不豁免的端點登記後就會跑。
+  - `[low]` `[reject]` （edge）CI 的 openapi-drift 只用 `git diff`，openapi.json 沒被追蹤或被刪掉時看不到 — openapi.json 已被追蹤，刪掉時 `git diff --exit-code` 會回報；單元測試 `test_committed_openapi_matches_the_app` 也讀這個檔。
+  - `[low]` `[reject]` （edge）路由若明確宣告錯誤回應（例如 `404: {"model": ProblemDetails}`），OpenAPI 會寫成 `application/json` — 目前沒有路由這樣宣告，錯誤回應一律用 `default`（ADR-0047）。
+  - `[low]` `[defer]` （blind）`/docs` 等文件頁在正式環境公開 — 見 frontmatter `deferred`。
+  - `[low]` `[defer]` （blind）未預期例外的 traceback 可能帶輸入值 — 見 frontmatter `deferred`。
+  - `[low]` `[defer]` （blind）金絲雀只放 email，之後靠各 Story 記得放 — 見 frontmatter `deferred`。
+  - `[—]` `[record]` （intent）8 項描述性落差：換人測試目前沒有真的端點經過；示範是會通過的後設測試（不是讓 CI 紅一次）；金絲雀放 email、日誌用 capsys 讀；`/readyz` 的 503 是例外；畫面的字有 7 個代碼落到通用句；CI 步驟的 arch 測試只檢查 YAML；openapi.json 是全集；`ProblemCode` 是 `ErrorCode` 的對照副本（單元測試核對）。都寫進 PR 說明的「沒照要求做的地方」或「要 Kevin 決定」。
 
 ## Design Notes
 

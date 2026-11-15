@@ -77,7 +77,7 @@ class ProblemDetails(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    type: str
+    type: Literal["about:blank"]
     title: str
     status: int
     code: ProblemCode
@@ -108,7 +108,8 @@ def problem_response(
     保留原本的狀態碼（例如 413 還是 413，代碼是 request_rejected）。
 
     Raises:
-        KeyError: 代碼不在 `PROBLEM_STATUS` 裡。
+        KeyError: 沒傳 `status`、代碼又不在 `PROBLEM_STATUS` 裡。
+        pydantic.ValidationError: 代碼不在 `ProblemCode` 裡（傳了 `status` 也一樣）。
     """
     resolved = HTTPStatus(PROBLEM_STATUS[code]) if status is None else status
     # 用 model_validate：代碼不在 ProblemCode 裡時這裡就失敗，不會送出文件以外的代碼。
