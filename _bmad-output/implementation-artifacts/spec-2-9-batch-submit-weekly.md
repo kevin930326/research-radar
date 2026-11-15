@@ -2,10 +2,10 @@
 title: 'Story 2.9：Batch 送出與每週更新的串接'
 type: 'feature'
 created: '2026-11-15'
-status: 'in-progress'
+status: 'done'
 baseline_revision: 'ccec182e63f1da22492b3c187acd6b39e0e8ae6b'
 review_loop_iteration: 0
-followup_review_recommended: false
+followup_review_recommended: true
 context:
   - '/Users/kevin/Documents/research-radar/docs/runs/epic-2b/api-reference.md'
   - '{project-root}/AGENTS.md'
@@ -102,6 +102,49 @@ deferred: []
 
 ## Review Triage Log
 
+### 2026-11-15 — Review pass
+- verdicts: 35 findings — high 0, medium 16, low 15, false 4, maybe-false 0
+- findings:
+  - （Edge Case Hunter）
+  - `[medium]` `[patch]` 規劃跨過台北午夜進入 1 日時，後面幾批仍照新月份預留 — 每次 `_plan_one_batch` 前重查月初窗口，進窗口就停（`HELD_MONTH_START`），有測試。
+  - `[medium]` `[patch]` `queued` 的批次被 sweep 補排時可能在月初窗口內送出 — 送出前也查窗口（與熔斷），在窗口或已熔斷就不動列、回 `HELD`（原因 `batch_month_start_hold`／`batch_budget_tripped`），有測試。
+  - `[medium]` `[patch]` 回應看不懂但帶合法 `response_id` 時，可能已建好的 batch ID 被丟掉 — 不確定分支標 `needs_attention` 後補記 `provider_batch_id`、日誌帶 ID 與 request_id，有測試。
+  - `[medium]` `[patch]` 一定還沒送出的錯誤（`NotCloudSafeError`、沒有狀態碼的 `LlmConfigurationError`）被當成不確定、卡在 `needs_attention` — 改成「一定沒建立」：批次與 run `failed`；其他非 HTTP 例外仍算不確定（不能讓送出後的錯誤導致重送），有測試。
+  - `[low]` `[patch]` `max_requests_per_batch` 允許到 100,000，一個交易可能拿到 20 萬把 advisory lock — 上限收緊為 1,000（仍 ≤ 官方 100,000），理由寫進設定檔與 ADR，有測試。
+  - `[low]` `[reject]` 一批總大小可能超過 256 MB — 上限 1,000 筆、每筆輸入受 `max_input_tokens` 限制，實際最多數十 MB，碰不到；加位元組檢查是額外分支。
+  - `[low]` `[patch]` 429 時列已被別人改成 `needs_attention`，回傳仍說 `QUEUED` — 條件式 UPDATE 沒改到時重讀列、回實際狀態（與 Blind 第 10 點同一根因）。
+  - （Verification Gap）
+  - `[medium]` `[patch]` 沒有測試驗證「該功能本月已花的帳」計入功能預算 — 新增有 zh 帳本列的規劃測試。
+  - `[medium]` `[patch]` Batch 請求本體的 `system` 與 `thinking` 沒被斷言 — 擴充 adapter 測試。
+  - `[low]` `[patch]` 408／409 算「明確 4xx」沒有測試釘住 — 加進參數化。
+  - （Blind Hunter）
+  - `[medium]` `[defer]` 互動呼叫的 `BudgetGuard` 看不到 Batch 預留，熔斷線仍可能被超過 — 改 `BudgetGuard` 會改 2.3～2.6 的互動行為，不是本 Story 的閘門範圍；寫進 ADR-0041 取捨並列為 Kevin 決定。
+  - `[medium]` `[patch]` 送出前沒再檢查熔斷與月初窗口 — 同 Edge 第 2 點一起修。
+  - `[medium]` `[patch]` 還沒送出就失敗的錯誤被當成不確定 — 同 Edge 第 4 點。
+  - `[low]` `[patch]` 一批總大小沒檢查、設定上限比鎖表鬆 — 上限部分同 Edge 第 5 點修；大小部分同 Edge 第 6 點不修。
+  - `[low]` `[reject]` `queued` 永遠不過期 — 卡住時不花錢（預留一直算在內，只會讓之後的 Batch 更保守），sweep 每小時重排有日誌；加過期規則是新的狀態轉移。
+  - `[medium]` `[patch]` 送出前核對沒有重跑 `plan_for`（ADR-0032 交代 2.9 決定）— `_check_items` 也讀處理事實、算 `plan_for`，工作消失或輸入種類變了就把 run 改 `batch_input_changed`；決定寫進 ADR-0041，有測試。
+  - `[low]` `[reject]` 預算用完後規劃仍把全庫看完 — 每週一次、記憶體受 `attempt_cap` 限制，只花 CPU；提早結束要加分支且會讓延後計數失準。
+  - `[medium]` `[patch]` `llm_job` 重抄互動 service 組 `LlmJob`，沒有測試保證兩邊 RunKey 一致 — 新增「先跑互動三個 service、再規劃，三個鍵都被略過」的測試。
+  - `[low]` `[patch]` 同一個常數寫好幾份 — adapter 改用 domain 的 `PROVIDER_MAX_REQUESTS`／`PROVIDER_BATCH_ID_PATTERN`；遷移裡的 CHECK 是 SQL 字面值，保留。
+  - `[low]` `[patch]` 條件式 UPDATE 的回傳值被忽略 — 同 Edge 第 7 點，三個分支都依實際結果記日誌與回傳。
+  - `[medium]` `[patch]` ADR 寫的邊界沒有測試：`attempt_cap` 帶到下一批、408／409、兩個規劃同時跑時的熔斷總額 — 新增三組測試（408／409 同 Verification Gap 第 3 點）。
+  - `[low]` `[reject]` 送出時丟掉的 item 沒反映到表頭的 `estimated_max_cost_usd` — 預留一律由 `batch_item`＋run 狀態計算，沒有程式讀表頭合計；留給 2.11 注意。
+  - `[medium]` `[defer]` `needs_attention` 在 2.9～2.11 之間只有錯誤日誌，看不到 — epics 2.11 的驗收條件明定由 `poll-batches` 不送心跳、AI 區塊顯示 failed；寫進 ADR 與 PR 的 Kevin 決定。
+  - `[low]` `[patch]` 預留不分月份、Batch 的帳記在哪個月沒寫 — ADR-0041 補一句：預留跨月仍算（保守），記帳月份由 2.11 決定。
+  - `[low]` `[reject]` 401／403 讓整批 failed，與缺金鑰留 `queued` 不一致 — intent 的 I/O 矩陣明定「429→回 queued；其他→failed」；列入 Kevin 決定。
+  - （Intent Alignment）
+  - `[low]` `[reject]` AC3 的測試沒有走到 batch 取得資格時的唯一索引分支 — 有 advisory lock 時無法自然觸發；索引本身由 0010 的測試驗證，batch 路徑由重跑與並行測試驗證。
+  - `[low]` `[patch]` 規劃交易中途中斷沒有專門測試 — 新增中途丟例外再重跑的測試（Kevin 的補充要求）。
+  - `[false]` `[reject]` `submitting` 要過 30 分鐘才標 `needs_attention` 與 intent 不同 — intent 寫「停在 submitting 而且沒有 ID」，「停在」就是過時；未過時限也不重送，符合 AD-14。
+  - `[false]` `[reject]` sweep 加了兩列而不是一列 — intent 是把 `batch_submission` 加進登記清單；同一張表兩個狀態各一列。
+  - `[medium]` `[defer]` `needs_attention` 底下項目沒顯示 `failed` — 同 Blind 第 13 點，epics 2.11 的驗收條件。
+  - `[medium]` `[patch]` 送出前不重問 `plan_for` — 同 Blind 第 6 點。
+  - `[medium]` `[patch]` 2.11 要求第一次全庫由 Kevin 手動、先試 20 篇，但每週掛勾一上線就會自動規劃全庫（且 2.11 前收不回結果）— 加必填設定 `weekly_planning_enabled`（預設 false），關閉時規劃直接回 `DISABLED`；列為 Kevin 決定，有測試。
+  - `[false]` `[reject]` 範圍超出 epics AC1～AC3 — 預算預留、月初窗口、啟動檢查都是 brief 指定的 SUMMARY §8 項目。
+  - `[low]` `[reject]` 沒有一個測試從發佈一路跑到規劃 — 三段各有測試（排入、工作、服務），串起來要真的佇列與 worker，價值低。
+  - `[false]` `[reject]` diff 沒有 spec 檔 — 審查用的 diff 刻意排除 spec（spec 另交 edge-case 層）。
+
 ## Design Notes
 
 - 每批上限 `max_requests_per_batch` 預設 500（官方上限 100,000）：一批一個交易，每筆一把 advisory xact lock，PostgreSQL 共用鎖表預設約 6,400 格；500 讓交易約一兩秒、請求量約 10 MB（遠小於 256 MB）、一批出事的範圍小；全庫約 3 萬筆＝約 60 批。
@@ -145,3 +188,13 @@ deferred: []
 - `uv run ruff check . && uv run ruff format --check . && uv run mypy` -- 全過（mypy 連 tests）
 - `uv run lint-imports` -- 契約全過
 - `uv run pytest -m unit`、`uv run pytest -m arch`、`uv run pytest -m integration`（radar-ci db） -- 全過；不要接 `| tail` 吞掉結束碼
+
+## Auto Run Result
+
+- **做了什麼**：遷移 0016（`batch_submission`／`batch_item`）、規劃工作 `plan_llm_batches`（全庫照 `plan_for`＋閘門 `should_run`，全域預算鎖內保守預留，放不下計 `deferred_budget`）、送出工作 `submit_llm_batch`（條件式狀態機、經閘門 `send_llm_batch`、明確 4xx／送出前錯誤 → failed、429 → queued、不確定 → needs_attention 不重送）、月初窗口（規劃與送出）、啟動時檢查 AI 設定（worker、CLI）、sweep 兩列、每週更新排入規劃、`weekly_planning_enabled` 開關（預設 false）、ADR-0041（提議）。
+- **改了哪些檔**：見 PR 說明草稿 `docs/runs/epic-2b/reviews/2.9-pr-body.md`（不進 git）的「改了哪些檔」。
+- **審查**：35 項（高 0、中 16、低 15、不成立 4）。修 22 項（中 13、低 9），延後 3 項（互動 BudgetGuard 看不到預留、needs_attention 在 2.11 前看不到 ×2；都寫進 ADR 取捨並列為 Kevin 決定），不修 10 項（理由見上面的審查分流紀錄）。
+- **是否建議再審一輪：是**。這一輪修了 13 項中等問題，其中送出錯誤的分類（哪些算「一定沒建立」）與送出前的 HELD 改動直接影響「會不會付兩次錢」，要外部審查（Codex）再看一次 `radar/services/llm_batches.py` 的 `_definite_reason`／`_send_failed`／`_held_reason`。
+- **驗證**：ruff、ruff format、mypy、lint-imports、unit、arch、integration 全過（數字見 PR 說明的「驗證」）。
+- **剩下的風險**：互動呼叫看不到 Batch 預留（熔斷線可能被超過一點）；needs_attention 在 2.11 前只有日誌；`radar/repo/ai_blocks.py` 的註解還寫「等 2.9 補」，實際由 2.11 補。
+
