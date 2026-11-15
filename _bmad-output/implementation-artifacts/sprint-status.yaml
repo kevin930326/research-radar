@@ -105,10 +105,14 @@
 #   rough: true 表示 Kevin 動手的時間是粗估、沒有認真計
 # epic-1 那一筆：elapsed_h 與 kevin_h_* 都是 Kevin 2026-11-14 親自回報（第三輪自動執行中補報「約 20 小時」
 #   「約 3～4 小時，粗估，沒有認真計」），不是自動執行端猜的。
+# epic-2a＋epic-3a 那一筆：第三輪（2.1～2.7，估計 22 h）和前端第一輪（3.1～3.2，估計 6.5 h）同時跑，
+#   Kevin 2026-11-15 兩輪合起來回報「大概 13 小時」「大概 1～2 小時」，所以記成一筆，沒有拆開。
+#   算 Epic 1、2 的倍率時，這一筆含 Epic 3 的 6.5 h 估計，要一起算或由 Kevin 另外拆。
 # 重估的倍率只用 kevin_h_low、kevin_h_high（見上面「怎麼重估」第 1 點），elapsed_h 只留著對照。
 # 這個區塊要留在 generated 上面，重跑 skill 才不會洗掉註解（2026-11-14 測過）。
 actual_hours:
   - {round: epic-1, stories: "1.1～1.11", estimate_h: 29, elapsed_h: 20, kevin_h_low: 3, kevin_h_high: 4, rough: true}
+  - {round: "epic-2a＋epic-3a", stories: "2.1～2.7、3.1～3.2", estimate_h: 28.5, elapsed_h: 13, kevin_h_low: 1, kevin_h_high: 2, rough: true}
 
 generated: 11-14-2026 03:46
 last_updated: 11-15-2026 06:40
