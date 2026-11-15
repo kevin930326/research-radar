@@ -46,6 +46,7 @@ import structlog
 from pydantic import BaseModel, ValidationError
 
 from radar.domain.ai_outputs import (
+    EXTRACTION_SCHEMA_VERSION,
     HEADER_TABLES,
     CallMode,
     GatewayConfig,
@@ -64,6 +65,7 @@ from radar.domain.ai_outputs import (
     check_output_storable,
     is_storable_json,
 )
+from radar.domain.context_values import ContextValues
 from radar.domain.errors import ErrorCode
 from radar.domain.fingerprints import input_sha256, run_lock_key
 from radar.domain.llm import (
@@ -80,6 +82,7 @@ from radar.domain.policy import CloudClearanceError, CloudSafeText, clear_for_cl
 from radar.domain.pricing import estimate_input_tokens, llm_call_cost
 from radar.domain.prompts import PromptIntegrityError
 from radar.domain.taxonomy import Taxonomy
+from radar.domain.validators.research_model import ResearchModelValidator
 from radar.domain.viewer import SystemViewer, Viewer
 from radar.ports import LlmProvider
 from radar.repo.ai_outputs import find_blocking_ai_result
@@ -150,12 +153,15 @@ class LlmJob:
       （算進 `input_sha256`）。
     - `taxonomy`：這個行程載入的分類表。`classify` 一定要帶、其他不得帶；`taxonomy_version` 要等於
       它的版本。寫入時當「現在的分類表」：核對晚到結果的版本，並把輸出正規化成標籤（ADR-0033）。
-      建構時就擋：少了分類表的 `classify` 到寫入才會失敗，那時模型已經呼叫、帳已經記了，接續也會
-      一直失敗。
+    - `context_values`：這個行程載入的情境值清單。`extract_model` 一定要帶、其他不得帶；
+      `context_values_version` 要等於它的版本。寫入時當「現在的情境值清單」：核對晚到結果的版本，
+      並把輸出驗證、正規化成研究模型的內容（ADR-0034）。
+    兩者都在建構時就擋：少了設定的工作到寫入才會失敗，那時模型已經呼叫、帳已經記了，接續也會
+    一直失敗。
 
     Raises:
-        ValueError: `classify` 沒帶分類表、不是 `classify` 卻帶了分類表，或 `taxonomy_version` 和
-            分類表的版本不一樣。
+        ValueError: `classify` 沒帶分類表、`extract_model` 沒帶情境值清單或 domain 驗證、別的工作
+            帶了它們，或版本和帶的分類表、情境值清單不一樣。
     """
 
     paper_id: uuid.UUID
@@ -166,17 +172,37 @@ class LlmJob:
     taxonomy_version: str | None = None
     context_values_version: str | None = None
     taxonomy: Taxonomy | None = None
+    context_values: ContextValues | None = None
 
     def __post_init__(self) -> None:
-        is_classify = LlmTask(self.task) is LlmTask.CLASSIFY
+        task = LlmTask(self.task)
+        is_classify = task is LlmTask.CLASSIFY
         if self.taxonomy is None:
             if is_classify:
                 raise ValueError("classify 一定要帶分類表（taxonomy），不然付了錢也寫不進結果")
-            return
-        if not is_classify:
+        elif not is_classify:
             raise ValueError("只有 classify 能帶分類表")
-        if self.taxonomy_version != self.taxonomy.version_label:
+        elif self.taxonomy_version != self.taxonomy.version_label:
             raise ValueError("taxonomy_version 要等於分類表的版本")
+        is_extract = task is LlmTask.EXTRACT_MODEL
+        if self.context_values is None:
+            if is_extract:
+                raise ValueError(
+                    "extract_model 一定要帶情境值清單（context_values），不然付了錢也寫不進結果"
+                )
+        elif not is_extract:
+            raise ValueError("只有 extract_model 能帶情境值清單")
+        elif self.context_values_version != self.context_values.version_label:
+            raise ValueError("context_values_version 要等於情境值清單的版本")
+        elif not (
+            isinstance(self.validate_output, ResearchModelValidator)
+            and self.validate_output.context_values == self.context_values
+        ):
+            # 沒有（或拿別份清單的）domain 驗證時，不合格的輸出到寫入（`validate_research_model`，
+            # 用的是 `context_values`）才被發現，那時錢已經付了、交易退回，之後每次接續都會再失敗。
+            raise ValueError(
+                "extract_model 一定要帶用同一份情境值清單的 domain 驗證（ResearchModelValidator）"
+            )
 
 
 @dataclass(frozen=True)
@@ -425,6 +451,9 @@ def _acquire(
         # 送出的凍結 schema 字串的雜湊：`Field(description=...)` 這類改動也看得出來（來歷）。
         "output_schema_sha256": prompt.schema_sha256,
     }
+    if LlmTask(job.task) is LlmTask.EXTRACT_MODEL:
+        # 萃取 schema 的版本（PRD FR-3「定版並記版本號」，和 prompt 版本一起當版本號；ADR-0034）。
+        params["extraction_schema_version"] = EXTRACTION_SCHEMA_VERSION
     with database.transaction() as connection:
         # 阻塞的交易級鎖：交易結束（commit 或退回）時自動放掉。
         Database.transaction_lock(connection, run_lock_key(key))
@@ -629,6 +658,8 @@ def _write_result(
             context_values_version=job.context_values_version,
             output=output,
             taxonomy=job.taxonomy,
+            context_values=job.context_values,
+            llm_input=llm_input,
         )
     except BaseException as exc:
         _try_fail_run(database, run_id)

@@ -1,5 +1,6 @@
-"""讀 AI 表頭表（`zh_summary`、`classification`、`research_model`）與掛在分類底下的細項表
-`classification_label` 的查詢只准放在 `radar/repo/ai_outputs.py`（AD-7、ADR-0030、ADR-0033）：
+"""讀 AI 表頭表（`zh_summary`、`classification`、`research_model`）與掛在表頭底下的細項表
+（`classification_label`、`construct_mention`、`hypothesis`）的查詢只准放在
+`radar/repo/ai_outputs.py`（AD-7、ADR-0030、ADR-0033、ADR-0034）：
 哪一筆算數（`active`、候選不算）只在一個地方決定；標籤不接上 `active` 表頭就去數，會把候選與
 已取代的也算進去。
 
@@ -20,7 +21,7 @@ ROOT = Path(__file__).resolve().parents[2]
 RADAR = ROOT / "radar"
 ALLOWED = frozenset({"radar/repo/ai_outputs.py"})
 # 表頭表加上細項表（細項的狀態跟著表頭，讀細項也要經同一個模組）。
-DETAIL_TABLES = ("classification_label",)
+DETAIL_TABLES = ("classification_label", "construct_mention", "hypothesis")
 TABLES = tuple(sorted({*HEADER_TABLES.values(), *DETAIL_TABLES}))
 TABLE_OBJECTS = frozenset(f"{table}_table" for table in TABLES)
 _READ = re.compile(

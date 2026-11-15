@@ -25,11 +25,17 @@ from radar.domain import llm, llm_schemas
 from radar.domain.llm import LlmRequest
 from radar.domain.llm_schemas import (
     ClassificationOutput,
+    ConstructOutput,
     FakeAnyObject,
     FakeItem,
     FakeKind,
     FakeNested,
     FakeResearchQuestion,
+    HypothesisOutput,
+    HypothesisStatsOutput,
+    MeasurementOutput,
+    ResearchContextOutput,
+    ResearchModelOutput,
     ZhSummaryOutput,
 )
 from radar.domain.policy import CloudPolicy, CloudSafeText, ContentSource, clear_for_cloud
@@ -116,6 +122,12 @@ def test_registry_holds_every_model_in_the_schema_module() -> None:
         FakeNested,
         ZhSummaryOutput,
         ClassificationOutput,
+        ResearchContextOutput,
+        MeasurementOutput,
+        ConstructOutput,
+        HypothesisStatsOutput,
+        HypothesisOutput,
+        ResearchModelOutput,
     }
     assert all(cls.__pydantic_complete__ for cls in classes)
     # 列舉只能當欄位型別，不能直接當 output_schema。

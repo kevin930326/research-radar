@@ -20,6 +20,8 @@
 
 需要動態內容時另寫 ADR，不能直接在這裡讀資料庫或外部文字。2.5 的分類清單沒有放進 schema 的
 `enum`：標籤寫成字串陣列，清單寫死在 prompt 模板裡，清單外的由 domain 丟掉並計數（ADR-0033）。
+2.6 的研究情境值也一樣（字串，清單寫死在 prompt 模板，清單外的存空值並計數，ADR-0034）；證據類型
+與支持與否是 PRD FR-3 固定的五個值，用列舉（`enum`）。
 """
 
 from enum import StrEnum
@@ -106,4 +108,141 @@ class ClassificationOutput(BaseModel):
     )
     methods: list[str] = Field(
         description="方法：分類清單「方法」裡符合的 key，可以多個；都不符合給空陣列"
+    )
+
+
+# --- 研究模型（`extract_model`，Story 2.6、ADR-0034）-------------------------------------------
+# 萃取 schema v1（PRD FR-3）。結構化輸出支援巢狀物件、`enum`、`anyOf` null，不支援 `minimum`／
+# `maximum`，所以數字範圍、原句是否出現在輸入、情境值是否在清單，都由
+# `domain/validators/research_model.py` 驗；這裡只管形狀。被引用的類別寫在前面。
+
+
+class EvidenceType(StrEnum):
+    """證據類型（PRD FR-3）：關係的結論是怎麼得出的。"""
+
+    EMPIRICAL_TEST = "empirical_test"
+    ANALYTICAL = "analytical"
+    SIMULATION = "simulation"
+    QUALITATIVE = "qualitative"
+    CONCEPTUAL = "conceptual"
+
+
+class SupportLevel(StrEnum):
+    """支持與否（PRD FR-3）。只有實證檢定判定支持與否；其他證據類型一律 `not_determined`。"""
+
+    SUPPORTED = "supported"
+    NOT_SUPPORTED = "not_supported"
+    PARTIALLY_SUPPORTED = "partially_supported"
+    NOT_STATED = "not_stated"
+    NOT_DETERMINED = "not_determined"
+
+
+class ResearchContextOutput(BaseModel):
+    """研究情境：四個情境欄位只能填清單裡的 key；輸入沒寫出就填 null。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    country: str | None = Field(
+        description="國家：清單「國家」裡的 key；輸入文字明確寫出才填，不推測，否則 null"
+    )
+    industry: str | None = Field(
+        description="產業：清單「產業」裡的 key；輸入文字明確寫出才填，不推測，否則 null"
+    )
+    research_design: str | None = Field(
+        description="研究設計：清單「研究設計」裡的 key；輸入沒提到就填 null"
+    )
+    unit_of_analysis: str | None = Field(
+        description="分析單位：清單「分析單位」裡的 key；輸入沒提到就填 null"
+    )
+    sample_size: int | None = Field(description="樣本數 N：輸入裡寫出的整數；沒提到就填 null")
+
+
+class MeasurementOutput(BaseModel):
+    """構面的測量品質（摘要多半沒有，全部填 null 時整個物件給 null）。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    scale_source: str | None = Field(
+        description="量表來源：從輸入逐字照抄的一段文字；沒提到就填 null"
+    )
+    item_location: str | None = Field(
+        description="量表題目位置（例如附錄、表格）：從輸入逐字照抄；只寫位置、不寫題目；"
+        "沒提到填 null"
+    )
+    item_count: int | None = Field(description="題數：輸入裡寫出的整數；沒提到就填 null")
+    cronbach_alpha: float | None = Field(
+        description="Cronbach's alpha：輸入裡寫出的數字（0～1）；沒提到就填 null"
+    )
+    composite_reliability: float | None = Field(
+        description="組合信度 CR：輸入裡寫出的數字（0～1）；沒提到就填 null"
+    )
+    ave: float | None = Field(
+        description="平均變異萃取量 AVE：輸入裡寫出的數字（0～1）；沒提到就填 null"
+    )
+
+
+class ConstructOutput(BaseModel):
+    """一個構面：英文名、繁中標籤、可空的定義與測量品質。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name_en: str = Field(description="構面的英文名稱，用輸入裡的寫法")
+    label_zh: str = Field(description="構面的繁體中文標籤，簡短的名詞片語")
+    definition: str | None = Field(
+        description="構面定義：從輸入逐字照抄定義這個構面的那一段；沒有就填 null，不自己寫"
+    )
+    measurement: MeasurementOutput | None = Field(description="測量品質；輸入都沒提到就填 null")
+
+
+class HypothesisStatsOutput(BaseModel):
+    """一條關係的統計數字（摘要多半沒有，全部填 null 時整個物件給 null）。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    beta: float | None = Field(description="路徑係數 β：輸入裡寫出的數字；沒提到就填 null")
+    p_value: float | None = Field(description="p 值：輸入裡寫出的數字（0～1）；沒提到就填 null")
+    sample_size: int | None = Field(
+        description="這條關係的樣本數 N：輸入裡寫出的整數；沒提到就填 null"
+    )
+    effect_type: str | None = Field(
+        description="效果類型（例如中介、調節）：從輸入逐字照抄；沒提到就填 null"
+    )
+
+
+class HypothesisOutput(BaseModel):
+    """一條關係：原句、因與果（構面英文名）、證據類型、支持與否、可空的統計數字。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    sentence: str = Field(description="提到這條關係的原句：從輸入逐字照抄，不改寫、不翻譯")
+    cause: str = Field(description="因（前因構面）：和 constructs 裡某個 name_en 一樣")
+    effect: str = Field(
+        description="果（結果構面）：和 constructs 裡某個 name_en 一樣，不能和因相同"
+    )
+    evidence_type: EvidenceType = Field(description="證據類型")
+    support: SupportLevel = Field(
+        description="支持與否：只有實證檢定而且報告了結果才判定；實證檢定沒寫結果填 not_stated；"
+        "其他證據類型一律 not_determined"
+    )
+    result_quote: str | None = Field(
+        description="寫出檢定結果的那段原文：support 是 supported、not_supported 或"
+        " partially_supported 時必填，從輸入逐字照抄（可以和原句同一段）；其他情況填 null"
+    )
+    statistics: HypothesisStatsOutput | None = Field(description="統計數字；輸入都沒提到就填 null")
+
+
+class ResearchModelOutput(BaseModel):
+    """研究模型（`extract_model`，萃取 schema v1）：所有欄位都要給，沒提到給 null 或空陣列。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    is_review_or_meta_analysis: bool = Field(description="這篇是不是文獻回顧或後設分析")
+    context: ResearchContextOutput = Field(description="研究情境")
+    limitations: str | None = Field(description="研究限制：從輸入逐字照抄；沒提到就填 null")
+    future_research: str | None = Field(description="未來研究建議：從輸入逐字照抄；沒提到就填 null")
+    constructs: list[ConstructOutput] = Field(
+        description="構面，每個構面一項、不重複；沒有就給空陣列"
+    )
+    hypotheses: list[HypothesisOutput] = Field(
+        description="構面之間的關係，一條關係一項；沒有就給空陣列"
     )

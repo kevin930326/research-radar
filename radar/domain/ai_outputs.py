@@ -3,7 +3,7 @@
 - 工作代碼只有六個（`LlmTask`）；要加新的工作要改架構文件的 AD-8（架構測試守著）。
 - 會產生「表頭」的工作對應到哪一張表頭表（`HEADER_TABLES`）。2.2 只建表頭欄位；2.4 加了
   中文重點的四欄內容（`ZhSummaryContent`），2.5 加了分類的標籤（`ClassificationContent`），
-  研究模型的內容由 2.6 加；
+  2.6 加了研究模型的內容（`ResearchModelContent`：表頭的論文層級欄位、構面、假設）；
   `merge_judge` 的 `merge_judgment` 在 Epic 10（它的對象表還不存在）。
 - 要送給模型的文字一律由 `build_llm_input` 從資料列（`paper.title`、`paper_abstract`）推出，
   來源（`ContentSource`）也由資料列決定；呼叫端只指定論文、工作、`input_kind`，不能自己給文字
@@ -24,6 +24,7 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Final, assert_never
 
 from radar.domain.errors import ErrorCode
+from radar.domain.llm_schemas import EvidenceType, SupportLevel
 from radar.domain.papers import AbstractSource, check_storable_text
 from radar.domain.policy import CloudPolicy, ContentSource
 from radar.domain.taxonomy import KEY_PATTERN, UNCLASSIFIED, TaxonomyField
@@ -260,16 +261,231 @@ class ClassificationContent:
         )
 
 
+# 研究模型萃取 schema 的版本（PRD FR-3「定版並記版本號」）：`ResearchModelOutput` 與它的驗證規則
+# 改了就加一。記在 `derivation_run.params.extraction_schema_version`（和 prompt 版本一起當版本號）。
+EXTRACTION_SCHEMA_VERSION: Final = 1
+# 「判定了」的支持與否（FR-3 擷取規則 1：要有寫出結果的原文 `result_quote`）。
+DECIDED_SUPPORT: Final = frozenset(
+    {SupportLevel.SUPPORTED, SupportLevel.NOT_SUPPORTED, SupportLevel.PARTIALLY_SUPPORTED}
+)
+_SHA256_HEX: Final = re.compile(r"[0-9a-f]{64}")
+
+
+def _check_optional_text(name: str, value: object) -> None:
+    """有值時要是字串、不能只有空白、存得進資料庫。"""
+    if value is None:
+        return
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{name} 有值時要是不只有空白的字串")
+    check_storable_text(value, name)
+
+
+# PostgreSQL integer 的上限。
+_MAX_INTEGER: Final = 2**31 - 1
+
+
+def _check_count(name: str, value: object, *, minimum: int) -> None:
+    """有值時要是 `minimum`～2^31 - 1 的整數（不收布林；存成 PostgreSQL 的 integer）。"""
+    if value is None:
+        return
+    if type(value) is not int or not minimum <= value <= _MAX_INTEGER:
+        raise ValueError(f"{name} 要是 {minimum}～2^31 - 1 的整數")
+
+
+def _check_decimal(name: str, value: object, *, unit: bool) -> None:
+    """有值時要是有限的 `Decimal`；`unit` 時在 0～1 之間。"""
+    if value is None:
+        return
+    if not isinstance(value, Decimal) or not value.is_finite():
+        raise ValueError(f"{name} 要是有限的 Decimal")
+    if unit and not (Decimal(0) <= value <= Decimal(1)):
+        raise ValueError(f"{name} 要在 0～1 之間")
+
+
+@dataclass(frozen=True, slots=True)
+class ConstructMentionContent:
+    """一篇論文提到的一個構面（`construct_mention` 的一列，Story 2.6、ADR-0034）。
+
+    `normalized_name` 是 `domain/constructs.normalize_name` 的結果（`construct` 的唯一鍵）；
+    `name_en`、`label_zh` 與原文欄位是正規化（NFC、空白縮成一個）後要存的字。測量的數字是
+    `Decimal`（模型回的數字最短的十進位寫法：`0.41` 不會變成 `0.40999…`，但 `0.410`
+    也是 `0.41`）。
+
+    Raises:
+        ValueError: 名稱空白、文字存不進資料庫、題數 < 1、α／CR／AVE 不在 0～1。
+    """
+
+    normalized_name: str
+    name_en: str
+    label_zh: str
+    definition: str | None
+    scale_source: str | None
+    item_location: str | None
+    item_count: int | None
+    cronbach_alpha: Decimal | None
+    composite_reliability: Decimal | None
+    ave: Decimal | None
+
+    def __post_init__(self) -> None:
+        for name in ("normalized_name", "name_en", "label_zh"):
+            value = getattr(self, name)
+            if value is None:
+                raise ValueError(f"{name} 不能是 None")
+            _check_optional_text(name, value)
+        for name in ("definition", "scale_source", "item_location"):
+            _check_optional_text(name, getattr(self, name))
+        _check_count("item_count", self.item_count, minimum=1)
+        for name in ("cronbach_alpha", "composite_reliability", "ave"):
+            _check_decimal(name, getattr(self, name), unit=True)
+
+
+@dataclass(frozen=True, slots=True)
+class HypothesisContent:
+    """一條關係（`hypothesis` 的一列，Story 2.6、ADR-0034）。
+
+    `cause`、`effect` 是構面的 `normalized_name`；`ordinal` 是這篇裡的順序（從 1 開始）；
+    `sentence_sha256` 是原句所在的**來源句子**（輸入裡涵蓋原句的完整句子）正規化後的雜湊：同一句
+    的完整版與片段算同一句（「不同原句」數得出來，FR-3 擷取規則 3）。支持與否已照 FR-3 擷取規則
+    1、2 改過：實證檢定一定不是 `not_determined`，其他證據類型一定是；判定了（`supported`、
+    `not_supported`、`partially_supported`）就一定有 `result_quote`（寫出結果的原文），其他一定
+    沒有。
+
+    Raises:
+        ValueError: 因果相同、原句空白、雜湊格式不對、證據類型與支持與否對不上、判定了卻沒有結果
+            原文（或沒判定卻有）、數字超出範圍。
+    """
+
+    ordinal: int
+    sentence: str
+    sentence_sha256: str
+    cause: str
+    effect: str
+    evidence_type: EvidenceType
+    support: SupportLevel
+    beta: Decimal | None
+    p_value: Decimal | None
+    sample_size: int | None
+    effect_type: str | None
+    result_quote: str | None
+
+    def __post_init__(self) -> None:
+        _check_count("ordinal", self.ordinal, minimum=1)
+        for name in ("sentence", "cause", "effect"):
+            value = getattr(self, name)
+            if value is None:
+                raise ValueError(f"{name} 不能是 None")
+            _check_optional_text(name, value)
+        if self.cause == self.effect:
+            raise ValueError("因和果不能是同一個構面")
+        if not isinstance(self.sentence_sha256, str) or not _SHA256_HEX.fullmatch(
+            self.sentence_sha256
+        ):
+            raise ValueError("sentence_sha256 要是 64 位小寫十六進位")
+        if not isinstance(self.evidence_type, EvidenceType) or not isinstance(
+            self.support, SupportLevel
+        ):
+            raise ValueError("evidence_type、support 要是列舉")
+        empirical = self.evidence_type is EvidenceType.EMPIRICAL_TEST
+        if empirical == (self.support is SupportLevel.NOT_DETERMINED):
+            raise ValueError("只有實證檢定判定支持與否；其他證據類型一律 not_determined")
+        _check_decimal("beta", self.beta, unit=False)
+        _check_decimal("p_value", self.p_value, unit=True)
+        _check_count("sample_size", self.sample_size, minimum=1)
+        _check_optional_text("effect_type", self.effect_type)
+        _check_optional_text("result_quote", self.result_quote)
+        if (self.support in DECIDED_SUPPORT) != (self.result_quote is not None):
+            raise ValueError("判定了支持與否才有 result_quote，判定了就一定要有")
+
+
+@dataclass(frozen=True, slots=True)
+class ResearchModelContent:
+    """研究模型的內容（`research_model` 表頭的內容欄位、`construct_mention`、`hypothesis`，
+    Story 2.6、ADR-0034）。
+
+    只由 `domain/validators/research_model.validate_research_model` 從驗證過的模型輸出做出來，
+    再經 `services/ai_results.py` 寫入；沒提到的欄位是 None。情境欄位是情境值清單的 `key`（清單外、
+    或國家與產業輸入沒寫出的已經換成 None 並計數）。四個計數：清單外丟掉的情境值、輸入沒寫出的
+    國家與產業、照擷取規則改過的支持與否、不可靠而清成空值的欄位（只寫門檻的 p 值、只有標點的
+    原文欄位）。
+
+    Raises:
+        ValueError: 計數不是 ≥ 0 的整數、情境 `key` 寫法不對、構面正規化名稱重複、假設指到不在
+            清單的構面、`ordinal` 不是 1～n、同一句同一條關係出現兩次、文字或數字不合格。
+    """
+
+    is_review_or_meta_analysis: bool
+    country: str | None
+    industry: str | None
+    research_design: str | None
+    unit_of_analysis: str | None
+    sample_size: int | None
+    limitations: str | None
+    future_research: str | None
+    dropped_context_value_count: int
+    unsupported_context_value_count: int
+    corrected_support_count: int
+    cleared_value_count: int
+    constructs: tuple[ConstructMentionContent, ...]
+    hypotheses: tuple[HypothesisContent, ...]
+
+    def __post_init__(self) -> None:
+        if type(self.is_review_or_meta_analysis) is not bool:
+            raise ValueError("is_review_or_meta_analysis 要是布林")
+        for name in ("country", "industry", "research_design", "unit_of_analysis"):
+            value = getattr(self, name)
+            if value is not None and (
+                not isinstance(value, str) or KEY_PATTERN.fullmatch(value) is None
+            ):
+                raise ValueError(f"{name} 要是情境值清單的 key 寫法")
+        _check_count("sample_size", self.sample_size, minimum=1)
+        _check_optional_text("limitations", self.limitations)
+        _check_optional_text("future_research", self.future_research)
+        for name in (
+            "dropped_context_value_count",
+            "unsupported_context_value_count",
+            "corrected_support_count",
+            "cleared_value_count",
+        ):
+            value = getattr(self, name)
+            if value is None:
+                raise ValueError(f"{name} 不能是 None")
+            _check_count(name, value, minimum=0)
+        if not isinstance(self.constructs, tuple) or not all(
+            isinstance(item, ConstructMentionContent) for item in self.constructs
+        ):
+            raise ValueError("constructs 要是 ConstructMentionContent 的 tuple")
+        if not isinstance(self.hypotheses, tuple) or not all(
+            isinstance(item, HypothesisContent) for item in self.hypotheses
+        ):
+            raise ValueError("hypotheses 要是 HypothesisContent 的 tuple")
+        names = [item.normalized_name for item in self.constructs]
+        if len(set(names)) != len(names):
+            raise ValueError("構面的正規化名稱不能重複")
+        known = set(names)
+        if [item.ordinal for item in self.hypotheses] != list(range(1, len(self.hypotheses) + 1)):
+            raise ValueError("假設的 ordinal 要是 1～n")
+        relations = [(item.sentence_sha256, item.cause, item.effect) for item in self.hypotheses]
+        if len(set(relations)) != len(relations):
+            raise ValueError("同一句、同一條關係只能有一列")
+        for item in self.hypotheses:
+            if item.cause not in known or item.effect not in known:
+                raise ValueError("假設的因與果要是這篇的構面")
+
+    def normalized_names(self) -> tuple[str, ...]:
+        """這篇提到的構面正規化名稱（照擷取的順序）。"""
+        return tuple(item.normalized_name for item in self.constructs)
+
+
 @dataclass(frozen=True, slots=True)
 class NewAiResult:
     """要新增的一列表頭。
 
     `zh_summary`：中文重點的內容（只有 `zh_summary` 工作、而且不是 `rejected` 時可以有值）。
     `classification`：分類的內容（只有 `classify` 工作、而且不是 `rejected` 時可以有值）。
-    研究模型的內容由 2.6 加。
+    `research_model`：研究模型的內容（只有 `extract_model` 工作、而且不是 `rejected` 時可以有值）。
 
     Raises:
-        ValueError: `rejected` 與原因代碼對不上、`rejected` 帶了內容，或兩種內容都有。
+        ValueError: `rejected` 與原因代碼對不上、`rejected` 帶了內容，或帶了兩種以上的內容。
     """
 
     paper_id: uuid.UUID
@@ -282,14 +498,19 @@ class NewAiResult:
     reject_reason: ErrorCode | None
     zh_summary: ZhSummaryContent | None = None
     classification: ClassificationContent | None = None
+    research_model: ResearchModelContent | None = None
 
     def __post_init__(self) -> None:
         if (self.status is ResultStatus.REJECTED) != (self.reject_reason is not None):
             raise ValueError("只有 rejected 帶原因代碼，而且 rejected 一定要帶")
-        has_content = self.zh_summary is not None or self.classification is not None
-        if self.status is ResultStatus.REJECTED and has_content:
+        contents = [
+            content
+            for content in (self.zh_summary, self.classification, self.research_model)
+            if content is not None
+        ]
+        if self.status is ResultStatus.REJECTED and contents:
             raise ValueError("rejected 不寫內容")
-        if self.zh_summary is not None and self.classification is not None:
+        if len(contents) > 1:
             raise ValueError("一列表頭只帶一種內容")
 
 

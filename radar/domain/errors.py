@@ -57,3 +57,23 @@ class ErrorCode(StrEnum):
     ZH_SUMMARY_SENTENCE_TRANSLATION = "zh_summary_sentence_translation"  # 看起來是逐句翻譯
     # 輸出有輸入（標題＋摘要）沒有的阿拉伯數字或英文詞（編造）
     ZH_SUMMARY_UNSUPPORTED_CONTENT = "zh_summary_unsupported_content"
+
+    # 研究模型的 domain 驗證（`radar/domain/validators/research_model.py`，Story 2.6、ADR-0034）：
+    # 整筆拒收、不寫內容。情境值不在清單或輸入沒寫出、證據類型與支持與否對不上、同一句同一條關係
+    # 重複，只改值並計數，不算拒收。
+    # 原文欄位（假設原句、構面定義、研究限制、未來研究、量表來源、題目位置、效果類型）正規化後不在
+    # 輸入（標題或摘要其中一段）裡
+    RESEARCH_MODEL_QUOTE_NOT_IN_INPUT = "research_model_quote_not_in_input"
+    # 任何字串含雙向控制字元、tag 字元或 HTML 實體；英文名或繁中標籤含標記或連結
+    RESEARCH_MODEL_UNSAFE_TEXT = "research_model_unsafe_text"
+    # 英文名或繁中標籤格式不對（長度、沒有英文字母或漢字、簡體專用字）；原句、定義不到 3 個詞
+    RESEARCH_MODEL_INVALID_TEXT = "research_model_invalid_text"
+    RESEARCH_MODEL_DUPLICATE_CONSTRUCT = "research_model_duplicate_construct"  # 正規化後同名
+    # 假設的因或果不是清單裡的構面，或因和果是同一個構面
+    RESEARCH_MODEL_UNKNOWN_CONSTRUCT = "research_model_unknown_construct"
+    # 樣本數、題數 < 1；α、CR、AVE、p 不在 0～1；β 不是有限數
+    RESEARCH_MODEL_NUMBER_OUT_OF_RANGE = "research_model_number_out_of_range"
+    # 數字不是輸入裡的數字；英文名的詞、繁中標籤的英文與數字不在輸入裡（編造）
+    RESEARCH_MODEL_UNSUPPORTED_CONTENT = "research_model_unsupported_content"
+    # 同一句、同一條關係給了互相衝突的值（證據類型、支持與否或統計數字不同）
+    RESEARCH_MODEL_CONFLICTING_HYPOTHESIS = "research_model_conflicting_hypothesis"
