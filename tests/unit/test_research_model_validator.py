@@ -1795,8 +1795,10 @@ def _labelled(
     *,
     cause: str = "Perceived usefulness",
     effect: str = "Trust",
+    abstract: str = LABELLED_ABSTRACT,
 ) -> HypothesisContent:
-    """用 `LABELLED_ABSTRACT` 當輸入，驗一條判了 supported 的關係，回存下來的那一條。"""
+    """用 `abstract`（預設 `LABELLED_ABSTRACT`）當輸入，驗一條判了 supported 的關係，回存下來的
+    那一條。"""
     data = _with_loyalty(
         _hypothesis(
             sentence=sentence,
@@ -1810,7 +1812,7 @@ def _labelled(
     data["future_research"] = None
     for construct in data["constructs"]:
         construct |= {"definition": None, "measurement": None}
-    (hypothesis,) = _validate(data, _input(abstract=LABELLED_ABSTRACT)).hypotheses
+    (hypothesis,) = _validate(data, _input(abstract=abstract)).hypotheses
     return hypothesis
 
 
@@ -2126,5 +2128,141 @@ def test_long_adversarial_result_quote_is_quick(unit: str) -> None:
 
     with contextlib.suppress(OutputRejectedError):
         _validate(data, _input(abstract=ABSTRACT + " " + quote))
+
+    assert time.perf_counter() - started < 2
+
+
+# --- Codex 主審查（PR #68）第 1～3 條：結果原文要直接陳述這條關係的結果 --------------------------
+# 第 1 條：研究問題（we examine whether…）後面才接結果時，核對「提到因或果」只看寫出結果的那個子句；
+# 那個子句只用代名詞指回去（and find that it does）時，才看研究問題提到的關係。
+
+
+@pytest.mark.parametrize(
+    "result_quote",
+    [
+        # Codex 的例子：研究問題提到 PU、trust，後面寫出結果的卻是 satisfaction → loyalty。
+        "We examine whether perceived usefulness affects trust, and we find that satisfaction"
+        " affects loyalty",
+        "We examine whether perceived usefulness affects trust; the results show that satisfaction"
+        " drives loyalty",
+        # 結果是統計量時也一樣：統計量所在的子句講的是另一條關係。
+        "We examine whether perceived usefulness affects trust, and satisfaction affects loyalty"
+        " (β = 0.30)",
+        # 研究問題有兩個 whether：it 指的是哪一個分不出來，不看研究問題。
+        "We examine whether perceived usefulness affects trust and whether satisfaction affects"
+        " loyalty, and we find that it does",
+        # 寫出結果的子句只有另一個代號，不是指回研究問題。
+        "We examine whether perceived usefulness affects trust, and H2 was supported",
+    ],
+)
+def test_result_after_a_research_question_about_another_relation_becomes_not_stated(
+    result_quote: str,
+) -> None:
+    data = _data()
+    data["hypotheses"][0]["result_quote"] = result_quote
+
+    content = _validate(data, _input(abstract=f"{ABSTRACT} {result_quote}."))
+
+    assert content.hypotheses[0].support is SupportLevel.NOT_STATED
+    assert content.hypotheses[0].result_quote is None
+
+
+@pytest.mark.parametrize(
+    "result_quote",
+    [
+        # 寫出結果的子句自己提到這條關係的因或果。
+        "We examine whether perceived usefulness affects trust, and we find that perceived"
+        " usefulness increases trust",
+        "We examine whether perceived usefulness affects trust, and we find that trust rises",
+        # 寫出結果的子句只用代名詞指回研究問題（同一條關係）。
+        "We examine whether perceived usefulness affects trust, and we find that it does"
+        " (β = 0.42)",
+        "We examine whether perceived usefulness affects trust, and it does (β = 0.42)",
+    ],
+)
+def test_result_after_a_research_question_about_the_same_relation_is_kept(
+    result_quote: str,
+) -> None:
+    data = _data()
+    data["hypotheses"][0]["result_quote"] = result_quote
+
+    content = _validate(data, _input(abstract=f"{ABSTRACT} {result_quote}."))
+
+    assert content.hypotheses[0].support is SupportLevel.SUPPORTED
+    assert content.hypotheses[0].result_quote == result_quote
+
+
+# 第 2、3 條：代號、全部假設要直接陳述結果（`H1 was supported`、`Results support H1`、`All
+# hypotheses were supported`）；整段有 whether、to determine、if、remains unknown、will 這類未定
+# 敘述時不算；範圍（`H1-H3`）兩端都不算。
+
+NOT_YET_REPORTED = (
+    "H1 was tested to determine whether the effect was significant",
+    "H1 was tested to see if it was significant",
+    "Whether H1 was supported remains unknown",
+    "H1 was not tested, but H2 was supported",
+    "Prior studies support H1",
+    "H1-H3 were supported",
+    "Results support H1-H3",
+    "In prior work, support was found for H1",
+    "All hypotheses were tested to determine whether they were supported",
+    "Whether all hypotheses were supported remains unknown",
+    "Future studies will test whether all hypotheses are supported",
+)
+DIRECTLY_REPORTED = (
+    "We find support for H1",
+    "H1 (β = 0.42) was supported",
+    "H1 and H2 were supported",
+    "Support was found for H1",
+    "H1: supported",
+    "We examine whether H1 holds, and we find support for H1",
+    "The results support all hypotheses",
+    "All of the proposed hypotheses were supported",
+)
+DIRECT_ABSTRACT = (
+    LABELLED_ABSTRACT
+    + " "
+    + " ".join(f"{quote}." for quote in NOT_YET_REPORTED + DIRECTLY_REPORTED)
+)
+
+
+@pytest.mark.parametrize("result_quote", NOT_YET_REPORTED)
+def test_label_or_all_hypotheses_without_a_direct_result_becomes_not_stated(
+    result_quote: str,
+) -> None:
+    hypothesis = _labelled(H1_SENTENCE, result_quote, abstract=DIRECT_ABSTRACT)
+
+    assert hypothesis.support is SupportLevel.NOT_STATED
+    assert hypothesis.result_quote is None
+
+
+@pytest.mark.parametrize("result_quote", DIRECTLY_REPORTED)
+def test_label_or_all_hypotheses_with_a_direct_result_is_kept(result_quote: str) -> None:
+    hypothesis = _labelled(H1_SENTENCE, result_quote, abstract=DIRECT_ABSTRACT)
+
+    assert hypothesis.support is SupportLevel.SUPPORTED
+    assert hypothesis.result_quote == result_quote
+
+
+def test_label_list_reports_each_label_in_it() -> None:
+    hypothesis = _labelled(
+        H2_SENTENCE,
+        "H1 and H2 were supported",
+        cause="Trust",
+        effect="Loyalty",
+        abstract=DIRECT_ABSTRACT,
+    )
+
+    assert hypothesis.support is SupportLevel.SUPPORTED
+
+
+@pytest.mark.parametrize("unit", ["H1 and ", "H1, ", "H1 & ", "Results support H1 and "])
+def test_long_label_list_is_quick(unit: str) -> None:
+    # 很長的代號清單後面接的不是判定字：直接陳述的比對不能變成平方時間（自我審查補）。
+    quote = "Results show " + unit * 20_000 + "tested"
+    started = time.perf_counter()
+
+    with contextlib.suppress(OutputRejectedError):
+        _labelled(H1_SENTENCE, quote, abstract=f"{LABELLED_ABSTRACT} {quote}.")
 
     assert time.perf_counter() - started < 2
