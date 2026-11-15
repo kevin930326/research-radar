@@ -5,6 +5,7 @@
 !radar/
 !migrations/
 !config/
+!prompts/
 # 前端：原始碼與 lock 檔放進來，本機的套件、建置結果與測試產物不放（映像裡重新 npm ci 與建置）。
 !web/
 web/node_modules

@@ -1,6 +1,7 @@
 """`radar` 指令：專案唯一的 CLI 入口（NFR-11）。typer 只能出現在這個套件。"""
 
 import uuid
+from datetime import UTC, datetime
 from importlib.metadata import version as package_version
 from typing import Annotated, NoReturn
 
@@ -10,11 +11,13 @@ import typer
 from radar.config import (
     ConfigError,
     database_pool_size,
+    load_budget_config,
     load_domain_config,
     load_import_baseline,
     load_migration_settings,
     load_settings,
 )
+from radar.domain.budget import render_cost_report
 from radar.domain.coverage import render_coverage_report
 from radar.domain.cube import UnknownJournalError
 from radar.domain.database_requirements import DatabaseRequirementsError
@@ -29,6 +32,7 @@ from radar.entrypoints.bootstrap import (
     build_object_store,
 )
 from radar.entrypoints.logging_config import configure_logging
+from radar.services.budget import get_budget_status
 from radar.services.coverage import get_coverage
 from radar.services.import_report import get_import_report
 from radar.services.jobs import enqueue_scheduled_job
@@ -262,6 +266,36 @@ def coverage() -> None:
     if report is None:
         _fail("還沒有已發佈的快照", [])
     for line in render_coverage_report(report):
+        typer.echo(line)
+
+
+def _utc_now() -> datetime:
+    """`radar costs` 的時鐘（測試換掉它來固定「本月」）。"""
+    return datetime.now(UTC)
+
+
+@app.command("costs")
+def costs() -> None:
+    """印出本月（台北時間）的 LLM 費用（只讀，不改任何資料）。
+
+    依工作代碼分的費用、合計、熔斷線、離熔斷線還有多少、是否「只檢索」；金額單位美元、
+    4 位小數。設定錯誤或讀不到資料庫：退出碼 1；資料庫的錯誤只印類別，不印連線字串。
+    """
+    configure_logging()
+    try:
+        settings = load_settings()
+        budget = load_budget_config()
+    except ConfigError as exc:
+        log.error("設定錯誤，無法讀取費用", problems=exc.problems)
+        _fail("設定錯誤，沒有讀取費用：", exc.problems)
+    try:
+        database = build_database(settings, pool_size=database_pool_size(settings, "cli"))
+        status = get_budget_status(SystemViewer(), database, budget, now=_utc_now())
+    except Exception as exc:
+        # 例外訊息可能含主機與帳號，只記類別名稱。
+        log.error("讀取費用失敗", error_type=type(exc).__name__)
+        _fail(f"讀取費用失敗（{type(exc).__name__}）；細節見日誌", [])
+    for line in render_cost_report(status):
         typer.echo(line)
 
 

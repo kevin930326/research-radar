@@ -9,6 +9,8 @@ from typing import Any, Literal
 import yaml
 from pydantic import BaseModel, SecretStr, ValidationError
 
+from radar.domain.budget import BudgetConfig
+from radar.domain.context_values import ContextValues, context_values_registry_problems
 from radar.domain.domain_config import (
     DomainConfig,
     ExclusionRulesConfig,
@@ -18,7 +20,10 @@ from radar.domain.domain_config import (
 )
 from radar.domain.import_report import ImportBaseline
 from radar.domain.jobs import scheduled_jobs
+from radar.domain.pricing import ModelsConfig
 from radar.domain.settings import MigrationSettings, Settings, heartbeat_url_field
+from radar.domain.taxonomy import Taxonomy, taxonomy_registry_problems
+from radar.domain.validators.zh_summary import ZhSummaryRules
 
 type ProcessKind = Literal["api", "worker", "cli"]
 
@@ -157,6 +162,16 @@ EXCLUSION_RULES_FILE = "exclusion_rules.yaml"
 KEYWORD_SOURCES_FILE = "keyword_sources.yaml"
 # OQ-02 的基準篇數：只有 `radar weekly-run report` 讀；不放進 DomainConfig，api、worker 不讀。
 IMPORT_BASELINE_FILE = "import_baseline.yaml"
+# 模型與價格（AD-8、ADR-0009）：只有要呼叫 LLM 的指令與工作讀（`load_models_config`）。
+MODELS_FILE = "models.yaml"
+# 每月預算（NFR-3、ADR-0031）：閘門的 BudgetGuard 與 `radar costs` 讀（`load_budget_config`）。
+BUDGET_FILE = "budget.yaml"
+# 中文重點的驗證門檻（PRD FR-14、ADR-0032）：跑 `zh_summary` 的工作讀（`load_zh_summary_rules`）。
+ZH_SUMMARY_FILE = "zh_summary.yaml"
+# 主題與方法的分類表（PRD FR-15、FR-36、ADR-0033）：跑 `classify` 的工作讀（`load_taxonomy`）。
+TAXONOMY_FILE = "taxonomy.yaml"
+# 研究情境的值清單（PRD FR-3、ADR-0034）：跑 `extract_model` 的工作讀（`load_context_values`）。
+CONTEXT_VALUES_FILE = "context_values.yaml"
 
 
 def config_dir(environ: Mapping[str, str] | None = None) -> Path:
@@ -215,6 +230,99 @@ def load_import_baseline(environ: Mapping[str, str] | None = None) -> ImportBase
     if problems or baseline is None:
         raise ConfigError(problems)
     return baseline
+
+
+def load_models_config(environ: Mapping[str, str] | None = None) -> ModelsConfig:
+    """讀 `RADAR_CONFIG_DIR` 下的 `models.yaml`（模型、價格、token 估計常數、各工作的模型）並驗證。
+
+    讀法與錯誤格式和 `load_domain_config` 相同（「檔名：欄位路徑：原因」）。
+
+    Raises:
+        ConfigError: 缺檔、不是合法 YAML、鍵寫兩次或內容不對（例如價格寫成數字、模型不在白名單）。
+    """
+    problems: list[str] = []
+    models = _load_yaml_model(config_dir(environ), MODELS_FILE, ModelsConfig, problems)
+    if problems or models is None:
+        raise ConfigError(problems)
+    return models
+
+
+def load_budget_config(environ: Mapping[str, str] | None = None) -> BudgetConfig:
+    """讀 `RADAR_CONFIG_DIR` 下的 `budget.yaml`（workspace 上限、熔斷線、各功能預算）並驗證。
+
+    讀法與錯誤格式和 `load_domain_config` 相同（「檔名：欄位路徑：原因」）。
+
+    Raises:
+        ConfigError: 缺檔、不是合法 YAML、鍵寫兩次或內容不對（例如金額寫成數字、負數、缺工作、
+            熔斷線不低於 workspace 上限）。
+    """
+    problems: list[str] = []
+    budget = _load_yaml_model(config_dir(environ), BUDGET_FILE, BudgetConfig, problems)
+    if problems or budget is None:
+        raise ConfigError(problems)
+    return budget
+
+
+def load_zh_summary_rules(environ: Mapping[str, str] | None = None) -> ZhSummaryRules:
+    """讀 `RADAR_CONFIG_DIR` 下的 `zh_summary.yaml`（中文重點的驗證門檻）並驗證。
+
+    讀法與錯誤格式和 `load_domain_config` 相同（「檔名：欄位路徑：原因」）。
+
+    Raises:
+        ConfigError: 缺檔、不是合法 YAML、鍵寫兩次、缺鍵或多鍵、值不是整數（含浮點數、布林）、
+            0 或負數、門檻超出範圍。
+    """
+    problems: list[str] = []
+    rules = _load_yaml_model(config_dir(environ), ZH_SUMMARY_FILE, ZhSummaryRules, problems)
+    if problems or rules is None:
+        raise ConfigError(problems)
+    return rules
+
+
+def load_taxonomy(environ: Mapping[str, str] | None = None) -> Taxonomy:
+    """讀 `RADAR_CONFIG_DIR` 下的 `taxonomy.yaml`（主題與方法的分類表），驗證格式後再核對內容雜湊
+    和 `domain/taxonomy_hashes.py` 的登記。
+
+    行程啟動時讀一次（AD-18）：同一個行程的分類工作從開始到寫入都用這一個物件當「現在的分類表」。
+    讀法與錯誤格式和 `load_domain_config` 相同（「檔名：欄位路徑：原因」）。
+
+    Raises:
+        ConfigError: 缺檔、不是合法 YAML、鍵寫兩次、缺 `version`、多欄、`key` 寫法不對或重複、
+            用了保留字 `unclassified`；內容改了卻沒升版，或版本沒有登記雜湊。
+    """
+    problems: list[str] = []
+    taxonomy = _load_yaml_model(config_dir(environ), TAXONOMY_FILE, Taxonomy, problems)
+    if taxonomy is not None:
+        problems.extend(
+            f"{TAXONOMY_FILE}：{problem}" for problem in taxonomy_registry_problems(taxonomy)
+        )
+    if problems or taxonomy is None:
+        raise ConfigError(problems)
+    return taxonomy
+
+
+def load_context_values(environ: Mapping[str, str] | None = None) -> ContextValues:
+    """讀 `RADAR_CONFIG_DIR` 下的 `context_values.yaml`（研究情境的值清單），驗證格式後再核對內容
+    雜湊和 `domain/context_values_hashes.py` 的登記。
+
+    行程啟動時讀一次（AD-18）：同一個行程的研究模型擷取從開始到寫入都用這一個物件當「現在的情境值
+    清單」。讀法與錯誤格式和 `load_domain_config` 相同（「檔名：欄位路徑：原因」）。
+
+    Raises:
+        ConfigError: 缺檔、不是合法 YAML、鍵寫兩次、缺 `version`、多欄、`key` 寫法不對或同一欄
+            重複、國家或產業沒有 `terms`、研究設計或分析單位有 `terms`；內容改了卻沒升版，或版本
+            沒有登記雜湊。
+    """
+    problems: list[str] = []
+    values = _load_yaml_model(config_dir(environ), CONTEXT_VALUES_FILE, ContextValues, problems)
+    if values is not None:
+        problems.extend(
+            f"{CONTEXT_VALUES_FILE}：{problem}"
+            for problem in context_values_registry_problems(values)
+        )
+    if problems or values is None:
+        raise ConfigError(problems)
+    return values
 
 
 def _load_yaml_model[T: BaseModel](

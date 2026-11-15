@@ -111,7 +111,7 @@ actual_hours:
   - {round: epic-1, stories: "1.1～1.11", estimate_h: 29, elapsed_h: 20, kevin_h_low: 3, kevin_h_high: 4, rough: true}
 
 generated: 11-14-2026 03:46
-last_updated: 11-14-2026 22:27
+last_updated: 11-15-2026 06:40
 project: research-radar
 project_key: NOKEY
 tracking_system: file-system
@@ -131,14 +131,14 @@ development_status:
   1-11-每週更新的排程與變動偵測: done
   epic-1-retrospective: optional
 
-  epic-2: backlog
-  2-1-送雲端的放行與-llm-連接: backlog
-  2-2-閘門-來歷與費用帳本: backlog
-  2-3-預算熔斷與費用指令: backlog
-  2-4-中文重點: backlog
-  2-5-主題與方法分類: backlog
-  2-6-研究模型擷取: backlog
-  2-7-人工判斷事件與有效值: backlog
+  epic-2: in-progress
+  2-1-送雲端的放行與-llm-連接: review
+  2-2-閘門-來歷與費用帳本: review
+  2-3-預算熔斷與費用指令: review
+  2-4-中文重點: review
+  2-5-主題與方法分類: review
+  2-6-研究模型擷取: review
+  2-7-人工判斷事件與有效值: review
   2-8-向量與全庫向量化: backlog
   2-9-batch-送出與每週更新的串接: backlog
   2-10-只對指定的論文跑-ai: backlog

@@ -1,5 +1,6 @@
 """組裝：唯一建立 adapter 與資料庫連線的地方（AD-1）。"""
 
+import importlib.metadata
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -10,16 +11,20 @@ from typing import TYPE_CHECKING
 from radar.adapters.heartbeat import HttpHeartbeat
 from radar.adapters.jobs import JobApp, create_job_app, defer_job, retry_stalled_jobs
 from radar.config import ConfigError, env_name
+from radar.domain.ai_outputs import CallMode, GatewayConfig
 from radar.domain.domain_config import OpenAlexConfig
 from radar.domain.jobs import Enqueue
+from radar.domain.pricing import ModelsConfig
 from radar.domain.schema import SchemaState
 from radar.domain.settings import MigrationSettings, Settings
 from radar.repo.db import Database
 from radar.repo.migrations import MigrationScripts, read_schema_state, upgrade_to_head
 
 if TYPE_CHECKING:
-    # 只給型別註記用：OpenAlex 與物件儲存的 adapter（boto3 約 11 MB）在 build_* 函式裡才 import，
-    # api 行程為了 build_readiness_probes import 這個模組時不會載入它們（mem_limit 很緊）。
+    # 只給型別註記用：OpenAlex、物件儲存（boto3 約 11 MB）與 Anthropic 的 adapter 在 build_*
+    # 函式裡才 import，api 行程為了 build_readiness_probes import 這個模組時不會載入它們
+    # （mem_limit 很緊）。
+    from radar.adapters.anthropic import AnthropicLlmProvider
     from radar.adapters.object_store import S3ObjectStore
     from radar.adapters.openalex import OpenAlexSource
 
@@ -28,6 +33,8 @@ from radar.repo.migrations import MigrationsNotFoundError as MigrationsNotFoundE
 
 # 遷移檔的位置：工作目錄下的 migrations/（映像的 WORKDIR 是 /app，開發時是 repo 根目錄）。
 DEFAULT_MIGRATIONS_DIR = Path("migrations")
+# prompt 檔的位置：工作目錄下的 prompts/（映像裡由 Dockerfile 複製進去）。
+DEFAULT_PROMPTS_DIR = Path("prompts")
 
 
 @dataclass(frozen=True)
@@ -216,3 +223,54 @@ def build_object_store(settings: Settings) -> S3ObjectStore:
         wait_jitter=settings.object_store_retry_wait_jitter,
         retry_after_max=settings.object_store_retry_after_max,
     )
+
+
+def build_llm_provider(settings: Settings) -> AnthropicLlmProvider:
+    """Anthropic 的 `LlmProvider`（逾時、重試設定來自 `RADAR_ANTHROPIC_*`）。不連線。
+
+    用完要 `close()`（或用 `with`）。
+
+    Raises:
+        ConfigError: 沒有設定 `RADAR_ANTHROPIC_API_KEY`；訊息只列環境變數名稱。
+    """
+    if settings.anthropic_api_key is None:
+        raise ConfigError([f"缺少環境變數 {env_name('anthropic_api_key')}"])
+    from radar.adapters.anthropic import AnthropicLlmProvider
+
+    return AnthropicLlmProvider(
+        settings.anthropic_api_key.get_secret_value(),
+        timeout=settings.anthropic_timeout,
+        attempts=settings.anthropic_attempts,
+        retry_wait_initial=settings.anthropic_retry_wait_initial,
+        retry_wait_max=settings.anthropic_retry_wait_max,
+        retry_wait_jitter=settings.anthropic_retry_wait_jitter,
+        retry_after_max=settings.anthropic_retry_after_max,
+        deadline=settings.anthropic_deadline,
+    )
+
+
+def build_gateway_config(
+    settings: Settings,
+    models: ModelsConfig,
+    *,
+    prompts_root: Path = DEFAULT_PROMPTS_DIR,
+    call_mode: CallMode = CallMode.INTERACTIVE,
+) -> GatewayConfig:
+    """LLM 閘門的設定：模型與價格表（`config/models.yaml`，由呼叫端用 `load_models_config` 讀）、
+    prompt 資料夾、放行設定（`RADAR_PAYWALLED_FULLTEXT_LLM`）、程式版本。不讀檔、不連線。
+    """
+    return GatewayConfig(
+        models=models,
+        prompts_root=prompts_root,
+        cloud_policy=settings.cloud_policy,
+        code_version=code_version(),
+        call_mode=call_mode,
+    )
+
+
+def code_version() -> str:
+    """記進 `derivation_run.code_version` 的程式版本：安裝的 `radar` 套件版本。"""
+    try:
+        return importlib.metadata.version("radar")
+    except importlib.metadata.PackageNotFoundError:
+        return "unknown"

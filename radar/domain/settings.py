@@ -5,6 +5,7 @@ from urllib.parse import urlsplit
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationInfo, field_validator
 
 from radar.domain.jobs import WORKER_HEARTBEAT_SECONDS
+from radar.domain.policy import CloudPolicy
 from radar.domain.weekly_run import DEFAULT_MAX_FAILURES
 
 DATABASE_URL_SCHEMES = frozenset({"postgresql", "postgresql+psycopg"})
@@ -132,6 +133,70 @@ class Settings(BaseModel):
     object_store_retry_wait_max: float = Field(default=5.0, gt=0, le=300)
     object_store_retry_wait_jitter: float = Field(default=0.5, ge=0, le=60)
     object_store_retry_after_max: int = Field(default=30, ge=0, le=600)
+    # 送雲端的放行（AD-9、ADR-0029）：付費全文與上傳的 PDF 內容可不可以送 Anthropic／Cloudflare。
+    # 預設關；圖書館回覆允許時只改這個設定，不改程式。
+    paywalled_fulltext_llm: bool = False
+    # Anthropic 的 API key。只有要呼叫 LLM 的指令與工作需要；缺了由 bootstrap 在組裝時回報。
+    anthropic_api_key: SecretStr | None = Field(default=None, min_length=1)
+    # 一次呼叫的逾時（秒）與最多嘗試幾次（含第一次；adapter 裡的 stamina 重試，
+    # SDK 自己的重試關掉）。
+    anthropic_timeout: int = Field(default=60, ge=1, le=600)
+    anthropic_attempts: int = Field(default=3, ge=1, le=10)
+    # Anthropic 重試的等待（秒，Conventions「重試、逾時、速率」）：只重試逾時、限流、服務端錯誤與
+    # 連線錯誤；一般是指數退避，從 initial 開始每次加倍、最多 max，再加 0～jitter 秒的抖動；
+    # 對方回 Retry-After 時照它等，要等的超過 retry_after_max 就不再重試（不提早重送）。
+    anthropic_retry_wait_initial: float = Field(default=1.0, gt=0, le=60)
+    anthropic_retry_wait_max: float = Field(default=10.0, gt=0, le=300)
+    anthropic_retry_wait_jitter: float = Field(default=1.0, ge=0, le=60)
+    anthropic_retry_after_max: int = Field(default=60, ge=0, le=600)
+    # 一次互動呼叫含所有重試的總時限（秒，AD-8 的硬性時間上限）：超過就不再重試。stamina 在一次
+    # 嘗試失敗後才看有沒有超過總時限，沒超過就照退避等完再試一次，正在進行的那一次也不會被打斷，
+    # 所以最壞是 deadline + 最長的一次等待（retry_wait_max + jitter 與 retry_after_max 取大的）
+    # + timeout 秒。
+    anthropic_deadline: int = Field(default=180, ge=1, le=3600)
+    # 互動呼叫的 `derivation_run` 建立（或接續）超過幾秒還是 running，sweep 就改成 failed
+    # （`llm_run_expired`；已經存下輸出的記 `llm_result_pending`，下一次接續）。
+    # 要比上面說的最壞時間長，否則還在跑的呼叫會被誤判。
+    llm_run_stale_after: int = Field(default=900, ge=60, le=86_400)
+
+    @property
+    def cloud_policy(self) -> CloudPolicy:
+        """送雲端的放行要看的設定（交給 `clear_for_cloud`）。"""
+        return CloudPolicy(paywalled_fulltext_llm=self.paywalled_fulltext_llm)
+
+    @field_validator("anthropic_api_key")
+    @classmethod
+    def _check_anthropic_api_key(cls, value: SecretStr | None) -> SecretStr | None:
+        # 帶空白或換行的 key 會變成不合法的 HTTP 標頭，送出時被當成連線錯誤一直重試；
+        # 在讀設定時擋下。訊息是固定句子，不帶值。
+        if value is not None and any(ch.isspace() for ch in value.get_secret_value()):
+            raise ValueError("不能含空白或換行")
+        return value
+
+    @field_validator("llm_run_stale_after")
+    @classmethod
+    def _check_llm_run_stale_after(cls, value: int, info: ValidationInfo) -> int:
+        # 欄位依定義順序驗證：deadline、timeout 在前面；它們本身不合法時另有錯誤，這裡不重複報。
+        deadline = info.data.get("anthropic_deadline")
+        timeout = info.data.get("anthropic_timeout")
+        wait_max = info.data.get("anthropic_retry_wait_max")
+        jitter = info.data.get("anthropic_retry_wait_jitter")
+        retry_after_max = info.data.get("anthropic_retry_after_max")
+        if (
+            isinstance(deadline, int)
+            and isinstance(timeout, int)
+            and isinstance(wait_max, float)
+            and isinstance(jitter, float)
+            and isinstance(retry_after_max, int)
+        ):
+            longest_wait = max(wait_max + jitter, float(retry_after_max))
+            if value <= deadline + timeout + longest_wait:
+                raise ValueError(
+                    "要大於 RADAR_ANTHROPIC_DEADLINE + RADAR_ANTHROPIC_TIMEOUT + 最長的一次重試等待"
+                    "（RADAR_ANTHROPIC_RETRY_WAIT_MAX + RADAR_ANTHROPIC_RETRY_WAIT_JITTER 與"
+                    " RADAR_ANTHROPIC_RETRY_AFTER_MAX 取大的；還在跑的呼叫會被誤判逾時）"
+                )
+        return value
 
     @field_validator("object_store_endpoint_url")
     @classmethod
