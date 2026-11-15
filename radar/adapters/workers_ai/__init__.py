@@ -11,6 +11,8 @@ Story 2.8）。
 - 回應防禦性解析：外層信封要是物件、`success` 是 `true`、`errors` 是空陣列、`result.data` 是
   陣列的陣列；筆數要等於送出的段數、每筆長度要等於登記的維度（1,024）、數字有限且在 halfvec 範圍
   內；`result.shape` 有給時要等於（筆數, 維度）。任何一項不符丟 `EmbeddingResponseError`，整批不寫。
+  轉成 halfvec 後全是 0 的向量：`embed_query` 當成回應不合格；`embed_documents` 照樣回傳，由服務
+  逐篇判斷（只讓那一篇失敗，其他篇照寫）。
   回應信封的形狀是 REST 指南拿別的模型示範的，這個模型的頁面沒有回應範例（api-reference.md），
   所以寧可嚴格擋下，也不猜。
 - 408、429、5xx、連線錯誤與逾時由 stamina 指數退避重試；帶 `Retry-After` 時照對方給的秒數等，要等的
@@ -18,11 +20,15 @@ Story 2.8）。
   401、403、404 丟 `EmbeddingConfigurationError`；其他 4xx 丟 `EmbeddingRequestError`；都不重試。
 - 總時限（`api.total_timeout_seconds`，含所有重試與等待）：剩下的時間不到 0 就不開始新的嘗試；每次
   嘗試的各階段逾時取 min(`timeout_seconds`, 剩下的秒數)；重試前要等的會超過總時限就不等、不再試；
-  回應用串流讀，收到標頭與每一塊資料後都看一次總時限，過了就中斷（對方一直慢慢送也停得下來）。
-  總時限到了丟 `EmbeddingTransientError`。最壞的結束時間見 `WorkersAiApi.request_limit_seconds`。
+  回應用串流讀，收到標頭與每一塊資料後都看一次總時限，過了就中斷（對方一直慢慢送 body 也停得
+  下來）。總時限到了丟 `EmbeddingTransientError`。等標頭與 TLS 握手的每一次讀取各自等
+  min(逾時, 剩下的秒數)，總時限蓋不住這兩段（對方慢慢吐標頭時），見
+  `WorkersAiApi.request_limit_seconds` 的兜底說明。
 - 每次 HTTP 嘗試前後呼叫服務交給的 `AttemptHooks`（`domain.embeddings.current_attempt_hooks`）：
   嘗試前 `before()`（額度放不下時丟 `EmbeddingQuotaReachedError`，原樣丟出、不送、不再重試），
-  嘗試後 `after(EmbeddingAttempt)`（送出與否、狀態碼、會不會計費）。不在服務的區塊裡呼叫時照常送。
+  嘗試後 `after(EmbeddingAttempt)`（送出與否、狀態碼、會不會計費）。嘗試前發現總時限已到時
+  不呼叫 `before()`、直接 `after(sent=False)`，讓服務放掉沿用的占用、不記用量。
+  不在服務的區塊裡呼叫時照常送。
 - token 與 account id 以 `SecretStr` 存在這個物件的私有欄位，送出前才取值：`repr`、錯誤訊息
   都不含它們，也不含完整網址
   （網址裡有 account id；stamina 重試時會把例外寫進日誌）。httpx 的例外不串在我們的例外後面。
@@ -150,7 +156,8 @@ class WorkersAiEmbeddingProvider:
         if not checked:
             return []
         body = {"documents": [cloud_text(text) for text in checked]}
-        return self._run(body, count=len(checked))
+        # 全 0 的向量照樣回傳：服務逐篇判斷，只讓那一篇失敗。
+        return self._run(body, count=len(checked), allow_zero=True)
 
     def embed_query(self, text: CloudSafeText) -> list[float]:
         """把查詢文字轉成向量（`queries`，設定有指示文字時帶 `instruction`）。
@@ -164,11 +171,11 @@ class WorkersAiEmbeddingProvider:
         body: dict[str, Any] = {"queries": [cloud_text(checked)]}
         if self._query_instruction is not None:
             body["instruction"] = self._query_instruction
-        return self._run(body, count=1)[0]
+        return self._run(body, count=1, allow_zero=False)[0]
 
     # --- 送出與重試 -----------------------------------------------------------------------------
 
-    def _run(self, body: dict[str, Any], *, count: int) -> list[list[float]]:
+    def _run(self, body: dict[str, Any], *, count: int, allow_zero: bool) -> list[list[float]]:
         retry = self._api.retry
         hooks = current_attempt_hooks()
         deadline = self._monotonic() + self._api.total_timeout_seconds
@@ -220,7 +227,9 @@ class WorkersAiEmbeddingProvider:
             raise EmbeddingTransientError(
                 f"重試用完仍失敗（{exc.reason}）", http_status=exc.http_status
             ) from None
-        return _parse_response(content, count=count, dimensions=self._dimensions)
+        return _parse_response(
+            content, count=count, dimensions=self._dimensions, allow_zero=allow_zero
+        )
 
     def _retry_after_too_long(self, error: _RetryableWorkersAiError) -> bool:
         return (
@@ -236,6 +245,9 @@ class WorkersAiEmbeddingProvider:
     def _attempt(self, body: dict[str, Any], deadline: float, hooks: AttemptHooks | None) -> bytes:
         """一次 HTTP 嘗試，前後呼叫 `hooks`；回 200 的回應內容。"""
         if self._monotonic() >= deadline:
+            # 還沒呼叫 before() 就到總時限：沒有送出，明確告訴服務（放掉沿用的占用、不記用量）。
+            if hooks is not None:
+                hooks.after(EmbeddingAttempt(sent=False, http_status=None, billable=False))
             raise self._deadline_error()
         if hooks is not None:
             hooks.before()  # 額度放不下時丟 EmbeddingQuotaReachedError：不送、不再重試
@@ -313,8 +325,13 @@ class WorkersAiEmbeddingProvider:
         return status, b"".join(chunks)
 
 
-def _parse_response(content: bytes, *, count: int, dimensions: int) -> list[list[float]]:
-    """解析 200 的回應信封（見模組說明）。不符丟 `EmbeddingResponseError`（帶狀態碼 200）。"""
+def _parse_response(
+    content: bytes, *, count: int, dimensions: int, allow_zero: bool
+) -> list[list[float]]:
+    """解析 200 的回應信封（見模組說明）。不符丟 `EmbeddingResponseError`（帶狀態碼 200）。
+
+    `allow_zero`：轉成 halfvec 後全是 0 的向量照樣回傳（`embed_documents`：服務逐篇判斷）。
+    """
 
     def bad(reason: str) -> EmbeddingResponseError:
         return EmbeddingResponseError(reason, http_status=200)
@@ -337,6 +354,8 @@ def _parse_response(content: bytes, *, count: int, dimensions: int) -> list[list
     if shape is not None and shape != [count, dimensions]:
         raise bad("回應的 shape 和送出的筆數、登記的維度不同")
     try:
-        return check_embedding_vectors(result.get("data"), count=count, dimensions=dimensions)
+        return check_embedding_vectors(
+            result.get("data"), count=count, dimensions=dimensions, allow_zero=allow_zero
+        )
     except EmbeddingResponseError as exc:
         raise bad(exc.reason) from None

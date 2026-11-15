@@ -72,8 +72,10 @@ class EmbeddingProvider(Protocol):
     回應不對），訊息不含金鑰、帳號與網址。
     真實的實作在每次 HTTP 嘗試（含內部重試）前後呼叫目前的
     `radar.domain.embeddings.current_attempt_hooks()`（服務用 `report_attempts_to` 交給它），
-    讓服務每次嘗試前占住額度、嘗試後記用量；`before()` 丟的 `EmbeddingQuotaReachedError` 原樣丟出、
-    不送、不再重試。不回報的實作（替身），服務把整次呼叫當成一次嘗試記帳。
+    讓服務每次嘗試前占住額度、嘗試後記用量；`before()` 丟的例外（`EmbeddingQuotaReachedError`、
+    等額度鎖逾時的 `LockWaitTimeoutError`）原樣丟出、不送、不再重試；嘗試前就停下（總時限已到）時
+    呼叫 `after(sent=False)`。不回報的實作（替身），服務把整次呼叫當成一次嘗試記帳。
+    `embed_documents` 回的向量裡轉成 halfvec 後全是 0 的那幾筆照樣回傳，由服務逐篇判斷。
     """
 
     @property

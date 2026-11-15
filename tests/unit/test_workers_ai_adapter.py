@@ -619,3 +619,54 @@ def test_request_limit_bounds_a_full_run_of_the_slowest_attempts() -> None:
     with pytest.raises(EmbeddingTransientError):
         provider.embed_documents([_safe("a")])
     assert clock.now <= provider._api.request_limit_seconds
+
+
+# --- 第二輪修正：總時限在第一次回呼前就到（Codex 複查 C2）、全 0 的向量逐篇判斷（低 3） -----------
+
+
+class _JumpingClock:
+    """第一次讀（建立總時限）是 0，之後都是很久以後：模擬建立期限後執行緒停到逾時。"""
+
+    def __init__(self) -> None:
+        self.readings = 0
+
+    def __call__(self) -> float:
+        self.readings += 1
+        return 0.0 if self.readings == 1 else 1_000_000.0
+
+
+def test_total_timeout_before_the_first_callback_reports_an_unsent_attempt() -> None:
+    # 還沒呼叫 before() 就到總時限：不送，明確回報「沒送出」（服務才知道要放掉沿用的占用）。
+    recorder = Recorder(_ok(1))
+    hooks = _Hooks()
+    provider = WorkersAiEmbeddingProvider(
+        SecretStr(FAKE_ACCOUNT),
+        SecretStr(FAKE_TOKEN),
+        _api(),
+        model_id=MODEL,
+        dimensions=DIMENSIONS,
+        transport=httpx2.MockTransport(recorder),
+        monotonic=_JumpingClock(),
+    )
+
+    with report_attempts_to(hooks.hooks()), pytest.raises(EmbeddingTransientError, match="總時限"):
+        provider.embed_documents([_safe("a")])
+
+    assert recorder.requests == []
+    assert hooks.before_calls == 0
+    assert hooks.attempts == [EmbeddingAttempt(sent=False, http_status=None, billable=False)]
+
+
+def test_documents_return_zero_vectors_for_the_service_to_judge_one_by_one() -> None:
+    zero = [0.0] * DIMENSIONS
+    rows = [_vectors(1)[0], zero]
+    recorder = Recorder(httpx2.Response(200, json=_envelope(rows)))
+
+    assert _provider(recorder).embed_documents([_safe("a"), _safe("b")]) == rows
+
+
+def test_query_zero_vector_is_still_rejected() -> None:
+    recorder = Recorder(httpx2.Response(200, json=_envelope([[0.0] * DIMENSIONS])))
+
+    with pytest.raises(EmbeddingResponseError, match="全是 0"):
+        _provider(recorder).embed_query(_safe("question"))

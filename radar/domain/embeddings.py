@@ -91,7 +91,8 @@ class WorkersAiApi(BaseModel):
     # 單一次 HTTP 嘗試各階段（連線、送出、每次讀取）的逾時秒數。
     timeout_seconds: float = Field(gt=0, le=300)
     # 一次 `embed_documents`／`embed_query` 含所有重試與等待的總時限（秒）：時限到了不再開始新的
-    # 嘗試、不再等，正在讀的回應也在下一塊資料到時中斷（見 `request_limit_seconds`）。
+    # 嘗試、不再等，正在讀的回應也在下一塊資料到時中斷（等標頭與 TLS 握手不在內，見
+    # `request_limit_seconds`）。
     total_timeout_seconds: float = Field(default=480, gt=0, le=3600)
     retry: EmbeddingRetry
 
@@ -109,7 +110,7 @@ class WorkersAiApi(BaseModel):
 
     @property
     def request_limit_seconds(self) -> float:
-        """一次 `embed_documents` 從開始到結束最久多久（上限，不是估計）。
+        """一次 `embed_documents` 從開始到結束最久多久（對方正常回標頭時的上限，不是估計）。
 
         adapter 的做法（`radar/adapters/workers_ai`）：
         - 總時限剩下的秒數不到 0 就不開始新的嘗試；每次嘗試的各階段逾時取
@@ -117,8 +118,15 @@ class WorkersAiApi(BaseModel):
         - 重試前要等的秒數（退避或 `Retry-After`）會超過總時限就不等、不再試。
         - 回應用串流一塊一塊讀，收到標頭與每一塊之後都看一次總時限，過了就中斷
           （對方一直慢慢送少量資料也停得下來）。
-        所以最壞是：連線剛好在總時限結束，接著「送出」與「等標頭」各等滿一次逾時：
-        總時限 ＋ 2 × `timeout_seconds`。
+        所以在對方正常回標頭的前提下，最壞是：連線剛好在總時限結束，接著「送出」與「等標頭」各等滿
+        一次逾時：總時限 ＋ 2 × `timeout_seconds`。
+
+        不是硬上限（Opus 確認審查低 1）：httpx 的逾時是「每一次 socket 讀寫」各自算的，對方每隔不到
+        `timeout_seconds` 送幾個位元組的標頭，或 TLS 握手讀很多次，等標頭這段就能拖過這個數字；DNS
+        解析也不受逾時管。總時限只在收到標頭之後與每一塊回應之後檢查。超過時由兩道防線兜底：
+        sweep 把還停在 running 的 run 收掉（寫入時發現 run 不是 running 就不寫、算失敗），占用過期後
+        由下一次占用照估計轉成用量（原本的行程回來結清時只刪不記），額度不會少算；最壞是那一批
+        重送、多花一次。
         """
         return self.total_timeout_seconds + 2 * self.timeout_seconds
 
@@ -200,7 +208,8 @@ class EmbeddingConfig(BaseModel):
     quota: EmbeddingQuota
     token_estimate: EmbeddingTokenEstimate
     # 取得執行資格、寫入時等論文那一列的鎖，以及占用額度時等額度鎖的上限（秒，`lock_timeout`）。
-    # 等不到：取得資格 → 當成別的工作正在做（`busy`，不送）；寫入 → 這篇標成失敗；占用額度 → 丟錯。
+    # 等不到：取得資格 → 當成別的工作正在做（`busy`，不送）；寫入 → 這篇標成失敗；占用額度 → 這一批
+    # 不送、算失敗（`embed_quota_lock_timeout`），其他論文照做。
     lock_timeout_seconds: float = Field(default=2, gt=0, le=60)
 
     @property
@@ -215,8 +224,8 @@ class EmbeddingConfig(BaseModel):
 
         一批裡第一篇取得資格後，還要等其他篇取得資格（每篇最多等一次鎖）、整個請求
         （`api.request_limit_seconds`）、最後一次嘗試的記帳（最多等一次鎖）、每篇寫入（每篇最多等
-        一次鎖）。鎖以外的 SQL 是毫秒級，不另外算。也當作額度占用的有效期限：過了這個時間，
-        占用的那次嘗試一定已經結束（或行程已經不在）。
+        一次鎖）。鎖以外的 SQL 是毫秒級，不另外算。也當作額度占用的有效期限：對方正常回標頭時，
+        過了這個時間占用的那次嘗試一定已經結束（或行程已經不在）；例外見 `request_limit_seconds`。
         """
         lock_waits = 2 * self.batch_size + 2
         return self.api.request_limit_seconds + lock_waits * self.lock_timeout_seconds
@@ -325,6 +334,8 @@ class AttemptHooks:
     - `before()`：每次 HTTP 嘗試之前呼叫（含重試）。今天的額度放不下這次嘗試時丟
       `EmbeddingQuotaReachedError`，adapter 原樣丟出、不送這一次、不再重試。
     - `after(attempt)`：每次嘗試之後呼叫（成功、失敗、沒送出都會），把占用轉成這次嘗試的用量。
+      嘗試前就停下（總時限已到）時，可能沒有先呼叫 `before()` 就呼叫 `after(sent=False)`：服務收到
+      就放掉沿用的占用、不記用量（Codex 複查 C2：「真的 adapter 還沒嘗試」和「替身不回報」分得開）。
     """
 
     before: Callable[[], None]
@@ -521,12 +532,17 @@ class EmbeddingResponseError(EmbeddingError):
     code = ErrorCode.EMBED_RESPONSE_INVALID
 
 
-def check_embedding_vectors(raw: object, *, count: int, dimensions: int) -> list[list[float]]:
+def check_embedding_vectors(
+    raw: object, *, count: int, dimensions: int, allow_zero: bool = False
+) -> list[list[float]]:
     """模型回的向量當作使用者輸入驗證，回轉成 float 的向量。
 
     要是 `count` 筆、每筆剛好 `dimensions` 個數字；數字是 int 或 float（不收 bool）、有限、
     絕對值不超過 halfvec 的上限 65504；轉成 halfvec 的半精度之後至少一個分量不是 0（全 0 的向量
     沒有方向，餘弦距離算不出來、HNSW 餘弦索引也不收；絕對值小於約 3e-8 的數字轉成半精度會變成 0）。
+
+    `allow_zero`：True 時不檢查最後一項，全 0 的那幾筆照樣回傳，由呼叫端逐筆用 `is_zero_at_halfvec`
+    判斷（文件的向量：只讓全 0 的那一篇失敗，其他篇照寫；Opus 確認審查低 3）。
 
     Raises:
         EmbeddingResponseError: 任何一項不符（訊息只說哪一項，不含數值）。
@@ -551,10 +567,15 @@ def check_embedding_vectors(raw: object, *, count: int, dimensions: int) -> list
             if not math.isfinite(number) or abs(number) > HALFVEC_MAX:
                 raise EmbeddingResponseError(f"第 {index} 筆向量有非有限或超出範圍的數字")
             vector.append(number)
-        if not any(_to_half(number) for number in vector):
+        if not allow_zero and is_zero_at_halfvec(vector):
             raise EmbeddingResponseError(f"第 {index} 筆向量轉成 halfvec 後全是 0")
         vectors.append(vector)
     return vectors
+
+
+def is_zero_at_halfvec(vector: Sequence[float]) -> bool:
+    """轉成 halfvec 的半精度之後每個分量都是 0 嗎（呼叫前已確認每個數字有限、在 ±65504 內）。"""
+    return not any(_to_half(number) for number in vector)
 
 
 def _to_half(number: float) -> float:
