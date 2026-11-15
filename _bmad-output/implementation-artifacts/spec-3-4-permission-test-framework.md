@@ -176,3 +176,17 @@ deferred:
 - `cd web && npm run lint && npm run typecheck && npm test && npm run build:member && npm run build:demo && npx playwright test --project=chromium`（都加 npm 別名）-- expected: 全過
 - `uv run radar export-schema && (cd web && npm run generate:api) && git status --porcelain` -- expected: 沒有差異
 - push 後 `gh run list --branch feat/3-4-permission-test-framework` -- expected: 最後一個 commit 全綠
+
+## Auto Run Result
+
+**做了什麼：** api 的錯誤一律 RFC 9457（`problems.py`：代碼→狀態只在一張表；本文只有 type／title／status／code；驗證錯誤只記種類）；3.3 的路由改用 `ApiProblemError` 與 Pydantic 回應模型；`radar export-schema` 用子行程輸出 `openapi.json`（全集，含假登入路由），CI `openapi-drift` 比對；orval 8.47.0（MIT，新增 101 個 dev 套件）產生 fetch 函式與型別到 `web/src/generated/`，CI `web-generated-drift` 比對，ESLint 只排除產生的檔、頁面只准 `import type`；前端 `errorMessageKey`（兩個代碼有專屬句子，其餘落到通用句）；換人測試與金絲雀測試共用 `tests/permissions/` 的登記表（豁免要理由、沒豁免要對照），單元測試和 `openapi.json` 與真正的 `main()` 組裝比對。ADR-0047（提議）。
+
+**審查結果：** 38 項（合併重複後 23 列；medium 4、其餘 low；intent 8 項描述性）。patch 10 組（對照、main() 組裝比對、no-store 與 content-type 斷言、`total`、stderr、`type` 固定值、export-schema 檢查 JSON、docstring、spec 名稱、拿掉 spec 裡的 npm 別名網址）；defer 3 項見 frontmatter；reject 的理由都在 Review Triage Log。
+
+**CI：** 1fae31f → run 43712610569 全綠；ead3ef0 → run 43713889488 全綠（integration 814 passed、1 skipped：換人測試目前沒有用例）。
+
+**followup_review_recommended：false**：審查後的修正都在測試框架與文件，產品程式只改了 `ProblemDetails.type` 的型別、一段 docstring 與 export-schema 的 JSON 檢查，沒有改到驗證或權限邏輯。
+
+**驗證：** `ruff check`、`ruff format --check`（330 檔）、`mypy`（322 檔）、`lint-imports`（19 條）全過；`pytest -m unit` 3007 passed、1 xfailed；`pytest -m arch` 299 passed、9 errors（本機連不到資料庫）；web lint、typecheck、161 個 Vitest、build:member／build:demo、78 個 Playwright 通過；重新輸出與重新產生後沒有差異。
+
+**剩下的風險：** 1fae31f 裡留有 npm 別名的網址（不能改寫歷史）；換人測試要到第一個回成員資料的端點（3.6 起）才真的跑；整合測試的 SADeprecationWarning（`radar/repo/members.py` 的 `Row.tuple()`）是 3.3 的既有程式，沒在這裡改。
