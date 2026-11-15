@@ -6,6 +6,7 @@
   框架拿這一份請求，成員 B 送一次、成員 A 送一次，**只換身分**。
 - 框架核對**實際處理請求的路由**（Starlette 路由比對寫進 scope 的 `route`）就是登記的端點：
   路徑打錯、被別的路由接走、方法不對（只對上路徑），結果都不能當證據（`assert_reached`）。
+  scope 的路由物件以物件身分對回 app 的路由表；路由表裡沒有的物件（就算樣板與方法都相同）算沒打到。
 - 換人測試（沒豁免的端點，`run_cross_member_case`）：B 要得到「看不到」（404 或空清單），A 自己要
   拿得到（對照）。沒有對照，路徑打錯、資料沒建成也會得到 404，換人測試會白白通過。
 - 「看不到」的判定（ADR-0002：不回 403，不透露資料存在，`assert_hidden_from_other_member`）：
@@ -13,7 +14,8 @@
     `application/problem+json`；多帶任何欄位都失敗。
   - 空清單：`items == []`，而且只能有回應模型宣告的清單欄位（Conventions「API」的 `items`、
     `next_cursor`、`total`、`snapshot`，`list_fields_of`）；`total` 沒有或是 0、`next_cursor`
-    沒有值。
+    沒有值；有 `snapshot` 時要剛好是 AD-19 的 `number`（正整數）與 `as_of`（ISO 8601、結尾 `Z`），
+    不能夾帶別的內容（ADR-0047）。
 - 豁免換人測試時寫 `exempt="理由"` 與 `status=預期狀態碼`；豁免的端點照樣有呼叫函式，
   金絲雀測試一樣會打它，狀態碼不是預期的就失敗。
 - 金絲雀（`run_canary_case`）：成員 A 的 email 是固定的金絲雀字串；B 打每個登記的端點，B 的回應
@@ -30,6 +32,7 @@ import uuid
 from collections import Counter
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
+from datetime import datetime
 from http import HTTPStatus
 from pathlib import Path
 from types import CodeType
@@ -67,6 +70,11 @@ NOT_FOUND_PROBLEM: Mapping[str, object] = {
 }
 # Conventions「API」的清單欄位：B 拿到空清單時，只能有回應模型宣告的這幾個欄位。
 LIST_ENVELOPE = frozenset({"items", "next_cursor", "total", "snapshot"})
+# 清單裡的 `snapshot`：AD-19「API 回應都含 `snapshot`（`number` 與 `as_of`）」；`number` 是遞增的
+# 整數（快照 1 起），`as_of` 照 Conventions「時間」是 ISO 8601、結尾 `Z`。只准剛好這個形狀
+# （ADR-0047）。
+SNAPSHOT_FIELDS = frozenset({"number", "as_of"})
+_SNAPSHOT_AS_OF = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,6})?Z")
 
 # 中介層記的「一個請求結束」那筆日誌（radar/entrypoints/api/app.py）。
 REQUEST_FINISHED_EVENT = "請求完成"
@@ -119,7 +127,10 @@ class ReachedRoute:
 
 @dataclass(frozen=True)
 class SentRequest:
-    """送出去的一個請求：回應，以及實際處理它的路由（沒有路由接手時是 None）。"""
+    """送出去的一個請求：回應，以及實際處理它的路由。
+
+    沒有路由接手，或 scope 裡的路由物件不在 app 的路由表裡（`_reached`），都是 None。
+    """
 
     response: Response
     route: ReachedRoute | None
@@ -145,15 +156,18 @@ class _RouteRecorder:
 
 
 def _reached(app: FastAPI, route: object | None) -> ReachedRoute | None:
-    """把 scope 裡的路由物件對回 app 的路由表（`include_router` 的前綴也算進路徑樣板）。"""
+    """把 scope 裡的路由物件對回 app 的路由表（`include_router` 的前綴也算進路徑樣板）。
+
+    以物件身分（`is`）找路由表裡的那一條；路由表裡沒有這個物件就回 None（算沒打到）。不拿物件
+    自己的 `path_format`／`methods` 補：子應用或中介層留下一個樣板與方法都相同的別的路由物件，
+    不能當成打到了登記的端點。
+    """
     if route is None:
         return None
     for context in iter_route_contexts(app.routes):
-        if context.original_route is route or context.route is route:
+        if context.original_route is route:
             return ReachedRoute(context.path_format, frozenset(context.methods or ()))
-    return ReachedRoute(
-        getattr(route, "path_format", None), frozenset(getattr(route, "methods", None) or ())
-    )
+    return None
 
 
 def endpoint_url(endpoint: Endpoint, path_params: Mapping[str, str]) -> str:
@@ -464,7 +478,8 @@ def assert_hidden_from_other_member(
 
     Raises:
         AssertionError: 其他結果（含 403：回 403 等於告訴對方資料存在，ADR-0002），或 404／空清單
-            多帶了欄位。
+            多帶了欄位，或空清單的 `snapshot` 不是剛好 `number` 與 `as_of`
+            （`snapshot_is_well_formed`）。
     """
     if response.status_code == 404:
         assert _media_type(response) == PROBLEM_MEDIA_TYPE, (
@@ -492,6 +507,30 @@ def assert_hidden_from_other_member(
     # 清單是空的、總數卻不是 0：等於透露了 A 的資料筆數。
     assert body.get("total") in (None, 0), f"成員 B 看得到成員 A 的資料筆數：{response.text}"
     assert body.get("next_cursor") is None, f"成員 B 的空清單卻有下一頁：{response.text}"
+    if "snapshot" in body:
+        assert snapshot_is_well_formed(body["snapshot"]), (
+            "成員 B 的空清單的 snapshot 要剛好是 number（正整數）與 as_of（ISO 8601、結尾 Z），"
+            f"不能夾帶別的內容：{response.text}"
+        )
+
+
+def snapshot_is_well_formed(value: object) -> bool:
+    """`snapshot` 是不是剛好 AD-19 的形狀：只有 `number`（正整數）與 `as_of`（ISO 8601、結尾 `Z`）。
+
+    null、字串、多一個或少一個欄位、`number` 是布林或字串、`as_of` 不是合法的時間都不算。
+    """
+    if not isinstance(value, dict) or value.keys() != SNAPSHOT_FIELDS:
+        return False
+    number, as_of = value["number"], value["as_of"]
+    if type(number) is not int or number < 1:
+        return False
+    if not isinstance(as_of, str) or _SNAPSHOT_AS_OF.fullmatch(as_of) is None:
+        return False
+    try:
+        datetime.fromisoformat(as_of)
+    except ValueError:
+        return False
+    return True
 
 
 def assert_visible_to_owner(response: Response) -> None:

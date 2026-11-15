@@ -8,7 +8,9 @@
   拿得到）擋住「路徑打錯也是 404」的假通過。
 - 框架送的是同一份請求、只換身分，並核對實際處理請求的路由：只有 B 被送到別的路由也會失敗。
 - 框架自己的頁面（頁面殼、文件頁、健康檢查的 HEAD）以實際處理函式辨認：換了處理函式就報錯。
-- 「看不到」的 404 與空清單多帶一個欄位就失敗；金絲雀走真的日誌設定，寫進日誌就失敗。
+- scope 的路由物件不在 app 的路由表裡（就算樣板與方法都和登記的端點相同）算沒打到。
+- 「看不到」的 404 與空清單多帶一個欄位就失敗；空清單的 `snapshot` 只准 AD-19 的 `number` 與
+  `as_of`，夾帶別的內容就失敗；金絲雀走真的日誌設定，寫進日誌就失敗。
 真的資料庫、真的兩位成員的版本在 `tests/integration/test_permissions.py`。
 """
 
@@ -25,11 +27,13 @@ import structlog
 import uvicorn
 from fastapi import APIRouter, FastAPI, Request
 from fastapi.responses import JSONResponse
+from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 from httpx2 import Response
 from pydantic import BaseModel
 from starlette.requests import Request as StarletteRequest
 from starlette.routing import Route
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 import radar.entrypoints.api.main as api_main
 from radar.adapters.fake.login import pick_member_identity
@@ -585,6 +589,53 @@ def test_cross_member_case_fails_for_a_registered_path_that_no_route_serves() ->
         run_cross_member_case(case, _app_context(_notes_app()))
 
 
+class _LookalikeRouteForOther:
+    """包在 app 的路由外面：成員 B 的請求處理完後，把 scope 的 `route` 換成 `route`（路由表外的
+    物件）；模擬子應用或中介層留下的非預期 `route`。每換一次記進 `replaced`。"""
+
+    def __init__(self, app: ASGIApp, *, route: APIRoute, replaced: list[object]) -> None:
+        self.app = app
+        self.route = route
+        self.replaced = replaced
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        await self.app(scope, receive, send)
+        cookie = dict(scope.get("headers", [])).get(b"cookie", b"")
+        if scope["type"] == "http" and OTHER.token.encode() in cookie:
+            scope["route"] = self.route
+            self.replaced.append(self.route)
+
+
+def _lookalike_note(note_id: str) -> dict[str, str]:
+    return {"note_id": note_id}
+
+
+def test_cross_member_case_fails_when_the_route_is_not_in_the_app_route_table() -> None:
+    # Codex 複查 R1：B 打錯路徑得到 404（本文是正確的 not_found），scope 的 route 卻是路由表外一個
+    # 路徑樣板與方法都和登記端點相同的物件。只看物件自己的 path_format／methods 會判成打到；框架以
+    # 物件身分對回 app 的路由表，查不到就算沒打到。
+    lookalike = APIRoute(TEST_ONLY_PATH, _lookalike_note, methods=["GET"])
+    assert (lookalike.path_format, lookalike.methods) == (TEST_ONLY_PATH, {"GET"})
+    replaced: list[object] = []
+    app = _notes_app(misroute_other=True)
+    app.add_middleware(_LookalikeRouteForOther, route=lookalike, replaced=replaced)
+    ctx = _app_context(app)
+
+    sent = ctx.send(
+        ctx.other,
+        Endpoint("GET", TEST_ONLY_PATH),
+        EndpointRequest(path_params={"note_id": NOTE_ID}),
+    )
+    assert replaced == [lookalike]
+    assert sent.response.status_code == 404
+    assert_hidden_from_other_member(sent.response)
+    assert sent.route is None
+    with pytest.raises(
+        AssertionError, match=r"成員 B 的請求沒有打到登記的端點.*實際處理的路由是 沒有"
+    ):
+        run_cross_member_case(_note_case(), ctx)
+
+
 def test_send_reports_the_route_that_really_handled_the_request() -> None:
     ctx = _app_context(_notes_app())
     note = Endpoint("GET", TEST_ONLY_PATH)
@@ -673,6 +724,81 @@ def test_empty_list_fields_come_from_the_response_model() -> None:
 def test_empty_list_with_a_next_cursor_fails() -> None:
     with pytest.raises(AssertionError, match="下一頁"):
         assert_hidden_from_other_member(Response(200, json={"items": [], "next_cursor": "abc"}))
+
+
+# --- 空清單的 snapshot 只准 AD-19 的形狀（Codex 複查 R2） --------------------------------------
+
+SNAPSHOT = {"number": 12, "as_of": "2026-11-15T16:00:00Z"}
+PRIVATE_TEXT = "成員 A 的資料"
+
+
+@pytest.mark.parametrize(
+    "snapshot",
+    [
+        pytest.param(SNAPSHOT, id="seconds"),
+        pytest.param({"number": 1, "as_of": "2026-11-15T16:00:00.123456Z"}, id="microseconds"),
+    ],
+)
+def test_empty_list_with_a_well_formed_snapshot_passes(snapshot: dict[str, object]) -> None:
+    assert_hidden_from_other_member(
+        Response(200, json={"items": [], "total": 0, "next_cursor": None, "snapshot": snapshot})
+    )
+
+
+@pytest.mark.parametrize(
+    "snapshot",
+    [
+        pytest.param({"private_text": PRIVATE_TEXT}, id="object"),
+        pytest.param({**SNAPSHOT, "private_text": PRIVATE_TEXT}, id="extra-field"),
+        pytest.param(PRIVATE_TEXT, id="private-string"),
+        pytest.param({"number": 12, "as_of": PRIVATE_TEXT}, id="private-as-of"),
+        pytest.param({"number": PRIVATE_TEXT, "as_of": SNAPSHOT["as_of"]}, id="private-number"),
+        pytest.param({"number": True, "as_of": SNAPSHOT["as_of"]}, id="bool-number"),
+        pytest.param({"number": 0, "as_of": SNAPSHOT["as_of"]}, id="zero-number"),
+        pytest.param({"number": 12, "as_of": "2026-11-16T00:00:00+08:00"}, id="not-z"),
+        pytest.param({"number": 12, "as_of": "2026-13-45T16:00:00Z"}, id="impossible-date"),
+        pytest.param({"number": 12}, id="missing-as-of"),
+        pytest.param(None, id="null"),
+        pytest.param([], id="list"),
+    ],
+)
+def test_empty_list_snapshot_carrying_other_content_fails(snapshot: object) -> None:
+    response = Response(200, json={"items": [], "total": 0, "snapshot": snapshot})
+
+    with pytest.raises(AssertionError, match="snapshot 要剛好是 number"):
+        assert_hidden_from_other_member(response)
+
+
+class _SnapshotNoteList(BaseModel):
+    """回應模型宣告了 `snapshot` 的清單；`snapshot` 的型別故意寬鬆（任何物件都收）。"""
+
+    items: list[str]
+    total: int
+    snapshot: dict[str, Any]
+
+
+def test_cross_member_case_fails_when_the_snapshot_carries_private_text() -> None:
+    # Codex 複查 R2 的反例：B 的 items 是空的、total 是 0，欄位也都是回應模型宣告的，但 snapshot
+    # 夾帶了 A 的私人文字。只看欄位名稱會通過；框架照 AD-19 驗證 snapshot 的內容，所以失敗。
+    path = "/api/v1/test-only-snapshot-notes"
+    app = _notes_app()
+
+    @app.get(path)
+    def snapshot_notes(request: Request) -> _SnapshotNoteList:
+        caller = _authenticate(request.cookies.get(SESSION_COOKIE))
+        assert caller is not None
+        items = [text for owner, text in NOTES.values() if owner == str(caller.member_id)]
+        return _SnapshotNoteList(
+            items=items, total=len(items), snapshot={"private_text": NOTES[NOTE_ID][1]}
+        )
+
+    registry = EndpointRegistry()
+    registry.case("GET", path)(lambda _ctx: EndpointRequest())
+    (case,) = registry.cases.values()
+
+    assert "snapshot" in list_fields_of(app.openapi(), case.endpoint)
+    with pytest.raises(AssertionError, match="snapshot 要剛好是 number"):
+        run_cross_member_case(case, _app_context(app))
 
 
 # --- 金絲雀：預期狀態碼、只看目標請求的日誌、走真的日誌設定 -----------------------------------

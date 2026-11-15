@@ -164,7 +164,7 @@
 ## 3.4 留給 3.6 以後的 Story：權限測試、錯誤格式、產生的型別
 
 - **新增端點一定要登記**（ADR-0047）：在 `tests/permissions/cases.py` 用 `@REGISTRY.case("方法", "路徑樣板")` 寫「成員 B 怎麼呼叫它」；沒登記 `tests/unit/test_permission_coverage.py` 就失敗。
-  - 會讀或改某位成員資料的端點（3.6 論文頁的私人欄位、3.16 文獻庫、Epic 5 問答紀錄、Epic 6 上傳）：**不豁免**。登記的函式先用 `ctx.extras["database"]`（整合測試的 `Database`）替成員 A 建資料，再回傳一份 `EndpointRequest(path_params=..., query=..., body=...)`（方法與路徑樣板來自登記本身）。框架用這一份請求先以 B 的身分送、再以 A 的身分送（對照），兩次都要打到登記的端點；`tests/integration/test_permissions.py` 檢查 B 得到剛好四個欄位的 404 problem，或只有回應模型清單欄位的空清單（`items == []`、`total` 沒有或是 0），A 要 200 且有內容。
+  - 會讀或改某位成員資料的端點（3.6 論文頁的私人欄位、3.16 文獻庫、Epic 5 問答紀錄、Epic 6 上傳）：**不豁免**。登記的函式先用 `ctx.extras["database"]`（整合測試的 `Database`）替成員 A 建資料，再回傳一份 `EndpointRequest(path_params=..., query=..., body=...)`（方法與路徑樣板來自登記本身）。框架用這一份請求先以 B 的身分送、再以 A 的身分送（對照），兩次都要打到登記的端點；`tests/integration/test_permissions.py` 檢查 B 得到剛好四個欄位的 404 problem，或只有回應模型清單欄位的空清單（`items == []`、`total` 沒有或是 0、有 `snapshot` 時剛好是 `number` 與 `as_of`，null 也不行），A 要 200 且有內容。
   - 能放文字的私人資料，把 `tests/permissions/framework.py` 的 `CANARY` 放進去；金絲雀測試會打每個登記的端點，檢查 B 的回應與這個請求的日誌都沒有它。
   - 只回自己資料、或不碰成員資料的端點才寫 `exempt="理由"`，同時寫 `status=成員 B 打它的預期狀態碼`（金絲雀測試會核對）。
   - 不要另外加 `include_in_schema=False` 的路由：不在 `openapi.json` 的路由只准 FastAPI 文件頁、頁面殼、健康檢查的 HEAD，而且以處理函式辨認。
