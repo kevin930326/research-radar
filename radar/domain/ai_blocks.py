@@ -253,6 +253,8 @@ class HypothesisValue:
     p_value: Decimal | None
     sample_size: int | None
     effect_type: str | None
+    # 判定了支持與否時，摘要裡寫出檢定結果的原文（2.6 的 FR-3 擷取規則 1）；沒判定時是 None。
+    result_quote: str | None
 
     def __post_init__(self) -> None:
         if type(self.ordinal) is not int or self.ordinal < 1:
@@ -261,6 +263,7 @@ class HypothesisValue:
             raise ValueError("sentence 不能是 None")
         _check_optional_text("sentence", self.sentence)
         _check_optional_text("effect_type", self.effect_type)
+        _check_optional_text("result_quote", self.result_quote)
         EvidenceType(self.evidence_type)
         SupportLevel(self.support)
         _check_decimal("beta", self.beta)

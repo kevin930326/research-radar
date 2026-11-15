@@ -35,8 +35,8 @@ PROMPT_FILE_HASHES: dict[str, dict[int, tuple[str, str | None]]] = {
     },
     "extract_model": {
         1: (
-            "fd2e96a2ed2c199bf193a7cd995f0c6c6ee10a4cdcf29fe0707b509c5604d19f",
-            "85cfcf178ec344ee954bf46b3c5f648cefe63dd3793f58a746da142ba888e2c1",
+            "593ffab9c3c09bde32f7486f9f00f49c822c18ea63d5a1935614063acf0bedf7",
+            "3069864a203ec7c369c2780b453e5232e0c23c54545dfeb49ff35c7c59f0a00a",
         ),
     },
 }

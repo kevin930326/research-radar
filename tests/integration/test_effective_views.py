@@ -506,8 +506,9 @@ def insert_research_model(
         db,
         "INSERT INTO hypothesis (research_model_id, ordinal, sentence, sentence_sha256,"
         " cause_construct_id, effect_construct_id, evidence_type, support, beta, p_value,"
-        " sample_size) VALUES (%s, 1, 'Trust increases loyalty.', %s, %s, %s,"
-        " 'empirical_test', 'supported', -0.10000000000000001, 0.01, 200)",
+        " sample_size, result_quote) VALUES (%s, 1, 'Trust increases loyalty.', %s, %s, %s,"
+        " 'empirical_test', 'supported', -0.10000000000000001, 0.01, 200,"
+        " 'trust increased loyalty')",
         header_id,
         "b" * 64,
         trust,
@@ -538,6 +539,7 @@ def test_research_model_view_carries_details_as_jsonb_with_numbers_as_text(
     (hypothesis,) = hypotheses
     assert hypothesis["beta"] == "-0.10000000000000001"
     assert hypothesis["p_value"] == "0.01"
+    assert hypothesis["result_quote"] == "trust increased loyalty"
     assert hypothesis["cause_construct_id"] == constructs[0]["construct_id"]
     assert (hypothesis["ordinal"], hypothesis["support"], hypothesis["sample_size"]) == (
         1,

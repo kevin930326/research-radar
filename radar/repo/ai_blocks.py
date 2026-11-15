@@ -263,6 +263,7 @@ def _hypothesis(item: Mapping[str, Any]) -> HypothesisValue:
         p_value=_decimal(item["p_value"]),
         sample_size=item["sample_size"],
         effect_type=item["effect_type"],
+        result_quote=item["result_quote"],
     )
 
 

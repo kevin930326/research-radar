@@ -167,6 +167,7 @@ RESEARCH_MODEL_COUNT_COLUMNS: Final = (
     "dropped_context_value_count",
     "unsupported_context_value_count",
     "corrected_support_count",
+    "cleared_value_count",
 )
 _RESEARCH_MODEL_CONTENT_COLUMNS: Final = (
     "is_review_or_meta_analysis",
@@ -259,6 +260,7 @@ hypothesis_table = Table(
     Column("p_value", Numeric),
     Column("sample_size", Integer),
     Column("effect_type", Text),
+    Column("result_quote", Text),
     # 也當 research_model_id 外鍵的索引。
     UniqueConstraint("research_model_id", "ordinal"),
     # 同一次擷取、同一句、同一條關係只有一列（FR-3 擷取規則 3）；自動產生的名字超過 63 字，給短名。
@@ -273,10 +275,17 @@ hypothesis_table = Table(
     Index("ix_hypothesis_effect_construct_id", "effect_construct_id"),
     CheckConstraint("ordinal >= 1", name="ordinal_positive"),
     CheckConstraint(
-        "sentence ~ '[^[:space:]]' AND (effect_type IS NULL OR effect_type ~ '[^[:space:]]')",
+        "sentence ~ '[^[:space:]]' AND (effect_type IS NULL OR effect_type ~ '[^[:space:]]')"
+        " AND (result_quote IS NULL OR result_quote ~ '[^[:space:]]')",
         name="text_not_blank",
     ),
     CheckConstraint("sentence_sha256 ~ '^[0-9a-f]{64}$'", name="sentence_sha256_format"),
+    # FR-3 擷取規則 1：判定了支持與否就一定有寫出結果的原文，沒判定就沒有。
+    CheckConstraint(
+        "(support IN ('supported', 'not_supported', 'partially_supported'))"
+        " = (result_quote IS NOT NULL)",
+        name="result_quote_matches_support",
+    ),
     CheckConstraint(
         "evidence_type IN ('empirical_test', 'analytical', 'simulation', 'qualitative',"
         " 'conceptual')",
@@ -323,12 +332,12 @@ _INSERT: Final[Mapping[LlmTask, TextClause]] = MappingProxyType(
             " lang, status, reject_reason, is_review_or_meta_analysis, country, industry,"
             " research_design, unit_of_analysis, sample_size, limitations, future_research,"
             " dropped_context_value_count, unsupported_context_value_count,"
-            " corrected_support_count)"
+            " corrected_support_count, cleared_value_count)"
             " VALUES (:paper_id, :run_id, :input_kind, :input_sha256, :abstract_id, :lang, :status,"
             " :reject_reason, :is_review_or_meta_analysis, :country, :industry, :research_design,"
             " :unit_of_analysis, :sample_size, :limitations, :future_research,"
             " :dropped_context_value_count, :unsupported_context_value_count,"
-            " :corrected_support_count) RETURNING id"
+            " :corrected_support_count, :cleared_value_count) RETURNING id"
         ),
     }
 )
@@ -345,10 +354,10 @@ _INSERT_CONSTRUCT_MENTION: Final = text(
 _INSERT_HYPOTHESIS: Final = text(
     "INSERT INTO hypothesis (research_model_id, ordinal, sentence, sentence_sha256,"
     " cause_construct_id, effect_construct_id, evidence_type, support, beta, p_value,"
-    " sample_size, effect_type)"
+    " sample_size, effect_type, result_quote)"
     " VALUES (:research_model_id, :ordinal, :sentence, :sentence_sha256, :cause_construct_id,"
     " :effect_construct_id, :evidence_type, :support, :beta, :p_value, :sample_size,"
-    " :effect_type)"
+    " :effect_type, :result_quote)"
 )
 
 _INSERT_CLASSIFICATION_LABEL: Final = text(
@@ -587,6 +596,7 @@ def _create_research_model_details(
                     "p_value": hypothesis.p_value,
                     "sample_size": hypothesis.sample_size,
                     "effect_type": hypothesis.effect_type,
+                    "result_quote": hypothesis.result_quote,
                 }
                 for hypothesis in content.hypotheses
             ],

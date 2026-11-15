@@ -100,6 +100,33 @@ def test_non_string_is_refused() -> None:
 _NAME_ALPHABET = st.characters(codec="utf-8")
 
 
+# 括號裡的字：故意多放「算大寫、卻不是字母或數字」的字（🅰、Ⓐ、Ⅻ）與各種符號。
+_PAREN_ALPHABET = st.one_of(
+    st.sampled_from("🅰🅱ⒶⓐⅫⅰ\u00b2\u2070ﬁẞ'-.&/"),
+    st.characters(codec="utf-8", exclude_characters="()"),
+)
+
+
+@settings(max_examples=500)
+@given(
+    st.lists(st.text(alphabet=_NAME_ALPHABET, max_size=6), max_size=3).map(" ".join),
+    st.text(alphabet=_PAREN_ALPHABET, min_size=1, max_size=15),
+)
+@example("Trust", "🅰")
+@example("Trust", "🅰B")
+@example("", "Ⓐ")
+def test_normalize_name_never_raises_on_parenthesised_text(before: str, inside: str) -> None:
+    # Codex 審查：`Trust (🅰)` 原本丟 ValueError（候選字母是空的）。不可信的名稱只會被正規化。
+    result = normalize_name(f"{before} ({inside})")
+
+    assert normalize_name(result) == result
+
+
+def test_uppercase_symbol_in_parentheses_is_treated_as_punctuation() -> None:
+    # 🅰 是符號（Unicode So）：不是縮寫，照其他符號換成空白。
+    assert normalize_name("Trust (🅰)") == "trust"
+
+
 @settings(max_examples=500)
 @given(st.text(alphabet=_NAME_ALPHABET, max_size=40))
 @example("Perceived Usefulness (PU)")

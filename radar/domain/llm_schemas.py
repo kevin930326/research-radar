@@ -224,6 +224,10 @@ class HypothesisOutput(BaseModel):
         description="支持與否：只有實證檢定而且報告了結果才判定；實證檢定沒寫結果填 not_stated；"
         "其他證據類型一律 not_determined"
     )
+    result_quote: str | None = Field(
+        description="寫出檢定結果的那段原文：support 是 supported、not_supported 或"
+        " partially_supported 時必填，從輸入逐字照抄（可以和原句同一段）；其他情況填 null"
+    )
     statistics: HypothesisStatsOutput | None = Field(description="統計數字；輸入都沒提到就填 null")
 
 

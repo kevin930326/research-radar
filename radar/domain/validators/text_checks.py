@@ -207,15 +207,51 @@ _SCALE_WORDS: Final[Mapping[str, int]] = {"thousand": 10**3, "million": 10**6, "
 # 數值：（Decimal, 是不是百分比）。
 type Number = tuple[Decimal, bool]
 
+# 科學記號（在檢查用副本上找）：「4.2 × 10^-2」「4.2 x 10-2」（上標的 10⁻² 經 NFKC 變成 10-2，所以
+# 前面有「數字 ×」時 10 後面的 -2 是指數）、單獨的「10^-3」。整段一起讀；`numbers` 不取其中的碎片
+# （4.2、10、2），`structured_numbers` 算出完整的值（0.042）。
+_SCIENTIFIC: Final = re.compile(
+    r"(?<![0-9A-Za-z.])(?:(?P<sign>[-+])\s?)?(?P<mantissa>[0-9]+(?:\.[0-9]+)?|\.[0-9]+)\s?[×xX*·]\s?"
+    r"10\s?(?:\^\s?(?P<power>[-+]?\s?[0-9]+)|(?P<signed_power>[-+][0-9]+))(?![0-9]|\.[0-9])"
+    r"|(?<![0-9A-Za-z.])10\s?\^\s?(?P<lone_power>[-+]?\s?[0-9]+)(?![0-9]|\.[0-9])"
+)
+# 其他含 `^` 的寫法（讀不出完整的值）：整段不取數字。
+# 只從一段不含空白的字的開頭試（不會平方級回溯）。
+_CARET_TOKEN: Final = re.compile(r"(?<!\S)\S*\^\S*")
+# 負號和數字之間隔了一個空白（「β = - 0.42」）：接在 `=`、`:`、`(`、比較符號後面時是負號，併起來
+# 讀成 -0.42（不是 0.42）。
+_SPACED_MINUS: Final = re.compile(r"(?<=[=:(<>≤≥])(\s?)-\s(?=[0-9]|\.[0-9])")
+
+
+def _blank(match: re.Match[str]) -> str:
+    return " " * len(match.group(0))
+
+
+def _prepared_for_numbers(text: str) -> str:
+    """讀數字前：科學記號與含 `^` 的整段換成空白（不取碎片），隔空白的負號併到數字上。"""
+    text = _SCIENTIFIC.sub(_blank, text)
+    if "^" in text:
+        text = _CARET_TOKEN.sub(_blank, text)
+    return _SPACED_MINUS.sub(lambda match: match.group(1) + "-", text)
+
+
+def decimal_of(text: str) -> Decimal | None:
+    """`.05`、`0.050`、`1e-3` 這種寫法的數值（正規化）；讀不懂是 None。"""
+    try:
+        return Decimal(text).normalize(NUMBER_CONTEXT)
+    except DecimalException:
+        return None
+
 
 def numbers(text: str, *, keep_unscaled: bool = False) -> tuple[set[Number], bool]:
     """檢查用副本裡的數字 →（數值集合, 有沒有讀不懂的數字，例如指數大到算不出來）。
 
     單位（萬、million…）乘進數值；`keep_unscaled`（輸入用）時也留下沒乘的數字，所以摘要寫
-    「12 million」時輸出寫 12 或 1200 萬都對得上，輸出寫「12 萬」只會是 120000。"""
+    「12 million」時輸出寫 12 或 1200 萬都對得上，輸出寫「12 萬」只會是 120000。科學記號與含 `^`
+    的寫法整段不取（不會把「4.2 × 10^-2」的 4.2 當成輸入裡的數字）；「= - 0.42」讀成 -0.42。"""
     found: set[Number] = set()
     unreadable = False
-    for match in _NUMBER.finditer(text):
+    for match in _NUMBER.finditer(_prepared_for_numbers(text)):
         exponent = match["exponent"] or ""
         percent = match["percent"] is not None
         scale_word = (match["scale"] or "").strip().lower()
@@ -229,6 +265,30 @@ def numbers(text: str, *, keep_unscaled: bool = False) -> tuple[set[Number], boo
         except DecimalException:
             unreadable = True
     return found, unreadable
+
+
+def _scientific_values(text: str) -> set[Number]:
+    """`_SCIENTIFIC` 認得的科學記號的完整值（4.2 × 10^-2 → 0.042；10^-3 → 0.001）。"""
+    found: set[Number] = set()
+    for match in _SCIENTIFIC.finditer(text):
+        power = match["power"] or match["signed_power"] or match["lone_power"]
+        mantissa = match["mantissa"] or "1"
+        try:
+            exponent = int(power.replace(" ", ""))
+            value = Decimal((match["sign"] or "") + mantissa).scaleb(exponent, NUMBER_CONTEXT)
+            found.add((value.normalize(NUMBER_CONTEXT), False))
+        except DecimalException, ValueError:
+            continue
+    return found
+
+
+def structured_numbers(text: str) -> frozenset[Number]:
+    """結構化數值（研究模型的樣本數、題數、α、β、p…）可以對照的輸入數字：只有**完整量級**
+    （「12 million」只有 12000000，不留 12；資料庫的數字沒有單位欄位）、科學記號算出完整的值、
+    隔空白的負號讀成負數，加上英文數字詞（整個詞組的值）。`text` 是檢查用副本。"""
+    values, _ = numbers(text)
+    words = [word.lower() for word in ENGLISH_WORD.findall(text)]
+    return frozenset(values | _scientific_values(text) | number_word_values(words))
 
 
 def _number_word_kind(word: str) -> tuple[str | None, int]:

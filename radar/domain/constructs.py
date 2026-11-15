@@ -57,6 +57,8 @@ def _is_abbreviation_of(inside: str, before: str) -> bool:
     if not any(char.isupper() for char in inside):
         return False
     letters = [char for char in inside if char.isalnum()]
+    if not letters:  # 例如 `(🅰)`：算大寫、卻不是字母或數字（Codex 審查）
+        return False
     words = _WORDS.findall(before)
     content_words = [word for word in words if word.casefold() not in _SKIPPABLE]
     candidates = [letters]

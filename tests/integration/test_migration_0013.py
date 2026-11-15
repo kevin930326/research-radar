@@ -37,6 +37,7 @@ CONTENT_COLUMNS = {
     "dropped_context_value_count",
     "unsupported_context_value_count",
     "corrected_support_count",
+    "cleared_value_count",
 }
 NEW_TABLES = {"construct", "construct_mention", "hypothesis"}
 
@@ -119,6 +120,7 @@ def _header(
             "dropped_context_value_count": 0,
             "unsupported_context_value_count": 0,
             "corrected_support_count": 0,
+            "cleared_value_count": 0,
         }
     )
     values.update(content)
@@ -182,6 +184,10 @@ def _hypothesis(
         "evidence_type": "empirical_test",
         "support": "supported",
     } | changes
+    # 判定了支持與否就要有結果原文（沒特別給時照支持與否補上）。
+    if "result_quote" not in values:
+        decided = values["support"] in ("supported", "not_supported", "partially_supported")
+        values["result_quote"] = "Trust increases loyalty (p = .01)." if decided else None
     columns = ", ".join(values)
     placeholders = ", ".join("%s" for _ in values)
     _app(
@@ -281,6 +287,7 @@ def test_header_accepts_full_content(db: TestDatabase) -> None:
         dropped_context_value_count=1,
         unsupported_context_value_count=2,
         corrected_support_count=3,
+        cleared_value_count=4,
     )
     # 2.2 留下的表頭沒有內容：全部 NULL。
     _header(
@@ -288,6 +295,7 @@ def test_header_accepts_full_content(db: TestDatabase) -> None:
         dropped_context_value_count=None,
         unsupported_context_value_count=None,
         corrected_support_count=None,
+        cleared_value_count=None,
     )
 
 
@@ -304,6 +312,7 @@ def test_header_accepts_full_content(db: TestDatabase) -> None:
         {"dropped_context_value_count": -1},
         {"unsupported_context_value_count": -1},
         {"corrected_support_count": -1},
+        {"cleared_value_count": -1},
     ],
 )
 def test_header_checks(db: TestDatabase, content: dict[str, object]) -> None:
@@ -320,6 +329,7 @@ def test_header_checks(db: TestDatabase, content: dict[str, object]) -> None:
         {"limitations": "x"},
         {"dropped_context_value_count": 0},
         {"corrected_support_count": 0},
+        {"cleared_value_count": 0},
     ],
 )
 def test_rejected_header_has_no_content(db: TestDatabase, content: dict[str, object]) -> None:
@@ -447,6 +457,11 @@ def test_construct_mention_foreign_keys(
         {"p_value": "1.5"},
         {"p_value": "-0.01"},
         {"sample_size": 0},
+        # 判定了支持與否就一定有結果原文，沒判定就沒有（FR-3 擷取規則 1）。
+        {"result_quote": None},
+        {"support": "not_stated", "result_quote": "Trust increases loyalty."},
+        {"evidence_type": "qualitative", "support": "not_determined", "result_quote": "x"},
+        {"result_quote": "  "},
     ],
 )
 def test_hypothesis_checks(

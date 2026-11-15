@@ -82,6 +82,7 @@ RESEARCH_MODEL = ResearchModelValue(
             p_value=None,
             sample_size=None,
             effect_type=None,
+            result_quote=None,
         ),
     ),
 )

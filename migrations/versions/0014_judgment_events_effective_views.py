@@ -231,7 +231,8 @@ SELECT h.id AS research_model_id, h.paper_id, h.input_kind, h.created_at AS gene
       'cause_construct_id', y.cause_construct_id, 'effect_construct_id', y.effect_construct_id,
       'evidence_type', y.evidence_type, 'support', y.support,
       'beta', y.beta::text, 'p_value', y.p_value::text,
-      'sample_size', y.sample_size, 'effect_type', y.effect_type) ORDER BY y.ordinal)
+      'sample_size', y.sample_size, 'effect_type', y.effect_type,
+      'result_quote', y.result_quote) ORDER BY y.ordinal)
     FROM hypothesis AS y WHERE y.research_model_id = h.id
   ), '[]'::jsonb) AS hypotheses
 FROM research_model AS h

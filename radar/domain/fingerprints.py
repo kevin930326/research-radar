@@ -196,9 +196,9 @@ HYPOTHESIS_SENTENCE_VERSION: Final = 1
 def context_values_content_sha256(values: ContextValues) -> str:
     """情境值清單內容的雜湊（64 位小寫十六進位 SHA-256）。
 
-    算每個欄位依 `key` 排序後的（`key`, 定義, `terms`）：`key` 與定義會進 prompt，`terms` 決定
-    國家、產業的值存不存得下來（FR-3 擷取規則 4），三樣都會影響結果。顯示名稱、項目順序與 `terms`
-    的順序不算（`terms` 排序後才算）。
+    算每個欄位依 `key` 排序後的（`key`, 定義, `terms`, `excluded_terms`）：`key` 與定義會進
+    prompt，`terms` 與 `excluded_terms` 決定國家、產業的值存不存得下來（FR-3 擷取規則 4），都會
+    影響結果。顯示名稱、項目順序與兩種字樣的順序不算（排序後才算）。
     """
     payload: dict[str, object] = {"v": CONTEXT_VALUES_CONTENT_VERSION}
     for name, items in (
@@ -208,7 +208,12 @@ def context_values_content_sha256(values: ContextValues) -> str:
         ("unit_of_analysis", values.units_of_analysis),
     ):
         payload[name] = sorted(
-            [item.key, item.definition, None if item.terms is None else sorted(item.terms)]
+            [
+                item.key,
+                item.definition,
+                None if item.terms is None else sorted(item.terms),
+                None if item.excluded_terms is None else sorted(item.excluded_terms),
+            ]
             for item in items
         )
     return _canonical_sha256(payload)
