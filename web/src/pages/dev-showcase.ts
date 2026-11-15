@@ -1,4 +1,4 @@
-// 元件示範頁（/dev/components，只在開發環境）的資料：每個顏色與字級代幣一列。
+// 元件示範頁（/dev/components，只在開發環境）的資料：每個顏色與字級代幣一列，三組尺度每個值一個樣本。
 // 類別名稱寫成完整的字串，Tailwind 才掃得到；src/design-tokens.test.ts 檢查這兩份清單和 DESIGN.md 一樣、
 // 字級用的字體和 DESIGN.md 的 fontFamily 對得上。
 import type { Provenance } from "../components/AiBadge";
@@ -53,6 +53,74 @@ export const TYPE_SCALE: readonly string[] = [
   "font-mono text-micro-mono",
   "font-mono text-table-number",
 ];
+
+/** 尺度（ADR-0038）：字級、行高、字距各一組，每個值一個類別。 */
+export const FONT_SIZE_SCALE: readonly string[] = [
+  "text-s11",
+  "text-s12",
+  "text-s13",
+  "text-s14",
+  "text-s15",
+  "text-s16",
+  "text-s17",
+  "text-s18",
+  "text-s19",
+  "text-s20",
+  "text-s21",
+  "text-s22",
+  "text-s23",
+  "text-s24",
+  "text-s25",
+  "text-s26",
+  "text-s28",
+  "text-s30",
+  "text-s32",
+  "text-s34",
+  "text-s36",
+  "text-s38",
+  "text-s40",
+  "text-s44",
+  "text-s60",
+  "text-s68",
+];
+
+export const LINE_HEIGHT_SCALE: readonly string[] = [
+  "leading-100",
+  "leading-105",
+  "leading-120",
+  "leading-125",
+  "leading-130",
+  "leading-135",
+  "leading-140",
+  "leading-145",
+  "leading-150",
+  "leading-160",
+  "leading-165",
+  "leading-170",
+  "leading-175",
+  "leading-180",
+  "leading-185",
+  "leading-190",
+];
+
+export const LETTER_SPACING_SCALE: readonly string[] = [
+  "tracking-n001",
+  "tracking-0",
+  "tracking-0005",
+  "tracking-001",
+  "tracking-002",
+  "tracking-003",
+  "tracking-004",
+  "tracking-006",
+  "tracking-008",
+  "tracking-01",
+  "tracking-012",
+];
+
+/** 尺度類別 → 尺度的名稱（text-s15 → s15、leading-185 → 185、tracking-004 → 004）。 */
+export function scaleToken(className: string): string {
+  return className.replace(/^(?:text|leading|tracking)-/, "");
+}
 
 /** 色塊類別 → 顏色代幣。 */
 export function colorToken(className: string): string {

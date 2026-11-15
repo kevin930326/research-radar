@@ -59,7 +59,9 @@ const NON_LITERAL_IMPORT_SELECTORS = [
 const XHR_MESSAGE = "頁面與元件不得用 XMLHttpRequest，請經過 datasource（ADR-0010 第 1 點）。";
 // 寫死的色碼與字級（ADR-0037）：字串、樣板字串、JSX 屬性都算。
 const COLOR_MESSAGE = "顏色只用 DESIGN.md 的代幣（Tailwind 類別或 var(--color-…)），不得寫死色碼（ADR-0037）。";
-const FONT_SIZE_MESSAGE = "字級只用 DESIGN.md 的代幣（text-body 這類類別），不得寫死字級（ADR-0037）。";
+// 字級、行高、字距可以用角色（text-body）或尺度（text-s15、leading-185、tracking-004；ADR-0038）；任意值照樣不准。
+const FONT_SIZE_MESSAGE =
+  "字級、行高、字距只用 DESIGN.md 的角色或尺度（text-body、text-s15、leading-185、tracking-004 這類類別），不得寫死字級（ADR-0037、ADR-0038）。";
 // CSS 標準的顏色名稱（CSS Color Module Level 4 的 148 個）。transparent、currentColor、inherit、none
 // 不是寫死的顏色，不在清單裡；用清單而不是「任何英文字」，元件的 color="primary" 這類屬性才不會被誤擋。
 const CSS_COLOR_NAMES = [

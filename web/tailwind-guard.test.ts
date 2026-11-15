@@ -96,6 +96,45 @@ describe("tailwind guard", () => {
     }
   });
 
+  it("allows the type scales (ADR-0038): sizes, line heights and letter spacings in any combination", () => {
+    expect(checkFile(path.join(FIXTURES, "ScaleType.tsx"))).toEqual([]);
+    // 字級類別只設字級，不帶行高與字距；行高、字距各自一個類別。
+    const [size, leading, tracking] = design.theme.candidatesToCss(["text-s15", "leading-185", "tracking-004"]);
+    expect(size).toContain("font-size: var(--text-s15)");
+    expect(size).not.toMatch(/line-height|letter-spacing|font-weight/);
+    expect(leading).toContain("line-height: var(--leading-185)");
+    expect(tracking).toContain("letter-spacing: var(--tracking-004)");
+  });
+
+  it("blocks sizes, line heights and letter spacings outside the scales", () => {
+    expect(checkFile(path.join(FIXTURES, "OffScaleType.tsx")).sort()).toEqual(
+      [
+        // 不產生 CSS：尺度沒有這些名稱。
+        "text-s27",
+        "leading-999",
+        "tracking-005",
+        "text-s15/999",
+        "leading-1.7",
+        "tracking-0.02em",
+        // 會產生 CSS，但不是尺度：間距代幣當行高、負的字距、內建的行高名稱、CSS 變數。
+        "leading-4",
+        "leading-gutter-desktop",
+        "-tracking-004",
+        "leading-none",
+        "leading-(--x)",
+        "split:tracking-(--x)",
+      ].sort(),
+    );
+    // 任意值的行高、字距建置檢查也擋（任意字級 text-[15px] 由 ESLint 擋，見 style-lint.test.ts）。
+    const arbitrary = ["leading-[1.7]", "tracking-[0.02em]", "hover:leading-[20px]", "leading-185!", "!leading-4"];
+    expect(findInvalidClasses(design, arbitrary)).toEqual([
+      "leading-[1.7]",
+      "tracking-[0.02em]",
+      "hover:leading-[20px]",
+      "!leading-4",
+    ]);
+  });
+
   it("allows token classes, layout arbitrary values, i18n keys, URLs, sentences and component props", () => {
     expect(checkFile(path.join(FIXTURES, "AllowedStyles.tsx"))).toEqual([]);
   });
