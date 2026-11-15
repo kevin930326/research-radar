@@ -809,3 +809,7 @@
 - **子句開頭**：一個小句的起點，例如段落開頭、逗號或分號後面；`H1 was supported` 這類直接陳述要在子句開頭，前面接 `We dispute that`、`Other researchers report that` 這種別人的說法就不算（ADR-0039）。
 - **研究問題的前置語**：句子裡 `we examine whether` 前面的那段字（例如 `In this study, `）；要是這篇研究自己的說法，換成 `Other researchers report that` 這種別人的說法，後面的結果就不算（ADR-0039）。
 - **取消舊的 CI 執行（concurrency）**：同一個 PR 又推了新的 commit 時，GitHub 自動把還在跑的上一次檢查停掉，只留最新的那一次；省分鐘數，代價是被取消的那個 commit 沒有結果。
+- **授權條款（LICENSE）**：放在 repo 根目錄的聲明，告訴別人能不能使用、修改、散布這裡的程式；沒有的話別人依法不能用。
+- **MIT 授權**：最寬鬆常見的開源授權；別人可以自由使用、修改、商用，只要保留著作權與授權聲明。
+- **CC BY-SA**：和 CC BY 一樣要標註原作者，另外規定改作後要用同一種授權釋出。
+- **CC0**：作者放棄所有權利，任何人都能自由使用，不用標註；OpenAlex 的書目資料用這個。
