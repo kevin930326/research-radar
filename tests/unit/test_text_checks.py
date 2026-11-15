@@ -340,3 +340,23 @@ def test_structured_numbers_still_skip_an_abbreviated_magnitude_before_punctuati
     text: str,
 ) -> None:
     assert _n("12") not in structured_numbers(check_copy(text))
+
+
+# Opus 第三輪確認審查（PR #68）L2：量級縮寫後面接「連字號＋數字」的範圍，前面那個數字也遮掉；
+# 數字和字母中間有空白的（`312 K-12`）照讀（上面的測試）。
+
+
+@pytest.mark.parametrize(
+    ("text", "unreadable"),
+    [
+        ("a 12M-15M user base", ("12", "15", "12000000")),
+        ("10k-20k respondents", ("10", "20", "10000")),
+    ],
+)
+def test_structured_numbers_skip_both_ends_of_an_abbreviated_magnitude_range(
+    text: str, unreadable: tuple[str, ...]
+) -> None:
+    found = structured_numbers(check_copy(text))
+
+    for value in unreadable:
+        assert _n(value) not in found, value

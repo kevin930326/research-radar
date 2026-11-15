@@ -16,18 +16,22 @@ ADR-0040，Story 2.8）。向量化不經 LLM 閘門。
    占用中（還沒回應）的估計 token，加上這一批的估計，換成 neurons 超過
    `daily_free_neurons × stop_at_ratio` 就停下（`quota_reached`，記警告、不算失敗、不寫任何列），
    留到下一次續跑（下一次每週更新排入的工作，或 Kevin 再跑一次回填指令）；放得下就新增一筆占用
-   （第一次嘗試用）。
+   （第一次嘗試用）。日期在拿到額度鎖之後才讀時鐘決定。等額度鎖逾時 → 這一批算失敗
+   （`embed_quota_lock_timeout`，還沒有 run）、不送，其他論文照做。
 6. 取得執行資格（每篇一個短交易，立刻 commit，等鎖最多 `lock_timeout_seconds`）：先鎖住論文那一列
    再重讀；別的工作已經寫好同一份輸入 → `unchanged`，輸入又變了 → `input_changed`，都不是才新增
    一筆 `running` 的 `derivation_run`（task＝embed）；同一份輸入另一個工作正在跑（部分唯一索引）
    或等鎖逾時 → `busy`。這幾種都不送，也不算進 `limit`（重送時略過的不再扣，見 `_split`）。
 7. 呼叫 `provider.embed_documents`（不開著交易）。adapter 每次 HTTP 嘗試（含內部重試）前後回報
-   （`report_attempts_to`）：第一次嘗試用第 5 步的占用，之後每次重試前再占一次（放不下 →
-   `EmbeddingQuotaReachedError`，這批的 run 改成 `failed`（`embed_quota_reached`）、停下
-   `quota_reached`）；每次嘗試後在同一個短交易裡刪掉占用、記一筆 `api_call`（`workers_ai`、
-   那次嘗試當下的時間與 UTC 日期、估計 token；失敗也照記，設定錯記 0）。不回報嘗試的 provider
-   （替身）整次呼叫當成一次嘗試記帳。
-8. 驗證向量（筆數、維度＝登記的維度、數字有限且在 halfvec 範圍內、轉成 halfvec 後不是全 0）。
+   （`report_attempts_to`）：第一次嘗試前在額度鎖內確認日期，和第 5 步同一個 UTC 日期就用第 5 步的
+   占用；跨過 UTC 午夜了就在同一個交易裡放掉舊占用、照新的一天重查並占用。之後每次重試前再占一次。
+   放不下 → `EmbeddingQuotaReachedError`，這批的 run 改成 `failed`（`embed_quota_reached`）、停下
+   `quota_reached`；等額度鎖逾時 → 這批的 run 改成 `failed`（`embed_quota_lock_timeout`），其他
+   論文照做。每次嘗試後在同一個短交易裡刪掉占用、記一筆 `api_call`（`workers_ai`、那次嘗試當下的
+   時間與 UTC 日期、估計 token；失敗也照記，設定錯記 0）；adapter 回報「沒送出」時只放掉占用。
+   不回報嘗試的 provider（替身）整次呼叫當成一次嘗試記帳。
+8. 驗證向量（筆數、維度＝登記的維度、數字有限且在 halfvec 範圍內）；不符整批不寫。轉成 halfvec 後
+   全是 0 的那一篇單獨標成失敗（`embed_response_invalid`）、不寫，其他篇照寫。
 9. 寫入（每篇一個短交易，等鎖最多 `lock_timeout_seconds`）：先鎖住論文那一列，重讀、重算
    `input_sha256`；變了就把 run 改成 `failed`（`embed_input_changed`），run 已經被 sweep 收掉也
    不寫，等鎖逾時把 run 改成 `failed`（`embed_lock_timeout`），都對才把 run 改成 `succeeded` 並覆寫
@@ -76,6 +80,7 @@ from radar.domain.embeddings import (
     build_embedding_input,
     check_embedding_vectors,
     estimate_embedding_tokens,
+    is_zero_at_halfvec,
     quota_allows,
     report_attempts_to,
 )
@@ -397,58 +402,71 @@ def _clear(planned: _Planned, cloud_policy: CloudPolicy, tally: _Tally) -> Cloud
 
 @dataclass(frozen=True, slots=True)
 class _Hold:
-    """一筆額度占用（`embedding_quota_hold`）。"""
+    """一筆額度占用（`embedding_quota_hold`）。
+
+    `checked_at`：最近一次在額度鎖內確認這筆占用的時間（新增時、第一次嘗試前確認日期時）；它的
+    UTC 日期就是這筆占用算進的那一天，也是記帳時那次嘗試的時間。
+    """
 
     id: uuid.UUID
-    reserved_at: datetime
+    checked_at: datetime
+
+
+def _utc_day_start(moment: datetime) -> datetime:
+    return moment.astimezone(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
 
 
 class _AttemptLedger:
     """一次 `embed_documents` 呼叫的額度占用與記帳（7）。
 
     - 開始前已經有第 5 步的占用（第一次嘗試用）。
-    - adapter 每次嘗試前呼叫 `hooks.before`：第一次用現成的占用；之後每次重試前再占一次，
-      放不下就丟 `EmbeddingQuotaReachedError`（adapter 不送、不再重試）。
+    - adapter 每次嘗試前呼叫 `hooks.before`：第一次在額度鎖內確認日期，同一個 UTC 日期就用現成的
+      占用，跨過午夜就放掉它、照新的一天重查並占用（Codex 複查 C1）；之後每次重試前再占一次。
+      放不下丟 `EmbeddingQuotaReachedError`（adapter 不送、不再重試）。
     - adapter 每次嘗試後呼叫 `hooks.after`：刪掉占用、記一筆那次嘗試的 `api_call`（同一個交易），
-      時間是那次嘗試開始的時間（跨過 UTC 午夜的重試記在各自的日期）。
-    - provider 回來或丟錯之後呼叫 `close`：還有沒結清的占用（provider 沒有回報嘗試，例如替身）就把
-      整次呼叫當成一次嘗試記帳；`release` 是一篇都沒取得資格、什麼都沒送時放掉占用。
+      時間是那次嘗試在額度鎖內確認的時間（跨過 UTC 午夜的重試記在各自的日期）；`sent=False`
+      （嘗試前就停下）只放掉占用、不記用量（Codex 複查 C2）。
+    - provider 回來或丟錯之後呼叫 `close`：provider 從沒回報過嘗試（替身）就把整次呼叫當成一次嘗試
+      記帳；回報過卻還留著占用，代表那筆占用的嘗試沒有送出（例如確認日期時等額度鎖逾時），只放掉。
+      `release` 是一篇都沒取得資格、什麼都沒送時放掉占用。
     """
 
     def __init__(self, runner: _BatchRunner, hold: _Hold) -> None:
         self._runner = runner
         self._hold: _Hold | None = hold
-        self._attempt_at = hold.reserved_at
         self._reported = False
         self.tokens = 0
         self.run_ids: list[uuid.UUID] = []
         self.hooks = AttemptHooks(before=self._before, after=self._after)
 
     def _before(self) -> None:
-        now = self._runner.now()
-        if not self._reported and self._hold is not None:
-            self._reported = True
-            self._attempt_at = now
-            return
+        first = not self._reported
         self._reported = True
-        hold = self._runner.reserve(self.tokens, now)
+        current = self._hold if first else None
+        hold = self._runner.reserve(self.tokens, current=current)
         if hold is None:
+            # 跨日重查放不下時，舊占用已經在同一個交易裡放掉。
+            self._hold = None
             raise EmbeddingQuotaReachedError()
         self._hold = hold
-        self._attempt_at = now
 
     def _after(self, attempt: EmbeddingAttempt) -> None:
+        self._reported = True
         hold, self._hold = self._hold, None
         if hold is not None:
-            self._runner.settle(hold, attempt, self.tokens, self._attempt_at)
+            self._runner.settle(hold, attempt, self.tokens)
 
     def close(self, http_status: int | None, *, billable: bool) -> None:
-        """provider 回來或丟錯之後：沒結清的占用照整次呼叫的結果記帳。記不進去時盡量把這批的 run
-        收掉，再原樣丟出（占用留著，過期後轉成用量）。"""
+        """provider 回來或丟錯之後：沒結清的占用照整次呼叫的結果記帳（見類別說明）。記不進去時盡量
+        把這批的 run 收掉，再原樣丟出（占用留著，過期後轉成用量）。"""
         if self._hold is None:
             return
+        if self._reported:
+            attempt = EmbeddingAttempt(sent=False, http_status=None, billable=False)
+        else:
+            attempt = EmbeddingAttempt(sent=True, http_status=http_status, billable=billable)
         try:
-            self._after(EmbeddingAttempt(sent=True, http_status=http_status, billable=billable))
+            self._after(attempt)
         except BaseException:
             self._runner.fail_runs(self.run_ids, ErrorCode.EMBED_FAILED)
             raise
@@ -487,7 +505,14 @@ class _BatchRunner:
         estimated = estimate_embedding_tokens(
             [item.planned.embedding_input.text for item in items], config.token_estimate
         )
-        hold = self.reserve(estimated, self.now())
+        try:
+            hold = self.reserve(estimated)
+        except LockWaitTimeoutError:
+            # 還沒有 run：這批算失敗、不送，也不扣這次送的篇數；其他論文照做。
+            self._quota_lock_timeout([], len(items))
+            for _ in items:
+                self._skipped(resend)
+            return None
         if hold is None:
             return EmbedStop.QUOTA_REACHED
         ledger = _AttemptLedger(self, hold)
@@ -520,10 +545,15 @@ class _BatchRunner:
             ledger.close(None, billable=False)
             self.fail_runs(run_ids, ErrorCode.EMBED_QUOTA_REACHED)
             log.warning(
-                "重試途中今天的估計用量到了停下的比例，這一批不寫，留到下一次續跑",
+                "送出前今天的估計用量到了停下的比例，這一批不寫，留到下一次續跑",
                 papers=len(run_ids),
             )
             return EmbedStop.QUOTA_REACHED
+        except LockWaitTimeoutError:
+            # 嘗試前等額度鎖逾時（adapter 原樣丟出、沒有送出這一次）。
+            ledger.close(None, billable=False)
+            self._quota_lock_timeout(run_ids, len(run_ids))
+            return None
         except EmbeddingRequestError as exc:
             ledger.close(exc.http_status, billable=True)
             if len(claimed) > 1:
@@ -541,13 +571,19 @@ class _BatchRunner:
         # provider 回來了就是 200；向量不對也照記這一次請求的用量。
         ledger.close(200, billable=True)
         try:
-            vectors = check_embedding_vectors(raw, count=len(claimed), dimensions=self._dimensions)
+            vectors = check_embedding_vectors(
+                raw, count=len(claimed), dimensions=self._dimensions, allow_zero=True
+            )
         except EmbeddingError as exc:
             return self._failed(exc, 200, run_ids)
 
         # 9. 寫入：每篇自己一個短交易，先鎖論文、核對輸入沒變、run 還是 running 才寫。
+        #    轉成 halfvec 後全是 0 的那一篇單獨標成失敗，其他照寫（不讓它卡住後面的論文）。
         try:
             for (item, run_id), vector in zip(claimed, vectors, strict=True):
+                if is_zero_at_halfvec(vector):
+                    self._zero_vector(run_id)
+                    continue
                 self._write_one(item, run_id, vector)
         except BaseException as exc:
             log.error("寫入向量失敗", error_type=type(exc).__name__)
@@ -557,20 +593,31 @@ class _BatchRunner:
 
     # --- 額度占用與記帳 ---------------------------------------------------------------------
 
-    def reserve(self, tokens: int, now: datetime) -> _Hold | None:
-        """5／每次重試前：短交易裡拿額度鎖，把過期的占用轉成用量，「今天已用＋占用中＋這次」放得下
-        就新增一筆占用；放不下回 None（記警告）。
+    def reserve(self, tokens: int, *, current: _Hold | None = None) -> _Hold | None:
+        """5／每次嘗試前：短交易裡拿額度鎖，**拿到鎖之後**才讀時鐘決定是哪一天，把過期的占用轉成
+        用量，「今天已用＋占用中＋這次」放得下就新增一筆占用；放不下回 None（記警告）。
 
-        占用的有效期限是 `config.run_limit_seconds`：過了這麼久那次嘗試一定已經結束，還在就是行程
-        中斷沒回來記帳，由下一次占用照估計轉成那天的用量（保守，當作已計費）。
+        `current`：第一次嘗試沿用的第 5 步占用（Codex 複查 C1）。和現在同一個 UTC 日期就照用
+        （回同一筆、確認時間換成現在）；跨過午夜了就在同一個交易裡刪掉它（還沒送出，不記用量），
+        再照新的一天重查、放得下才新增。放不下時舊占用也已經刪掉。
+
+        占用的有效期限是 `config.run_limit_seconds`：過了這麼久那次嘗試（對方正常回標頭時）一定已經
+        結束，還在就是行程中斷沒回來記帳，由下一次占用照估計轉成那天的用量（保守，當作已計費）；
+        原本的行程之後才回來結清時只刪不記（`settle`）。
 
         Raises:
-            LockWaitTimeoutError: 等額度鎖超過 `lock_timeout_seconds`。
+            LockWaitTimeoutError: 等額度鎖超過 `lock_timeout_seconds`（交易退回，`current` 還在）。
         """
         config = self._config
-        day_start = now.astimezone(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
         with self._database.transaction_with_lock_timeout(config.lock_timeout_ms) as connection:
             Database.transaction_lock(connection, EMBEDDING_QUOTA_LOCK_KEY)
+            now = self.now()
+            day_start = _utc_day_start(now)
+            if current is not None:
+                if _utc_day_start(current.checked_at) == day_start:
+                    return _Hold(current.id, now)
+                log.info("占用額度後、第一次送出前跨過 UTC 午夜，照新的一天重查額度")
+                delete_embedding_quota_hold(connection, current.id, None)
             delete_expired_embedding_quota_holds(connection, now)
             used, held = get_embedding_quota_usage(SystemViewer(), connection, day_start)
             if not quota_allows(used + held, tokens, config.quota):
@@ -590,21 +637,23 @@ class _BatchRunner:
             )
         return _Hold(hold_id, now)
 
-    def settle(
-        self, hold: _Hold, attempt: EmbeddingAttempt, tokens: int, called_at: datetime
-    ) -> None:
-        """每次嘗試後：同一個短交易裡刪掉占用、記一筆 `api_call`（沒送出就只刪占用）。"""
+    def settle(self, hold: _Hold, attempt: EmbeddingAttempt, tokens: int) -> None:
+        """每次嘗試後：同一個短交易裡刪掉占用、記一筆 `api_call`（沒送出就只刪占用）。
+
+        占用已經不在（過期後被別的占用轉成用量了）時什麼都不寫，這次的報表也不計入（那筆用量已經照
+        占用的估計記過，報表和帳對得上）。
+        """
         call = None
         if attempt.sent:
             call = EmbeddingApiCall(
                 operation=EMBED_DOCUMENTS_OPERATION,
                 http_status=attempt.http_status,
                 estimated_input_tokens=tokens if attempt.billable else 0,
-                called_at=called_at,
+                called_at=hold.checked_at,
             )
         with self._database.transaction() as connection:
-            delete_embedding_quota_hold(connection, hold.id, call)
-        if call is not None:
+            settled = delete_embedding_quota_hold(connection, hold.id, call)
+        if call is not None and settled:
             self._tally.requests += 1
             self._tally.estimated_tokens += call.estimated_input_tokens
 
@@ -683,6 +732,20 @@ class _BatchRunner:
         log.error(
             "這一篇的向量化請求不合法，這次略過", reason=exc.code.value, http_status=exc.http_status
         )
+
+    def _quota_lock_timeout(self, run_ids: list[uuid.UUID], papers: int) -> None:
+        """等額度鎖逾時：這批不送、算失敗（有 run 就改成 `failed`），其他論文照做（不停下）。"""
+        self.fail_runs(run_ids, ErrorCode.EMBED_QUOTA_LOCK_TIMEOUT)
+        self._tally.failed += papers
+        self._tally.failure_reason = ErrorCode.EMBED_QUOTA_LOCK_TIMEOUT
+        log.error("占用額度時等額度鎖逾時，這一批這次不送", papers=papers)
+
+    def _zero_vector(self, run_id: uuid.UUID) -> None:
+        """這一篇的向量轉成 halfvec 後全是 0：標成失敗、不寫，其他篇照寫。"""
+        self.fail_runs([run_id], ErrorCode.EMBED_RESPONSE_INVALID)
+        self._tally.failed += 1
+        self._tally.failure_reason = ErrorCode.EMBED_RESPONSE_INVALID
+        log.error("這一篇的向量轉成 halfvec 後全是 0，這次不寫")
 
     def _failed(
         self, exc: EmbeddingError, http_status: int | None, run_ids: list[uuid.UUID]

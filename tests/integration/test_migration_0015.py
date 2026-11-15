@@ -118,7 +118,7 @@ def _constraint_defs(db: TestDatabase, table: str) -> set[str]:
 
 
 def test_downgrade_to_0014_and_upgrade_again(db: TestDatabase, paper_id: uuid.UUID) -> None:
-    assert _relations(db) >= {"embedding", "embedding_model"}
+    assert _relations(db) >= {"embedding", "embedding_model", "embedding_quota_hold"}
     run_id = _embed_run(db, paper_id)
     _insert_embedding(db, paper_id, run_id)
     execute(
@@ -131,7 +131,7 @@ def test_downgrade_to_0014_and_upgrade_again(db: TestDatabase, paper_id: uuid.UU
 
     assert down.returncode == 0, down.stdout + down.stderr
     assert db.revisions() == {"0014"}
-    assert not {"embedding", "embedding_model"} & _relations(db)
+    assert not {"embedding", "embedding_model", "embedding_quota_hold"} & _relations(db)
     assert execute(db, "SELECT count(*) FROM derivation_run WHERE task = 'embed'") == [(0,)]
     assert execute(db, "SELECT count(*) FROM api_call WHERE source = 'workers_ai'") == [(0,)]
     columns = {
@@ -156,6 +156,7 @@ def test_downgrade_to_0014_and_upgrade_again(db: TestDatabase, paper_id: uuid.UU
     migrate(db)
 
     assert db.revisions() == {"0016"}
+    assert "embedding_quota_hold" in _relations(db)
     assert execute(db, "SELECT model_id, provider, dimensions FROM embedding_model") == [
         (QWEN, "workers_ai", 1024)
     ]
@@ -340,3 +341,7 @@ def test_constraints_match_the_repo_definitions(db: TestDatabase) -> None:
         "CHECK (((source = 'workers_ai'::text) = (estimated_input_tokens IS NOT NULL)))"
         in _constraint_defs(db, "api_call")
     )
+    assert _constraint_defs(db, "embedding_quota_hold") == {
+        "CHECK ((estimated_input_tokens >= 0))",
+        "CHECK ((expires_at > reserved_at))",
+    }

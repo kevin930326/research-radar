@@ -3,11 +3,12 @@
 
 1. 每次 HTTP 嘗試（含 adapter 內部的重試）各記一筆 `api_call`，日期是那次嘗試當下的 UTC 日期；
    每次嘗試前都檢查額度（真的 adapter 接 `httpx2.MockTransport`，假回應不是真的錄的，形狀照官方
-   schema）。
+   schema）。占用後、第一次送出前跨過 UTC 午夜時照新的一天重查（Codex 複查 C1）；第一次嘗試前
+   總時限就到了不記請求與用量、放掉占用（C2）。
 2. 送出前先占住估計額度：兩個 worker 同時接近上限時，只有放得下的那個送出；過期的占用轉成用量。
 3. 取得執行資格與寫入時等論文那一列的鎖有上限（`lock_timeout_seconds`）。
 5. `--limit` 不會被重送時才略過的篇數抵銷。
-7. 轉成 halfvec 後全是 0 的向量當成回應不合格，不寫入。
+7. 轉成 halfvec 後全是 0 的向量當成回應不合格，不寫入；只讓那一篇失敗，其他篇照寫（Opus 確認低 3）。
 
 假模型 `fake-embedding`（8 維）由超級使用者登記；標題、摘要、account id、token 都是測試自己編的。
 """
@@ -33,9 +34,9 @@ from radar.domain.embeddings import (
     EmbedStop,
     estimate_embedding_tokens,
 )
-from radar.domain.errors import ErrorCode
-from radar.domain.policy import CloudSafeText
-from radar.repo.db import Database
+from radar.domain.errors import ErrorCode, LockWaitTimeoutError
+from radar.domain.policy import CloudSafeText, cloud_text
+from radar.repo.db import EMBEDDING_QUOTA_LOCK_KEY, Database
 from radar.services.embeddings import embed_papers
 from tests.database import APP_ROLE, TestDatabase
 from tests.integration.test_embeddings import (
@@ -240,6 +241,128 @@ def test_configuration_error_attempt_records_zero_tokens(
     assert _holds(db) == 0
 
 
+class _ClockJumpsBeforeSending(WorkersAiEmbeddingProvider):
+    """取得資格之後、adapter 第一次送出之前把時鐘撥到 `jump_to`（模擬這段期間跨過 UTC 午夜）。"""
+
+    def __init__(
+        self,
+        transport: _Transport,
+        clock: _Clock,
+        jump_to: datetime,
+        on_jump: Any = None,
+    ) -> None:
+        super().__init__(
+            SecretStr(FAKE_ACCOUNT),
+            SecretStr(FAKE_TOKEN),
+            CONFIG.api,
+            model_id=MODEL,
+            dimensions=DIMENSIONS,
+            transport=httpx2.MockTransport(transport),
+        )
+        self.clock = clock
+        self.jump_to = jump_to
+        self.on_jump = on_jump
+
+    def embed_documents(self, texts: Sequence[CloudSafeText]) -> list[list[float]]:
+        self.clock.now = self.jump_to
+        if self.on_jump is not None:
+            self.on_jump()
+        return super().embed_documents(texts)
+
+
+BEFORE_MIDNIGHT = datetime(2026, 11, 15, 23, 59, 58, tzinfo=UTC)
+AFTER_MIDNIGHT = datetime(2026, 11, 16, 0, 0, 5, tzinfo=UTC)
+
+
+def test_crossing_utc_midnight_before_the_first_send_rechecks_the_full_new_day(
+    db: TestDatabase, database: Database
+) -> None:
+    # 11/15 23:59:58 占用成功（還有一次的空間）；取得資格後跨過午夜，11/16 的額度已經被別的工作
+    # 用滿：第一次送出前照 11/16 重查，放不下就不送（沿用 11/15 的占用會送出、記在 11/16、突破當日
+    # 門檻）。
+    _paper(database, 1)
+    tokens = _tokens(1)
+    _insert_usage(db, DAY_LIMIT - tokens, datetime(2026, 11, 15, 1, 0, tzinfo=UTC))
+    clock = _Clock(BEFORE_MIDNIGHT)
+    transport = _Transport()
+
+    def other_job_fills_the_new_day() -> None:
+        _insert_usage(db, DAY_LIMIT, datetime(2026, 11, 16, 0, 0, 1, tzinfo=UTC))
+
+    result = _run(
+        database,
+        _ClockJumpsBeforeSending(transport, clock, AFTER_MIDNIGHT, other_job_fills_the_new_day),
+        config=_tiny_quota(),
+        clock=clock,
+    )
+
+    assert transport.requests == []
+    assert result.stop is EmbedStop.QUOTA_REACHED
+    assert not result.has_failures
+    assert result.requests == 0
+    assert len(_calls(db)) == 2  # 只有事先寫的兩天用量，沒有新的請求
+    assert [(row[1], row[2]) for row in _runs(db)] == [("failed", "embed_quota_reached")]
+    assert _embeddings(db) == {}
+    assert _holds(db) == 0  # 11/15 的占用放掉了，不記用量
+
+
+def test_crossing_utc_midnight_before_the_first_send_holds_and_records_on_the_new_day(
+    db: TestDatabase, database: Database
+) -> None:
+    # 對照：11/16 還有空間：換成 11/16 的占用、送出，記在 11/16；11/15 不多記任何用量。
+    _paper(database, 1)
+    tokens = _tokens(1)
+    _insert_usage(db, DAY_LIMIT - tokens, datetime(2026, 11, 15, 1, 0, tzinfo=UTC))
+    clock = _Clock(BEFORE_MIDNIGHT)
+    transport = _Transport()
+
+    result = _run(
+        database,
+        _ClockJumpsBeforeSending(transport, clock, AFTER_MIDNIGHT),
+        config=_tiny_quota(),
+        clock=clock,
+    )
+
+    assert len(transport.requests) == 1
+    assert result.embedded == 1
+    assert [(row[1], row[3], row[4]) for row in _calls(db)][1:] == [(200, tokens, AFTER_MIDNIGHT)]
+    assert _holds(db) == 0
+
+
+def test_total_timeout_before_the_first_attempt_records_nothing_and_releases_the_hold(
+    db: TestDatabase, database: Database
+) -> None:
+    # 建立總時限之後執行緒停住，回來時總時限已到：adapter 在任何回呼之前停下、一個請求都沒送。
+    # 不能把第 5 步的占用當成「已送出、可能計費」結清：不記 api_call、不算請求與用量、占用放掉。
+    _paper(database, 1)
+    readings = iter([0.0])
+
+    def monotonic() -> float:
+        return next(readings, 1_000_000.0)
+
+    transport = _Transport()
+    provider = WorkersAiEmbeddingProvider(
+        SecretStr(FAKE_ACCOUNT),
+        SecretStr(FAKE_TOKEN),
+        CONFIG.api,
+        model_id=MODEL,
+        dimensions=DIMENSIONS,
+        transport=httpx2.MockTransport(transport),
+        monotonic=monotonic,
+    )
+
+    result = _run(database, provider)
+
+    assert transport.requests == []
+    assert result.stop is EmbedStop.FAILED
+    assert result.failure_reason is ErrorCode.EMBED_TRANSIENT
+    assert result.requests == 0
+    assert result.estimated_tokens == 0
+    assert _calls(db) == []
+    assert _holds(db) == 0
+    assert [(row[1], row[2]) for row in _runs(db)] == [("failed", "embed_transient")]
+
+
 # --- 2. 額度占用 -----------------------------------------------------------------------------
 
 
@@ -403,6 +526,46 @@ def test_hold_is_released_when_nothing_is_claimed(db: TestDatabase, database: Da
     assert _holds(db) == 0
 
 
+class _HoldExpiresWhileCalling(FakeEmbeddingProvider):
+    """等回應時，自己的占用過期、被另一次執行的占用轉成用量（模擬回應慢到超過占用期限）。"""
+
+    def __init__(self, db: TestDatabase, database: Database) -> None:
+        super().__init__(DIMENSIONS, model_id=MODEL)
+        self.db = db
+        self.database = database
+        self.other: EmbedRunResult | None = None
+
+    def embed_documents(self, texts: Sequence[CloudSafeText]) -> list[list[float]]:
+        vectors = super().embed_documents(texts)
+        execute(
+            self.db,
+            "UPDATE embedding_quota_hold SET reserved_at = reserved_at - interval '20 minutes',"
+            " expires_at = reserved_at - interval '10 minutes'",
+        )
+        # 另一次執行：這篇正在跑（busy、不送），但它的占用會先把過期的占用轉成用量。
+        self.other = _run(self.database, FakeEmbeddingProvider(DIMENSIONS, model_id=MODEL))
+        return vectors
+
+
+def test_settling_a_hold_already_counted_as_used_records_nothing_more(
+    db: TestDatabase, database: Database
+) -> None:
+    # ADR-0040 決定 11：占用被轉成用量之後，原本的 worker 才回來結清，只刪不記（不重複算），這次的
+    # 報表也不計入這個請求（報表和帳對得上）。
+    _paper(database, 1)
+    provider = _HoldExpiresWhileCalling(db, database)
+
+    result = _run(database, provider)
+
+    assert provider.other is not None
+    assert provider.other.busy == 1
+    assert [(row[1], row[3]) for row in _calls(db)] == [(None, _tokens(1))]
+    assert result.embedded == 1
+    assert result.requests == 0
+    assert result.estimated_tokens == 0
+    assert _holds(db) == 0
+
+
 # --- 3. 等鎖的上限 ---------------------------------------------------------------------------
 
 SHORT_LOCK = _config(lock_timeout_seconds=0.2)
@@ -463,6 +626,134 @@ def test_write_that_cannot_get_the_paper_lock_fails_only_that_paper(
     assert set(_embeddings(db)) == {other}
     statuses = {row[0]: (row[1], row[2]) for row in _runs(db)}
     assert statuses == {locked: ("failed", "embed_lock_timeout"), other: ("succeeded", None)}
+
+
+def _hold_quota_lock(db: TestDatabase) -> Any:
+    """另一條連線拿著額度鎖不放（交易級；呼叫端 rollback 才放）。"""
+    holder = db.connect(APP_ROLE, autocommit=False)
+    holder.execute("SELECT pg_advisory_xact_lock(%s)", (EMBEDDING_QUOTA_LOCK_KEY,))
+    return holder
+
+
+def test_quota_lock_timeout_before_a_batch_fails_it_and_goes_on_to_the_next(
+    db: TestDatabase, database: Database
+) -> None:
+    # 一批一篇：兩批都等不到額度鎖 → 各自算失敗（還沒有 run）、不送，不會中止整次執行。
+    for n in (1, 2):
+        _paper(database, n)
+    provider = FakeEmbeddingProvider(DIMENSIONS, model_id=MODEL)
+    holder = _hold_quota_lock(db)
+    try:
+        result = _run(database, provider, config=_config(lock_timeout_seconds=0.2, batch_size=1))
+    finally:
+        holder.rollback()
+        holder.close()
+
+    assert provider.document_calls == []
+    assert result.stop is EmbedStop.COMPLETED
+    assert result.failed == 2
+    assert result.failure_reason is ErrorCode.EMBED_QUOTA_LOCK_TIMEOUT
+    assert result.has_failures
+    assert _runs(db) == []
+    assert _calls(db) == []
+    assert _holds(db) == 0
+    # 鎖放開後下一次補上。
+    assert _run(database, FakeEmbeddingProvider(DIMENSIONS, model_id=MODEL)).embedded == 2
+
+
+class _TakesQuotaLockAfterFirstRequest(WorkersAiEmbeddingProvider):
+    """第一個請求（回 503）送出後，另一條連線拿走額度鎖；重試前等不到鎖時放開它（讓後面的論文
+    照做）。"""
+
+    def __init__(self, db: TestDatabase, config: EmbeddingConfig) -> None:
+        self.db = db
+        self.holder: Any = None
+        self.lock_timeouts = 0
+        self.transport = _Transport(httpx2.Response(503), on_request=self._take)
+        super().__init__(
+            SecretStr(FAKE_ACCOUNT),
+            SecretStr(FAKE_TOKEN),
+            config.api,
+            model_id=MODEL,
+            dimensions=DIMENSIONS,
+            transport=httpx2.MockTransport(self.transport),
+        )
+
+    def _take(self, number: int) -> None:
+        if number == 1:
+            self.holder = _hold_quota_lock(self.db)
+
+    def release(self) -> None:
+        if self.holder is not None:
+            self.holder.rollback()
+            self.holder.close()
+            self.holder = None
+
+    def embed_documents(self, texts: Sequence[CloudSafeText]) -> list[list[float]]:
+        try:
+            return super().embed_documents(texts)
+        except LockWaitTimeoutError:
+            self.lock_timeouts += 1
+            self.release()
+            raise
+
+
+def test_quota_lock_timeout_before_a_retry_fails_only_that_batch(
+    db: TestDatabase, database: Database
+) -> None:
+    # 一批一篇：第 1 篇第一次 503，送出後另一條連線拿走額度鎖；重試前等不到 → 這批的 run 改成
+    # failed（embed_quota_lock_timeout），不再送；第一次嘗試照記。第 2 篇在鎖放開後照做。
+    for n in (1, 2):
+        _paper(database, n)
+    config = _config(lock_timeout_seconds=0.2, batch_size=1)
+    provider = _TakesQuotaLockAfterFirstRequest(db, config)
+    try:
+        result = _run(database, provider, config=config)
+    finally:
+        provider.release()
+
+    assert provider.lock_timeouts == 1
+    assert len(provider.transport.requests) == 2  # 第 1 篇的第一次、第 2 篇
+    assert result.stop is EmbedStop.COMPLETED
+    assert result.embedded == 1
+    assert result.failed == 1
+    assert result.failure_reason is ErrorCode.EMBED_QUOTA_LOCK_TIMEOUT
+    assert result.has_failures
+    assert [(row[1], row[3]) for row in _calls(db)] == [(503, _tokens(1)), (200, _tokens(2))]
+    assert sorted((row[1], row[2] or "") for row in _runs(db)) == [
+        ("failed", "embed_quota_lock_timeout"),
+        ("succeeded", ""),
+    ]
+    assert _holds(db) == 0
+
+
+def _wait_for_quota_lock_with_statement_timeout(database: Database) -> None:
+    with database.transaction_with_lock_timeout(5_000) as connection:
+        connection.exec_driver_sql("SET LOCAL statement_timeout = '100ms'")
+        Database.transaction_lock(connection, EMBEDDING_QUOTA_LOCK_KEY)
+
+
+def _divide_by_zero(database: Database) -> None:
+    with database.transaction_with_lock_timeout(5_000) as connection:
+        connection.exec_driver_sql("SELECT 1 / 0")
+
+
+def test_statement_timeout_while_waiting_for_a_lock_counts_as_lock_timeout(
+    db: TestDatabase, database: Database
+) -> None:
+    # 57014（statement_timeout 比 lock_timeout 先到、等鎖的那一句被取消）也算等鎖逾時；
+    # 其他錯誤原樣往上丟。
+    holder = _hold_quota_lock(db)
+    try:
+        with pytest.raises(LockWaitTimeoutError):
+            _wait_for_quota_lock_with_statement_timeout(database)
+    finally:
+        holder.rollback()
+        holder.close()
+
+    with pytest.raises(Exception, match="division by zero") as caught:
+        _divide_by_zero(database)
+    assert not isinstance(caught.value, LockWaitTimeoutError)
 
 
 # --- 5. `--limit` 與重送 ---------------------------------------------------------------------
@@ -573,9 +864,52 @@ def test_vectors_that_are_zero_at_halfvec_precision_are_not_written(
 
     result = _run(database, _Vectors(value))
 
-    assert result.stop is EmbedStop.FAILED
+    # 低 3 之後只讓全 0 的那一篇失敗、不停下（原本整批失敗、停在 failed）。
+    assert result.stop is EmbedStop.COMPLETED
+    assert result.has_failures
+    assert result.failed == 1
     assert result.failure_reason is ErrorCode.EMBED_RESPONSE_INVALID
     assert _embeddings(db) == {}
     assert [(row[1], row[2]) for row in _runs(db)] == [("failed", "embed_response_invalid")]
     # 沒有寫入，下一次（回應正常時）照樣會再做這一篇，不會被永久略過。
     assert _run(database, FakeEmbeddingProvider(DIMENSIONS, model_id=MODEL)).embedded == 1
+
+
+class _ZeroFor(FakeEmbeddingProvider):
+    """指定的那篇（照文字開頭）每次都回全 0 的向量，其他篇正常。"""
+
+    def __init__(self, prefix: str) -> None:
+        super().__init__(DIMENSIONS, model_id=MODEL)
+        self.prefix = prefix
+
+    def embed_documents(self, texts: Sequence[CloudSafeText]) -> list[list[float]]:
+        vectors = super().embed_documents(texts)
+        return [
+            [0.0] * DIMENSIONS if cloud_text(text).startswith(self.prefix) else vector
+            for text, vector in zip(texts, vectors, strict=True)
+        ]
+
+
+def test_a_paper_that_always_gets_a_zero_vector_fails_alone_and_does_not_block_the_rest(
+    db: TestDatabase, database: Database
+) -> None:
+    # 第 1 篇每次都拿到全 0：只有它失敗，同一批的第 2 篇與後面的第 3 篇照寫（原本整批失敗、
+    # 下一次照 id 順序又挑到同一批，回填永遠卡在這裡）。
+    ids = [_paper(database, n) for n in (1, 2, 3)]
+
+    first = _run(database, _ZeroFor("Paper 1 "))
+
+    assert first.stop is EmbedStop.COMPLETED
+    assert first.embedded == 2
+    assert first.failed == 1
+    assert first.failure_reason is ErrorCode.EMBED_RESPONSE_INVALID
+    assert first.has_failures
+    assert set(_embeddings(db)) == {ids[1], ids[2]}
+    statuses = {row[0]: (row[1], row[2]) for row in _runs(db)}
+    assert statuses[ids[0]] == ("failed", "embed_response_invalid")
+
+    # 下一次：第 1 篇還是全 0、還是失敗，其他篇沒變（不送），不會卡住。
+    second = _run(database, _ZeroFor("Paper 1 "))
+    assert second.embedded == 0
+    assert second.failed == 1
+    assert second.unchanged == 2

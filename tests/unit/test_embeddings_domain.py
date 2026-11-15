@@ -33,6 +33,7 @@ from radar.domain.embeddings import (
     days_needed,
     estimate_embedding_tokens,
     halfvec_literal,
+    is_zero_at_halfvec,
     parse_halfvec,
     quota_allows,
     render_backfill_report,
@@ -478,10 +479,24 @@ def test_vector_that_is_all_zero_at_halfvec_precision_is_rejected(row: list[floa
 
 
 def test_vector_with_one_component_that_survives_halfvec_is_accepted() -> None:
-    # 1e-7 轉成半精度是最小的次正規數（約 1.19e-7），不是 0。
+    # 1e-7 轉成半精度約 1.19e-7（最小次正規數約 5.96e-8 的 2 倍），不是 0。
     assert check_embedding_vectors([[0.0, 1e-7, 1e-9]], count=1, dimensions=3) == [
         [0.0, 1e-7, 1e-9]
     ]
+
+
+@pytest.mark.parametrize("row", [[0.0, 0.0, 0.0], [1e-9, -1e-9, 0.0]])
+def test_zero_vectors_can_be_returned_for_the_caller_to_judge_one_by_one(row: list[float]) -> None:
+    # 文件的向量：全 0 的那一筆照樣回傳，由服務逐篇判斷（只讓那一篇失敗；Opus 確認低 3）。
+    raw = [[0.1, 0.2, 0.3], row]
+    assert check_embedding_vectors(raw, count=2, dimensions=3, allow_zero=True) == raw
+    assert not is_zero_at_halfvec(raw[0])
+    assert is_zero_at_halfvec(row)
+
+
+def test_allow_zero_still_checks_everything_else() -> None:
+    with pytest.raises(EmbeddingResponseError, match="非有限"):
+        check_embedding_vectors([[float("nan"), 0.0]], count=1, dimensions=2, allow_zero=True)
 
 
 def test_has_failures_covers_single_failed_papers_without_a_failed_stop() -> None:

@@ -93,7 +93,8 @@ class ErrorCode(StrEnum):
     EMBED_TRANSIENT = "embed_transient"  # 重試用完仍是逾時、限流、服務端錯誤或連線錯誤
     EMBED_CONFIGURATION = "embed_configuration"  # 401、403、404：token、帳號或模型設定不對
     EMBED_REQUEST_INVALID = "embed_request_invalid"  # 400、413、422 等：請求本身不合法
-    # 回應的信封、筆數、維度或數字不對（例如不是 1,024 維、有 NaN）：整批不寫
+    # 回應的信封、筆數、維度或數字不對（例如不是 1,024 維、有 NaN）：整批不寫；只有某一篇的向量轉成
+    # halfvec 後全是 0 時只有那一篇不寫
     EMBED_RESPONSE_INVALID = "embed_response_invalid"
     EMBED_INPUT_CHANGED = "embed_input_changed"  # 寫入前核對：送出後標題或摘要又變了，這篇不寫
     EMBED_FAILED = "embed_failed"  # 向量化服務自己出錯（例如寫入的交易失敗），run 改 failed
@@ -101,6 +102,8 @@ class ErrorCode(StrEnum):
     EMBED_QUOTA_REACHED = "embed_quota_reached"
     # 寫入前等論文那一列的鎖超過 lock_timeout：這篇不寫，下一次重算
     EMBED_LOCK_TIMEOUT = "embed_lock_timeout"
+    # 占用額度時等額度鎖超過 lock_timeout：這一批不送（已取得資格的 run 改 failed），其他論文照做
+    EMBED_QUOTA_LOCK_TIMEOUT = "embed_quota_lock_timeout"
 
     # Batch 送出（`radar/services/llm_batches.py`，Story 2.9、ADR-0041）
     # 送出前重建請求，和規劃時記的 run 鍵對不上（摘要、prompt 版本、模型或設定版本變了，或論文
