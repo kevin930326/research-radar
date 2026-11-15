@@ -813,3 +813,8 @@
 - **回應信封（API 的）**：API 回應包在資料外面的固定外層；Cloudflare 的是 `result`、`success`、`errors`、`messages` 四個欄位，向量放在 `result` 裡。和 AI 區塊的「信封」是不同的東西（ADR-0040）。
 - **毒批（poison batch）**：一批裡只要有一筆有問題，整批就被對方拒收；不處理的話，那一筆會一直擋住後面所有資料。向量化遇到時改成一篇一篇重送，只略過有問題的那一篇（ADR-0040）。
 - **最久等待時間（worst case）**：一次請求在最倒楣的情況下要等多久：每次嘗試都等到逾時、每次重試前都等到上限，全部加起來；要比 sweep 判定逾時的時限短，否則還在等回應的工作會被誤判卡住（ADR-0040）。
+- **直接陳述的結果**：結果原文用固定的句型直接講某個假設代號或「全部假設」的結果，例如 `H1 was supported`、`Results support H1 and H2`、`We find support for H1`；只在整段某處出現 significant 這類字不算，有 whether、future、prior 這類「還沒有結果或不是這篇的」字也不算（ADR-0039）。
+- **寫出結果的那段**：結果原文裡真的報告結果的部分；前面有 `we examine whether…` 研究問題時，只取研究問題後面寫出結果的那個子句，核對構面、代號都只看這段（ADR-0039）。
+- **平方時間**：輸入變成兩倍長、處理時間變成約四倍的寫法；故意塞很長的文字就能拖慢系統，所以驗證器要避免（ADR-0039）。
+- **嚴格首字母**：縮寫剛好是名稱裡每個實詞的第一個字母（`system satisfaction` → SS、`perceived ease of use` → PEOU）；輸入寫「名稱 (縮寫)」時，有嚴格首字母對得上的較長名稱優先，免得 SS 被算成只有 satisfaction（ADR-0039）。
+- **子句開頭**：一個小句的起點，例如段落開頭、逗號或分號後面；`H1 was supported` 這類直接陳述要在子句開頭，前面接 `We dispute that`、`Other researchers report that` 這種別人的說法就不算（ADR-0039）。

@@ -239,3 +239,104 @@ def test_long_abbreviated_magnitude_text_is_quick(unit: str) -> None:
     structured_numbers(text)
 
     assert time.perf_counter() - started < 2
+
+
+# Codex 主審查（PR #68）第 5 條：常見的量級縮寫變體（MM、Mn、mln、連字號接一個量級字母）也讀不懂。
+
+
+@pytest.mark.parametrize(
+    ("text", "unreadable"),
+    [
+        ("N = 12MM users", ("12", "12000000")),
+        ("12mm users", ("12",)),
+        ("12 MM users", ("12",)),
+        ("1.2 Mn users", ("1.2", "1200000")),
+        ("1.2mn users", ("1.2",)),
+        ("12-M users", ("12", "12000000")),
+        ("12-k users", ("12", "12000")),
+        ("3.5-B transactions", ("3.5",)),
+        ("12 mln users", ("12",)),
+        ("12 mil users", ("12",)),
+        ("2 bln transactions", ("2",)),
+        ("2 bil transactions", ("2",)),
+        ("12 mio users", ("12",)),
+    ],
+)
+def test_structured_numbers_skip_abbreviated_magnitude_variants(
+    text: str, unreadable: tuple[str, ...]
+) -> None:
+    found = structured_numbers(check_copy(text))
+
+    for value in unreadable:
+        assert _n(value) not in found, value
+
+
+@pytest.mark.parametrize(
+    ("text", "value"),
+    [
+        ("a 12-month study", "12"),
+        ("12 months", "12"),
+        ("a 5-MB file", "5"),
+        ("5 MB of data", "5"),
+        ("312 K-12 teachers", "312"),
+        ("200 M-Turk workers", "200"),
+        ("12 mmHg", "12"),
+    ],
+)
+def test_structured_numbers_still_read_numbers_before_longer_words(text: str, value: str) -> None:
+    assert _n(value) in structured_numbers(check_copy(text))
+
+
+# Opus 確認審查（PR #68）M3：數字和量級字母中間沒有空白時，後面接「連字號＋字母」的複合形容詞
+# （`a 2M-user platform`）也是縮寫；中間有空白或連字號的（`200 M-Turk`、`312 K-12`）照讀。
+
+
+@pytest.mark.parametrize(
+    ("text", "unreadable"),
+    [
+        ("a 2M-user platform", ("2", "2000000")),
+        ("a 10k-respondent panel", ("10", "10000")),
+        ("a 10K-sample survey", ("10", "10000")),
+        ("a 2B-dollar market", ("2", "2000000000")),
+        ("a 12MM-user network", ("12",)),
+        ("a 1.5bn-dollar deal", ("1.5",)),
+    ],
+)
+def test_structured_numbers_skip_abbreviated_magnitudes_before_a_hyphenated_word(
+    text: str, unreadable: tuple[str, ...]
+) -> None:
+    found = structured_numbers(check_copy(text))
+
+    for value in unreadable:
+        assert _n(value) not in found, value
+
+
+# M4：量級字母後面接 `&`、`/`、`.字母` 的不是縮寫（`412 M&A deals`、`120 M.B.A. students`）；
+# 句尾的 `12M.` 仍是縮寫。
+
+
+@pytest.mark.parametrize(
+    ("text", "value"),
+    [
+        ("412 M&A deals", "412"),
+        ("412 m&a deals", "412"),
+        ("120 M.B.A. students", "120"),
+        ("20 M.D. physicians", "20"),
+        ("200 B.Sc. students", "200"),
+        ("120 M/F", "120"),
+        ("12 B.V. firms", "12"),
+        ("200 M-Turk workers", "200"),
+        ("312 K-12 teachers", "312"),
+    ],
+)
+def test_structured_numbers_read_numbers_before_a_magnitude_letter_in_another_word(
+    text: str, value: str
+) -> None:
+    assert _n(value) in structured_numbers(check_copy(text))
+
+
+@pytest.mark.parametrize("text", ["the panel has 12M.", "the panel has 12M. Next", "N = 12M; fine"])
+def test_structured_numbers_still_skip_an_abbreviated_magnitude_before_punctuation(
+    text: str,
+) -> None:
+    assert _n("12") not in structured_numbers(check_copy(text))
