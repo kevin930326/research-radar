@@ -14,7 +14,8 @@
 //   --height 視窗高度，預設 900
 //   --out    截圖與報告要放的資料夾，預設 ./design-compare-out
 //   --within 只比對設計稿裡這個 CSS 選擇器底下的文字（例如只做了其中一段時）
-//   --expect-missing  一個文字檔，一行一段「設計稿有、這個 Story 還不做」的文字（寫開頭幾個字就可以，空白不算）。
+//   --expect-missing  一個文字檔，一行一段「設計稿有、這個 Story 還不做」的文字（空白不算）。
+//                     一行要和整段文字完全相同；只想寫開頭幾個字，行尾加「…」。
 //                     清單裡的缺少不算差異；清單裡這次沒用到的會另外列出來（那段已經做出來的，要從清單拿掉）。
 //
 // 結束碼：報告裡會擋的四段任何一段不是 0（樣式、多出的文字、位置與寬度、沒列在清單裡的缺少）就是 1，全部是 0 才是 0。
@@ -83,6 +84,19 @@ function collect(within) {
   rows.sort((a, b) => a.rect.top - b.rect.top || a.rect.left - b.rect.left);
   const px = (v) => Math.round(parseFloat(v) * 10) / 10;
   const key = (el) => el.textContent.replace(/\s+/g, "");
+  const countLines = (el) => {
+    const range = document.createRange();
+    range.selectNodeContents(el);
+    const boxes = [...range.getClientRects()].filter((r) => r.width > 0 && r.height > 0).sort((a, b) => a.top - b.top);
+    let count = 0;
+    let bottom = -Infinity;
+    for (const box of boxes) {
+      // 這一塊的上緣已經到上一行的下半部以下，才算新的一行（同一行裡大小不同的字會上下重疊）。
+      if (box.top >= bottom - box.height / 2) count += 1;
+      bottom = Math.max(bottom, box.bottom);
+    }
+    return Math.max(1, count);
+  };
   const hasLine = (node, side) => {
     const s = getComputedStyle(node);
     return parseFloat(s[`border${side}Width`]) > 0 && s[`border${side}Style`] !== "none";
@@ -136,8 +150,8 @@ function collect(within) {
         textTransform: style.textTransform,
         textDecoration: style.textDecorationLine,
         fontFamily: style.fontFamily.split(",")[0].trim().replace(/["']/g, ""),
-        // 佔幾行（高度除以行高）；行內元素和行高是 normal 的不算。
-        lines: inline || lineHeightPx === null ? null : Math.max(1, Math.round(rect.height / lineHeightPx)),
+        // 佔幾行：數文字實際排成幾行（不靠高度除以行高，行高是 normal 或有內距時才量得準）；行內元素不算。
+        lines: inline ? null : countLines(el),
         prevText: prev ? key(prev.el) : null,
         gapAbove: prev ? Math.round(rect.top - prev.rect.bottom) : null,
         hairlineAbove: hairline,
@@ -221,6 +235,7 @@ try {
   const layoutDiffs = [];
   const unknownTexts = [];
   const skipped = [];
+  const implBlockTexts = new Set(impl.rows.filter((row) => !row.inline).map((row) => row.text));
   for (const row of impl.rows) {
     const nth = seen.get(row.text) ?? 0;
     seen.set(row.text, nth + 1);
@@ -235,7 +250,11 @@ try {
       if (key === "gapAbove" || key === "hairlineAbove") {
         if (match.prevText === null && row.prevText === null) continue;
         if (match.prevText !== row.prevText) {
-          if (key === "gapAbove") skipped.push(`- ${row.text.slice(0, 30)}（設計稿的上一段：${(match.prevText ?? "沒有").slice(0, 20)}；畫面的上一段：${(row.prevText ?? "沒有").slice(0, 20)}）`);
+          // 設計稿的上一段畫面上其實有（或設計稿上面本來沒有東西）：是順序或版面不一樣，要擋。
+          // 只有設計稿的上一段還沒做出來時，才是「沒比到」。
+          if (match.prevText === null || implBlockTexts.has(match.prevText)) {
+            if (key === "gapAbove") layoutDiffs.push(`| ${row.text.slice(0, 18)} | 上一段是誰 | ${(match.prevText ?? "沒有").slice(0, 18)} | ${(row.prevText ?? "沒有").slice(0, 18)} |`);
+          } else if (key === "gapAbove") skipped.push(`- ${row.text.slice(0, 30)}（設計稿的上一段：${(match.prevText ?? "沒有").slice(0, 20)}；畫面的上一段：${(row.prevText ?? "沒有").slice(0, 20)}）`);
           continue;
         }
       }
@@ -252,22 +271,24 @@ try {
   const expected = args.expectMissing
     ? readFileSync(resolve(args.expectMissing), "utf-8").split("\n").map((line) => line.replace(/\s+/g, "")).filter((line) => line !== "" && !line.startsWith("#"))
     : [];
-  const isExpected = (text) => expected.some((prefix) => text.startsWith(prefix));
-  const unexpectedMissing = missing.filter((text) => !isExpected(text));
-  const expectedMissing = missing.filter(isExpected);
-  // 清單裡有、但已經沒有任何缺少的文字對得上：清單過期了（那段已經做出來，或文字寫錯）。
-  const staleExpected = expected.filter((prefix) => !missing.some((text) => text.startsWith(prefix)));
+  // 清單的一行預設要和整段文字完全相同；行尾加「…」才是「以這幾個字開頭」。
+  const allows = (entry, text) => (entry.endsWith("…") ? text.startsWith(entry.slice(0, -1)) : text === entry);
+  const allowedBy = (text) => expected.find((entry) => allows(entry, text));
+  const unexpectedMissing = missing.filter((text) => allowedBy(text) === undefined);
+  const expectedMissing = missing.filter((text) => allowedBy(text) !== undefined);
+  // 清單裡有、但已經沒有任何缺少的文字對得上（那段已經做出來，或文字寫錯）。
+  const staleExpected = expected.filter((entry) => !missing.some((text) => allows(entry, text)));
 
   lines.push(`## 樣式不一樣（${styleDiffs.length} 處）`, "");
   if (styleDiffs.length > 0) lines.push("| 文字 | 項目 | 設計稿 | 做出來的 |", "|---|---|---|---|", ...styleDiffs);
   lines.push("", `## 設計稿沒有這段文字（${unknownTexts.length} 處）`, "", ...unknownTexts.map((t) => `- ${t.slice(0, 60)}`));
-  lines.push("", `## 位置與寬度不一樣（${layoutDiffs.length} 處）`, "");
+  lines.push("", `## 位置、寬度、順序不一樣（${layoutDiffs.length} 處）`, "");
   if (layoutDiffs.length > 0) lines.push("| 文字 | 項目 | 設計稿 | 做出來的 |", "|---|---|---|---|", ...layoutDiffs);
   lines.push("", `## 設計稿有、畫面上沒有、也沒列在清單裡的文字（${unexpectedMissing.length} 處）`, "",
     ...unexpectedMissing.slice(0, 120).map((t) => `- ${t.slice(0, 60)}`));
   lines.push("", "---", "", "以下不影響結束碼，但要看過：", "",
     `## 清單內的缺少（${expectedMissing.length} 處；PR 說明要寫各屬於哪個 Story）`, "",
-    ...expectedMissing.slice(0, 120).map((t) => `- ${t.slice(0, 60)}`));
+    ...expectedMissing.slice(0, 120).map((t) => `- ${t.slice(0, 60)} ← 清單：${allowedBy(t)}`));
   lines.push("", `## 距離與髮線沒比到（${skipped.length} 處；上一段文字兩邊不同）`, "", ...skipped);
   lines.push("", `## 清單裡這次沒用到的（${staleExpected.length} 處；手機版設計稿本來就沒有的不用管，已經做出來的要從清單拿掉）`, "",
     ...staleExpected.map((t) => `- ${t.slice(0, 60)}`));

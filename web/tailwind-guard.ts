@@ -135,16 +135,17 @@ function isForbiddenVariant(variant: string): boolean {
 }
 
 /** 任意屬性（[屬性:值]）裡不准直接寫的字體屬性，以及不准就地改寫的主題變數前綴。 */
-const TYPE_PROPERTIES = new Set(["font", "font-size", "line-height", "letter-spacing"]);
-const THEME_VARIABLE = /^--(?:text|leading|tracking|font|color)-/;
+const TYPE_PROPERTIES = new Set(["font", "font-size", "font-weight", "font-family", "line-height", "letter-spacing"]);
+// --tw-leading／--tw-tracking／--tw-font-weight 是 Tailwind 內部變數：角色類別的行高、字距、字重會讀它們。
+const THEME_VARIABLE = /^--(?:text|leading|tracking|font|color|tw-leading|tw-tracking|tw-font-weight)(?:-|$)/;
 
 /**
  * 本體繞過了字級、行高、字距的尺度（ADR-0038）：
  * - leading-…／tracking-… 的值必須是主題裡 --leading-…／--tracking-… 的名稱。Tailwind 的 leading-4 會退而拿
  *   間距代幣（--spacing-4）當行高、-tracking-004 是負的字距、leading-[1.7] 與 leading-(--x) 是任意值。
  * - text-[…]／text-(…)：任意值的字級或顏色（text-(length:--x) 可以把任何變數當字級）。
- * - 任意屬性 [line-height:1.7]、[letter-spacing:0.02em]、[font-size:27px]、[font:…]。
- * - 任意屬性就地改寫主題變數：[--text-s15:30px]、[--leading-185:3]、[--color-…:…]。
+ * - 任意屬性 [line-height:1.7]、[letter-spacing:0.02em]、[font-size:27px]、[font-weight:300]、[font-family:…]、[font:…]。
+ * - 任意屬性就地改寫主題變數或 Tailwind 內部變數：[--text-s15:30px]、[--leading-185:3]、[--color-…:…]、[--tw-leading:3]。
  * 這些都會產生 CSS，但不在 DESIGN.md 裡。
  */
 function isOffScale({ theme }: GuardSystems, body: string): boolean {

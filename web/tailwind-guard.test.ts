@@ -150,6 +150,11 @@ describe("tailwind guard", () => {
       "[--tracking-004:1em]",
       "[--color-text-primary:red]",
       "[--font-serif:Arial]",
+      "[--tw-leading:3]",
+      "[--tw-tracking:1em]",
+      "[--tw-font-weight:100]",
+      "[font-weight:300]",
+      "[font-family:serif]",
     ];
     expect(findInvalidClasses(design, bypasses)).toEqual(bypasses);
     // 版面用的任意屬性與自訂變數不受影響。
