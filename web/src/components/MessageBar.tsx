@@ -28,14 +28,21 @@ interface MessageBarProps {
   message: string;
   children?: ReactNode;
   role?: "status" | "alert";
+  /**
+   * 這句訊息就是頁面標題（h1）：整頁載入失敗、找不到這一頁（EXPERIENCE.md State Patterns「全站共用」）。
+   * 畫面上的字與樣子不變（h1 的字級、字重、外距由 Tailwind 的 preflight 歸零，用的是同一組類別）。
+   */
+  heading?: boolean;
 }
 
-export function MessageBar({ tone, message, children, role = "status" }: MessageBarProps) {
+const MESSAGE_CLASS = "flex min-h-tap-target items-center text-body text-text-primary";
+
+export function MessageBar({ tone, message, children, role = "status", heading = false }: MessageBarProps) {
   return (
     <div role={role} className="flex items-start gap-3 py-3">
       <span className="flex h-tap-target shrink-0 items-center">{tone === "error" ? <ErrorIcon /> : <InfoIcon />}</span>
       <div className="flex flex-wrap items-center gap-x-6">
-        <p className="flex min-h-tap-target items-center text-body text-text-primary">{message}</p>
+        {heading ? <h1 className={MESSAGE_CLASS}>{message}</h1> : <p className={MESSAGE_CLASS}>{message}</p>}
         {children}
       </div>
     </div>

@@ -375,16 +375,22 @@
                 "type": "null"
               }
             ]
+          },
+          "fix_member_count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Fix Member Count"
           }
         },
         "additionalProperties": false,
         "type": "object",
         "required": [
           "topic",
-          "method"
+          "method",
+          "fix_member_count"
         ],
         "title": "ClassificationContent",
-        "description": "有效的分類：主題與方法兩欄；沒有值的那一欄是 null（只有人工修正、沒有 AI 值時才會發生）。"
+        "description": "有效的分類：主題與方法兩欄；沒有值的那一欄是 null（只有人工修正、沒有 AI 值時才會發生）。\n\n- `fix_member_count`：修正過這篇分類（主題或方法）的成員人數，整篇去重\n  （「有 N 位成員修正過」）。"
       },
       "ClassificationField": {
         "properties": {

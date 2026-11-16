@@ -9,12 +9,16 @@ const NOT_FOUND = TEXT["common:states.notFound.message"];
 test("member: an unknown address shows not found with a link home", async ({ page }) => {
   await page.goto(`${member.baseURL}${MISSING_PATH}`);
   await expect(page.getByText(NOT_FOUND, { exact: true })).toBeVisible();
+  await expect(page.locator("h1")).toHaveText(NOT_FOUND);
+  await expect(page).toHaveTitle(NOT_FOUND);
 
   const home = page.getByRole("link", { name: TEXT["common:states.notFound.home"] });
   await expect(home).toHaveAttribute("href", "/");
   await home.click();
   await expect(page).toHaveURL(`${member.baseURL}/notice`);
   await expect(page.getByText(NOT_FOUND, { exact: true })).toHaveCount(0);
+  // 離開之後分頁名稱換回原本的。
+  await expect(page).not.toHaveTitle(NOT_FOUND);
 });
 
 test("demo: no notice page, and not found has no link home", async ({ page }) => {
@@ -22,7 +26,10 @@ test("demo: no notice page, and not found has no link home", async ({ page }) =>
     await page.goto(`${demo.baseURL}${path}`);
     await expect(page.getByText(NOT_FOUND, { exact: true })).toBeVisible();
     await expect(page.locator("a")).toHaveCount(0);
-    await expect(page.locator("h1")).toHaveCount(0);
+    // 「找不到這一頁」就是頁面標題（h1），分頁名稱也是它（EXPERIENCE.md State Patterns「全站共用」，Story 3.8）。
+    await expect(page.locator("h1")).toHaveCount(1);
+    await expect(page.locator("h1")).toHaveText(NOT_FOUND);
+    await expect(page).toHaveTitle(NOT_FOUND);
   }
 });
 

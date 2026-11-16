@@ -54,6 +54,34 @@ describe("site-wide states", () => {
   });
 });
 
+// EXPERIENCE.md State Patterns「全站共用」：整頁載入失敗、找不到這一頁時，訊息就是頁面標題（h1），字與樣子不變
+// （分頁名稱在瀏覽器裡才看得到，交給 e2e/paper.spec.ts）。Codex 審查 3.8 中 8。
+describe("whole-page states are the page title", () => {
+  it("load failed: the message is the h1, with the same classes as the message line", () => {
+    const html = renderToStaticMarkup(<LoadFailed />);
+    expect(html).toContain(
+      `<h1 class="flex min-h-tap-target items-center text-body text-text-primary">${text["common:states.loadFailed.message"]}</h1>`,
+    );
+    expect(html).not.toMatch(/<p[\s>]/);
+  });
+
+  it("not found: the message is the h1", async () => {
+    // NotFound 的「回首頁」是站內連結，要在路由裡渲染（同上面 not found 的測試）。
+    const router = createAppRouter({ history: createMemoryHistory({ initialEntries: ["/no/such/page"] }) });
+    await router.load();
+    const html = renderToString(<RouterProvider router={router} />);
+    expect(html).toContain(
+      `<h1 class="flex min-h-tap-target items-center text-body text-text-primary">${text["common:states.notFound.message"]}</h1>`,
+    );
+  });
+
+  it("offline is not a page title: it stays a paragraph", () => {
+    const html = renderToStaticMarkup(<OfflineNotice />);
+    expect(html).not.toContain("<h1");
+    expect(html).toContain(`<p class="flex min-h-tap-target items-center text-body text-text-primary">`);
+  });
+});
+
 describe("router defaults", () => {
   it("uses the shared states and waits 300 ms before showing the skeleton", () => {
     const router = createAppRouter({ history: createMemoryHistory() });

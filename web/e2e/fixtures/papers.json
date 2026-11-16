@@ -1,0 +1,2265 @@
+{
+  "_comment": "論文頁（Story 3.8）的假資料：e2e/api-mock.ts 與 scripts/mock-api.mjs 共用。全部是自己編的（example.com、10.5555 DOI），不是真實論文。",
+  "displayNames": {
+    "journals": [
+      {
+        "key": "jes",
+        "name": "Journal of Example Studies"
+      }
+    ],
+    "topics": [
+      {
+        "key": "platforms",
+        "name": "平台經濟"
+      },
+      {
+        "key": "trust",
+        "name": "線上信任"
+      }
+    ],
+    "methods": [
+      {
+        "key": "experiment",
+        "name": "實驗"
+      }
+    ]
+  },
+  "errors": {
+    "38000000-0000-4000-8000-000000000090": {
+      "label": "not-found",
+      "status": 404,
+      "note": "找不到或沒有權限（後端回 404）"
+    },
+    "38000000-0000-4000-8000-000000000091": {
+      "label": "server-error",
+      "status": 500,
+      "note": "伺服器錯誤（載入失敗）"
+    },
+    "38000000-0000-4000-8000-000000000092": {
+      "label": "expired",
+      "status": 401,
+      "note": "登入過期（回登入頁）"
+    }
+  },
+  "slow": {
+    "38000000-0000-4000-8000-000000000093": {
+      "label": "slow",
+      "of": "38000000-0000-4000-8000-000000000001",
+      "delayMs": 4000,
+      "note": "很慢（先看到載入中的骨架，4 秒後是 normal 那一篇）"
+    }
+  },
+  "papers": {
+    "38000000-0000-4000-8000-000000000001": {
+      "label": "normal",
+      "note": "三塊都有內容、有開放取用版本",
+      "page": {
+        "paper": {
+          "id": "38000000-0000-4000-8000-000000000001",
+          "title": "Rating Inconsistency and Reader Trust on Review Platforms",
+          "authors": [
+            "Avery Example",
+            "Jordan Sample",
+            "Riley Placeholder"
+          ],
+          "publication_year": 2023,
+          "journal": "jes",
+          "journal_issn_l": "0000-0000",
+          "volume": "12",
+          "issue": "3",
+          "first_page": "101",
+          "last_page": "124",
+          "doi": "10.5555/rr.1",
+          "doi_url": "https://doi.org/10.5555/rr.1",
+          "openalex_id": "W9000000001",
+          "openalex_url": "https://openalex.org/W9000000001",
+          "cited_by_count": 1234,
+          "in_scope": true,
+          "origin": "tracked",
+          "is_retracted": false
+        },
+        "abstract": {
+          "content": "This fictional study examines how inconsistent star ratings across review platforms affect reader trust. In an online experiment, participants viewed listings whose ratings agreed or disagreed and then reported their trust and the effort they spent deciding. Inconsistent ratings reduced trust and increased decision effort. The text is invented test data for the paper page.",
+          "source": "openalex"
+        },
+        "zh_summary": {
+          "state": "ready",
+          "value": {
+            "zh_summary_id": "z1000000-0000-4000-8000-000000000001",
+            "research_question": "線上評價平台上，不同來源的星等彼此不一致時，讀者對商家的信任會不會下降。",
+            "method": "線上實驗，兩百四十位受測者看三組評價頁面並回答信任量表。",
+            "theory": "訊號理論與認知負荷理論。",
+            "findings": "星等不一致時信任明顯下降，受測者也需要更多時間判斷。",
+            "reported_fields": []
+          },
+          "provenance": {
+            "model": "claude-haiku-4-5",
+            "generated_at": "2026-11-10T03:00:00Z",
+            "input_kind": "abstract",
+            "human_verified": false
+          }
+        },
+        "classification": {
+          "state": "ready",
+          "value": {
+            "topic": {
+              "keys": [
+                "platforms",
+                "trust"
+              ],
+              "human_verified": false,
+              "fix_member_count": 0,
+              "members_disagree": false
+            },
+            "method": {
+              "keys": [
+                "experiment"
+              ],
+              "human_verified": false,
+              "fix_member_count": 0,
+              "members_disagree": false
+            },
+            "fix_member_count": 0
+          },
+          "provenance": {
+            "model": "claude-haiku-4-5",
+            "generated_at": "2026-11-10T03:00:00Z",
+            "input_kind": "abstract",
+            "human_verified": false
+          }
+        },
+        "research_model": {
+          "state": "ready",
+          "provenance": {
+            "model": "claude-haiku-4-5",
+            "generated_at": "2026-11-10T03:00:00Z",
+            "input_kind": "abstract",
+            "human_verified": false
+          },
+          "value": {
+            "research_model_id": "r1000000-0000-4000-8000-000000000001",
+            "is_review_or_meta_analysis": false,
+            "country": null,
+            "industry": null,
+            "research_design": null,
+            "unit_of_analysis": null,
+            "sample_size": 240,
+            "limitations": null,
+            "future_research": null,
+            "constructs": [
+              {
+                "construct_id": "c1000000-0000-4000-8000-000000000001",
+                "name_en": "Rating inconsistency",
+                "label_zh": "評分不一致",
+                "definition": null,
+                "scale_source": null,
+                "item_location": null,
+                "item_count": null,
+                "cronbach_alpha": null,
+                "composite_reliability": null,
+                "ave": null
+              },
+              {
+                "construct_id": "c1000000-0000-4000-8000-000000000002",
+                "name_en": "Reader trust",
+                "label_zh": "讀者信任",
+                "definition": null,
+                "scale_source": null,
+                "item_location": null,
+                "item_count": null,
+                "cronbach_alpha": null,
+                "composite_reliability": null,
+                "ave": null
+              },
+              {
+                "construct_id": "c1000000-0000-4000-8000-000000000003",
+                "name_en": "Decision effort",
+                "label_zh": "判斷費力程度",
+                "definition": null,
+                "scale_source": null,
+                "item_location": null,
+                "item_count": null,
+                "cronbach_alpha": null,
+                "composite_reliability": null,
+                "ave": null
+              }
+            ],
+            "hypotheses": [
+              {
+                "ordinal": 1,
+                "sentence": "Inconsistent ratings lower the trust readers place in a listing.",
+                "cause_construct_id": "c1000000-0000-4000-8000-000000000001",
+                "effect_construct_id": "c1000000-0000-4000-8000-000000000002",
+                "evidence_type": "empirical_test",
+                "support": "supported",
+                "beta": null,
+                "p_value": null,
+                "sample_size": null,
+                "effect_type": null,
+                "result_quote": null
+              },
+              {
+                "ordinal": 2,
+                "sentence": "Inconsistent ratings increase the effort readers spend before deciding.",
+                "cause_construct_id": "c1000000-0000-4000-8000-000000000001",
+                "effect_construct_id": "c1000000-0000-4000-8000-000000000003",
+                "evidence_type": "empirical_test",
+                "support": "supported",
+                "beta": null,
+                "p_value": null,
+                "sample_size": null,
+                "effect_type": null,
+                "result_quote": null
+              }
+            ]
+          }
+        },
+        "full_text_links": {
+          "doi_url": "https://doi.org/10.5555/rr.1",
+          "open_access_url": "https://example.com/open-access/rr-1.pdf"
+        },
+        "snapshot": {
+          "number": 12,
+          "as_of": "2026-11-11T17:30:00Z"
+        }
+      }
+    },
+    "38000000-0000-4000-8000-000000000002": {
+      "label": "normal-no-oa",
+      "note": "三塊都有內容、沒有開放取用版本（真實資料目前都是這樣）",
+      "page": {
+        "paper": {
+          "id": "38000000-0000-4000-8000-000000000002",
+          "title": "Rating Inconsistency and Reader Trust on Review Platforms",
+          "authors": [
+            "Avery Example",
+            "Jordan Sample",
+            "Riley Placeholder"
+          ],
+          "publication_year": 2023,
+          "journal": "jes",
+          "journal_issn_l": "0000-0000",
+          "volume": "12",
+          "issue": "3",
+          "first_page": "101",
+          "last_page": "124",
+          "doi": "10.5555/rr.2",
+          "doi_url": "https://doi.org/10.5555/rr.2",
+          "openalex_id": "W9000000002",
+          "openalex_url": "https://openalex.org/W9000000002",
+          "cited_by_count": 1234,
+          "in_scope": true,
+          "origin": "tracked",
+          "is_retracted": false
+        },
+        "abstract": {
+          "content": "This fictional study examines how inconsistent star ratings across review platforms affect reader trust. In an online experiment, participants viewed listings whose ratings agreed or disagreed and then reported their trust and the effort they spent deciding. Inconsistent ratings reduced trust and increased decision effort. The text is invented test data for the paper page.",
+          "source": "openalex"
+        },
+        "zh_summary": {
+          "state": "ready",
+          "value": {
+            "zh_summary_id": "z1000000-0000-4000-8000-000000000001",
+            "research_question": "線上評價平台上，不同來源的星等彼此不一致時，讀者對商家的信任會不會下降。",
+            "method": "線上實驗，兩百四十位受測者看三組評價頁面並回答信任量表。",
+            "theory": "訊號理論與認知負荷理論。",
+            "findings": "星等不一致時信任明顯下降，受測者也需要更多時間判斷。",
+            "reported_fields": []
+          },
+          "provenance": {
+            "model": "claude-haiku-4-5",
+            "generated_at": "2026-11-10T03:00:00Z",
+            "input_kind": "abstract",
+            "human_verified": false
+          }
+        },
+        "classification": {
+          "state": "ready",
+          "value": {
+            "topic": {
+              "keys": [
+                "platforms",
+                "trust"
+              ],
+              "human_verified": false,
+              "fix_member_count": 0,
+              "members_disagree": false
+            },
+            "method": {
+              "keys": [
+                "experiment"
+              ],
+              "human_verified": false,
+              "fix_member_count": 0,
+              "members_disagree": false
+            },
+            "fix_member_count": 0
+          },
+          "provenance": {
+            "model": "claude-haiku-4-5",
+            "generated_at": "2026-11-10T03:00:00Z",
+            "input_kind": "abstract",
+            "human_verified": false
+          }
+        },
+        "research_model": {
+          "state": "ready",
+          "provenance": {
+            "model": "claude-haiku-4-5",
+            "generated_at": "2026-11-10T03:00:00Z",
+            "input_kind": "abstract",
+            "human_verified": false
+          },
+          "value": {
+            "research_model_id": "r1000000-0000-4000-8000-000000000001",
+            "is_review_or_meta_analysis": false,
+            "country": null,
+            "industry": null,
+            "research_design": null,
+            "unit_of_analysis": null,
+            "sample_size": 240,
+            "limitations": null,
+            "future_research": null,
+            "constructs": [
+              {
+                "construct_id": "c1000000-0000-4000-8000-000000000001",
+                "name_en": "Rating inconsistency",
+                "label_zh": "評分不一致",
+                "definition": null,
+                "scale_source": null,
+                "item_location": null,
+                "item_count": null,
+                "cronbach_alpha": null,
+                "composite_reliability": null,
+                "ave": null
+              },
+              {
+                "construct_id": "c1000000-0000-4000-8000-000000000002",
+                "name_en": "Reader trust",
+                "label_zh": "讀者信任",
+                "definition": null,
+                "scale_source": null,
+                "item_location": null,
+                "item_count": null,
+                "cronbach_alpha": null,
+                "composite_reliability": null,
+                "ave": null
+              },
+              {
+                "construct_id": "c1000000-0000-4000-8000-000000000003",
+                "name_en": "Decision effort",
+                "label_zh": "判斷費力程度",
+                "definition": null,
+                "scale_source": null,
+                "item_location": null,
+                "item_count": null,
+                "cronbach_alpha": null,
+                "composite_reliability": null,
+                "ave": null
+              }
+            ],
+            "hypotheses": [
+              {
+                "ordinal": 1,
+                "sentence": "Inconsistent ratings lower the trust readers place in a listing.",
+                "cause_construct_id": "c1000000-0000-4000-8000-000000000001",
+                "effect_construct_id": "c1000000-0000-4000-8000-000000000002",
+                "evidence_type": "empirical_test",
+                "support": "supported",
+                "beta": null,
+                "p_value": null,
+                "sample_size": null,
+                "effect_type": null,
+                "result_quote": null
+              },
+              {
+                "ordinal": 2,
+                "sentence": "Inconsistent ratings increase the effort readers spend before deciding.",
+                "cause_construct_id": "c1000000-0000-4000-8000-000000000001",
+                "effect_construct_id": "c1000000-0000-4000-8000-000000000003",
+                "evidence_type": "empirical_test",
+                "support": "supported",
+                "beta": null,
+                "p_value": null,
+                "sample_size": null,
+                "effect_type": null,
+                "result_quote": null
+              }
+            ]
+          }
+        },
+        "full_text_links": {
+          "doi_url": "https://doi.org/10.5555/rr.2",
+          "open_access_url": null
+        },
+        "snapshot": {
+          "number": 12,
+          "as_of": "2026-11-11T17:30:00Z"
+        }
+      }
+    },
+    "38000000-0000-4000-8000-000000000003": {
+      "label": "no-abstract",
+      "note": "沒有摘要：中文重點與研究模型 no_input、分類只根據標題",
+      "page": {
+        "paper": {
+          "id": "38000000-0000-4000-8000-000000000003",
+          "title": "Platform Governance Without Abstracts: A Placeholder Title",
+          "authors": [
+            "Avery Example",
+            "Jordan Sample",
+            "Riley Placeholder"
+          ],
+          "publication_year": 2025,
+          "journal": "jes",
+          "journal_issn_l": "0000-0000",
+          "volume": "12",
+          "issue": "3",
+          "first_page": "101",
+          "last_page": "124",
+          "doi": "10.5555/rr.3",
+          "doi_url": "https://doi.org/10.5555/rr.3",
+          "openalex_id": "W9000000003",
+          "openalex_url": "https://openalex.org/W9000000003",
+          "cited_by_count": 8,
+          "in_scope": true,
+          "origin": "tracked",
+          "is_retracted": false
+        },
+        "abstract": null,
+        "zh_summary": {
+          "state": "no_input",
+          "value": null,
+          "provenance": null
+        },
+        "classification": {
+          "state": "ready",
+          "value": {
+            "topic": {
+              "keys": [
+                "unclassified"
+              ],
+              "human_verified": false,
+              "fix_member_count": 0,
+              "members_disagree": false
+            },
+            "method": {
+              "keys": [
+                "experiment"
+              ],
+              "human_verified": false,
+              "fix_member_count": 0,
+              "members_disagree": false
+            },
+            "fix_member_count": 0
+          },
+          "provenance": {
+            "model": "claude-haiku-4-5",
+            "generated_at": "2026-11-10T03:00:00Z",
+            "input_kind": "title",
+            "human_verified": false
+          }
+        },
+        "research_model": {
+          "state": "no_input",
+          "value": null,
+          "provenance": null
+        },
+        "full_text_links": {
+          "doi_url": "https://doi.org/10.5555/rr.3",
+          "open_access_url": null
+        },
+        "snapshot": {
+          "number": 12,
+          "as_of": "2026-11-11T17:30:00Z"
+        }
+      }
+    },
+    "38000000-0000-4000-8000-000000000004": {
+      "label": "zh-failed",
+      "note": "只有中文重點沒成功",
+      "page": {
+        "paper": {
+          "id": "38000000-0000-4000-8000-000000000004",
+          "title": "Rating Inconsistency and Reader Trust on Review Platforms",
+          "authors": [
+            "Avery Example",
+            "Jordan Sample",
+            "Riley Placeholder"
+          ],
+          "publication_year": 2023,
+          "journal": "jes",
+          "journal_issn_l": "0000-0000",
+          "volume": "12",
+          "issue": "3",
+          "first_page": "101",
+          "last_page": "124",
+          "doi": "10.5555/rr.4",
+          "doi_url": "https://doi.org/10.5555/rr.4",
+          "openalex_id": "W9000000004",
+          "openalex_url": "https://openalex.org/W9000000004",
+          "cited_by_count": 1234,
+          "in_scope": true,
+          "origin": "tracked",
+          "is_retracted": false
+        },
+        "abstract": {
+          "content": "This fictional study examines how inconsistent star ratings across review platforms affect reader trust. In an online experiment, participants viewed listings whose ratings agreed or disagreed and then reported their trust and the effort they spent deciding. Inconsistent ratings reduced trust and increased decision effort. The text is invented test data for the paper page.",
+          "source": "openalex"
+        },
+        "zh_summary": {
+          "state": "failed",
+          "value": null,
+          "provenance": null
+        },
+        "classification": {
+          "state": "ready",
+          "value": {
+            "topic": {
+              "keys": [
+                "platforms",
+                "trust"
+              ],
+              "human_verified": false,
+              "fix_member_count": 0,
+              "members_disagree": false
+            },
+            "method": {
+              "keys": [
+                "experiment"
+              ],
+              "human_verified": false,
+              "fix_member_count": 0,
+              "members_disagree": false
+            },
+            "fix_member_count": 0
+          },
+          "provenance": {
+            "model": "claude-haiku-4-5",
+            "generated_at": "2026-11-10T03:00:00Z",
+            "input_kind": "abstract",
+            "human_verified": false
+          }
+        },
+        "research_model": {
+          "state": "ready",
+          "provenance": {
+            "model": "claude-haiku-4-5",
+            "generated_at": "2026-11-10T03:00:00Z",
+            "input_kind": "abstract",
+            "human_verified": false
+          },
+          "value": {
+            "research_model_id": "r1000000-0000-4000-8000-000000000001",
+            "is_review_or_meta_analysis": false,
+            "country": null,
+            "industry": null,
+            "research_design": null,
+            "unit_of_analysis": null,
+            "sample_size": 240,
+            "limitations": null,
+            "future_research": null,
+            "constructs": [
+              {
+                "construct_id": "c1000000-0000-4000-8000-000000000001",
+                "name_en": "Rating inconsistency",
+                "label_zh": "評分不一致",
+                "definition": null,
+                "scale_source": null,
+                "item_location": null,
+                "item_count": null,
+                "cronbach_alpha": null,
+                "composite_reliability": null,
+                "ave": null
+              },
+              {
+                "construct_id": "c1000000-0000-4000-8000-000000000002",
+                "name_en": "Reader trust",
+                "label_zh": "讀者信任",
+                "definition": null,
+                "scale_source": null,
+                "item_location": null,
+                "item_count": null,
+                "cronbach_alpha": null,
+                "composite_reliability": null,
+                "ave": null
+              },
+              {
+                "construct_id": "c1000000-0000-4000-8000-000000000003",
+                "name_en": "Decision effort",
+                "label_zh": "判斷費力程度",
+                "definition": null,
+                "scale_source": null,
+                "item_location": null,
+                "item_count": null,
+                "cronbach_alpha": null,
+                "composite_reliability": null,
+                "ave": null
+              }
+            ],
+            "hypotheses": [
+              {
+                "ordinal": 1,
+                "sentence": "Inconsistent ratings lower the trust readers place in a listing.",
+                "cause_construct_id": "c1000000-0000-4000-8000-000000000001",
+                "effect_construct_id": "c1000000-0000-4000-8000-000000000002",
+                "evidence_type": "empirical_test",
+                "support": "supported",
+                "beta": null,
+                "p_value": null,
+                "sample_size": null,
+                "effect_type": null,
+                "result_quote": null
+              },
+              {
+                "ordinal": 2,
+                "sentence": "Inconsistent ratings increase the effort readers spend before deciding.",
+                "cause_construct_id": "c1000000-0000-4000-8000-000000000001",
+                "effect_construct_id": "c1000000-0000-4000-8000-000000000003",
+                "evidence_type": "empirical_test",
+                "support": "supported",
+                "beta": null,
+                "p_value": null,
+                "sample_size": null,
+                "effect_type": null,
+                "result_quote": null
+              }
+            ]
+          }
+        },
+        "full_text_links": {
+          "doi_url": "https://doi.org/10.5555/rr.4",
+          "open_access_url": null
+        },
+        "snapshot": {
+          "number": 12,
+          "as_of": "2026-11-11T17:30:00Z"
+        }
+      }
+    },
+    "38000000-0000-4000-8000-000000000005": {
+      "label": "all-failed",
+      "note": "三個 AI 區塊都沒成功",
+      "page": {
+        "paper": {
+          "id": "38000000-0000-4000-8000-000000000005",
+          "title": "Rating Inconsistency and Reader Trust on Review Platforms",
+          "authors": [
+            "Avery Example",
+            "Jordan Sample",
+            "Riley Placeholder"
+          ],
+          "publication_year": 2023,
+          "journal": "jes",
+          "journal_issn_l": "0000-0000",
+          "volume": "12",
+          "issue": "3",
+          "first_page": "101",
+          "last_page": "124",
+          "doi": "10.5555/rr.5",
+          "doi_url": "https://doi.org/10.5555/rr.5",
+          "openalex_id": "W9000000005",
+          "openalex_url": "https://openalex.org/W9000000005",
+          "cited_by_count": 1234,
+          "in_scope": true,
+          "origin": "tracked",
+          "is_retracted": false
+        },
+        "abstract": {
+          "content": "This fictional study examines how inconsistent star ratings across review platforms affect reader trust. In an online experiment, participants viewed listings whose ratings agreed or disagreed and then reported their trust and the effort they spent deciding. Inconsistent ratings reduced trust and increased decision effort. The text is invented test data for the paper page.",
+          "source": "openalex"
+        },
+        "zh_summary": {
+          "state": "failed",
+          "value": null,
+          "provenance": null
+        },
+        "classification": {
+          "state": "failed",
+          "value": null,
+          "provenance": null
+        },
+        "research_model": {
+          "state": "failed",
+          "value": null,
+          "provenance": null
+        },
+        "full_text_links": {
+          "doi_url": "https://doi.org/10.5555/rr.5",
+          "open_access_url": null
+        },
+        "snapshot": {
+          "number": 12,
+          "as_of": "2026-11-11T17:30:00Z"
+        }
+      }
+    },
+    "38000000-0000-4000-8000-000000000006": {
+      "label": "pending",
+      "note": "還在產生（中文重點即時、分類與研究模型批次）",
+      "page": {
+        "paper": {
+          "id": "38000000-0000-4000-8000-000000000006",
+          "title": "Rating Inconsistency and Reader Trust on Review Platforms",
+          "authors": [
+            "Avery Example",
+            "Jordan Sample",
+            "Riley Placeholder"
+          ],
+          "publication_year": 2023,
+          "journal": "jes",
+          "journal_issn_l": "0000-0000",
+          "volume": "12",
+          "issue": "3",
+          "first_page": "101",
+          "last_page": "124",
+          "doi": "10.5555/rr.6",
+          "doi_url": "https://doi.org/10.5555/rr.6",
+          "openalex_id": "W9000000006",
+          "openalex_url": "https://openalex.org/W9000000006",
+          "cited_by_count": 1234,
+          "in_scope": true,
+          "origin": "tracked",
+          "is_retracted": false
+        },
+        "abstract": {
+          "content": "This fictional study examines how inconsistent star ratings across review platforms affect reader trust. In an online experiment, participants viewed listings whose ratings agreed or disagreed and then reported their trust and the effort they spent deciding. Inconsistent ratings reduced trust and increased decision effort. The text is invented test data for the paper page.",
+          "source": "openalex"
+        },
+        "zh_summary": {
+          "state": "pending_interactive",
+          "value": null,
+          "provenance": null
+        },
+        "classification": {
+          "state": "pending_batch",
+          "value": null,
+          "provenance": null
+        },
+        "research_model": {
+          "state": "pending_batch",
+          "value": null,
+          "provenance": null
+        },
+        "full_text_links": {
+          "doi_url": "https://doi.org/10.5555/rr.6",
+          "open_access_url": null
+        },
+        "snapshot": {
+          "number": 12,
+          "as_of": "2026-11-11T17:30:00Z"
+        }
+      }
+    },
+    "38000000-0000-4000-8000-000000000007": {
+      "label": "budget",
+      "note": "本月 AI 額度用完",
+      "page": {
+        "paper": {
+          "id": "38000000-0000-4000-8000-000000000007",
+          "title": "Rating Inconsistency and Reader Trust on Review Platforms",
+          "authors": [
+            "Avery Example",
+            "Jordan Sample",
+            "Riley Placeholder"
+          ],
+          "publication_year": 2023,
+          "journal": "jes",
+          "journal_issn_l": "0000-0000",
+          "volume": "12",
+          "issue": "3",
+          "first_page": "101",
+          "last_page": "124",
+          "doi": "10.5555/rr.7",
+          "doi_url": "https://doi.org/10.5555/rr.7",
+          "openalex_id": "W9000000007",
+          "openalex_url": "https://openalex.org/W9000000007",
+          "cited_by_count": 1234,
+          "in_scope": true,
+          "origin": "tracked",
+          "is_retracted": false
+        },
+        "abstract": {
+          "content": "This fictional study examines how inconsistent star ratings across review platforms affect reader trust. In an online experiment, participants viewed listings whose ratings agreed or disagreed and then reported their trust and the effort they spent deciding. Inconsistent ratings reduced trust and increased decision effort. The text is invented test data for the paper page.",
+          "source": "openalex"
+        },
+        "zh_summary": {
+          "state": "deferred_budget",
+          "value": null,
+          "provenance": null
+        },
+        "classification": {
+          "state": "deferred_budget",
+          "value": null,
+          "provenance": null
+        },
+        "research_model": {
+          "state": "deferred_budget",
+          "value": null,
+          "provenance": null
+        },
+        "full_text_links": {
+          "doi_url": "https://doi.org/10.5555/rr.7",
+          "open_access_url": null
+        },
+        "snapshot": {
+          "number": 12,
+          "as_of": "2026-11-11T17:30:00Z"
+        }
+      }
+    },
+    "38000000-0000-4000-8000-000000000008": {
+      "label": "mixed",
+      "note": "三塊各是不同狀態：中文重點有內容、分類沒成功、研究模型還在產生",
+      "page": {
+        "paper": {
+          "id": "38000000-0000-4000-8000-000000000008",
+          "title": "Rating Inconsistency and Reader Trust on Review Platforms",
+          "authors": [
+            "Avery Example",
+            "Jordan Sample",
+            "Riley Placeholder"
+          ],
+          "publication_year": 2023,
+          "journal": "jes",
+          "journal_issn_l": "0000-0000",
+          "volume": "12",
+          "issue": "3",
+          "first_page": "101",
+          "last_page": "124",
+          "doi": "10.5555/rr.8",
+          "doi_url": "https://doi.org/10.5555/rr.8",
+          "openalex_id": "W9000000008",
+          "openalex_url": "https://openalex.org/W9000000008",
+          "cited_by_count": 1234,
+          "in_scope": true,
+          "origin": "tracked",
+          "is_retracted": false
+        },
+        "abstract": {
+          "content": "This fictional study examines how inconsistent star ratings across review platforms affect reader trust. In an online experiment, participants viewed listings whose ratings agreed or disagreed and then reported their trust and the effort they spent deciding. Inconsistent ratings reduced trust and increased decision effort. The text is invented test data for the paper page.",
+          "source": "openalex"
+        },
+        "zh_summary": {
+          "state": "ready",
+          "value": {
+            "zh_summary_id": "z1000000-0000-4000-8000-000000000001",
+            "research_question": "線上評價平台上，不同來源的星等彼此不一致時，讀者對商家的信任會不會下降。",
+            "method": "線上實驗，兩百四十位受測者看三組評價頁面並回答信任量表。",
+            "theory": "訊號理論與認知負荷理論。",
+            "findings": "星等不一致時信任明顯下降，受測者也需要更多時間判斷。",
+            "reported_fields": []
+          },
+          "provenance": {
+            "model": "claude-haiku-4-5",
+            "generated_at": "2026-11-10T03:00:00Z",
+            "input_kind": "abstract",
+            "human_verified": false
+          }
+        },
+        "classification": {
+          "state": "failed",
+          "value": null,
+          "provenance": null
+        },
+        "research_model": {
+          "state": "pending_batch",
+          "value": null,
+          "provenance": null
+        },
+        "full_text_links": {
+          "doi_url": "https://doi.org/10.5555/rr.8",
+          "open_access_url": null
+        },
+        "snapshot": {
+          "number": 12,
+          "as_of": "2026-11-11T17:30:00Z"
+        }
+      }
+    },
+    "38000000-0000-4000-8000-000000000009": {
+      "label": "empty",
+      "note": "中文重點與研究模型是空的（摘要沒提到）",
+      "page": {
+        "paper": {
+          "id": "38000000-0000-4000-8000-000000000009",
+          "title": "Rating Inconsistency and Reader Trust on Review Platforms",
+          "authors": [
+            "Avery Example",
+            "Jordan Sample",
+            "Riley Placeholder"
+          ],
+          "publication_year": 2023,
+          "journal": "jes",
+          "journal_issn_l": "0000-0000",
+          "volume": "12",
+          "issue": "3",
+          "first_page": "101",
+          "last_page": "124",
+          "doi": "10.5555/rr.9",
+          "doi_url": "https://doi.org/10.5555/rr.9",
+          "openalex_id": "W9000000009",
+          "openalex_url": "https://openalex.org/W9000000009",
+          "cited_by_count": 1234,
+          "in_scope": true,
+          "origin": "tracked",
+          "is_retracted": false
+        },
+        "abstract": {
+          "content": "This fictional study examines how inconsistent star ratings across review platforms affect reader trust. In an online experiment, participants viewed listings whose ratings agreed or disagreed and then reported their trust and the effort they spent deciding. Inconsistent ratings reduced trust and increased decision effort. The text is invented test data for the paper page.",
+          "source": "openalex"
+        },
+        "zh_summary": {
+          "state": "empty",
+          "value": null,
+          "provenance": {
+            "model": "claude-haiku-4-5",
+            "generated_at": "2026-11-10T03:00:00Z",
+            "input_kind": "abstract",
+            "human_verified": false
+          }
+        },
+        "classification": {
+          "state": "ready",
+          "value": {
+            "topic": {
+              "keys": [
+                "platforms",
+                "trust"
+              ],
+              "human_verified": false,
+              "fix_member_count": 0,
+              "members_disagree": false
+            },
+            "method": {
+              "keys": [
+                "experiment"
+              ],
+              "human_verified": false,
+              "fix_member_count": 0,
+              "members_disagree": false
+            },
+            "fix_member_count": 0
+          },
+          "provenance": {
+            "model": "claude-haiku-4-5",
+            "generated_at": "2026-11-10T03:00:00Z",
+            "input_kind": "abstract",
+            "human_verified": false
+          }
+        },
+        "research_model": {
+          "state": "empty",
+          "value": null,
+          "provenance": {
+            "model": "claude-haiku-4-5",
+            "generated_at": "2026-11-10T03:00:00Z",
+            "input_kind": "abstract",
+            "human_verified": false
+          }
+        },
+        "full_text_links": {
+          "doi_url": "https://doi.org/10.5555/rr.9",
+          "open_access_url": null
+        },
+        "snapshot": {
+          "number": 12,
+          "as_of": "2026-11-11T17:30:00Z"
+        }
+      }
+    },
+    "38000000-0000-4000-8000-000000000010": {
+      "label": "not-applicable",
+      "note": "三塊都是 not_applicable（手填書目，Epic 6）",
+      "page": {
+        "paper": {
+          "id": "38000000-0000-4000-8000-000000000010",
+          "title": "A Manually Entered Placeholder Paper",
+          "authors": [
+            "Avery Example",
+            "Jordan Sample",
+            "Riley Placeholder"
+          ],
+          "publication_year": 2023,
+          "journal": "jes",
+          "journal_issn_l": "0000-0000",
+          "volume": "12",
+          "issue": "3",
+          "first_page": "101",
+          "last_page": "124",
+          "doi": "10.5555/rr.10",
+          "doi_url": "https://doi.org/10.5555/rr.10",
+          "openalex_id": null,
+          "openalex_url": null,
+          "cited_by_count": null,
+          "in_scope": true,
+          "origin": "manual",
+          "is_retracted": false
+        },
+        "abstract": {
+          "content": "This fictional study examines how inconsistent star ratings across review platforms affect reader trust. In an online experiment, participants viewed listings whose ratings agreed or disagreed and then reported their trust and the effort they spent deciding. Inconsistent ratings reduced trust and increased decision effort. The text is invented test data for the paper page.",
+          "source": "openalex"
+        },
+        "zh_summary": {
+          "state": "not_applicable",
+          "value": null,
+          "provenance": null
+        },
+        "classification": {
+          "state": "not_applicable",
+          "value": null,
+          "provenance": null
+        },
+        "research_model": {
+          "state": "not_applicable",
+          "value": null,
+          "provenance": null
+        },
+        "full_text_links": {
+          "doi_url": "https://doi.org/10.5555/rr.10",
+          "open_access_url": null
+        },
+        "snapshot": {
+          "number": 12,
+          "as_of": "2026-11-11T17:30:00Z"
+        }
+      }
+    },
+    "38000000-0000-4000-8000-000000000011": {
+      "label": "no-doi",
+      "note": "沒有 DOI（也沒有快照：資料日期列不出現）",
+      "page": {
+        "paper": {
+          "id": "38000000-0000-4000-8000-000000000011",
+          "title": "Rating Inconsistency and Reader Trust on Review Platforms",
+          "authors": [
+            "Avery Example",
+            "Jordan Sample",
+            "Riley Placeholder"
+          ],
+          "publication_year": 2023,
+          "journal": "jes",
+          "journal_issn_l": "0000-0000",
+          "volume": "12",
+          "issue": "3",
+          "first_page": "101",
+          "last_page": "124",
+          "doi": null,
+          "doi_url": null,
+          "openalex_id": "W9000000011",
+          "openalex_url": "https://openalex.org/W9000000011",
+          "cited_by_count": 1234,
+          "in_scope": true,
+          "origin": "tracked",
+          "is_retracted": false
+        },
+        "abstract": {
+          "content": "This fictional study examines how inconsistent star ratings across review platforms affect reader trust. In an online experiment, participants viewed listings whose ratings agreed or disagreed and then reported their trust and the effort they spent deciding. Inconsistent ratings reduced trust and increased decision effort. The text is invented test data for the paper page.",
+          "source": "openalex"
+        },
+        "zh_summary": {
+          "state": "ready",
+          "value": {
+            "zh_summary_id": "z1000000-0000-4000-8000-000000000001",
+            "research_question": "線上評價平台上，不同來源的星等彼此不一致時，讀者對商家的信任會不會下降。",
+            "method": "線上實驗，兩百四十位受測者看三組評價頁面並回答信任量表。",
+            "theory": "訊號理論與認知負荷理論。",
+            "findings": "星等不一致時信任明顯下降，受測者也需要更多時間判斷。",
+            "reported_fields": []
+          },
+          "provenance": {
+            "model": "claude-haiku-4-5",
+            "generated_at": "2026-11-10T03:00:00Z",
+            "input_kind": "abstract",
+            "human_verified": false
+          }
+        },
+        "classification": {
+          "state": "ready",
+          "value": {
+            "topic": {
+              "keys": [
+                "platforms",
+                "trust"
+              ],
+              "human_verified": false,
+              "fix_member_count": 0,
+              "members_disagree": false
+            },
+            "method": {
+              "keys": [
+                "experiment"
+              ],
+              "human_verified": false,
+              "fix_member_count": 0,
+              "members_disagree": false
+            },
+            "fix_member_count": 0
+          },
+          "provenance": {
+            "model": "claude-haiku-4-5",
+            "generated_at": "2026-11-10T03:00:00Z",
+            "input_kind": "abstract",
+            "human_verified": false
+          }
+        },
+        "research_model": {
+          "state": "ready",
+          "provenance": {
+            "model": "claude-haiku-4-5",
+            "generated_at": "2026-11-10T03:00:00Z",
+            "input_kind": "abstract",
+            "human_verified": false
+          },
+          "value": {
+            "research_model_id": "r1000000-0000-4000-8000-000000000001",
+            "is_review_or_meta_analysis": false,
+            "country": null,
+            "industry": null,
+            "research_design": null,
+            "unit_of_analysis": null,
+            "sample_size": 240,
+            "limitations": null,
+            "future_research": null,
+            "constructs": [
+              {
+                "construct_id": "c1000000-0000-4000-8000-000000000001",
+                "name_en": "Rating inconsistency",
+                "label_zh": "評分不一致",
+                "definition": null,
+                "scale_source": null,
+                "item_location": null,
+                "item_count": null,
+                "cronbach_alpha": null,
+                "composite_reliability": null,
+                "ave": null
+              },
+              {
+                "construct_id": "c1000000-0000-4000-8000-000000000002",
+                "name_en": "Reader trust",
+                "label_zh": "讀者信任",
+                "definition": null,
+                "scale_source": null,
+                "item_location": null,
+                "item_count": null,
+                "cronbach_alpha": null,
+                "composite_reliability": null,
+                "ave": null
+              },
+              {
+                "construct_id": "c1000000-0000-4000-8000-000000000003",
+                "name_en": "Decision effort",
+                "label_zh": "判斷費力程度",
+                "definition": null,
+                "scale_source": null,
+                "item_location": null,
+                "item_count": null,
+                "cronbach_alpha": null,
+                "composite_reliability": null,
+                "ave": null
+              }
+            ],
+            "hypotheses": [
+              {
+                "ordinal": 1,
+                "sentence": "Inconsistent ratings lower the trust readers place in a listing.",
+                "cause_construct_id": "c1000000-0000-4000-8000-000000000001",
+                "effect_construct_id": "c1000000-0000-4000-8000-000000000002",
+                "evidence_type": "empirical_test",
+                "support": "supported",
+                "beta": null,
+                "p_value": null,
+                "sample_size": null,
+                "effect_type": null,
+                "result_quote": null
+              },
+              {
+                "ordinal": 2,
+                "sentence": "Inconsistent ratings increase the effort readers spend before deciding.",
+                "cause_construct_id": "c1000000-0000-4000-8000-000000000001",
+                "effect_construct_id": "c1000000-0000-4000-8000-000000000003",
+                "evidence_type": "empirical_test",
+                "support": "supported",
+                "beta": null,
+                "p_value": null,
+                "sample_size": null,
+                "effect_type": null,
+                "result_quote": null
+              }
+            ]
+          }
+        },
+        "full_text_links": {
+          "doi_url": null,
+          "open_access_url": null
+        },
+        "snapshot": null
+      }
+    },
+    "38000000-0000-4000-8000-000000000012": {
+      "label": "reported",
+      "note": "有人回報中文重點的「方法」、分類有 2 位成員修正過而且意見不同、分類已核對",
+      "page": {
+        "paper": {
+          "id": "38000000-0000-4000-8000-000000000012",
+          "title": "Rating Inconsistency and Reader Trust on Review Platforms",
+          "authors": [
+            "Avery Example",
+            "Jordan Sample",
+            "Riley Placeholder"
+          ],
+          "publication_year": 2023,
+          "journal": "jes",
+          "journal_issn_l": "0000-0000",
+          "volume": "12",
+          "issue": "3",
+          "first_page": "101",
+          "last_page": "124",
+          "doi": "10.5555/rr.12",
+          "doi_url": "https://doi.org/10.5555/rr.12",
+          "openalex_id": "W9000000012",
+          "openalex_url": "https://openalex.org/W9000000012",
+          "cited_by_count": 1234,
+          "in_scope": true,
+          "origin": "tracked",
+          "is_retracted": false
+        },
+        "abstract": {
+          "content": "This fictional study examines how inconsistent star ratings across review platforms affect reader trust. In an online experiment, participants viewed listings whose ratings agreed or disagreed and then reported their trust and the effort they spent deciding. Inconsistent ratings reduced trust and increased decision effort. The text is invented test data for the paper page.",
+          "source": "openalex"
+        },
+        "zh_summary": {
+          "state": "ready",
+          "value": {
+            "zh_summary_id": "z1000000-0000-4000-8000-000000000001",
+            "research_question": "線上評價平台上，不同來源的星等彼此不一致時，讀者對商家的信任會不會下降。",
+            "method": "線上實驗，兩百四十位受測者看三組評價頁面並回答信任量表。",
+            "theory": "訊號理論與認知負荷理論。",
+            "findings": "星等不一致時信任明顯下降，受測者也需要更多時間判斷。",
+            "reported_fields": [
+              "method"
+            ]
+          },
+          "provenance": {
+            "model": "claude-haiku-4-5",
+            "generated_at": "2026-11-10T03:00:00Z",
+            "input_kind": "abstract",
+            "human_verified": false
+          }
+        },
+        "classification": {
+          "state": "ready",
+          "value": {
+            "topic": {
+              "keys": [
+                "platforms",
+                "trust"
+              ],
+              "human_verified": true,
+              "fix_member_count": 2,
+              "members_disagree": true
+            },
+            "method": {
+              "keys": [
+                "experiment"
+              ],
+              "human_verified": true,
+              "fix_member_count": 2,
+              "members_disagree": true
+            },
+            "fix_member_count": 2
+          },
+          "provenance": {
+            "model": "claude-haiku-4-5",
+            "generated_at": "2026-11-10T03:00:00Z",
+            "input_kind": "abstract",
+            "human_verified": true
+          }
+        },
+        "research_model": {
+          "state": "ready",
+          "provenance": {
+            "model": "claude-haiku-4-5",
+            "generated_at": "2026-11-10T03:00:00Z",
+            "input_kind": "abstract",
+            "human_verified": false
+          },
+          "value": {
+            "research_model_id": "r1000000-0000-4000-8000-000000000001",
+            "is_review_or_meta_analysis": false,
+            "country": null,
+            "industry": null,
+            "research_design": null,
+            "unit_of_analysis": null,
+            "sample_size": 240,
+            "limitations": null,
+            "future_research": null,
+            "constructs": [
+              {
+                "construct_id": "c1000000-0000-4000-8000-000000000001",
+                "name_en": "Rating inconsistency",
+                "label_zh": "評分不一致",
+                "definition": null,
+                "scale_source": null,
+                "item_location": null,
+                "item_count": null,
+                "cronbach_alpha": null,
+                "composite_reliability": null,
+                "ave": null
+              },
+              {
+                "construct_id": "c1000000-0000-4000-8000-000000000002",
+                "name_en": "Reader trust",
+                "label_zh": "讀者信任",
+                "definition": null,
+                "scale_source": null,
+                "item_location": null,
+                "item_count": null,
+                "cronbach_alpha": null,
+                "composite_reliability": null,
+                "ave": null
+              },
+              {
+                "construct_id": "c1000000-0000-4000-8000-000000000003",
+                "name_en": "Decision effort",
+                "label_zh": "判斷費力程度",
+                "definition": null,
+                "scale_source": null,
+                "item_location": null,
+                "item_count": null,
+                "cronbach_alpha": null,
+                "composite_reliability": null,
+                "ave": null
+              }
+            ],
+            "hypotheses": [
+              {
+                "ordinal": 1,
+                "sentence": "Inconsistent ratings lower the trust readers place in a listing.",
+                "cause_construct_id": "c1000000-0000-4000-8000-000000000001",
+                "effect_construct_id": "c1000000-0000-4000-8000-000000000002",
+                "evidence_type": "empirical_test",
+                "support": "supported",
+                "beta": null,
+                "p_value": null,
+                "sample_size": null,
+                "effect_type": null,
+                "result_quote": null
+              },
+              {
+                "ordinal": 2,
+                "sentence": "Inconsistent ratings increase the effort readers spend before deciding.",
+                "cause_construct_id": "c1000000-0000-4000-8000-000000000001",
+                "effect_construct_id": "c1000000-0000-4000-8000-000000000003",
+                "evidence_type": "empirical_test",
+                "support": "supported",
+                "beta": null,
+                "p_value": null,
+                "sample_size": null,
+                "effect_type": null,
+                "result_quote": null
+              }
+            ]
+          }
+        },
+        "full_text_links": {
+          "doi_url": "https://doi.org/10.5555/rr.12",
+          "open_access_url": null
+        },
+        "snapshot": {
+          "number": 12,
+          "as_of": "2026-11-11T17:30:00Z"
+        }
+      }
+    },
+    "38000000-0000-4000-8000-000000000013": {
+      "label": "fixed",
+      "note": "分類有 1 位成員修正過（意見相同）：同一人修了主題與方法，兩欄都是人工值，標章是「已核對」（和 3.6 的 API 一致）",
+      "page": {
+        "paper": {
+          "id": "38000000-0000-4000-8000-000000000013",
+          "title": "Rating Inconsistency and Reader Trust on Review Platforms",
+          "authors": [
+            "Avery Example",
+            "Jordan Sample",
+            "Riley Placeholder"
+          ],
+          "publication_year": 2023,
+          "journal": "jes",
+          "journal_issn_l": "0000-0000",
+          "volume": "12",
+          "issue": "3",
+          "first_page": "101",
+          "last_page": "124",
+          "doi": "10.5555/rr.13",
+          "doi_url": "https://doi.org/10.5555/rr.13",
+          "openalex_id": "W9000000013",
+          "openalex_url": "https://openalex.org/W9000000013",
+          "cited_by_count": 1234,
+          "in_scope": true,
+          "origin": "tracked",
+          "is_retracted": false
+        },
+        "abstract": {
+          "content": "This fictional study examines how inconsistent star ratings across review platforms affect reader trust. In an online experiment, participants viewed listings whose ratings agreed or disagreed and then reported their trust and the effort they spent deciding. Inconsistent ratings reduced trust and increased decision effort. The text is invented test data for the paper page.",
+          "source": "openalex"
+        },
+        "zh_summary": {
+          "state": "ready",
+          "value": {
+            "zh_summary_id": "z1000000-0000-4000-8000-000000000001",
+            "research_question": "線上評價平台上，不同來源的星等彼此不一致時，讀者對商家的信任會不會下降。",
+            "method": "線上實驗，兩百四十位受測者看三組評價頁面並回答信任量表。",
+            "theory": "訊號理論與認知負荷理論。",
+            "findings": "星等不一致時信任明顯下降，受測者也需要更多時間判斷。",
+            "reported_fields": []
+          },
+          "provenance": {
+            "model": "claude-haiku-4-5",
+            "generated_at": "2026-11-10T03:00:00Z",
+            "input_kind": "abstract",
+            "human_verified": false
+          }
+        },
+        "classification": {
+          "state": "ready",
+          "value": {
+            "topic": {
+              "keys": [
+                "platforms",
+                "trust"
+              ],
+              "human_verified": true,
+              "fix_member_count": 1,
+              "members_disagree": false
+            },
+            "method": {
+              "keys": [
+                "experiment"
+              ],
+              "human_verified": true,
+              "fix_member_count": 1,
+              "members_disagree": false
+            },
+            "fix_member_count": 1
+          },
+          "provenance": {
+            "model": "claude-haiku-4-5",
+            "generated_at": "2026-11-10T03:00:00Z",
+            "input_kind": "abstract",
+            "human_verified": true
+          }
+        },
+        "research_model": {
+          "state": "ready",
+          "provenance": {
+            "model": "claude-haiku-4-5",
+            "generated_at": "2026-11-10T03:00:00Z",
+            "input_kind": "abstract",
+            "human_verified": false
+          },
+          "value": {
+            "research_model_id": "r1000000-0000-4000-8000-000000000001",
+            "is_review_or_meta_analysis": false,
+            "country": null,
+            "industry": null,
+            "research_design": null,
+            "unit_of_analysis": null,
+            "sample_size": 240,
+            "limitations": null,
+            "future_research": null,
+            "constructs": [
+              {
+                "construct_id": "c1000000-0000-4000-8000-000000000001",
+                "name_en": "Rating inconsistency",
+                "label_zh": "評分不一致",
+                "definition": null,
+                "scale_source": null,
+                "item_location": null,
+                "item_count": null,
+                "cronbach_alpha": null,
+                "composite_reliability": null,
+                "ave": null
+              },
+              {
+                "construct_id": "c1000000-0000-4000-8000-000000000002",
+                "name_en": "Reader trust",
+                "label_zh": "讀者信任",
+                "definition": null,
+                "scale_source": null,
+                "item_location": null,
+                "item_count": null,
+                "cronbach_alpha": null,
+                "composite_reliability": null,
+                "ave": null
+              },
+              {
+                "construct_id": "c1000000-0000-4000-8000-000000000003",
+                "name_en": "Decision effort",
+                "label_zh": "判斷費力程度",
+                "definition": null,
+                "scale_source": null,
+                "item_location": null,
+                "item_count": null,
+                "cronbach_alpha": null,
+                "composite_reliability": null,
+                "ave": null
+              }
+            ],
+            "hypotheses": [
+              {
+                "ordinal": 1,
+                "sentence": "Inconsistent ratings lower the trust readers place in a listing.",
+                "cause_construct_id": "c1000000-0000-4000-8000-000000000001",
+                "effect_construct_id": "c1000000-0000-4000-8000-000000000002",
+                "evidence_type": "empirical_test",
+                "support": "supported",
+                "beta": null,
+                "p_value": null,
+                "sample_size": null,
+                "effect_type": null,
+                "result_quote": null
+              },
+              {
+                "ordinal": 2,
+                "sentence": "Inconsistent ratings increase the effort readers spend before deciding.",
+                "cause_construct_id": "c1000000-0000-4000-8000-000000000001",
+                "effect_construct_id": "c1000000-0000-4000-8000-000000000003",
+                "evidence_type": "empirical_test",
+                "support": "supported",
+                "beta": null,
+                "p_value": null,
+                "sample_size": null,
+                "effect_type": null,
+                "result_quote": null
+              }
+            ]
+          }
+        },
+        "full_text_links": {
+          "doi_url": "https://doi.org/10.5555/rr.13",
+          "open_access_url": null
+        },
+        "snapshot": {
+          "number": 12,
+          "as_of": "2026-11-11T17:30:00Z"
+        }
+      }
+    },
+    "38000000-0000-4000-8000-000000000014": {
+      "label": "support-variants",
+      "note": "是否成立與證據類型的各種值；證據來源是全文",
+      "page": {
+        "paper": {
+          "id": "38000000-0000-4000-8000-000000000014",
+          "title": "Rating Inconsistency and Reader Trust on Review Platforms",
+          "authors": [
+            "Avery Example",
+            "Jordan Sample",
+            "Riley Placeholder"
+          ],
+          "publication_year": 2023,
+          "journal": "jes",
+          "journal_issn_l": "0000-0000",
+          "volume": "12",
+          "issue": "3",
+          "first_page": "101",
+          "last_page": "124",
+          "doi": "10.5555/rr.14",
+          "doi_url": "https://doi.org/10.5555/rr.14",
+          "openalex_id": "W9000000014",
+          "openalex_url": "https://openalex.org/W9000000014",
+          "cited_by_count": 1234,
+          "in_scope": true,
+          "origin": "tracked",
+          "is_retracted": false
+        },
+        "abstract": {
+          "content": "This fictional study examines how inconsistent star ratings across review platforms affect reader trust. In an online experiment, participants viewed listings whose ratings agreed or disagreed and then reported their trust and the effort they spent deciding. Inconsistent ratings reduced trust and increased decision effort. The text is invented test data for the paper page.",
+          "source": "openalex"
+        },
+        "zh_summary": {
+          "state": "ready",
+          "value": {
+            "zh_summary_id": "z1000000-0000-4000-8000-000000000001",
+            "research_question": "線上評價平台上，不同來源的星等彼此不一致時，讀者對商家的信任會不會下降。",
+            "method": "線上實驗，兩百四十位受測者看三組評價頁面並回答信任量表。",
+            "theory": "訊號理論與認知負荷理論。",
+            "findings": "星等不一致時信任明顯下降，受測者也需要更多時間判斷。",
+            "reported_fields": []
+          },
+          "provenance": {
+            "model": "claude-haiku-4-5",
+            "generated_at": "2026-11-10T03:00:00Z",
+            "input_kind": "abstract",
+            "human_verified": false
+          }
+        },
+        "classification": {
+          "state": "ready",
+          "value": {
+            "topic": {
+              "keys": [
+                "platforms",
+                "trust"
+              ],
+              "human_verified": false,
+              "fix_member_count": 0,
+              "members_disagree": false
+            },
+            "method": {
+              "keys": [
+                "experiment"
+              ],
+              "human_verified": false,
+              "fix_member_count": 0,
+              "members_disagree": false
+            },
+            "fix_member_count": 0
+          },
+          "provenance": {
+            "model": "claude-haiku-4-5",
+            "generated_at": "2026-11-10T03:00:00Z",
+            "input_kind": "abstract",
+            "human_verified": false
+          }
+        },
+        "research_model": {
+          "state": "ready",
+          "provenance": {
+            "model": "claude-haiku-4-5",
+            "generated_at": "2026-11-10T03:00:00Z",
+            "input_kind": "fulltext",
+            "human_verified": false
+          },
+          "value": {
+            "research_model_id": "r1000000-0000-4000-8000-000000000001",
+            "is_review_or_meta_analysis": false,
+            "country": null,
+            "industry": null,
+            "research_design": null,
+            "unit_of_analysis": null,
+            "sample_size": 240,
+            "limitations": null,
+            "future_research": null,
+            "constructs": [
+              {
+                "construct_id": "c1000000-0000-4000-8000-000000000001",
+                "name_en": "Rating inconsistency",
+                "label_zh": "評分不一致",
+                "definition": null,
+                "scale_source": null,
+                "item_location": null,
+                "item_count": null,
+                "cronbach_alpha": null,
+                "composite_reliability": null,
+                "ave": null
+              },
+              {
+                "construct_id": "c1000000-0000-4000-8000-000000000002",
+                "name_en": "Reader trust",
+                "label_zh": "讀者信任",
+                "definition": null,
+                "scale_source": null,
+                "item_location": null,
+                "item_count": null,
+                "cronbach_alpha": null,
+                "composite_reliability": null,
+                "ave": null
+              },
+              {
+                "construct_id": "c1000000-0000-4000-8000-000000000003",
+                "name_en": "Decision effort",
+                "label_zh": "判斷費力程度",
+                "definition": null,
+                "scale_source": null,
+                "item_location": null,
+                "item_count": null,
+                "cronbach_alpha": null,
+                "composite_reliability": null,
+                "ave": null
+              }
+            ],
+            "hypotheses": [
+              {
+                "ordinal": 1,
+                "sentence": "Inconsistent ratings lower trust.",
+                "cause_construct_id": "c1000000-0000-4000-8000-000000000001",
+                "effect_construct_id": "c1000000-0000-4000-8000-000000000002",
+                "evidence_type": "analytical",
+                "support": "not_stated",
+                "beta": null,
+                "p_value": null,
+                "sample_size": null,
+                "effect_type": null,
+                "result_quote": null
+              },
+              {
+                "ordinal": 2,
+                "sentence": "Inconsistent ratings raise effort.",
+                "cause_construct_id": "c1000000-0000-4000-8000-000000000001",
+                "effect_construct_id": "c1000000-0000-4000-8000-000000000003",
+                "evidence_type": "simulation",
+                "support": "not_determined",
+                "beta": null,
+                "p_value": null,
+                "sample_size": null,
+                "effect_type": null,
+                "result_quote": null
+              },
+              {
+                "ordinal": 3,
+                "sentence": "Trust lowers effort.",
+                "cause_construct_id": "c1000000-0000-4000-8000-000000000002",
+                "effect_construct_id": "c1000000-0000-4000-8000-000000000003",
+                "evidence_type": "qualitative",
+                "support": "partially_supported",
+                "beta": null,
+                "p_value": null,
+                "sample_size": null,
+                "effect_type": null,
+                "result_quote": null
+              },
+              {
+                "ordinal": 4,
+                "sentence": "Effort lowers trust.",
+                "cause_construct_id": "c1000000-0000-4000-8000-000000000003",
+                "effect_construct_id": "c1000000-0000-4000-8000-000000000002",
+                "evidence_type": "conceptual",
+                "support": "not_supported",
+                "beta": null,
+                "p_value": null,
+                "sample_size": null,
+                "effect_type": null,
+                "result_quote": null
+              }
+            ]
+          }
+        },
+        "full_text_links": {
+          "doi_url": "https://doi.org/10.5555/rr.14",
+          "open_access_url": null
+        },
+        "snapshot": {
+          "number": 12,
+          "as_of": "2026-11-11T17:30:00Z"
+        }
+      }
+    },
+    "38000000-0000-4000-8000-000000000015": {
+      "label": "long-100",
+      "note": "中文重點四欄各 100 字；標題與作者很長",
+      "page": {
+        "paper": {
+          "id": "38000000-0000-4000-8000-000000000015",
+          "title": "A Deliberately Long Placeholder Title That Wraps Across Several Lines to Test Balanced Wrapping on the Paper Page Layout",
+          "authors": [
+            "Author Number1 Example",
+            "Author Number2 Example",
+            "Author Number3 Example",
+            "Author Number4 Example",
+            "Author Number5 Example",
+            "Author Number6 Example",
+            "Author Number7 Example",
+            "Author Number8 Example",
+            "Author Number9 Example",
+            "Author Number10 Example",
+            "Author Number11 Example",
+            "Author Number12 Example"
+          ],
+          "publication_year": 2023,
+          "journal": "jes",
+          "journal_issn_l": "0000-0000",
+          "volume": "12",
+          "issue": "3",
+          "first_page": "101",
+          "last_page": "124",
+          "doi": "10.5555/rr.15",
+          "doi_url": "https://doi.org/10.5555/rr.15",
+          "openalex_id": "W9000000015",
+          "openalex_url": "https://openalex.org/W9000000015",
+          "cited_by_count": 1234,
+          "in_scope": true,
+          "origin": "tracked",
+          "is_retracted": false
+        },
+        "abstract": {
+          "content": "This fictional study examines how inconsistent star ratings across review platforms affect reader trust. In an online experiment, participants viewed listings whose ratings agreed or disagreed and then reported their trust and the effort they spent deciding. Inconsistent ratings reduced trust and increased decision effort. The text is invented test data for the paper page.",
+          "source": "openalex"
+        },
+        "zh_summary": {
+          "state": "ready",
+          "value": {
+            "zh_summary_id": "z1000000-0000-4000-8000-000000000001",
+            "research_question": "這是一段剛好一百個字的測試文字，用來確認中文重點的欄位在桌機與手機上都能完整換行，不會被截斷、不會擠壓旁邊的欄名，也不會讓版面出現左右捲動；內容是自己編的測試資料，和任何真實論文都沒有關係，請不要引用",
+            "method": "的測試文字，用來確認中文重點的欄位在桌機與手機上都能完整換行，不會被截斷、不會擠壓旁邊的欄名，也不會讓版面出現左右捲動；內容是自己編的測試資料，和任何真實論文都沒有關係，請不要引用。這是一段剛好一百個",
+            "theory": "中文重點的欄位在桌機與手機上都能完整換行，不會被截斷、不會擠壓旁邊的欄名，也不會讓版面出現左右捲動；內容是自己編的測試資料，和任何真實論文都沒有關係，請不要引用。這是一段剛好一百個字的測試文字，用來確",
+            "findings": "與手機上都能完整換行，不會被截斷、不會擠壓旁邊的欄名，也不會讓版面出現左右捲動；內容是自己編的測試資料，和任何真實論文都沒有關係，請不要引用。這是一段剛好一百個字的測試文字，用來確認中文重點的欄位在桌",
+            "reported_fields": []
+          },
+          "provenance": {
+            "model": "claude-haiku-4-5",
+            "generated_at": "2026-11-10T03:00:00Z",
+            "input_kind": "abstract",
+            "human_verified": false
+          }
+        },
+        "classification": {
+          "state": "ready",
+          "value": {
+            "topic": {
+              "keys": [
+                "platforms",
+                "trust"
+              ],
+              "human_verified": false,
+              "fix_member_count": 0,
+              "members_disagree": false
+            },
+            "method": {
+              "keys": [
+                "experiment"
+              ],
+              "human_verified": false,
+              "fix_member_count": 0,
+              "members_disagree": false
+            },
+            "fix_member_count": 0
+          },
+          "provenance": {
+            "model": "claude-haiku-4-5",
+            "generated_at": "2026-11-10T03:00:00Z",
+            "input_kind": "abstract",
+            "human_verified": false
+          }
+        },
+        "research_model": {
+          "state": "ready",
+          "provenance": {
+            "model": "claude-haiku-4-5",
+            "generated_at": "2026-11-10T03:00:00Z",
+            "input_kind": "abstract",
+            "human_verified": false
+          },
+          "value": {
+            "research_model_id": "r1000000-0000-4000-8000-000000000001",
+            "is_review_or_meta_analysis": false,
+            "country": null,
+            "industry": null,
+            "research_design": null,
+            "unit_of_analysis": null,
+            "sample_size": 240,
+            "limitations": null,
+            "future_research": null,
+            "constructs": [
+              {
+                "construct_id": "c1000000-0000-4000-8000-000000000001",
+                "name_en": "Rating inconsistency",
+                "label_zh": "評分不一致",
+                "definition": null,
+                "scale_source": null,
+                "item_location": null,
+                "item_count": null,
+                "cronbach_alpha": null,
+                "composite_reliability": null,
+                "ave": null
+              },
+              {
+                "construct_id": "c1000000-0000-4000-8000-000000000002",
+                "name_en": "Reader trust",
+                "label_zh": "讀者信任",
+                "definition": null,
+                "scale_source": null,
+                "item_location": null,
+                "item_count": null,
+                "cronbach_alpha": null,
+                "composite_reliability": null,
+                "ave": null
+              },
+              {
+                "construct_id": "c1000000-0000-4000-8000-000000000003",
+                "name_en": "Decision effort",
+                "label_zh": "判斷費力程度",
+                "definition": null,
+                "scale_source": null,
+                "item_location": null,
+                "item_count": null,
+                "cronbach_alpha": null,
+                "composite_reliability": null,
+                "ave": null
+              }
+            ],
+            "hypotheses": [
+              {
+                "ordinal": 1,
+                "sentence": "Inconsistent ratings lower the trust readers place in a listing.",
+                "cause_construct_id": "c1000000-0000-4000-8000-000000000001",
+                "effect_construct_id": "c1000000-0000-4000-8000-000000000002",
+                "evidence_type": "empirical_test",
+                "support": "supported",
+                "beta": null,
+                "p_value": null,
+                "sample_size": null,
+                "effect_type": null,
+                "result_quote": null
+              },
+              {
+                "ordinal": 2,
+                "sentence": "Inconsistent ratings increase the effort readers spend before deciding.",
+                "cause_construct_id": "c1000000-0000-4000-8000-000000000001",
+                "effect_construct_id": "c1000000-0000-4000-8000-000000000003",
+                "evidence_type": "empirical_test",
+                "support": "supported",
+                "beta": null,
+                "p_value": null,
+                "sample_size": null,
+                "effect_type": null,
+                "result_quote": null
+              }
+            ]
+          }
+        },
+        "full_text_links": {
+          "doi_url": "https://doi.org/10.5555/rr.15",
+          "open_access_url": null
+        },
+        "snapshot": {
+          "number": 12,
+          "as_of": "2026-11-11T17:30:00Z"
+        }
+      }
+    },
+    "38000000-0000-4000-8000-000000000016": {
+      "label": "xss",
+      "note": "AI 文字裡有 HTML 標籤、javascript: 連結、Markdown 連結與圖片、腳本樣的字串",
+      "page": {
+        "paper": {
+          "id": "38000000-0000-4000-8000-000000000016",
+          "title": "Rating Inconsistency and Reader Trust on Review Platforms",
+          "authors": [
+            "Avery Example",
+            "Jordan Sample",
+            "Riley Placeholder"
+          ],
+          "publication_year": 2023,
+          "journal": "jes",
+          "journal_issn_l": "0000-0000",
+          "volume": "12",
+          "issue": "3",
+          "first_page": "101",
+          "last_page": "124",
+          "doi": "10.5555/rr.16",
+          "doi_url": "https://doi.org/10.5555/rr.16",
+          "openalex_id": "W9000000016",
+          "openalex_url": "https://openalex.org/W9000000016",
+          "cited_by_count": 1234,
+          "in_scope": true,
+          "origin": "tracked",
+          "is_retracted": false
+        },
+        "abstract": {
+          "content": "This fictional study examines how inconsistent star ratings across review platforms affect reader trust. In an online experiment, participants viewed listings whose ratings agreed or disagreed and then reported their trust and the effort they spent deciding. Inconsistent ratings reduced trust and increased decision effort. The text is invented test data for the paper page.",
+          "source": "openalex"
+        },
+        "zh_summary": {
+          "state": "ready",
+          "value": {
+            "zh_summary_id": "z1000000-0000-4000-8000-000000000001",
+            "research_question": "<script>window.__xss = 1</script><img src=x onerror=\"window.__xss = 2\"> **粗體可以**",
+            "method": "[點我](javascript:window.__xss=3) 與 <a href=\"javascript:window.__xss=4\">連結</a>",
+            "theory": "![圖片](https://example.com/x.png) <iframe src=\"https://example.com\"></iframe> javascript:alert(1)",
+            "findings": "- 第一點\n- 第二點 [網址](https://example.com/phish)\n\n<style>body{display:none}</style>{{constructor.constructor('return 1')()}}",
+            "reported_fields": []
+          },
+          "provenance": {
+            "model": "claude-haiku-4-5",
+            "generated_at": "2026-11-10T03:00:00Z",
+            "input_kind": "abstract",
+            "human_verified": false
+          }
+        },
+        "classification": {
+          "state": "ready",
+          "value": {
+            "topic": {
+              "keys": [
+                "platforms",
+                "trust"
+              ],
+              "human_verified": false,
+              "fix_member_count": 0,
+              "members_disagree": false
+            },
+            "method": {
+              "keys": [
+                "experiment"
+              ],
+              "human_verified": false,
+              "fix_member_count": 0,
+              "members_disagree": false
+            },
+            "fix_member_count": 0
+          },
+          "provenance": {
+            "model": "claude-haiku-4-5",
+            "generated_at": "2026-11-10T03:00:00Z",
+            "input_kind": "abstract",
+            "human_verified": false
+          }
+        },
+        "research_model": {
+          "state": "ready",
+          "provenance": {
+            "model": "claude-haiku-4-5",
+            "generated_at": "2026-11-10T03:00:00Z",
+            "input_kind": "abstract",
+            "human_verified": false
+          },
+          "value": {
+            "research_model_id": "r1000000-0000-4000-8000-000000000001",
+            "is_review_or_meta_analysis": false,
+            "country": null,
+            "industry": null,
+            "research_design": null,
+            "unit_of_analysis": null,
+            "sample_size": 240,
+            "limitations": null,
+            "future_research": null,
+            "constructs": [
+              {
+                "construct_id": "c1000000-0000-4000-8000-000000000001",
+                "name_en": "Rating inconsistency",
+                "label_zh": "<img src=x onerror=\"window.__xss=8\">評分[不一致](javascript:window.__xss=9)",
+                "definition": null,
+                "scale_source": null,
+                "item_location": null,
+                "item_count": null,
+                "cronbach_alpha": null,
+                "composite_reliability": null,
+                "ave": null
+              },
+              {
+                "construct_id": "c1000000-0000-4000-8000-000000000002",
+                "name_en": "Reader trust",
+                "label_zh": "讀者信任",
+                "definition": null,
+                "scale_source": null,
+                "item_location": null,
+                "item_count": null,
+                "cronbach_alpha": null,
+                "composite_reliability": null,
+                "ave": null
+              },
+              {
+                "construct_id": "c1000000-0000-4000-8000-000000000003",
+                "name_en": "Decision effort",
+                "label_zh": "判斷費力程度",
+                "definition": null,
+                "scale_source": null,
+                "item_location": null,
+                "item_count": null,
+                "cronbach_alpha": null,
+                "composite_reliability": null,
+                "ave": null
+              }
+            ],
+            "hypotheses": [
+              {
+                "ordinal": 1,
+                "sentence": "<script>window.__xss = 5</script>[trust](javascript:window.__xss=6) <b onclick=\"window.__xss=7\">bold</b>",
+                "cause_construct_id": "c1000000-0000-4000-8000-000000000001",
+                "effect_construct_id": "c1000000-0000-4000-8000-000000000002",
+                "evidence_type": "empirical_test",
+                "support": "supported",
+                "beta": null,
+                "p_value": null,
+                "sample_size": null,
+                "effect_type": null,
+                "result_quote": null
+              }
+            ]
+          }
+        },
+        "full_text_links": {
+          "doi_url": "https://doi.org/10.5555/rr.16",
+          "open_access_url": null
+        },
+        "snapshot": {
+          "number": 12,
+          "as_of": "2026-11-11T17:30:00Z"
+        }
+      }
+    },
+    "38000000-0000-4000-8000-000000000017": {
+      "label": "no-snapshot",
+      "note": "還沒有發佈過快照（資料日期列不出現；平均每年用今天的年份）",
+      "page": {
+        "paper": {
+          "id": "38000000-0000-4000-8000-000000000017",
+          "title": "Rating Inconsistency and Reader Trust on Review Platforms",
+          "authors": [
+            "Avery Example",
+            "Jordan Sample",
+            "Riley Placeholder"
+          ],
+          "publication_year": 2023,
+          "journal": "jes",
+          "journal_issn_l": "0000-0000",
+          "volume": "12",
+          "issue": "3",
+          "first_page": "101",
+          "last_page": "124",
+          "doi": "10.5555/rr.17",
+          "doi_url": "https://doi.org/10.5555/rr.17",
+          "openalex_id": "W9000000017",
+          "openalex_url": "https://openalex.org/W9000000017",
+          "cited_by_count": 1234,
+          "in_scope": true,
+          "origin": "tracked",
+          "is_retracted": false
+        },
+        "abstract": {
+          "content": "This fictional study examines how inconsistent star ratings across review platforms affect reader trust. In an online experiment, participants viewed listings whose ratings agreed or disagreed and then reported their trust and the effort they spent deciding. Inconsistent ratings reduced trust and increased decision effort. The text is invented test data for the paper page.",
+          "source": "openalex"
+        },
+        "zh_summary": {
+          "state": "ready",
+          "value": {
+            "zh_summary_id": "z1000000-0000-4000-8000-000000000001",
+            "research_question": "線上評價平台上，不同來源的星等彼此不一致時，讀者對商家的信任會不會下降。",
+            "method": "線上實驗，兩百四十位受測者看三組評價頁面並回答信任量表。",
+            "theory": "訊號理論與認知負荷理論。",
+            "findings": "星等不一致時信任明顯下降，受測者也需要更多時間判斷。",
+            "reported_fields": []
+          },
+          "provenance": {
+            "model": "claude-haiku-4-5",
+            "generated_at": "2026-11-10T03:00:00Z",
+            "input_kind": "abstract",
+            "human_verified": false
+          }
+        },
+        "classification": {
+          "state": "ready",
+          "value": {
+            "topic": {
+              "keys": [
+                "platforms",
+                "trust"
+              ],
+              "human_verified": false,
+              "fix_member_count": 0,
+              "members_disagree": false
+            },
+            "method": {
+              "keys": [
+                "experiment"
+              ],
+              "human_verified": false,
+              "fix_member_count": 0,
+              "members_disagree": false
+            },
+            "fix_member_count": 0
+          },
+          "provenance": {
+            "model": "claude-haiku-4-5",
+            "generated_at": "2026-11-10T03:00:00Z",
+            "input_kind": "abstract",
+            "human_verified": false
+          }
+        },
+        "research_model": {
+          "state": "ready",
+          "provenance": {
+            "model": "claude-haiku-4-5",
+            "generated_at": "2026-11-10T03:00:00Z",
+            "input_kind": "abstract",
+            "human_verified": false
+          },
+          "value": {
+            "research_model_id": "r1000000-0000-4000-8000-000000000001",
+            "is_review_or_meta_analysis": false,
+            "country": null,
+            "industry": null,
+            "research_design": null,
+            "unit_of_analysis": null,
+            "sample_size": 240,
+            "limitations": null,
+            "future_research": null,
+            "constructs": [
+              {
+                "construct_id": "c1000000-0000-4000-8000-000000000001",
+                "name_en": "Rating inconsistency",
+                "label_zh": "評分不一致",
+                "definition": null,
+                "scale_source": null,
+                "item_location": null,
+                "item_count": null,
+                "cronbach_alpha": null,
+                "composite_reliability": null,
+                "ave": null
+              },
+              {
+                "construct_id": "c1000000-0000-4000-8000-000000000002",
+                "name_en": "Reader trust",
+                "label_zh": "讀者信任",
+                "definition": null,
+                "scale_source": null,
+                "item_location": null,
+                "item_count": null,
+                "cronbach_alpha": null,
+                "composite_reliability": null,
+                "ave": null
+              },
+              {
+                "construct_id": "c1000000-0000-4000-8000-000000000003",
+                "name_en": "Decision effort",
+                "label_zh": "判斷費力程度",
+                "definition": null,
+                "scale_source": null,
+                "item_location": null,
+                "item_count": null,
+                "cronbach_alpha": null,
+                "composite_reliability": null,
+                "ave": null
+              }
+            ],
+            "hypotheses": [
+              {
+                "ordinal": 1,
+                "sentence": "Inconsistent ratings lower the trust readers place in a listing.",
+                "cause_construct_id": "c1000000-0000-4000-8000-000000000001",
+                "effect_construct_id": "c1000000-0000-4000-8000-000000000002",
+                "evidence_type": "empirical_test",
+                "support": "supported",
+                "beta": null,
+                "p_value": null,
+                "sample_size": null,
+                "effect_type": null,
+                "result_quote": null
+              },
+              {
+                "ordinal": 2,
+                "sentence": "Inconsistent ratings increase the effort readers spend before deciding.",
+                "cause_construct_id": "c1000000-0000-4000-8000-000000000001",
+                "effect_construct_id": "c1000000-0000-4000-8000-000000000003",
+                "evidence_type": "empirical_test",
+                "support": "supported",
+                "beta": null,
+                "p_value": null,
+                "sample_size": null,
+                "effect_type": null,
+                "result_quote": null
+              }
+            ]
+          }
+        },
+        "full_text_links": {
+          "doi_url": "https://doi.org/10.5555/rr.17",
+          "open_access_url": null
+        },
+        "snapshot": null
+      }
+    }
+  }
+}
