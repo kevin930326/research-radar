@@ -1,15 +1,28 @@
-"""`audit_event`（稽核事件）：表的定義（AD-26、AD-10、ADR-0035、Story 2.7）。
+"""`audit_event`（稽核事件）：表的定義與唯一的寫入者（AD-26、AD-10、ADR-0035、Story 2.7、2.12）。
 
 - 只新增：應用程式角色沒有 UPDATE、DELETE 權限（遷移 0014 收回）。
 - `actor_member_id` 空的＝系統做的（`actor_role` 是 `system`），兩者由 CHECK 綁在一起；`action`
   是小寫識別字；`detail` 是 jsonb 物件。
-- 寫入函式還沒有：留給第一個要寫稽核的 Story（AD-26 寫的 `record()` 不符合 repo 的前綴規則，名字
-  到時候再定）。
+- 寫入是 `create_audit_event`（AD-26 寫的 `record()` 不符合 repo 的前綴規則，Story 2.12 定成這個
+  名字）；形狀在 `domain/audit.NewAuditEvent` 建構時就驗過。
 """
 
-from sqlalchemy import CheckConstraint, Column, DateTime, Index, Table, Text, Uuid, text
+import uuid
+
+from sqlalchemy import (
+    CheckConstraint,
+    Column,
+    Connection,
+    DateTime,
+    Index,
+    Table,
+    Text,
+    Uuid,
+    text,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 
+from radar.domain.audit import AuditActorRole, NewAuditEvent
 from radar.repo.models import Base
 
 # --- 表的定義（`alembic check` 拿來和資料庫比對；遷移 0014 建表） -----------------------------
@@ -36,3 +49,34 @@ audit_event_table = Table(
     CheckConstraint("target_type ~ '^[a-z][a-z0-9_]*$'", name="target_type_format"),
     CheckConstraint("jsonb_typeof(detail) = 'object'", name="detail_object"),
 )
+
+
+# --- 寫入 ---------------------------------------------------------------------------------
+
+
+def create_audit_event(connection: Connection, event: NewAuditEvent) -> uuid.UUID:
+    """新增一筆稽核事件，回它的 id。在呼叫端開好的交易裡做，不 commit（和它記錄的那件事同一個
+    交易：那件事退回，稽核也不留）。
+
+    Raises:
+        TypeError: `event` 不是 `NewAuditEvent`（形狀在它建構時已經驗過）。
+    """
+    if not isinstance(event, NewAuditEvent):
+        raise TypeError("event 要是 NewAuditEvent")
+    value = connection.execute(
+        text(
+            "INSERT INTO audit_event"
+            " (actor_member_id, actor_role, action, target_type, target_id, detail)"
+            " VALUES (:actor_member_id, :actor_role, :action, :target_type, :target_id,"
+            " CAST(:detail AS jsonb)) RETURNING id"
+        ),
+        {
+            "actor_member_id": event.actor_member_id,
+            "actor_role": AuditActorRole(event.actor_role).value,
+            "action": event.action,
+            "target_type": event.target_type,
+            "target_id": event.target_id,
+            "detail": event.detail_json(),
+        },
+    ).scalar_one()
+    return uuid.UUID(str(value))

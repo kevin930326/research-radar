@@ -230,7 +230,7 @@ def test_downgrade_to_0012_drops_content_and_upgrade_restores_it(
 
     migrate(db)
 
-    assert db.revisions() == {"0017"}
+    assert db.revisions() == {"0018"}
     assert _tables(db) >= NEW_TABLES
     # 降版丟掉的內容不會回來；舊列的內容與計數是 NULL，CHECK 都成立。
     assert execute(

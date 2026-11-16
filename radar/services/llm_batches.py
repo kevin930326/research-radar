@@ -8,6 +8,14 @@ ADR-0041、ADR-0043、Story 2.9、2.11）。`batch_submission` 的狀態只在�
 1. 台北時間每月 1 日 00:00～`month_start_hold_hours` 點以前：整次延後，不寫任何列、不算失敗；
    每一批開始前再看一次，途中跨進窗口就停（已 commit 的批次留著）。
 2. 已熔斷：整次不排。
+2a. 分類表或情境值清單改版後要重跑的（`active` 的設定檔版本和現在不同）保守上限合計超過
+   `revision_rerun_max_usd`：整次不排、不寫任何列、記錯誤日誌（`estimate_revision_reruns`，
+   Story 2.12、ADR-0044）。第一次全庫沒有 `active`，不受影響。沒超過時，這次估過的改版重跑
+   （鍵與保守上限）就是這次規劃唯一能排的改版重跑：第 4 步在預算鎖裡再查一次這篇的 `active`
+   版本，是改版重跑卻不在清單裡（或費用不同，例如估完後一個在跑的改版工作失敗了）就不排、計
+   `rerun_unestimated`，留給下一次規劃重新估（Story 2.12 審查後第 4 點）；估算本來就不算、取得
+   資格也會略過的（新鍵已經有 running、擋下的結果或可接續的 run）照原本算 skipped／resumable
+   （第二輪 O2）。
 3. 每個工作讀一次 prompt；依論文 id 分頁讀論文，每篇照 `plan_for` 要做的工作組 `LlmJob`，經閘門的
    `prepare_llm_request` 放行、算指紋、組請求、檢查大小（`NO_INPUT`／`BLOCKED`／`TOO_LARGE`
    計數略過）。
@@ -90,7 +98,7 @@ Batch 價的保守上限。不寫任何列、不建 provider、不看預算。
 
 import re
 import uuid
-from collections.abc import Callable, Collection, Iterator
+from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -98,12 +106,14 @@ from typing import Final, Protocol
 
 import structlog
 
+from radar.domain.admin_runs import RevisionEstimate
 from radar.domain.ai_outputs import (
     CallMode,
     GatewayConfig,
     InputKind,
     LlmTask,
     OutputLang,
+    RunKey,
     RunStatus,
 )
 from radar.domain.budget import BudgetConfig
@@ -156,7 +166,7 @@ from radar.domain.validators.research_model import ResearchModelValidator
 from radar.domain.validators.zh_summary import ZhSummaryRules, ZhSummaryValidator
 from radar.domain.viewer import SystemViewer, Viewer
 from radar.ports import LlmProvider
-from radar.repo.ai_outputs import find_blocking_ai_result
+from radar.repo.ai_outputs import find_active_config_versions, find_blocking_ai_result
 from radar.repo.db import Database, DbConnection
 from radar.repo.llm_batches import (
     count_batch_running_runs,
@@ -342,6 +352,21 @@ def plan_llm_batches(
             total_usd=str(status.total_usd),
         )
         return result
+    reruns = estimate_revision_reruns(
+        actor, database, setup, tasks=REVISION_TASKS, assume_changed=False
+    )
+    if reruns.exceeds_cap:
+        # 分類表或情境值清單改版後要重跑的超過上限：整次不排、不寫任何列，等 Kevin 決定
+        # （ADR-0044）。
+        result.stop = PlanStop.RERUN_CAP_EXCEEDED
+        log.error(
+            "改版後要重跑的保守上限超過 revision_rerun_max_usd，Batch 規劃整次不排",
+            weekly_run_id=_id_text(weekly_run_id),
+            reruns=reruns.reruns,
+            estimated_max_cost_usd=str(reruns.max_cost_usd),
+            cap_usd=str(reruns.cap_usd),
+        )
+        return result
 
     prompts = {task: load_prompt(setup.gateway.prompts_root, task) for task in BATCH_TASKS}
     candidates = _candidates(database, setup, prompts, result)
@@ -369,7 +394,7 @@ def plan_llm_batches(
             )
             break
         used, submission_id = _plan_one_batch(
-            actor, database, setup, pending, weekly_run_id, clock, result
+            actor, database, setup, pending, weekly_run_id, clock, result, reruns.approved
         )
         if used is None:
             # 等預算鎖的時候跨進月初窗口（鎖裡重查）：這一批沒寫任何列，剩下的不排。
@@ -393,6 +418,7 @@ def plan_llm_batches(
         skipped=result.skipped,
         resumable=result.resumable,
         deferred_budget=result.deferred_budget,
+        rerun_unestimated=result.rerun_unestimated,
         no_input=result.no_input,
         blocked=result.blocked,
         too_large=result.too_large,
@@ -538,9 +564,15 @@ def _plan_one_batch(
     weekly_run_id: uuid.UUID | None,
     clock: Callable[[], datetime],
     result: LlmBatchPlanResult,
+    approved_reruns: Mapping[RunKey, Decimal],
 ) -> tuple[int | None, uuid.UUID | None]:
     """一個交易：預算鎖→重查月初窗口→逐筆放得下就取得資格、建 item。回（看了幾筆, 建的
     submission id）；拿到鎖時已在月初窗口（等鎖跨過台北午夜）就什麼都不寫、回 (None, None)。
+
+    `approved_reruns` 是規劃開頭重跑上限檢查估過的改版重跑（鍵 → 保守上限）：鎖裡再查一次這幾篇的
+    `active` 設定檔版本，是改版重跑卻不在清單裡、或費用不同的不排（`rerun_unestimated`；估算本來
+    就不算的照 `_claim_would_not_plan` 算 skipped／resumable），這次排的改版重跑合計一定不超過
+    估過、也檢查過上限的金額。
 
     計數在交易 commit 之後才併進 `result`（交易退回時不算）。
     """
@@ -557,6 +589,8 @@ def _plan_one_batch(
             # 等鎖可能等很久：拿到鎖之後再看一次，跨進窗口就整批不寫（交易沒有任何寫入）。
             return None, None
         remaining = _remaining(connection, setup.budget, now)
+        active_versions = _active_revision_versions(connection, pending[:attempt_cap])
+        current_versions = _current_revision_versions(setup)
         for prepared in pending:
             if tally.planned >= capacity or attempts >= attempt_cap:
                 break
@@ -569,12 +603,28 @@ def _plan_one_batch(
                 prepared.request.max_tokens,
                 is_batch=True,
             )
+            if (
+                _is_revision_rerun(prepared, active_versions, current_versions)
+                and approved_reruns.get(prepared.key) != cost
+            ):
+                # 改版重跑卻不在這次估過的清單裡。估算本來就不算、取得資格也會略過的（新鍵已經有
+                # running、擋下的結果或可接續的 run）照原本算 skipped／resumable（審查後第二輪
+                # O2）；其餘是估完之後狀態變了：不排，下一次規劃重新估。
+                would = _claim_would_not_plan(connection, prepared.key)
+                if would is BatchClaimOutcome.RESUMABLE:
+                    tally.resumable += 1
+                elif would is BatchClaimOutcome.SKIPPED:
+                    tally.skipped += 1
+                else:
+                    tally.rerun_unestimated += 1
+                continue
             if not remaining.fits(task, cost):
                 tally.deferred_budget += 1
                 continue
             attempts += 1
             claim = claim_batch_run(actor, connection, setup.gateway, prepared)
-            if claim.outcome is BatchClaimOutcome.SKIPPED:
+            if claim.outcome in (BatchClaimOutcome.SKIPPED, BatchClaimOutcome.INPUT_CHANGED):
+                # INPUT_CHANGED：讀候選之後這篇的摘要來源被移除或換掉（Story 2.12 審查後）。
                 tally.skipped += 1
                 continue
             if claim.outcome is BatchClaimOutcome.RESUMABLE:
@@ -598,6 +648,7 @@ def _plan_one_batch(
     result.skipped += tally.skipped
     result.resumable += tally.resumable
     result.deferred_budget += tally.deferred_budget
+    result.rerun_unestimated += tally.rerun_unestimated
     result.estimated_max_cost_usd += tally.estimated_max_cost_usd
     if submission_id is not None:
         result.submission_ids.append(submission_id)
@@ -608,6 +659,56 @@ def _plan_one_batch(
             estimated_max_cost_usd=str(tally.estimated_max_cost_usd),
         )
     return used, submission_id
+
+
+def _claim_would_not_plan(connection: DbConnection, key: RunKey) -> BatchClaimOutcome | None:
+    """取得資格不會排這組鍵的原因（順序和 `_estimate_chunk` 一樣）：已經有 running 或擋下的結果
+    → `SKIPPED`；有可接續的 `llm_result_pending` → `RESUMABLE`；都沒有回 None。改版預估與規劃
+    判斷「估算本來就不算的改版重跑」共用（Story 2.12 審查後第二輪 O2）。"""
+    viewer = SystemViewer()
+    if (
+        find_running_derivation_run_id(viewer, connection, key, None) is not None
+        or find_blocking_ai_result(viewer, connection, key) is not None
+    ):
+        return BatchClaimOutcome.SKIPPED
+    if find_resumable_derivation_run_id(viewer, connection, key, None) is not None:
+        return BatchClaimOutcome.RESUMABLE
+    return None
+
+
+def _active_revision_versions(
+    connection: DbConnection, pending: Sequence[PreparedLlmRequest]
+) -> dict[LlmTask, dict[uuid.UUID, str | None]]:
+    """（預算鎖裡）這幾筆裡分類、研究模型的論文，`active` 用的設定檔版本（沒有 `active` 的論文不在
+    結果裡）。"""
+    viewer = SystemViewer()
+    versions: dict[LlmTask, dict[uuid.UUID, str | None]] = {}
+    for task in REVISION_TASKS:
+        paper_ids = [item.key.paper_id for item in pending if item.key.task is task]
+        if paper_ids:
+            versions[task] = find_active_config_versions(viewer, connection, task, paper_ids)
+    return versions
+
+
+def _current_revision_versions(setup: LlmBatchSetup) -> dict[LlmTask, str]:
+    return {
+        LlmTask.CLASSIFY: setup.taxonomy.version_label,
+        LlmTask.EXTRACT_MODEL: setup.context_values.version_label,
+    }
+
+
+def _is_revision_rerun(
+    prepared: PreparedLlmRequest,
+    active_versions: Mapping[LlmTask, Mapping[uuid.UUID, str | None]],
+    current_versions: Mapping[LlmTask, str],
+) -> bool:
+    """這筆是不是改版重跑：分類或研究模型、這篇有 `active`、而且 `active` 用的設定檔版本和現在的
+    不同（沒記版本也算不同；和 `_estimate_revision_chunk` 同一個判斷）。"""
+    task = prepared.key.task
+    versions = active_versions.get(task)
+    if versions is None or prepared.key.paper_id not in versions:
+        return False
+    return versions[prepared.key.paper_id] != current_versions[task]
 
 
 def _enqueue_submit(enqueue: Enqueue, submission_id: uuid.UUID, result: LlmBatchPlanResult) -> None:
@@ -1599,3 +1700,107 @@ def resolve_llm_batch(
 
 def _id_text(value: uuid.UUID | None) -> str | None:
     return None if value is None else str(value)
+
+
+# --- 改版的重跑預估與上限（Story 2.12、ADR-0044） ---------------------------------------------
+
+# 輸入指紋含設定檔版本的工作（分類表、情境值清單改版會讓它們整批重跑）。
+REVISION_TASKS: Final = (LlmTask.CLASSIFY, LlmTask.EXTRACT_MODEL)
+
+
+def estimate_revision_reruns(
+    actor: Viewer,
+    database: Database,
+    setup: LlmBatchSetup,
+    *,
+    tasks: Collection[LlmTask],
+    assume_changed: bool,
+) -> RevisionEstimate:
+    """改分類表（`classify`）或情境值清單（`extract_model`）會重跑幾篇、Batch 價保守上限多少。
+    不寫任何列、不建 provider。
+
+    照規劃同樣的候選（`_candidates`：`plan_for`、放行、指紋、大小檢查），每 200 筆開一個只讀交易查
+    那幾篇 `active` 的 run 用的設定檔版本（`find_active_config_versions`）：
+
+    - `assume_changed=True`（`radar runs estimate-revision`）：有 `active` 的都算「會重跑」，沒有的
+      算「還沒有結果」。
+    - `assume_changed=False`（Batch 規劃的上限檢查）：只算 `active` 的版本和現在的設定檔不同的
+      （設定檔已經改了、下一次規劃就會重跑的）。第一次全庫沒有任何 `active`，上限不影響規劃。
+
+    金額是每筆 `max_call_cost(..., is_batch=True)` 的合計；上限是 `revision_rerun_max_usd`。
+
+    Raises:
+        PermissionDeniedError: `actor` 不是系統工作（不碰資料庫）。
+        ValueError: `tasks` 是空的或有分類、研究模型以外的工作（不碰資料庫）。
+        PromptIntegrityError, PromptFormatError: prompt 檔或登記不對。
+    """
+    require(actor, Action.RUN_AI_JOBS, None)
+    wanted = {LlmTask(task) for task in tasks}
+    if not wanted or wanted - set(REVISION_TASKS):
+        raise ValueError("tasks 要是 classify、extract_model 裡的至少一個")
+    ordered = tuple(task for task in REVISION_TASKS if task in wanted)
+    estimate = RevisionEstimate(ordered, setup.batches.revision_rerun_max_usd)
+    for task in ordered:
+        estimate.for_task(task)
+    current = _current_revision_versions(setup)
+    prompts = {task: load_prompt(setup.gateway.prompts_root, task) for task in BATCH_TASKS}
+    chunk: list[PreparedLlmRequest] = []
+    for prepared in _candidates(database, setup, prompts, LlmBatchPlanResult()):
+        if prepared.key.task not in wanted:
+            continue
+        chunk.append(prepared)
+        if len(chunk) >= PAGE_SIZE:
+            _estimate_revision_chunk(database, setup, chunk, estimate, current, assume_changed)
+            chunk = []
+    if chunk:
+        _estimate_revision_chunk(database, setup, chunk, estimate, current, assume_changed)
+    return estimate
+
+
+def _estimate_revision_chunk(
+    database: Database,
+    setup: LlmBatchSetup,
+    chunk: list[PreparedLlmRequest],
+    estimate: RevisionEstimate,
+    current: dict[LlmTask, str],
+    assume_changed: bool,
+) -> None:
+    """（只讀交易）這幾筆的論文有沒有 `active`、用哪一版設定檔，計進預估。
+
+    `assume_changed=False`（規劃的上限檢查）時，規劃不會排的不算：新鍵已經有 running、有擋下的
+    結果（例如改版後那一次被拒收，舊版本的 active 會一直留著）或可接續的 `llm_result_pending`
+    （順序和 `_estimate_chunk` 一樣）。不然累積的拒收會讓每次規劃都卡在上限、沒有出路。
+    """
+    viewer = SystemViewer()
+    versions: dict[LlmTask, dict[uuid.UUID, str | None]] = {}
+    will_skip: set[int] = set()
+    with database.transaction() as connection:
+        for task in {prepared.key.task for prepared in chunk}:
+            paper_ids = [prepared.key.paper_id for prepared in chunk if prepared.key.task is task]
+            versions[task] = find_active_config_versions(viewer, connection, task, paper_ids)
+        if not assume_changed:
+            for index, prepared in enumerate(chunk):
+                if _claim_would_not_plan(connection, prepared.key) is not None:
+                    will_skip.add(index)
+    for index, prepared in enumerate(chunk):
+        if index in will_skip:
+            continue
+        key = prepared.key
+        found = estimate.for_task(key.task)
+        active = versions[key.task]
+        if key.paper_id not in active:
+            found.no_result += 1
+            continue
+        if not assume_changed and active[key.paper_id] == current[key.task]:
+            continue
+        cost = max_call_cost(
+            setup.gateway.models,
+            key.model,
+            prepared.estimated_input_tokens,
+            prepared.request.max_tokens,
+            is_batch=True,
+        )
+        found.rerun += 1
+        found.max_cost_usd += cost
+        # 規劃只能排這份清單裡的改版重跑（Story 2.12 審查後第 4 點）。
+        estimate.approved[key] = cost

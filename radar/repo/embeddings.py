@@ -14,7 +14,7 @@ ADR-0040，Story 2.8）。
 
 import uuid
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, Final
 
 from sqlalchemy import (
     CheckConstraint,
@@ -95,6 +95,9 @@ embedding_table = Table(
     Column("run_id", Uuid, ForeignKey("derivation_run.id"), nullable=False, index=True),
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
     Column("updated_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
+    # 向量化當時用的摘要來源（遷移 0018、Story 2.12 審查後）：只看標題的是 NULL。
+    # `radar runs remove-by-source` 照它刪向量（之後照指紋規則重算）。
+    Column("abstract_source", Text),
     PrimaryKeyConstraint("item_type", "item_id", "model_id"),
     ForeignKeyConstraint(
         ["model_id", "dimensions"],
@@ -105,6 +108,11 @@ embedding_table = Table(
     CheckConstraint("item_type IN ('paper')", name="item_type"),
     CheckConstraint("input_sha256 ~ '^[0-9a-f]{64}$'", name="input_sha256_format"),
     CheckConstraint("vector_dims(vector) = dimensions", name="vector_dims"),
+    CheckConstraint(
+        "abstract_source IS NULL"
+        " OR abstract_source IN ('openalex', 'semantic_scholar', 'uploaded_pdf')",
+        name="abstract_source",
+    ),
 )
 
 # 每個模型一個 HNSW 部分索引（AD-12）：用運算式 `(vector::halfvec(維度))` 建，查詢要寫一樣的運算式
@@ -301,6 +309,44 @@ def find_paper_embedding(
 # --- 寫入 ---------------------------------------------------------------------------------
 
 
+# 依來源移除要刪的向量（`e`）：記的來源是 `:source`，或看摘要卻沒記來源（遷移 0018 前就有的
+# 舊向量一律不回填來源，可能就是用這個來源算的：保守一起刪，Story 2.12 審查後第二輪 R2、第三輪）。
+_REMOVABLE_EMBEDDING: Final = (
+    "(e.abstract_source = :source OR (e.abstract_source IS NULL AND EXISTS ("
+    "SELECT 1 FROM derivation_run AS r WHERE r.id = e.run_id AND r.input_kind = 'abstract')))"
+)
+
+
+def count_embeddings_by_abstract_source(
+    viewer: SystemViewer, connection: Connection, source: AbstractSource
+) -> int:
+    """依來源移除 `source` 會刪的向量有幾列：用它的摘要算的（`embedding.abstract_source`），加上看
+    摘要卻沒記來源的（見 `_REMOVABLE_EMBEDDING`）。`radar runs remove-by-source` 的預覽（Story 2.12
+    審查後）。
+
+    Raises:
+        TypeError: `viewer` 不是 `SystemViewer`。
+    """
+    visible = visible_to_system_only(viewer)
+    value = connection.execute(
+        text(f"SELECT count(*) FROM embedding AS e WHERE {visible} AND {_REMOVABLE_EMBEDDING}"),
+        {"source": AbstractSource(source).value},
+    ).scalar_one()
+    return int(value)
+
+
+def delete_embeddings_by_abstract_source(connection: Connection, source: AbstractSource) -> int:
+    """刪掉用 `source` 的摘要算的向量，以及看摘要卻沒記來源的向量（保守一起刪，見
+    `_REMOVABLE_EMBEDDING`），回刪了幾列（`radar runs remove-by-source --execute`，Story 2.12
+    審查後、ADR-0044）。之後的向量化看不到現有向量，照指紋規則用現在的輸入重算並記下來源。
+    在呼叫端開好的交易裡做，不 commit。"""
+    result = connection.execute(
+        text(f"DELETE FROM embedding AS e WHERE {_REMOVABLE_EMBEDDING}"),
+        {"source": AbstractSource(source).value},
+    )
+    return int(result.rowcount)
+
+
 def upsert_embeddings(connection: Connection, rows: Sequence[NewEmbedding]) -> int:
     """寫入論文的向量：同一個主鍵（論文, 模型）已經有就整列覆寫（AD-12），回寫了幾列。
 
@@ -312,13 +358,14 @@ def upsert_embeddings(connection: Connection, rows: Sequence[NewEmbedding]) -> i
     connection.execute(
         text(
             "INSERT INTO embedding"
-            " (item_type, item_id, model_id, dimensions, vector, input_sha256, run_id)"
+            " (item_type, item_id, model_id, dimensions, vector, input_sha256, run_id,"
+            " abstract_source)"
             " VALUES (:item_type, :item_id, :model_id, :dimensions, CAST(:vector AS halfvec),"
-            " :input_sha256, :run_id)"
+            " :input_sha256, :run_id, :abstract_source)"
             " ON CONFLICT (item_type, item_id, model_id) DO UPDATE SET"
             " dimensions = EXCLUDED.dimensions, vector = EXCLUDED.vector,"
             " input_sha256 = EXCLUDED.input_sha256, run_id = EXCLUDED.run_id,"
-            " updated_at = clock_timestamp()"
+            " abstract_source = EXCLUDED.abstract_source, updated_at = clock_timestamp()"
         ),
         [
             {
@@ -329,6 +376,11 @@ def upsert_embeddings(connection: Connection, rows: Sequence[NewEmbedding]) -> i
                 "vector": halfvec_literal(row.vector),
                 "input_sha256": row.input_sha256,
                 "run_id": row.run_id,
+                "abstract_source": (
+                    None
+                    if row.abstract_source is None
+                    else AbstractSource(row.abstract_source).value
+                ),
             }
             for row in rows
         ],

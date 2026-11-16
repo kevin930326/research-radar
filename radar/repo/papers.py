@@ -404,6 +404,27 @@ def list_paper_dois(
     return {uuid.UUID(str(paper_id)): tuple(dois) for paper_id, dois in rows}
 
 
+def count_papers_with_current_abstract_source(
+    viewer: SystemViewer, connection: Connection, source: AbstractSource
+) -> int:
+    """目前的摘要（`is_current`）是 `source` 的論文有幾篇（每篇最多一筆 `is_current`，所以數摘要列
+    就是篇數；不接 `paper`，不是統計用的篇數）。`radar runs remove-by-source` 的擋下條件：這些論文
+    下次規劃會用同一份摘要重新產生（Story 2.12）。
+
+    Raises:
+        TypeError: `viewer` 不是 `SystemViewer`。
+    """
+    visible = visible_to_system_only(viewer)
+    value = connection.execute(
+        text(
+            f"SELECT count(*) FROM paper_abstract WHERE {visible}"
+            " AND is_current AND source = :source"
+        ),
+        {"source": AbstractSource(source).value},
+    ).scalar_one()
+    return int(value)
+
+
 def list_trial_candidates(
     viewer: SystemViewer, connection: Connection, *, after_id: uuid.UUID | None, limit: int
 ) -> list[TrialCandidate]:

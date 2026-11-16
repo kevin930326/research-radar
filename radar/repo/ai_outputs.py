@@ -16,12 +16,15 @@ ADR-0015、ADR-0030）。
   （`tests/arch/test_ai_table_reads.py`）。有效值讀遷移 0014 的 `effective_*` view
   （`repo/ai_blocks.py`）。
 - 寫入 SQL 每張表各寫一份字面值（架構測試掃字串確認一張表一個寫入者，表名不能是變數）。
+- 唯一的刪除路徑是 `delete_ai_results_by_abstract_source`（`radar runs remove-by-source`，
+  Story 2.12、FR-11、AD-26）：摘要來源授權改變時，依 `derivation_run.abstract_source` 直接刪表頭與
+  細項，不複製被刪的內容。
 - `abstract_id` 不設外鍵（ADR-0030）：`paper_abstract` 在來源拿掉摘要時會被刪掉，外鍵會讓每週
   更新失敗；表頭是歷史，留著原本的 id。
 """
 
 import uuid
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from types import MappingProxyType
 from typing import Any, Final
 
@@ -43,9 +46,16 @@ from sqlalchemy import (
     text,
 )
 
+from radar.domain.admin_runs import (
+    REMOVAL_TABLES,
+    AiHistoryRow,
+    LatestAiResult,
+    SourceAiCounts,
+)
 from radar.domain.ai_outputs import (
     HEADER_TABLES,
     ClassificationContent,
+    InputKind,
     LlmTask,
     NewAiResult,
     OutputLang,
@@ -55,9 +65,11 @@ from radar.domain.ai_outputs import (
     RunStatus,
 )
 from radar.domain.llm_batches import BATCH_TASKS
+from radar.domain.papers import AbstractSource
 from radar.domain.run_reports import RunOutcomeRow, RunScope, run_outcome
 from radar.domain.viewer import SystemViewer, Viewer
-from radar.repo.constructs import upsert_constructs
+from radar.repo.constructs import delete_constructs, upsert_constructs
+from radar.repo.db import Database
 from radar.repo.models import Base
 from radar.repo.visibility import visible_papers, visible_to_system_only
 
@@ -389,6 +401,16 @@ def _check_task(task: LlmTask) -> LlmTask:
     return task
 
 
+def _key_params(key: RunKey, task: LlmTask) -> dict[str, object]:
+    return {
+        "paper_id": key.paper_id,
+        "task": task.value,
+        "prompt_version": key.prompt_version,
+        "model": key.model,
+        "input_sha256": key.input_sha256,
+    }
+
+
 # --- 讀取 ---------------------------------------------------------------------------------
 
 
@@ -549,6 +571,246 @@ def list_run_outcomes(
     return result
 
 
+def find_latest_ai_result(
+    viewer: SystemViewer, connection: Connection, key: RunKey
+) -> LatestAiResult | None:
+    """這組鍵最新的一列平常流程（不是評估）表頭（`created_at, id` 最新），連同狀態與拒收原因；
+    沒有回 None。`radar runs retry` 與閘門鎖內的 `retry_of` 核對用（Story 2.12）。
+
+    Raises:
+        TypeError: `viewer` 不是 `SystemViewer`。
+        ValueError: 這個工作沒有表頭表。
+    """
+    visible = visible_to_system_only(viewer)
+    task = _check_task(key.task)
+    where = (
+        f" WHERE {visible} AND r.paper_id = :paper_id AND r.task = :task"
+        " AND r.prompt_version = :prompt_version AND r.model = :model"
+        " AND r.input_sha256 = :input_sha256 AND r.eval_run_id IS NULL"
+        " ORDER BY h.created_at DESC, h.id DESC LIMIT 1"
+    )
+    match task:
+        case LlmTask.ZH_SUMMARY:
+            sql = text(
+                "SELECT h.id, h.status, h.reject_reason FROM zh_summary AS h"
+                " JOIN derivation_run AS r ON r.id = h.run_id" + where
+            )
+        case LlmTask.CLASSIFY:
+            sql = text(
+                "SELECT h.id, h.status, h.reject_reason FROM classification AS h"
+                " JOIN derivation_run AS r ON r.id = h.run_id" + where
+            )
+        case _:
+            sql = text(
+                "SELECT h.id, h.status, h.reject_reason FROM research_model AS h"
+                " JOIN derivation_run AS r ON r.id = h.run_id" + where
+            )
+    row = connection.execute(sql, _key_params(key, task)).mappings().one_or_none()
+    if row is None:
+        return None
+    return LatestAiResult(
+        id=uuid.UUID(str(row["id"])),
+        status=ResultStatus(row["status"]),
+        reject_reason=row["reject_reason"],
+    )
+
+
+def list_paper_ai_history(
+    viewer: SystemViewer, connection: Connection, paper_id: uuid.UUID
+) -> list[AiHistoryRow]:
+    """這篇論文三個工作的全部 run（含評估，`is_eval` 標出來），有表頭時連同表頭的狀態與拒收原因；
+    依 run 的建立時間（舊到新）。`radar runs show` 用（Story 2.12）。
+
+    Raises:
+        TypeError: `viewer` 不是 `SystemViewer`。
+    """
+    visible = visible_to_system_only(viewer)
+    rows = connection.execute(
+        text(
+            "SELECT r.id, r.task, r.status, r.failure_reason, h.status AS header_status,"
+            " h.reject_reason, r.model, r.prompt_version, r.input_kind, r.abstract_source,"
+            " r.created_at, r.eval_run_id IS NOT NULL AS is_eval"
+            " FROM derivation_run AS r LEFT JOIN ("
+            " SELECT run_id, status, reject_reason FROM zh_summary"
+            " UNION ALL SELECT run_id, status, reject_reason FROM classification"
+            " UNION ALL SELECT run_id, status, reject_reason FROM research_model"
+            ") AS h ON h.run_id = r.id"
+            f" WHERE {visible} AND r.paper_id = :paper_id AND r.task = ANY(:tasks)"
+            " ORDER BY r.created_at, r.id"
+        ),
+        {"paper_id": paper_id, "tasks": [task.value for task in HEADER_TABLES]},
+    ).mappings()
+    return [
+        AiHistoryRow(
+            run_id=uuid.UUID(str(row["id"])),
+            task=LlmTask(row["task"]),
+            run_status=RunStatus(row["status"]),
+            failure_reason=row["failure_reason"],
+            header_status=(
+                None if row["header_status"] is None else ResultStatus(row["header_status"])
+            ),
+            reject_reason=row["reject_reason"],
+            model=row["model"],
+            prompt_version=row["prompt_version"],
+            input_kind=InputKind(row["input_kind"]),
+            abstract_source=(
+                None if row["abstract_source"] is None else AbstractSource(row["abstract_source"])
+            ),
+            created_at=row["created_at"],
+            is_eval=bool(row["is_eval"]),
+        )
+        for row in rows
+    ]
+
+
+def count_ai_results_by_abstract_source(
+    viewer: SystemViewer, connection: Connection, source: AbstractSource
+) -> SourceAiCounts:
+    """送出時用了 `source` 的摘要（`derivation_run.abstract_source`）的表頭：各表各狀態幾列、底下
+    的細項幾列；另外數看摘要但 run 沒記來源的表頭（來源不明，不會被刪）。`radar runs
+    remove-by-source` 的預覽（Story 2.12）。
+
+    Raises:
+        TypeError: `viewer` 不是 `SystemViewer`。
+    """
+    visible = visible_to_system_only(viewer)
+    params = {"source": AbstractSource(source).value}
+    rows = connection.execute(
+        text(
+            "SELECT 'zh_summary' AS task, h.status, count(*) AS n FROM zh_summary AS h"
+            " JOIN derivation_run AS r ON r.id = h.run_id"
+            f" WHERE {visible} AND r.abstract_source = :source GROUP BY h.status"
+            " UNION ALL SELECT 'classify', h.status, count(*) FROM classification AS h"
+            " JOIN derivation_run AS r ON r.id = h.run_id"
+            f" WHERE {visible} AND r.abstract_source = :source GROUP BY h.status"
+            " UNION ALL SELECT 'extract_model', h.status, count(*) FROM research_model AS h"
+            " JOIN derivation_run AS r ON r.id = h.run_id"
+            f" WHERE {visible} AND r.abstract_source = :source GROUP BY h.status"
+        ),
+        params,
+    ).all()
+    headers: dict[LlmTask, dict[ResultStatus, int]] = {
+        task: dict.fromkeys(ResultStatus, 0) for task in HEADER_TABLES
+    }
+    for task, status, count in rows:
+        headers[LlmTask(task)][ResultStatus(status)] = int(count)
+    detail_row = connection.execute(
+        text(
+            "SELECT"
+            " (SELECT count(*) FROM classification_label AS d"
+            " JOIN classification AS h ON h.id = d.classification_id"
+            " JOIN derivation_run AS r ON r.id = h.run_id"
+            f" WHERE {visible} AND r.abstract_source = :source),"
+            " (SELECT count(*) FROM construct_mention AS d"
+            " JOIN research_model AS h ON h.id = d.research_model_id"
+            " JOIN derivation_run AS r ON r.id = h.run_id"
+            f" WHERE {visible} AND r.abstract_source = :source),"
+            " (SELECT count(*) FROM hypothesis AS d"
+            " JOIN research_model AS h ON h.id = d.research_model_id"
+            " JOIN derivation_run AS r ON r.id = h.run_id"
+            f" WHERE {visible} AND r.abstract_source = :source),"
+            " (SELECT count(*) FROM ("
+            " SELECT run_id, input_kind FROM zh_summary"
+            " UNION ALL SELECT run_id, input_kind FROM classification"
+            " UNION ALL SELECT run_id, input_kind FROM research_model"
+            ") AS h JOIN derivation_run AS r ON r.id = h.run_id"
+            f" WHERE {visible} AND h.input_kind = 'abstract' AND r.abstract_source IS NULL)"
+        ),
+        params,
+    ).one()
+    labels, mentions, hypotheses, unknown = (int(value) for value in detail_row)
+    # 刪完這些表頭之後沒有其他人用的構面（「其他」＝這個來源以外的表頭的提及與假設）。
+    unused = _construct_unused("m.research_model_id NOT IN (SELECT id FROM targets)")
+    constructs = connection.execute(
+        text(
+            f"WITH {_SOURCE_RESEARCH_MODELS}, {_SOURCE_CONSTRUCTS}"
+            " SELECT count(*) FROM construct AS c WHERE c.id IN (SELECT id FROM cand)"
+            f" AND {unused}"
+        ),
+        params,
+    ).scalar_one()
+    return SourceAiCounts(
+        headers=headers,
+        details={
+            "classification_label": labels,
+            "construct_mention": mentions,
+            "hypothesis": hypotheses,
+        },
+        unknown_source=unknown,
+        constructs=int(constructs),
+    )
+
+
+def _construct_unused(other: str) -> str:
+    """構面 `c` 沒有其他人用的條件（`other` 篩出「其他」的構面、假設：預覽時是這個來源以外的表頭，
+    刪完細項後是全部）：沒有其他構面提及、假設，沒有別的構面以它為代表（`canonical_id`），也沒有
+    人工的合併判斷（`judgment_event` 的 `construct_pair`）提到它。"""
+    hypothesis_other = other.replace("m.", "h.")
+    return (
+        "NOT EXISTS (SELECT 1 FROM construct_mention AS m"
+        f" WHERE m.construct_id = c.id AND {other})"
+        " AND NOT EXISTS (SELECT 1 FROM hypothesis AS h"
+        " WHERE (h.cause_construct_id = c.id OR h.effect_construct_id = c.id)"
+        f" AND {hypothesis_other})"
+        " AND NOT EXISTS (SELECT 1 FROM construct AS o"
+        " WHERE o.canonical_id = c.id AND o.id <> c.id)"
+        " AND NOT EXISTS (SELECT 1 FROM judgment_event AS j WHERE j.target_type = 'construct_pair'"
+        " AND (j.target_id = c.id OR j.related_id = c.id))"
+    )
+
+
+# 這個來源衍生的研究模型表頭（`targets`）與它們的構面、假設用到的構面（`cand`）。
+_SOURCE_RESEARCH_MODELS: Final = (
+    "targets AS (SELECT h.id FROM research_model AS h JOIN derivation_run AS r ON r.id = h.run_id"
+    " WHERE r.abstract_source = :source)"
+)
+_SOURCE_CONSTRUCTS: Final = (
+    "cand AS (SELECT construct_id AS id FROM construct_mention"
+    " WHERE research_model_id IN (SELECT id FROM targets)"
+    " UNION SELECT cause_construct_id FROM hypothesis"
+    " WHERE research_model_id IN (SELECT id FROM targets)"
+    " UNION SELECT effect_construct_id FROM hypothesis"
+    " WHERE research_model_id IN (SELECT id FROM targets))"
+)
+
+
+def find_active_config_versions(
+    viewer: SystemViewer, connection: Connection, task: LlmTask, paper_ids: Sequence[uuid.UUID]
+) -> dict[uuid.UUID, str | None]:
+    """這幾篇論文 `task` 的 `active` 表頭是用哪一版設定檔跑的：`classify` 回分類表版本、
+    `extract_model` 回情境值清單版本（run 沒記時是 None）；沒有 `active` 的論文不在結果裡。改版
+    預估與 Batch 規劃的重跑上限用（Story 2.12）。
+
+    Raises:
+        TypeError: `viewer` 不是 `SystemViewer`。
+        ValueError: `task` 不是 `classify` 或 `extract_model`（其他工作的輸入不含設定檔版本）。
+    """
+    visible = visible_to_system_only(viewer)
+    task = LlmTask(task)
+    params = {"paper_ids": list(paper_ids)}
+    match task:
+        case LlmTask.CLASSIFY:
+            sql = text(
+                "SELECT h.paper_id, r.taxonomy_version AS version FROM classification AS h"
+                " JOIN derivation_run AS r ON r.id = h.run_id"
+                f" WHERE {visible} AND h.status = 'active' AND h.paper_id = ANY(:paper_ids)"
+            )
+        case LlmTask.EXTRACT_MODEL:
+            sql = text(
+                "SELECT h.paper_id, r.context_values_version AS version FROM research_model AS h"
+                " JOIN derivation_run AS r ON r.id = h.run_id"
+                f" WHERE {visible} AND h.status = 'active' AND h.paper_id = ANY(:paper_ids)"
+            )
+        case _:
+            raise ValueError(f"{task.value} 的輸入不含設定檔版本")
+    if not paper_ids:
+        return {}
+    return {
+        uuid.UUID(str(row["paper_id"])): row["version"]
+        for row in connection.execute(sql, params).mappings()
+    }
+
+
 # --- 寫入 ---------------------------------------------------------------------------------
 
 
@@ -682,3 +944,116 @@ def update_ai_results_superseded(
         _SUPERSEDE[task], {"paper_id": paper_id, "lang": OutputLang(lang).value}
     )
     return int(result.rowcount)
+
+
+# 依來源移除鎖構面候選時最多等多久（毫秒）：比連線的 statement_timeout（`connect_timeout` 秒，至少
+# 3 秒）短，等不到就整次移除退回、請管理者重跑（Story 2.12 審查後第二輪 R3）。
+CONSTRUCT_LOCK_TIMEOUT_MS: Final = 2000
+
+
+def delete_ai_results_by_abstract_source(
+    connection: Connection,
+    source: AbstractSource,
+    *,
+    construct_lock_timeout_ms: int = CONSTRUCT_LOCK_TIMEOUT_MS,
+) -> dict[str, int]:
+    """刪掉送出時用了 `source` 的摘要（`derivation_run.abstract_source`）的表頭（四種狀態）與底下的
+    細項、只被它們用到的構面，回各表刪了幾列（`REMOVAL_TABLES` 的順序，不含 `embedding`：向量由
+    `repo/embeddings.delete_embeddings_by_abstract_source` 刪）。先刪細項再刪表頭（外鍵沒有
+    ON DELETE）。
+
+    構面（審查後第 2 點）：只刪這些表頭的構面提及、假設用到，而且刪完之後沒有其他構面提及、假設、
+    代表（`canonical_id`）或人工合併判斷用到的（交給 `repo/constructs.delete_constructs`）。候選在
+    刪任何提及、假設之前先全部 `FOR UPDATE` 鎖住（不跳過、最多等 `construct_lock_timeout_ms`；審查後
+    第二輪 R3）：別的交易正在新增引用它的列（外鍵檢查會拿 `FOR KEY SHARE`）時等它結束，拿到鎖之後
+    再判斷有沒有人用，不會因為跳過而永遠失去清理線索。等不到就丟 `LockWaitTimeoutError`，呼叫端
+    讓整個交易退回（一列都沒少），請管理者重跑。
+
+    `derivation_run`、`llm_call`、人工判斷事件都不動；不複製被刪的內容。`radar runs
+    remove-by-source --execute` 用（Story 2.12、FR-11、AD-26）。在呼叫端開好的交易裡做，不 commit。
+
+    Raises:
+        LockWaitTimeoutError: 構面候選等不到鎖（交易已經不能用，要整個退回）。
+    """
+    params = {"source": AbstractSource(source).value}
+    deleted: dict[str, int] = {}
+    candidates = sorted(
+        {
+            str(row[0])
+            for row in connection.execute(
+                text(f"WITH {_SOURCE_RESEARCH_MODELS}, {_SOURCE_CONSTRUCTS} SELECT id FROM cand"),
+                params,
+            ).all()
+        }
+    )
+    if candidates:
+        # 先鎖住全部候選（照 id 排序），才刪提及與假設：等不到就整次退回，候選線索不會遺失。
+        with Database.local_lock_timeout(connection, construct_lock_timeout_ms):
+            connection.execute(
+                text(
+                    "SELECT id FROM construct WHERE id = ANY(CAST(:ids AS uuid[]))"
+                    " ORDER BY id FOR UPDATE"
+                ),
+                {"ids": candidates},
+            ).all()
+    deleted["classification_label"] = connection.execute(
+        text(
+            "DELETE FROM classification_label WHERE classification_id IN ("
+            " SELECT h.id FROM classification AS h JOIN derivation_run AS r ON r.id = h.run_id"
+            " WHERE r.abstract_source = :source)"
+        ),
+        params,
+    ).rowcount
+    deleted["construct_mention"] = connection.execute(
+        text(
+            "DELETE FROM construct_mention WHERE research_model_id IN ("
+            " SELECT h.id FROM research_model AS h JOIN derivation_run AS r ON r.id = h.run_id"
+            " WHERE r.abstract_source = :source)"
+        ),
+        params,
+    ).rowcount
+    deleted["hypothesis"] = connection.execute(
+        text(
+            "DELETE FROM hypothesis WHERE research_model_id IN ("
+            " SELECT h.id FROM research_model AS h JOIN derivation_run AS r ON r.id = h.run_id"
+            " WHERE r.abstract_source = :source)"
+        ),
+        params,
+    ).rowcount
+    deleted["zh_summary"] = connection.execute(
+        text(
+            "DELETE FROM zh_summary AS h USING derivation_run AS r"
+            " WHERE r.id = h.run_id AND r.abstract_source = :source"
+        ),
+        params,
+    ).rowcount
+    deleted["classification"] = connection.execute(
+        text(
+            "DELETE FROM classification AS h USING derivation_run AS r"
+            " WHERE r.id = h.run_id AND r.abstract_source = :source"
+        ),
+        params,
+    ).rowcount
+    deleted["research_model"] = connection.execute(
+        text(
+            "DELETE FROM research_model AS h USING derivation_run AS r"
+            " WHERE r.id = h.run_id AND r.abstract_source = :source"
+        ),
+        params,
+    ).rowcount
+    # 刪完提及與假設之後沒有任何人用的構面（候選已經鎖住，別的交易不能再新增引用它們的列），
+    # 交給構面表的寫入者刪。
+    unused: list[uuid.UUID] = []
+    if candidates:
+        unused = [
+            uuid.UUID(str(row[0]))
+            for row in connection.execute(
+                text(
+                    "SELECT c.id FROM construct AS c WHERE c.id = ANY(CAST(:ids AS uuid[]))"
+                    f" AND {_construct_unused('TRUE')} ORDER BY c.id"
+                ),
+                {"ids": candidates},
+            ).all()
+        ]
+    deleted["construct"] = delete_constructs(connection, unused)
+    return {table: int(deleted[table]) for table in REMOVAL_TABLES if table in deleted}

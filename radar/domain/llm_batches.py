@@ -32,6 +32,7 @@ from radar.domain.ai_outputs import InputKind, LlmTask, PaperLlmSource, RunKey, 
 from radar.domain.budget import BUDGET_TIMEZONE, BudgetConfig, BudgetStatus, format_usd
 from radar.domain.errors import ErrorCode
 from radar.domain.llm import BatchProcessingStatus, LlmBatchStatus
+from radar.domain.pricing import ConfigDecimal
 from radar.domain.processing import ProcessingFacts
 from radar.domain.text_table import render_table
 
@@ -82,6 +83,9 @@ class LlmBatchConfig(BaseModel):
     - `month_start_hold_hours`：台北時間每月 1 日 00:00 到這個鐘點以前，整次規劃延後（Anthropic
       的 workspace 上限可能還在用 UTC 的上個月，ADR-0031 取捨）；0 表示不延後。
     - `poll_interval_minutes`：`radar batches wait` 每幾分鐘查一次供應商（預設 10）。
+    - `revision_rerun_max_usd`：分類表或情境值清單改版後，一次規劃要重跑的（`active` 用的設定檔
+      版本和現在不同的）Batch 價保守上限合計最多多少美元（0～50，預設 5）；超過就整次不排
+      （`PlanStop.RERUN_CAP_EXCEEDED`，Story 2.12、ADR-0044）。
     - `incomplete_results_attention_after`：同一個供應商 batch ID 連續幾次讀到的結果項數比供應商的
       計數少，就把批次標 `needs_attention`（`batch_results_incomplete`），交給 `radar batches
       resolve`（預設 3；Story 2.11 確認審查 D2）。
@@ -95,6 +99,9 @@ class LlmBatchConfig(BaseModel):
     # `radar batches wait` 每幾分鐘查一次（1～1,440；Story 2.11）。有預設值，舊的設定檔照樣讀得
     # 進來。
     poll_interval_minutes: int = Field(default=10, ge=1, le=1440, strict=True)
+    # 改版後一次規劃的重跑上限（美元，字串；0～50）。有預設值，舊的設定檔照樣讀得進來
+    # （Story 2.12）。
+    revision_rerun_max_usd: ConfigDecimal = Field(default=Decimal(5), ge=0, le=50)
     # 結果被截短多半是偶發（斷線），重讀一兩次就補齊；一直對不上代表供應商的計數和結果檔本身不一致，
     # 再讀也一樣，要有人工出口（1～100；有預設值，舊的設定檔照樣讀得進來）。
     incomplete_results_attention_after: int = Field(default=3, ge=1, le=100, strict=True)
@@ -239,6 +246,8 @@ class PlanStop(StrEnum):
     # 台北每月 1 日 month_start_hold_hours 點以前：整次延後（規劃途中跨進窗口也在下一批前停下）
     HELD_MONTH_START = "held_month_start"
     BUDGET_TRIPPED = "budget_tripped"  # 已熔斷：整次不排
+    # 分類表或情境值清單改版後要重跑的保守上限超過 revision_rerun_max_usd：整次不排（Story 2.12）
+    RERUN_CAP_EXCEEDED = "rerun_cap_exceeded"
 
 
 @dataclass
@@ -250,6 +259,9 @@ class LlmBatchPlanResult:
       running）。
     - `resumable`：有 `llm_result_pending` 可接續（留給互動接續，不重付）。
     - `deferred_budget`：保守上限放不下剩餘預算或功能預算。
+    - `rerun_unestimated`：分類表或情境值清單改版後的重跑，卻不在規劃開頭估過的清單裡（估完之後
+      狀態變了，例如在跑的改版工作失敗）：這次不排，下一次規劃重新估（Story 2.12 審查後）。新鍵
+      已經有 running、擋下的結果或可接續的 run 的不算在這裡（照原本算 skipped／resumable）。
     - `no_input`／`blocked`／`too_large`：組請求時擋下。
     - `submission_ids`：這次建的 `batch_submission`。
     - `enqueue_failed`：建好了但排入送出失敗的批次數（sweep 之後補排）。
@@ -260,6 +272,7 @@ class LlmBatchPlanResult:
     skipped: int = 0
     resumable: int = 0
     deferred_budget: int = 0
+    rerun_unestimated: int = 0
     no_input: int = 0
     blocked: int = 0
     too_large: int = 0

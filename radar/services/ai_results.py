@@ -34,10 +34,26 @@ Batch 匯入走 `record_batch_llm_result`（Story 2.11、ADR-0043），和上面
   標成 `needs_attention`、人工確認換了 ID）→ 什麼都不寫、丟 `BatchImportStoppedError`（審查後）。
 - 判斷「還是不是現在該用的」時多問一次 `plan_for`（在同一把論文鎖裡）：論文被排除、或該用的輸入
   種類變了 → `superseded`。
+
+看摘要的 run（Story 2.12 審查後第 1、5 點、ADR-0044）：鎖論文之前先拿 run 記的摘要來源的**共用**
+advisory lock（依來源移除拿獨佔），鎖住 run 之後重新核對「這篇的目前摘要仍是這個來源、仍放行」：
+
+- 不符 → 不寫表頭；run（`running` 或 `llm_result_pending`）改 `failed`
+  （`abstract_source_changed`）並 commit；互動入口丟 `AbstractSourceChangedError`、Batch 入口回
+  `NotRecorded.SOURCE_CHANGED`。依來源移除做完之後，就不會再冒出這個來源的表頭。
+- run 還沒記來源（遷移 0018 前建的）：用現在的論文內容重算指紋，和 run 的一樣就辨識出來源（指紋
+  算進每段的來源），同一個交易補上再照上面核對。鎖內辨識不出（輸入已經變了、摘要剛好被拿掉），
+  或和拿鎖時辨識的不是同一個來源（沒拿到它的鎖）：一律當成來源變了，不寫表頭（審查後第二輪
+  R1、O1）；辨識得出的來源（優先用拿鎖時的）照樣補記到 run 上。所以不會再寫出「來源不明」的
+  新表頭。
+
+鎖的順序：批次（`FOR SHARE`）→ 摘要來源（共用）→ 論文 → run。
 """
 
 import uuid
+from enum import StrEnum
 
+import structlog
 from pydantic import BaseModel
 
 from radar.domain.ai_outputs import (
@@ -45,6 +61,7 @@ from radar.domain.ai_outputs import (
     ClassificationContent,
     DerivationRun,
     GatewayConfig,
+    InputKind,
     LlmInput,
     LlmTask,
     NewAiResult,
@@ -55,13 +72,15 @@ from radar.domain.ai_outputs import (
     ResultStatus,
     RunStatus,
     ZhSummaryContent,
+    abstract_source_usable,
     build_llm_input,
 )
 from radar.domain.context_values import ContextValues
 from radar.domain.errors import ErrorCode
-from radar.domain.fingerprints import input_sha256
+from radar.domain.fingerprints import abstract_source_lock_key, input_sha256
 from radar.domain.llm_batches import BatchImportStoppedError
 from radar.domain.llm_schemas import ClassificationOutput, ResearchModelOutput, ZhSummaryOutput
+from radar.domain.papers import AbstractSource
 from radar.domain.permissions import Action, require
 from radar.domain.processing import ProcessingTask, plan_for
 from radar.domain.taxonomy import Taxonomy
@@ -74,15 +93,32 @@ from radar.repo.db import Database, DbConnection
 from radar.repo.llm_batches import find_batch_submission_importing
 from radar.repo.llm_ledger import (
     find_derivation_run,
+    update_derivation_run_abstract_source,
     update_derivation_run_pending_settled,
+    update_derivation_run_source_changed,
     update_derivation_run_succeeded,
 )
 from radar.repo.papers import find_paper_llm_source, find_paper_processing_facts
 from radar.services.prompt_loader import current_prompt_version
 
+log = structlog.get_logger(__name__)
+
 
 class ResultTargetNotFoundError(LookupError):
     """要寫結果的論文或 `derivation_run` 不存在（或兩者對不起來）。"""
+
+
+class NotRecorded(StrEnum):
+    """沒有寫表頭的原因。"""
+
+    ALREADY_DONE = "already_done"  # Batch：鎖住 run 時它已經不是 running（別人匯入過、被收掉）
+    # 摘要來源鎖裡核對：送出時用的摘要已經不是這篇的目前摘要或不再放行（run 已改 failed）
+    SOURCE_CHANGED = "source_changed"
+
+
+class AbstractSourceChangedError(Exception):
+    """`record_llm_result` 沒有寫表頭：送出時用的摘要來源已經不是這篇的目前摘要或不再放行
+    （Story 2.12 審查後）。丟出時 run 已經改成 `failed`（`abstract_source_changed`）並 commit。"""
 
 
 def record_llm_result(
@@ -102,7 +138,8 @@ def record_llm_result(
     context_values: ContextValues | None = None,
     llm_input: LlmInput | None = None,
 ) -> ResultStatus:
-    """把一次模型呼叫的結果寫成一列表頭，回寫成的狀態（見模組說明的順序）。
+    """把一次模型呼叫的結果寫成一列表頭，回寫成的狀態（見模組說明的順序）；摘要來源核對不過時
+    不寫、丟 `AbstractSourceChangedError`（run 已改 `failed` 並 commit）。
 
     `reject_reason` 有值代表被拒收；`abstract_id` 是送出時用的那一筆摘要（只看標題時是 None）。
     `output` 是閘門驗證過的輸出（Pydantic 模型；沒有 schema 時是文字），內容欄位從它得出。
@@ -115,6 +152,8 @@ def record_llm_result(
     Raises:
         PermissionDeniedError: `actor` 不是系統工作（不碰資料庫）。
         ResultTargetNotFoundError: 論文或 `derivation_run` 不存在，或 run 不是這篇論文的。
+        AbstractSourceChangedError: 看摘要的 run 的摘要來源已經不是這篇的目前摘要或不再放行
+            （表頭沒寫，run 已改 `failed` 並 commit）。
         ValueError: 這個工作沒有表頭表；`taxonomy`／`context_values` 和另外給的版本不一樣、給錯
             工作；`classify` 的輸出要寫標籤卻沒給 `taxonomy`；`extract_model` 的輸出要寫內容卻沒給
             `context_values` 或 `llm_input`。
@@ -139,7 +178,10 @@ def record_llm_result(
         llm_input=llm_input,
         batch=None,
     )
-    assert status is not None  # 平常的入口不會略過
+    if status is NotRecorded.SOURCE_CHANGED:
+        raise AbstractSourceChangedError("摘要來源已經變了，沒有寫表頭")
+    if isinstance(status, NotRecorded):  # 平常的入口不會略過
+        raise RuntimeError("互動寫入回了 already_done")
     return status
 
 
@@ -161,10 +203,11 @@ def record_batch_llm_result(
     taxonomy: Taxonomy | None = None,
     context_values: ContextValues | None = None,
     llm_input: LlmInput | None = None,
-) -> ResultStatus | None:
+) -> ResultStatus | NotRecorded:
     """Batch 匯入的入口（見模組說明）：`batch_submission_id`／`provider_batch_id` 是這次匯入的批次與
     下載的供應商 batch ID，其餘參數和 `record_llm_result` 一樣；鎖住 run 時它已經不是 `running`
-    就什麼都不寫、回 None，否則回寫成的狀態。
+    就什麼都不寫、回 `NotRecorded.ALREADY_DONE`，摘要來源核對不過回 `SOURCE_CHANGED`，否則回寫成
+    的狀態。
 
     Raises:
         BatchImportStoppedError: run 還是 `running`，但批次已經不是 `ended` 或換了供應商 batch ID
@@ -206,10 +249,11 @@ def _record(
     context_values: ContextValues | None,
     llm_input: LlmInput | None,
     batch: tuple[uuid.UUID, str] | None,
-) -> ResultStatus | None:
+) -> ResultStatus | NotRecorded:
     """兩個入口共用的寫入（權限已經查過）。`batch` 是 Batch 匯入的（批次 id, 供應商 batch ID）：
-    有給時先鎖批次列、run 不是 `running` 就略過（回 None）、批次不在匯入這個 ID 就丟
-    `BatchImportStoppedError`，「還是不是現在該用的」也多問 `plan_for`。"""
+    有給時先鎖批次列、run 不是 `running` 就略過（`ALREADY_DONE`）、批次不在匯入這個 ID 就丟
+    `BatchImportStoppedError`，「還是不是現在該用的」也多問 `plan_for`。看摘要的 run 先拿摘要來源
+    的共用鎖、鎖內核對（見模組說明）。"""
     if taxonomy is not None:
         if taxonomy_version is not None and taxonomy_version != taxonomy.version_label:
             raise ValueError("taxonomy_version 和分類表的版本不一樣")
@@ -223,17 +267,18 @@ def _record(
         context_values_version = context_values.version_label
     viewer = SystemViewer()
     with database.transaction() as connection:
-        # 鎖的順序：批次 → 論文 → run（匯入的其他寫入交易也是先批次）。
+        # 鎖的順序：批次 → 摘要來源（共用）→ 論文 → run（匯入的其他寫入交易也是先批次）。
         importing = batch is not None and find_batch_submission_importing(
             viewer, connection, batch[0], batch[1]
         )
+        held = _hold_abstract_source(connection, run_id)
         source = find_paper_llm_source(viewer, connection, paper_id, for_update=True)
         run = find_derivation_run(viewer, connection, run_id, for_update=True)
         if source is None or run is None or run.key.paper_id != paper_id:
             raise ResultTargetNotFoundError("找不到要寫結果的論文或 derivation_run")
         if batch is not None and run.status is not RunStatus.RUNNING:
             # 另一個 poller 已經匯入、或 sweep／`resolve --fail` 已經改成 failed：不重寫。
-            return None
+            return NotRecorded.ALREADY_DONE
         if batch is not None and not importing:
             # 批次被別的 poll 標成 needs_attention、或人工確認換了 ID：這次的結果不寫。
             raise BatchImportStoppedError(batch[0])
@@ -244,12 +289,24 @@ def _record(
             raise ValueError("只有 classify 能給分類表")
         if context_values is not None and task is not LlmTask.EXTRACT_MODEL:
             raise ValueError("只有 extract_model 能給情境值清單")
-        # 先做出內容（不碰資料庫）：做不出來就整個交易退回、不切換 active。
+        # 先做出內容（不碰資料庫）：做不出來（呼叫端的錯）就整個交易退回、不切換 active。放在摘要
+        # 來源核對之前：程式的錯不管資料怎麼變都要丟出來，不被「來源變了」蓋掉。
         zh_summary = _zh_summary_content(task, reject_reason, output)
         classification = _classification_content(task, reject_reason, output, taxonomy)
         research_model = _research_model_content(
             task, reject_reason, output, context_values, llm_input
         )
+        if run.input_kind is InputKind.ABSTRACT and not _abstract_source_confirmed(
+            connection, config, run, source, held
+        ):
+            # 這個來源的摘要已經被移除或換掉：不寫表頭（依來源移除之後不會再冒出來）。
+            update_derivation_run_source_changed(connection, run.id)
+            log.warning(
+                "寫 AI 表頭前摘要來源已經變了，不寫表頭",
+                task=run.key.task.value,
+                run_id=str(run.id),
+            )
+            return NotRecorded.SOURCE_CHANGED
 
         if reject_reason is not None:
             status = ResultStatus.REJECTED
@@ -342,6 +399,75 @@ def _research_model_content(
     if context_values is None or llm_input is None:
         raise ValueError("extract_model 的輸出要對照情境值清單與送出的輸入寫內容，沒給")
     return validate_research_model(output, llm_input, context_values)
+
+
+def _identify_abstract_source(
+    run: DerivationRun, paper: PaperLlmSource | None
+) -> AbstractSource | None:
+    """還沒記摘要來源的 run：用現在的論文內容與 run 記的設定版本重算指紋，和 run 的一樣就回現在
+    摘要的來源（指紋算進每段的來源，所以一樣就是同一個來源）；不一樣或組不出輸入回 None。"""
+    if paper is None:
+        return None
+    try:
+        current = build_llm_input(paper, run.input_kind)
+        fingerprint = input_sha256(
+            current.blocks,
+            run.key.task,
+            taxonomy_version=run.taxonomy_version,
+            context_values_version=run.context_values_version,
+        )
+    except NoLlmInputError, ValueError:
+        return None
+    return current.abstract_source if fingerprint == run.key.input_sha256 else None
+
+
+def _hold_abstract_source(connection: DbConnection, run_id: uuid.UUID) -> AbstractSource | None:
+    """（鎖論文之前）看摘要的 run 先拿它的摘要來源的共用鎖，回拿的是哪個來源；run 不看摘要、
+    不存在或辨識不出來源時不拿、回 None。run 還沒記來源時先用沒上鎖的讀取辨識，鎖內再核對一次。"""
+    viewer = SystemViewer()
+    run = find_derivation_run(viewer, connection, run_id, for_update=False)
+    if run is None or run.input_kind is not InputKind.ABSTRACT:
+        return None
+    held = run.abstract_source
+    if held is None:
+        paper = find_paper_llm_source(viewer, connection, run.key.paper_id, for_update=False)
+        held = _identify_abstract_source(run, paper)
+    if held is not None:
+        Database.transaction_lock_shared(connection, abstract_source_lock_key(held))
+    return held
+
+
+def _abstract_source_confirmed(
+    connection: DbConnection,
+    config: GatewayConfig,
+    run: DerivationRun,
+    paper: PaperLlmSource,
+    held: AbstractSource | None,
+) -> bool:
+    """（摘要來源鎖、論文鎖、run 鎖裡）這筆看摘要的 run 可不可以寫表頭：
+
+    - run 記了來源：要等於拿鎖的來源，而且這篇的目前摘要仍是它、仍放行。
+    - 沒記來源：鎖內再辨識一次，和拿鎖的一樣就補記到 run 上，再照上面核對。鎖內辨識不出，或和
+      拿鎖的不一樣（包括拿鎖時辨識不出、沒拿任何來源的鎖）：不放行（審查後第二輪 R1、O1）。
+      辨識得出的來源（優先用拿鎖時的 `held`）照樣補記：指紋已經證明 run 用的是它（沒有表頭，
+      補記不影響移除）。
+    """
+    source = run.abstract_source
+    if source is None:
+        identified = _identify_abstract_source(run, paper)
+        known = held if held is not None else identified
+        if known is not None:
+            update_derivation_run_abstract_source(connection, run.id, known)
+        if identified is None or identified is not held:
+            log.warning(
+                "遷移前的 run 在鎖內辨識不出摘要來源，不寫表頭",
+                task=run.key.task.value,
+                run_id=str(run.id),
+                held=None if held is None else held.value,
+            )
+            return False
+        source = identified
+    return source is held and abstract_source_usable(paper, source, config.cloud_policy)
 
 
 def _still_planned(connection: DbConnection, run: DerivationRun) -> bool:
