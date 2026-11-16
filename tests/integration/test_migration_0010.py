@@ -53,7 +53,7 @@ def test_downgrade_to_0009_drops_tables_and_upgrade_restores_them(db: TestDataba
 
     migrate(db)
 
-    assert db.revisions() == {"0020"}
+    assert db.revisions() == {"0019"}
     assert all(db.has_table(table) for table in NEW_TABLES)
 
 

@@ -168,7 +168,7 @@ def test_migration_creates_queue_objects_without_extensions(fresh_database: Test
     assert _admin_rows(fresh_database, "SELECT extname FROM pg_extension ORDER BY 1") == (
         extensions_before
     )
-    assert fresh_database.revisions() == {"0020"}
+    assert fresh_database.revisions() == {"0019"}
 
 
 def test_downgrade_to_0001_removes_every_queue_object(fresh_database: TestDatabase) -> None:

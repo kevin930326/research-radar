@@ -58,7 +58,7 @@ Google 登入在 Epic 7 才做，但 Epic 3 之後的每個畫面都要知道「
 ## 決定
 
 1. **session 照 ADR-0008**：token 是 `secrets.token_urlsafe(32)`（256 位元），資料庫只存 SHA-256（`session.token_sha256`，bytea 32 位元組、UNIQUE）。cookie 是 `__Host-radar_session`（HttpOnly、Secure、SameSite=Lax、Path=/、沒有 Domain、Max-Age＝最長期限）。閒置 14 天、最長 30 天（`RADAR_SESSION_IDLE_DAYS`、`RADAR_SESSION_MAX_DAYS` 可調，最長不能比閒置短）；最後使用時間超過 5 分鐘才更新。查 session 時同時要求 `allowed_email` 還在，所以刪 session（撤銷）或刪名單（移出）都立刻失效。期限的邊界：閒置恰好 14 天、建立恰好 30 天就算過期（`>` 不是 `>=`）。過期的列先留著，之後由清理工作刪；但登出只看 token 雜湊，過期或已移出名單的 session 登出時也刪掉那一列（不然之後調長期限或把人加回名單，已經登出的 token 會重新有效）。
-2. **三張新表**（遷移 0020）：`member`（顯示名稱、是否管理者、`google_sub` 可空 UNIQUE、第一次登入時間）、`allowed_email`（小寫 email UNIQUE、一位成員一個 email）、`session`。應用程式角色不能刪 `member`（會被判斷事件、稽核引用）；移出名單是刪 `allowed_email`。不改任何既有的表。
+2. **三張新表**（遷移 0019）：`member`（顯示名稱、是否管理者、`google_sub` 可空 UNIQUE、第一次登入時間）、`allowed_email`（小寫 email UNIQUE、一位成員一個 email）、`session`。應用程式角色不能刪 `member`（會被判斷事件、稽核引用）；移出名單是刪 `allowed_email`。不改任何既有的表。
 3. **環境與開關**：選項 B。啟動時擋下：正式＋假登入、假登入＋Google 登入、試用＋假登入但缺 team 網域／audience／管理者 email／站台來源（或站台來源不是 https）。compose 的 api 明寫開發＋假登入，映像冒煙順便證明「開發＋假登入可以啟動」。
 4. **試用環境驗 Access 的 JWT**：選項 B，規則照搬 ADR-0008 第 1.3 項。
    - 標頭自己解析：`alg` 一定是字串 `RS256`、要有字串 `kid`、有 `crit` 就拒絕。
@@ -84,7 +84,7 @@ Google 登入在 Epic 7 才做，但 Epic 3 之後的每個畫面都要知道「
 - JSON 格式錯的請求可能在 Origin 檢查之前就回 422（FastAPI 先解析本文）；不會建 session，只是錯誤碼不同。統一的錯誤格式在 Story 3.4（RFC 9457）。
 - `member.first_login_at` 假登入不寫，留給 Google 登入第一次成功時寫。
 - `MANAGE_ALLOWLIST`（ADMIN）與 CLI 用 `SystemViewer` 不一致，services 用型別檢查補；要不要改權限表等 Kevin 決定。
-- 遷移 0020 接在 0014 後面（0015～0019 保留給另一條線），兩條線合併後要把 `down_revision` 改接 0019，並刪掉 `tests/arch/test_migrations.py` 的保留空號。
+- 遷移原本寫成 0020 接 0014（0015～0019 保留給另一條線）；兩條線合併後改號成 0019、接 0018，`tests/arch/test_migrations.py` 的保留空號已刪（2026-11-16）。
 - `__Host-` cookie 一定要帶 Secure。Chrome、Firefox 在 `http://localhost`、`http://127.0.0.1` 也收，但有些版本的 Safari 不收，所以本機開發請用 Chrome 或 Firefox（要 Kevin 手動確認一次）。
 - compose 的 `environment:` 會蓋過 `env_file`，所以本機開發要改 `RADAR_ENVIRONMENT`、`RADAR_FAKE_LOGIN`、`RADAR_SITE_ORIGIN` 時改 `compose.yaml`（例如用 Vite 的 5173 埠時，在那裡設 `RADAR_SITE_ORIGIN`）。
 - 公鑰清單沒有快取：只要請求的標頭長得像 RS256 的 JWT，就會觸發一次抓取（逾時最多 5 秒）。站台在 Access 後面時可以接受；如果哪天主機能被直接連到，要加以 `kid` 為鍵的快取。
