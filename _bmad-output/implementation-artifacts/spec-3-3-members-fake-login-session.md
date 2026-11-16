@@ -11,7 +11,7 @@ context:
   - '{project-root}/_bmad-output/implementation-artifacts/epic-3-context.md'
   - '{project-root}/docs/adr/0008-login-google-oidc.md'
   - '{project-root}/docs/adr/0002-read-authorization-viewer.md'
-  - '/Users/kevin/Documents/research-radar/docs/runs/epic-3b/brief-3-3.md'
+  - '<repo>/docs/runs/epic-3b/brief-3-3.md'
 warnings: ['oversized']
 deferred:
   - summary: >-
@@ -55,7 +55,7 @@ deferred:
 ## Boundaries & Constraints
 
 **Always:**
-- 只在 worktree `/Users/kevin/Documents/research-radar/.claude/worktrees/epic3b` 做；本機 pytest 一律加 `RADAR_TEST_ADMIN_DATABASE_URL=postgresql://postgres@127.0.0.1:1/postgres`；需要資料庫的測試靠 CI。
+- 只在 worktree `<repo>/.claude/worktrees/epic3b` 做；本機 pytest 一律加 `RADAR_TEST_ADMIN_DATABASE_URL=postgresql://postgres@127.0.0.1:1/postgres`；需要資料庫的測試靠 CI。
 - 遷移 0020（`down_revision = "0014"`；2026-11-16 合併 Epic 2 後改號成 0019、`down_revision = "0018"`），只建新表，不改任何既有的表（含 `judgment_event.member_id`、`audit_event` 的結構）。ADR 從 0046 起，狀態「提議」。
 - 和另一條線共用的檔只加最少的行、盡量加在尾端：`radar/config.py`（尾端加 `load_auth_settings`）、`radar/entrypoints/cli/__init__.py`（一行 import＋一行 `add_typer`）、`radar/entrypoints/bootstrap.py`、`migrations/env.py`、`radar/domain/errors.py`、`.env.example`、`docs/adr/README.md`、`docs/glossary.md`、`sprint-status.yaml`。不改 `config/` 的 YAML、`radar/adapters/anthropic`、向量、Batch 相關的檔。
 - 管理者 email 只從 `RADAR_ADMIN_EMAIL` 讀（`SecretStr`）；日誌、CLI 輸出、API 回應都不出現任何 email，只記成員 ID。測試成員一律 `*@example.com`、假名字。

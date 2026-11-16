@@ -12,7 +12,7 @@ context:
   - '{project-root}/docs/adr/0010-frontend-stack.md'
   - '{project-root}/docs/adr/0037-design-tokens-guard-and-a11y-floor.md'
   - '{project-root}/docs/adr/0046-fake-login-in-dev-and-trial.md'
-  - '/Users/kevin/Documents/research-radar/docs/runs/epic-3b/brief-3-5.md'
+  - '<repo>/docs/runs/epic-3b/brief-3-5.md'
 warnings: ['oversized']
 deferred:
   - summary: >-

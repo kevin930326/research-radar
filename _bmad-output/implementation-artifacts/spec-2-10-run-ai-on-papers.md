@@ -7,7 +7,7 @@ baseline_revision: 'f1071e9dc7173294f2c7087c2f57575207407f2e'
 review_loop_iteration: 0
 followup_review_recommended: false
 context:
-  - '/Users/kevin/Documents/research-radar/docs/runs/epic-2a/claude-api-reference.md'
+  - '<repo>/docs/runs/epic-2a/claude-api-reference.md'
   - '{project-root}/AGENTS.md'
   - '{project-root}/docs/adr/0030-llm-gateway-ledger-and-prompts.md'
   - '{project-root}/docs/adr/0031-budget-breaker-and-costs.md'
@@ -155,7 +155,7 @@ deferred: []
 
 **操作限制（硬性）：**
 - 一個真的網路請求都不送（Anthropic、Cloudflare、OpenAlex 都不行）；不讀、不印 `.env`、`.env.radar` 等有真值的 `.env*`（`.env.example` 除外）；不跑 `docker compose config`、不帶 `--format` 的 `docker inspect`、容器裡的 `env`。
-- 只在 worktree `/private/tmp/claude-501/-Users-kevin-Documents-research-radar/2151c064-b1a1-494a-ae91-221da01d8c08/scratchpad/wt-2-10` 裡改檔；不切分支、不 stash、不 commit、不 push；不動主資料夾 `/Users/kevin/Documents/research-radar` 與 `.claude/worktrees/`。暫存檔放 `/private/tmp/claude-501/-Users-kevin-Documents-research-radar/2151c064-b1a1-494a-ae91-221da01d8c08/scratchpad/tmp-2-10/`。
+- 只在 worktree `<scratchpad>/wt-2-10` 裡改檔；不切分支、不 stash、不 commit、不 push；不動主資料夾 `<repo>` 與 `.claude/worktrees/`。暫存檔放 `<scratchpad>/tmp-2-10/`。
 - 測試資料庫是共用的 radar-ci db 容器：先 `docker ps --filter name=radar-ci-db-1` 確認在跑就直接用，**不要 up、down、recreate**；絕不用 `-p radar`。只有不在跑時才 `docker compose --env-file /dev/null --project-name radar-ci --file compose.yaml up --detach --wait db` 一次並回報。
 - 不用掃描工具掃 repo 根目錄；不新增套件；不改既有測試去配合程式（`llm_job` 型別改動不該讓任何既有測試要改；真的要改的逐一列理由）。
 - 遷移不需要；ADR 用 0042（0039～0041 已用）。新名詞加在 `docs/glossary.md` 檔尾。

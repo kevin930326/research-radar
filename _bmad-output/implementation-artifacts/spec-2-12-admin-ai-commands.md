@@ -150,7 +150,7 @@ deferred: []
 
 **操作限制（硬性）：**
 - 本 spec 的 `{project-root}`＝下面這個 worktree（frontmatter `context` 從 worktree 讀）。
-- 在 worktree `/private/tmp/claude-501/-Users-kevin-Documents-research-radar/2151c064-b1a1-494a-ae91-221da01d8c08/scratchpad/wt-2-12` 裡做；不切分支、不 stash、不 commit、不 push；不動主資料夾 `/Users/kevin/Documents/research-radar` 的任何檔案、不動 `.claude/worktrees/`、不碰別的 worktree（wt-2-9、wt-2-10、wt-2-11）。暫存檔放 `/private/tmp/claude-501/-Users-kevin-Documents-research-radar/2151c064-b1a1-494a-ae91-221da01d8c08/scratchpad/tmp-2-12/`。
+- 在 worktree `<scratchpad>/wt-2-12` 裡做；不切分支、不 stash、不 commit、不 push；不動主資料夾 `<repo>` 的任何檔案、不動 `.claude/worktrees/`、不碰別的 worktree（wt-2-9、wt-2-10、wt-2-11）。暫存檔放 `<scratchpad>/tmp-2-12/`。
 - 一個真的網路請求都不送；不讀、不印 `.env*`（`.env.example` 除外）；不跑 `docker compose config`、不帶 `--format` 的 `docker inspect`、容器裡的 `env`；不用掃描工具掃 repo 根目錄。
 - 測試資料庫是共用的 radar-ci db 容器，已經在跑：先 `docker ps --filter name=radar-ci-db-1` 確認；**不要 up、down、recreate**；絕不用 `-p radar`。每個測試自建資料庫，不刪不是自己建的。
 - 不新增套件；不改既有測試去配合程式（只准改 Code Map 列的需求改變項目，並列理由）。遷移只能用 0018（0019 保留）；ADR 只能用 0044（0045 保留）。
