@@ -1,6 +1,6 @@
-import { queryOptions } from "@tanstack/react-query";
-import { Outlet, createRoute, lazyRouteComponent, redirect } from "@tanstack/react-router";
-import { useState } from "react";
+import { queryOptions, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Outlet, createRoute, lazyRouteComponent, redirect, useLocation, useNavigate } from "@tanstack/react-router";
+import { useEffect, useState } from "react";
 
 import { SiteHeader } from "../components/SiteHeader";
 import { LoadFailed } from "../components/states/LoadFailed";
@@ -8,7 +8,7 @@ import { Offline } from "../components/states/Offline";
 import { NotFound } from "../components/states/NotFound";
 import { PageLoading } from "../components/states/PageLoading";
 import { datasource } from "../datasource";
-import type { PaperSource } from "../datasource/types";
+import type { PaperPage as PaperPageData, PaperSource } from "../datasource/types";
 import { LoginPage } from "../pages/LoginPage";
 import { NoticePage } from "../pages/NoticePage";
 import { PaperPage } from "../pages/PaperPage";
@@ -24,7 +24,8 @@ import { FIRST_PAGE, clearMemberQueries, meQuery, validateLoginSearch } from "./
 //   「我是誰」問不到（網路、伺服器錯誤）是全站共用的「載入失敗」。
 // - 3.14 之前登入後第一頁是使用須知，所以 / 先導到 /notice。
 // - /papers/$paperId：論文頁（Story 3.8）。ID 不是 UUID 時不送請求；看不到或不存在（404）時在導覽列下方顯示
-//   全站共用的「找不到這一頁」；論文 API 回 401 時照登入過期處理。
+//   全站共用的「找不到這一頁」；論文或顯示名稱任一個 API 回 401 時照登入過期處理（清快取、回登入頁）。
+//   論文讀到就顯示整頁；顯示名稱沒讀到只有分類那一行顯示訊息條與「重試」（Codex 審查 3.8 中 3、中 6）。
 // - 找不到的網址由最外層顯示（routes/root.tsx），不用登入。
 
 const loginRoute = createRoute({
@@ -139,11 +140,41 @@ function paperSource(): PaperSource {
 const paperQuery = (paperId: string) =>
   queryOptions({ queryKey: ["papers", paperId], queryFn: () => paperSource().paper(paperId), retry: false });
 
+// 顯示名稱是設定值，同一位成員登入期間不會變：讀到就留著（登出、換人時 clearMemberQueries 會清掉）。
+// 路由先讀一次；畫面掛上時不再自動重讀，沒讀到也不自動重試（按「重試」才讀）。
 const displayNamesQuery = queryOptions({
   queryKey: ["display-names"],
   queryFn: () => paperSource().displayNames(),
   retry: false,
+  staleTime: Infinity,
+  retryOnMount: false,
 });
+
+/** 論文頁＋顯示名稱：顯示名稱沒讀到時只有分類那一行顯示訊息條；按「重試」回 401 時照登入過期處理。 */
+function PaperWithNames({ page }: { page: PaperPageData }) {
+  const queryClient = useQueryClient();
+  const navigate = useNavigate();
+  const href = useLocation({ select: (location) => location.href });
+  const names = useQuery(displayNamesQuery);
+  const signedOut = names.data?.kind === "signedOut";
+  useEffect(() => {
+    if (!signedOut) return;
+    void (async () => {
+      await clearMemberQueries(queryClient);
+      await navigate({ to: "/login", search: { next: href, expired: true as const }, replace: true });
+    })();
+  }, [signedOut, queryClient, navigate, href]);
+  if (signedOut) {
+    return null;
+  }
+  return (
+    <PaperPage
+      page={page}
+      names={names.data?.kind === "found" ? names.data.names : null}
+      onRetryNames={() => void names.refetch({ cancelRefetch: false })}
+    />
+  );
+}
 
 const paperRoute = createRoute({
   getParentRoute: () => appRoute,
@@ -155,32 +186,34 @@ const paperRoute = createRoute({
     if (!isPaperId(params.paperId)) {
       return { kind: "notFound" as const };
     }
-    // 兩個請求一起送；論文先看是不是 401（登入過期），再看顯示名稱。
+    // 兩個請求一起送。任一個回 401（登入過期）都回登入頁；論文其他錯誤是整頁「載入失敗」。
+    // 顯示名稱的其他錯誤不擋整頁：結果留在查詢快取裡，畫面（PaperWithNames）讀它決定分類那一行怎麼顯示。
     const [paper, names] = await Promise.allSettled([
       queryClient.fetchQuery(paperQuery(params.paperId)),
       queryClient.fetchQuery(displayNamesQuery),
     ]);
-    if (paper.status === "rejected") {
-      throw paper.reason;
-    }
-    if (paper.value.kind === "signedOut") {
+    const paperSignedOut = paper.status === "fulfilled" && paper.value.kind === "signedOut";
+    const namesSignedOut = names.status === "fulfilled" && names.value.kind === "signedOut";
+    if (paperSignedOut || namesSignedOut) {
       await clearMemberQueries(queryClient);
       throw redirect({ to: "/login", search: { next: location.href, expired: true as const }, replace: true });
     }
-    if (paper.value.kind === "notFound") {
+    if (paper.status === "rejected") {
+      throw paper.reason;
+    }
+    const result = paper.value;
+    // signedOut 上面已經處理，剩下的只有 notFound。
+    if (result.kind !== "found") {
       return { kind: "notFound" as const };
     }
-    if (names.status === "rejected") {
-      throw names.reason;
-    }
-    return { kind: "found" as const, page: paper.value.page, names: names.value };
+    return { kind: "found" as const, page: result.page };
   },
   component: function PaperRoute() {
     const data = paperRoute.useLoaderData();
     if (data.kind === "notFound") {
       return <NotFound />;
     }
-    return <PaperPage page={data.page} names={data.names} />;
+    return <PaperWithNames page={data.page} />;
   },
 });
 

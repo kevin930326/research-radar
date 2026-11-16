@@ -81,6 +81,10 @@
       "vpnBelow": "連學校 VPN 時，下方的「開啟全文」會直接到全文頁",
       "openAccess": "開放取用版本",
       "noDoi": "這篇沒有 DOI，沒有全文連結"
+    },
+    "names": {
+      "loadFailed": "沒有載入成功",
+      "retry": "重試"
     }
   }
 }

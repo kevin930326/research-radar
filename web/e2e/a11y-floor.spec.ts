@@ -6,8 +6,8 @@
 // (5) 論文標題與摘要元素自己有 lang，且和內容的語言一致（英文是 en，中文是 zh 開頭）；
 // (6) 開發站另跑 axe（正式建置由 3.1 的 a11y.spec.ts 跑），每個說明框點開後也跑一次。
 // 頁面清單和站內連結檢查同一份（pages.ts），新頁面加進來就自動被檢查。
-// 「找不到這一頁」（MISSING_PATH）也跑 (1)～(3)；它沒有第一層標題（EXPERIENCE.md 沒有那段文字），
-// 所以不跑 (4)～(6)，要不要補待 Kevin 決定。
+// 「找不到這一頁」（MISSING_PATH）也跑 (1)～(4)：Story 3.8 起「找不到這一頁」這句就是 h1（EXPERIENCE.md
+// State Patterns「全站共用」）；(5)、(6) 只跑真的頁面。
 import AxeBuilder from "@axe-core/playwright";
 import type { Page } from "@playwright/test";
 
@@ -115,7 +115,7 @@ async function waitForPage(page: Page, missing: boolean): Promise<void> {
 }
 
 for (const site of A11Y_SITES) {
-  // 「找不到這一頁」也跑焦點外框、44×44、200% 放大；h1、lang、axe 只跑真的頁面。
+  // 「找不到這一頁」也跑焦點外框、44×44、200% 放大、h1；lang、axe 只跑真的頁面。
   const targets = [
     ...site.pages.map((path) => ({ path, missing: false })),
     { path: MISSING_PATH, missing: true },
@@ -161,15 +161,10 @@ for (const site of A11Y_SITES) {
       expect(scrollWidth).toBeLessThanOrEqual(720);
 
       const overlaps = await page.evaluate((epsilon) => {
-        // 疊在內容上面的固定列（position: sticky／fixed，例如論文頁手機版底部的「開啟全文」，Story 3.8）
-        // 本來就會蓋住捲過去的內容，不算版面重疊；它自己的字照樣和其他固定列比。
-        const pinned = (element: HTMLElement) => {
-          for (let node: HTMLElement | null = element; node !== null; node = node.parentElement) {
-            const position = getComputedStyle(node).position;
-            if (position === "sticky" || position === "fixed") return true;
-          }
-          return false;
-        };
+        // 只放寬一個地方：論文頁 899px 以下底部的固定列（「開啟全文」，Story 3.8）照設計稿疊在捲過去的內容上面，
+        // 列裡的字和列外的字疊在一起不算版面重疊；列裡的字彼此照樣比。其他 sticky／fixed 的元素不放寬。
+        // 固定列有沒有蓋住鍵盤焦點，由 paper.spec.ts 的焦點測試看（Opus 畫面審查低 11、中 2）。
+        const pinned = (element: HTMLElement) => element.closest("[data-full-text='bar']") !== null;
         // 直接含有文字的元素（不含隱藏的）。
         const elements = [...document.querySelectorAll<HTMLElement>("body *")].filter((element) => {
           const hasText = [...element.childNodes].some(
@@ -200,13 +195,13 @@ for (const site of A11Y_SITES) {
       expect(overlaps).toEqual([]);
     });
 
-    if (missing) continue;
-
     test(`${site.name} ${path}: exactly one h1`, async ({ page }) => {
       await page.goto(url);
       await expect(page.locator("main")).toBeVisible();
       await expect(page.locator("h1")).toHaveCount(1);
     });
+
+    if (missing) continue;
 
     test(`${site.name} ${path}: paper titles and abstracts carry the lang of their text`, async ({ page }) => {
       await page.goto(url);

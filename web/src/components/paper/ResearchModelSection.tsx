@@ -12,6 +12,8 @@ import { BlockLine, MONO_LABEL_CLASS, NoteLine, SECTION_CLASS, SectionHeading, b
 // - `empty`：一行「摘要裡沒有寫出可以擷取的假設」，有標章（設計稿沒畫，沿用 failed 那一行）。
 // - `no_input`（沒有摘要）：一行「沒有摘要，所以沒有研究模型。」，沒有標章（設計稿「沒有摘要」）。
 // - 沒有產生成功／還在產生／額度用完：一行狀態，沒有標章。
+// - 有內容的狀態（ready、empty）卻沒有來歷：不顯示內容（ADR-0010 第 8 點、ADR-0015），照「還沒產生」那一行，
+//   沒有標章（Codex 審查 3.8 中 1）。只有 ready 讀 `value`（中 2）。
 // - 「找相似論文」在 Epic 4 才放（AR-67）。
 
 const ARROW = (
@@ -92,15 +94,16 @@ interface ResearchModelSectionProps {
 export function ResearchModelSection({ block, firstBadge }: ResearchModelSectionProps) {
   const { t } = useTranslation("paper");
   const heading = <SectionHeading id="paper-research-model" title={t("paper.model.heading")} />;
+  const withoutProvenance = (block.state === "ready" || block.state === "empty") && block.provenance === null;
   // 有內容但一個構面都沒有，和 empty 一樣是「摘要裡沒有寫出可以擷取的假設」。
-  const noConstructs = block.state === "ready" && (block.value?.constructs.length ?? 0) === 0;
+  const noConstructs = block.state === "ready" && !withoutProvenance && (block.value?.constructs.length ?? 0) === 0;
   let line: string | null;
   switch (block.state) {
     case "ready":
-      line = noConstructs ? t("paper.model.empty") : null;
+      line = withoutProvenance ? t("paper.state.pending") : noConstructs ? t("paper.model.empty") : null;
       break;
     case "empty":
-      line = t("paper.model.empty");
+      line = withoutProvenance ? t("paper.state.pending") : t("paper.model.empty");
       break;
     case "no_input":
       line = t("paper.model.noAbstract");
@@ -130,14 +133,16 @@ export function ResearchModelSection({ block, firstBadge }: ResearchModelSection
         aria-labelledby="paper-research-model"
         className={SECTION_CLASS}
       >
-        {block.state === "empty" || noConstructs ? (
+        {(block.state === "empty" || noConstructs) && !withoutProvenance ? (
           <SectionHeading id="paper-research-model" title={t("paper.model.heading")}>
             {badge}
           </SectionHeading>
         ) : (
           heading
         )}
-        <BlockLine state={block.state}>{line}</BlockLine>
+        <BlockLine state={block.state} provenance={withoutProvenance ? "missing" : undefined}>
+          {line}
+        </BlockLine>
       </section>
     );
   }

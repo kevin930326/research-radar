@@ -118,7 +118,8 @@
               "human_verified": false,
               "fix_member_count": 0,
               "members_disagree": false
-            }
+            },
+            "fix_member_count": 0
           },
           "provenance": {
             "model": "claude-haiku-4-5",
@@ -291,7 +292,8 @@
               "human_verified": false,
               "fix_member_count": 0,
               "members_disagree": false
-            }
+            },
+            "fix_member_count": 0
           },
           "provenance": {
             "model": "claude-haiku-4-5",
@@ -448,7 +450,8 @@
               "human_verified": false,
               "fix_member_count": 0,
               "members_disagree": false
-            }
+            },
+            "fix_member_count": 0
           },
           "provenance": {
             "model": "claude-haiku-4-5",
@@ -528,7 +531,8 @@
               "human_verified": false,
               "fix_member_count": 0,
               "members_disagree": false
-            }
+            },
+            "fix_member_count": 0
           },
           "provenance": {
             "model": "claude-haiku-4-5",
@@ -934,7 +938,8 @@
               "human_verified": false,
               "fix_member_count": 0,
               "members_disagree": false
-            }
+            },
+            "fix_member_count": 0
           },
           "provenance": {
             "model": "claude-haiku-4-5",
@@ -1088,7 +1093,8 @@
               "human_verified": false,
               "fix_member_count": 0,
               "members_disagree": false
-            }
+            },
+            "fix_member_count": 0
           },
           "provenance": {
             "model": "claude-haiku-4-5",
@@ -1260,7 +1266,8 @@
               "human_verified": true,
               "fix_member_count": 2,
               "members_disagree": true
-            }
+            },
+            "fix_member_count": 2
           },
           "provenance": {
             "model": "claude-haiku-4-5",
@@ -1367,7 +1374,7 @@
     },
     "38000000-0000-4000-8000-000000000013": {
       "label": "fixed",
-      "note": "分類有 1 位成員修正過（意見相同）",
+      "note": "分類有 1 位成員修正過（意見相同）：同一人修了主題與方法，兩欄都是人工值，標章是「已核對」（和 3.6 的 API 一致）",
       "page": {
         "paper": {
           "id": "38000000-0000-4000-8000-000000000013",
@@ -1422,7 +1429,7 @@
                 "platforms",
                 "trust"
               ],
-              "human_verified": false,
+              "human_verified": true,
               "fix_member_count": 1,
               "members_disagree": false
             },
@@ -1430,16 +1437,17 @@
               "keys": [
                 "experiment"
               ],
-              "human_verified": false,
+              "human_verified": true,
               "fix_member_count": 1,
               "members_disagree": false
-            }
+            },
+            "fix_member_count": 1
           },
           "provenance": {
             "model": "claude-haiku-4-5",
             "generated_at": "2026-11-10T03:00:00Z",
             "input_kind": "abstract",
-            "human_verified": false
+            "human_verified": true
           }
         },
         "research_model": {
@@ -1606,7 +1614,8 @@
               "human_verified": false,
               "fix_member_count": 0,
               "members_disagree": false
-            }
+            },
+            "fix_member_count": 0
           },
           "provenance": {
             "model": "claude-haiku-4-5",
@@ -1814,7 +1823,8 @@
               "human_verified": false,
               "fix_member_count": 0,
               "members_disagree": false
-            }
+            },
+            "fix_member_count": 0
           },
           "provenance": {
             "model": "claude-haiku-4-5",
@@ -1987,7 +1997,8 @@
               "human_verified": false,
               "fix_member_count": 0,
               "members_disagree": false
-            }
+            },
+            "fix_member_count": 0
           },
           "provenance": {
             "model": "claude-haiku-4-5",
@@ -2147,7 +2158,8 @@
               "human_verified": false,
               "fix_member_count": 0,
               "members_disagree": false
-            }
+            },
+            "fix_member_count": 0
           },
           "provenance": {
             "model": "claude-haiku-4-5",

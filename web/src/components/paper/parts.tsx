@@ -21,9 +21,18 @@ export const RAIL_LABEL_CLASS = "font-mono text-s13 tracking-008 text-text-secon
  * 區塊裡的一行狀態（paper-ai-failed.html 的「沒有產生成功，可以請管理者重跑」、paper.html 的「沒有摘要，所以沒有研究模型。」）：
  * 標題下 16px、16px、行高 1.9、第二層文字色。設計稿沒畫的「還在產生」「額度用完」「研究模型是空的」沿用同一行。
  */
-export function BlockLine({ children, state }: { children: ReactNode; state: string }) {
+export function BlockLine({
+  children,
+  state,
+  provenance,
+}: {
+  children: ReactNode;
+  state: string;
+  /** 有內容的狀態卻沒有來歷（不顯示內容）時是 "missing"，給測試認。 */
+  provenance?: "missing";
+}) {
   return (
-    <div data-block-state={state} className="mt-4 text-s16 leading-190 text-text-secondary">
+    <div data-block-state={state} data-provenance={provenance} className="mt-4 text-s16 leading-190 text-text-secondary">
       {children}
     </div>
   );

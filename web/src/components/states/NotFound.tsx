@@ -1,15 +1,19 @@
 import { useTranslation } from "react-i18next";
 
 import { datasource } from "../../datasource";
+import { useDocumentTitle } from "../../hooks/use-document-title";
 import { MessageBar } from "../MessageBar";
 import { TextLink } from "../TextLink";
 
 // 全站共用狀態「找不到這一頁」（沒有權限也是這個畫面）：訊息條＋回首頁的連結。
 // 示範站的首頁在 Epic 13 才有，目的地不存在的入口不放（AR-67），所以示範站不放這個連結。
+// 「找不到這一頁」就是頁面標題（h1），瀏覽器分頁名稱也是它（EXPERIENCE.md State Patterns「全站共用」；字與樣子不變）。
 export function NotFound() {
   const { t } = useTranslation("common");
+  const message = t("states.notFound.message");
+  useDocumentTitle(message);
   return (
-    <MessageBar tone="info" message={t("states.notFound.message")}>
+    <MessageBar tone="info" heading message={message}>
       {datasource.siteKind() === "member" ? (
         <TextLink to="/">{t("states.notFound.home")}</TextLink>
       ) : null}

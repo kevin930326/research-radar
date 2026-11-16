@@ -27,8 +27,10 @@ export function DataDateBar({ snapshot }: { snapshot: SnapshotRef | null }) {
     >
       <span aria-hidden="true" className="h-[5px] w-[5px] shrink-0 rounded-full bg-accent-gold" />
       <span>{t("dataDate.bar.asOf", { date })}</span>
+      {/* 按鈕的名稱是「#N」（EXPERIENCE.md：聚焦在「#12」時），「·」只是分隔的記號，報讀器不唸。 */}
       <InfoPopover
         triggerClassName="-my-[14px]"
+        triggerLabel={t("dataDate.bar.number", { number: snapshot.number })}
         trigger={<span className="text-text-tertiary">{t("dataDate.bar.snapshot", { number: snapshot.number })}</span>}
       >
         {t("dataDate.bar.snapshotInfo", { number: snapshot.number })}

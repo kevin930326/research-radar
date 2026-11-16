@@ -1,7 +1,7 @@
 import { NewTabNote } from "../components/ExternalArrow";
 import { AbstractSection, NoAbstractSection } from "../components/paper/AbstractSection";
 import { FullTextBar, FullTextMobile, FullTextRail } from "../components/paper/FullText";
-import { PaperBiblio } from "../components/paper/PaperBiblio";
+import { PaperBiblio, classificationHasTags } from "../components/paper/PaperBiblio";
 import { ResearchModelSection } from "../components/paper/ResearchModelSection";
 import { ZhSummarySection } from "../components/paper/ZhSummarySection";
 import type { DisplayNames, PaperPageResponse, Provenance } from "../generated/model";
@@ -22,24 +22,23 @@ function showsBadge(block: Badged, states: readonly string[]): boolean {
   return states.includes(block.state) && block.provenance !== null;
 }
 
-function hasClassification(page: PaperPageResponse): boolean {
-  const value = page.classification.value;
-  return value !== null && [value.topic, value.method].some((field) => field !== null && field.keys.length > 0);
-}
-
 /**
  * 這一頁第一個「未經人工核對」的標章在哪一塊（EXPERIENCE.md：每頁第一個標章寫全文）。
  * 順序和畫面一樣：分類（書目最後一行）→ 中文重點 → 研究模型。核對過的標章是「◆ 已核對」，全文移到下一個。
+ * `namesLoaded` 是 false（顯示名稱沒讀到）時，分類那一行換成訊息條，標章不在那裡。
  */
-export function firstUnverifiedBadge(page: PaperPageResponse): "classification" | "zh_summary" | "research_model" | null {
+export function firstUnverifiedBadge(
+  page: PaperPageResponse,
+  namesLoaded = true,
+): "classification" | "zh_summary" | "research_model" | null {
   const candidates = [
     ["classification", page.classification, ["ready"]],
     ["zh_summary", page.zh_summary, ["ready", "empty"]],
     ["research_model", page.research_model, ["ready", "empty"]],
   ] as const;
   for (const [name, block, states] of candidates) {
-    // 分類的標章只在有主題或方法的時候畫得出來（ClassificationLine）。
-    const drawn = name !== "classification" || hasClassification(page);
+    // 分類的標章只在有主題或方法、而且讀到顯示名稱的時候畫得出來（ClassificationLine）。
+    const drawn = name !== "classification" || (namesLoaded && classificationHasTags(page.classification));
     if (drawn && showsBadge(block, states) && block.provenance?.human_verified === false) {
       return name;
     }
@@ -49,11 +48,14 @@ export function firstUnverifiedBadge(page: PaperPageResponse): "classification" 
 
 interface PaperPageProps {
   page: PaperPageResponse;
-  names: DisplayNames;
+  /** 期刊、主題、方法的顯示名稱；沒有讀到是 null（只有分類那一行顯示訊息條與「重試」，其他照常）。 */
+  names: DisplayNames | null;
+  /** 顯示名稱沒有讀到時，按「重試」要做的事。 */
+  onRetryNames?: () => void;
 }
 
-export function PaperPage({ page, names }: PaperPageProps) {
-  const first = firstUnverifiedBadge(page);
+export function PaperPage({ page, names, onRetryNames }: PaperPageProps) {
+  const first = firstUnverifiedBadge(page, names !== null);
   const links = {
     doi_url: externalUrl(page.full_text_links.doi_url),
     open_access_url: externalUrl(page.full_text_links.open_access_url),
@@ -64,7 +66,7 @@ export function PaperPage({ page, names }: PaperPageProps) {
       className="text-s14 leading-normal tracking-0 text-text-primary split:flex split:items-start split:justify-between split:gap-12"
     >
       <div className="min-w-[0px] split:max-w-reading-width split:flex-1">
-        <PaperBiblio page={page} names={names} firstBadge={first === "classification"} />
+        <PaperBiblio page={page} names={names} onRetryNames={onRetryNames} firstBadge={first === "classification"} />
         <div className="split:hidden">
           <FullTextMobile links={links} />
         </div>

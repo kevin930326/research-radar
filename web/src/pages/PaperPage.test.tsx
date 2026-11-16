@@ -246,6 +246,124 @@ describe("State Patterns 8: blocks", () => {
   });
 });
 
+// Codex 審查 3.8 中 1、中 2、中 5、中 6 與 Opus 畫面審查低 8、低 9 的反例。
+describe("review fixes", () => {
+  const SUMMARY_TEXT = "only-in-the-empty-value-marker";
+
+  it("ready or empty without provenance: no content and no badge, the 'still generating' line instead", () => {
+    const page = fixture("normal");
+    page.zh_summary.provenance = null;
+    page.research_model.provenance = null;
+    page.classification.provenance = null;
+    const html = render(page);
+    const value = fixture("normal");
+    for (const name of ["zh_summary", "research_model", "classification"]) {
+      const part = block(html, name);
+      expect(part, name).toContain(PENDING);
+      expect(part, name).toContain('data-provenance="missing"');
+      expect(part, name).not.toContain("data-ai-badge");
+    }
+    expect(html).not.toContain(value.zh_summary.value!.research_question!);
+    expect(html).not.toContain(value.research_model.value!.constructs[0]!.label_zh);
+    expect(block(html, "classification")).not.toContain("data-tag");
+    expect(html).not.toContain(TEXT["paper:paper.summary.screeningOnly"]);
+    expect(html).not.toContain(TEXT["paper:paper.model.abstractOnly"]);
+    expect(firstUnverifiedBadge(page)).toBeNull();
+
+    const empty = fixture("empty");
+    empty.zh_summary.provenance = null;
+    empty.research_model.provenance = null;
+    const emptyHtml = render(empty);
+    expect(block(emptyHtml, "zh_summary")).toContain(PENDING);
+    expect(block(emptyHtml, "zh_summary")).not.toContain(TEXT["paper:paper.summary.notMentioned"]);
+    expect(block(emptyHtml, "research_model")).toContain(PENDING);
+    expect(block(emptyHtml, "research_model")).not.toContain(TEXT["paper:paper.model.empty"]);
+    expect(block(emptyHtml, "zh_summary")).not.toContain("data-ai-badge=");
+    expect(block(emptyHtml, "research_model")).not.toContain("data-ai-badge=");
+  });
+
+  it("empty never reads its value, even when one comes along", () => {
+    const page = fixture("empty");
+    page.zh_summary.value = {
+      ...fixture("normal").zh_summary.value!,
+      research_question: SUMMARY_TEXT,
+      reported_fields: ["method"],
+    };
+    page.research_model.value = fixture("normal").research_model.value;
+    const html = render(page);
+    const summary = block(html, "zh_summary");
+    expect(summary).not.toContain(SUMMARY_TEXT);
+    expect(count(summary, TEXT["paper:paper.summary.notMentioned"]!)).toBe(4);
+    expect(summary).not.toContain(TEXT["paper:paper.summary.reported"]);
+    const model = block(html, "research_model");
+    expect(model).toContain(TEXT["paper:paper.model.empty"]);
+    expect(model).not.toContain("data-construct");
+    expect(model).not.toContain(fixture("normal").research_model.value!.constructs[0]!.label_zh);
+  });
+
+  it("members who fixed the classification are counted once for the whole paper", () => {
+    // A 只修主題、B 只修方法：兩欄各 1 位，整篇 2 位（不是取比較大的那一欄）。
+    const page = fixture("normal");
+    const value = page.classification.value!;
+    value.topic = { ...value.topic!, human_verified: true, fix_member_count: 1 };
+    value.method = { ...value.method!, human_verified: true, fix_member_count: 1 };
+    value.fix_member_count = 2;
+    const html = block(render(page), "classification");
+    expect(html).toContain(TEXT["paper:paper.classification.fixed"]!.replace("{{members}}", "2"));
+    expect(html).not.toContain(TEXT["paper:paper.classification.fixed"]!.replace("{{members}}", "1"));
+  });
+
+  it("a fixed classification shows the verified badge next to 'fixed by 1 member'", () => {
+    const page = fixture("fixed");
+    expect(page.classification.provenance!.human_verified).toBe(true);
+    const html = block(render(page), "classification");
+    expect(html).toContain(TEXT["paper:paper.classification.fixed"]!.replace("{{members}}", "1"));
+    expect(html).toContain(TEXT["ai:ai.badge.verified"]);
+    expect(html).not.toContain(TEXT["ai:ai.badge.full"]);
+    expect(firstUnverifiedBadge(page)).toBe("zh_summary");
+  });
+
+  it("display names not loaded: the rest of the page shows, the classification line is a message bar with retry", () => {
+    const page = fixture("normal");
+    const html = renderToStaticMarkup(<PaperPage page={page} names={null} onRetryNames={() => {}} />);
+    const failed = html.slice(html.indexOf('data-names="failed"'));
+    expect(failed).toContain(TEXT["paper:paper.names.loadFailed"]);
+    expect(failed).toMatch(new RegExp(`<button type="button"[^>]*>${TEXT["paper:paper.names.retry"]}</button>`));
+    expect(failed).toContain('role="alert"');
+    // 分類的標籤與標章不顯示；期刊名稱不顯示；其他區塊照常。
+    expect(html).not.toContain('data-block="classification"');
+    expect(html).not.toContain(NAMES.journals.find((entry) => entry.key === "jes")!.name);
+    expect(html).toContain(`>${page.paper.title}<`);
+    expect(block(html, "zh_summary")).toContain(page.zh_summary.value!.research_question!);
+    expect(block(html, "research_model")).toContain("data-construct");
+    expect(html).toContain('data-block="abstract"');
+    // 第一個未核對的標章（寫全文）移到中文重點。
+    expect(firstUnverifiedBadge(page, false)).toBe("zh_summary");
+    expect(block(html, "zh_summary")).toContain(TEXT["ai:ai.badge.full"]);
+    expect(count(html, TEXT["ai:ai.badge.full"]!)).toBe(1);
+    // 只有一個訊息條。
+    expect(count(html, 'data-names="failed"')).toBe(1);
+  });
+
+  it("display names not loaded but nothing needs them: no message bar, the classification state line stays", () => {
+    const page = fixture("all-failed");
+    page.paper.journal = null;
+    const html = renderToStaticMarkup(<PaperPage page={page} names={null} />);
+    expect(html).not.toContain('data-names="failed"');
+    expect(block(html, "classification")).toContain(FAILED);
+    // 期刊有值時，就算分類沒有標籤，也要讓人知道期刊名稱沒讀到。
+    const withJournal = fixture("all-failed");
+    const journalHtml = renderToStaticMarkup(<PaperPage page={withJournal} names={null} />);
+    expect(count(journalHtml, 'data-names="failed"')).toBe(1);
+    expect(block(journalHtml, "classification")).toContain(FAILED);
+  });
+
+  it("the snapshot number's button is read as '#12', without the separator dot", () => {
+    const html = render(fixture("normal"));
+    expect(html).toMatch(/<button[^>]*aria-label="#12"[^>]*data-info-popover-trigger/);
+  });
+});
+
 describe("AI text on the paper page", () => {
   it("nothing from the AI text is clickable or executable", () => {
     const html = render(fixture("xss"));

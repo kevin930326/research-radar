@@ -72,8 +72,10 @@ export interface ApiMockState {
   logoutGate: Promise<void> | null;
   /** 論文頁：設了就等它 resolve 才回論文（看載入中的骨架）。 */
   paperGate: Promise<void> | null;
-  /** 顯示名稱改成伺服器錯誤。 */
-  displayNamesFail: boolean;
+  /** 某一位成員（成員 ID）看到的論文改成這一份（不管哪個論文 ID）：測換人登入時不會露出上一位的資料。 */
+  paperByMember: Record<string, PaperPageResponse>;
+  /** 顯示名稱：成功／伺服器錯誤（500）／登入過期（401）。 */
+  displayNames: "ok" | "failed" | "expired";
   /** 收到的請求（依序）。 */
   requests: ApiRequest[];
 }
@@ -90,7 +92,8 @@ export function createApiState(): ApiMockState {
     loginGate: null,
     logoutGate: null,
     paperGate: null,
-    displayNamesFail: false,
+    paperByMember: {},
+    displayNames: "ok",
     requests: [],
   };
 }
@@ -162,14 +165,16 @@ export async function installApiMock(page: Page, state: ApiMockState): Promise<v
     }
     if (method === "GET" && path === "/api/v1/display-names") {
       state.requests.push({ method, path, body });
-      if (state.member === null) return problem(route, 401, "not_authenticated");
-      if (state.displayNamesFail) return problem(route, 500, "internal_error");
+      if (state.member === null || state.displayNames === "expired") return problem(route, 401, "not_authenticated");
+      if (state.displayNames === "failed") return problem(route, 500, "internal_error");
       return json(route, PAPER_FIXTURES.displayNames);
     }
     if (method === "GET" && path.startsWith("/api/v1/papers/")) {
       state.requests.push({ method, path, body });
       await state.paperGate;
       if (state.member === null) return problem(route, 401, "not_authenticated");
+      const own = state.paperByMember[state.member.member_id];
+      if (own !== undefined) return json(route, own);
       let id = decodeURIComponent(path.slice("/api/v1/papers/".length));
       const error = PAPER_FIXTURES.errors[id];
       if (error !== undefined) return problem(route, error.status, ERROR_CODES[error.status] ?? "internal_error");

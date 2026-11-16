@@ -6,7 +6,9 @@ import { citationsPerYear, externalUrl, formatCount, formatVolume, splitTemplate
 import { AiBadge } from "../AiBadge";
 import { DataDateBar } from "../DataDateBar";
 import { ExternalArrow, NEW_TAB_NOTE_ID } from "../ExternalArrow";
+import { MessageBar } from "../MessageBar";
 import { PaperTitle } from "../PaperText";
+import { TEXT_LINK_CLASS } from "../TextLink";
 import { taipeiDate } from "../taipei-date";
 import { MONO_LABEL_CLASS, NoteLine, badgeProvenance } from "./parts";
 
@@ -14,6 +16,8 @@ import { MONO_LABEL_CLASS, NoteLine, badgeProvenance } from "./parts";
 // 期刊 · 年份 · 卷期頁碼、DOI 與 OpenAlex 連結、被引用次數與有沒有摘要，最後一行是分類（不是獨立的區塊）。
 // 狀態標記（追蹤範圍外、使用者輸入、只有你看得到…）屬於 Epic 6 與 3.16，這一輪不放。
 // 站外連結至少 44×44（ADR-0037）：設計稿是 28px 高，用上下各 -8px 的外距讓這一列看起來一樣高。
+// 顯示名稱（期刊、主題、方法）沒有讀到時，只有用到它的地方受影響：期刊名稱不顯示，分類那一行換成訊息條
+// 「沒有載入成功」＋「重試」（State Patterns「錯誤」：只有那個區塊顯示訊息條與重試；Codex 審查 3.8 中 6）。
 
 /** 被引用次數這一行：數字是主要文字色，其餘是第二層（設計稿）。 */
 function Citations({ citations, perYear }: { citations: number; perYear: number | null }) {
@@ -95,19 +99,50 @@ function TagGroup({ label, field, names }: { label: string; field: Classificatio
 }
 
 /** 分類沒有內容時的那一行（paper-ai-failed.html）：「分類」＋一句狀態。 */
-function ClassificationStateLine({ state, text }: { state: string; text: string }) {
+function ClassificationStateLine({ state, text, provenance }: { state: string; text: string; provenance?: "missing" }) {
   const { t } = useTranslation("paper");
   return (
-    <div data-block="classification" data-block-state={state} className="mt-[22px] flex flex-wrap items-baseline gap-x-[14px] gap-y-1">
+    <div
+      data-block="classification"
+      data-block-state={state}
+      data-provenance={provenance}
+      className="mt-[22px] flex flex-wrap items-baseline gap-x-[14px] gap-y-1"
+    >
       <span className={MONO_LABEL_CLASS}>{t("paper.classification.label")}</span>
       <span className="text-s15 leading-180 text-text-secondary">{text}</span>
     </div>
   );
 }
 
+/** 顯示名稱沒有讀到：訊息條＋「重試」（沿用全站的訊息條；字是 EXPERIENCE.md 既有的「沒有載入成功」「重試」）。 */
+function NamesFailed({ onRetry }: { onRetry: () => void }) {
+  const { t } = useTranslation("paper");
+  return (
+    <div data-names="failed" className="mt-[22px]">
+      <MessageBar tone="error" role="alert" message={t("paper.names.loadFailed")}>
+        <button type="button" onClick={onRetry} className={`cursor-pointer ${TEXT_LINK_CLASS}`}>
+          {t("paper.names.retry")}
+        </button>
+      </MessageBar>
+    </div>
+  );
+}
+
+/** 分類這一行會畫出標籤（要用到主題與方法的顯示名稱）：ready、有來歷、至少一欄有標籤。 */
+export function classificationHasTags(block: ClassificationBlock): boolean {
+  const value = block.value;
+  return (
+    block.state === "ready" &&
+    block.provenance !== null &&
+    value !== null &&
+    [value.topic, value.method].some((field) => field !== null && field.keys.length > 0)
+  );
+}
+
 interface ClassificationProps {
   block: ClassificationBlock;
-  names: DisplayNames;
+  /** 顯示名稱；沒有讀到（null）時，要畫標籤的那一行不顯示（換成訊息條，見 PaperBiblio）。 */
+  names: DisplayNames | null;
   /** 這一頁第一個未核對的標章在這裡（寫全文）。 */
   firstBadge: boolean;
 }
@@ -115,6 +150,10 @@ interface ClassificationProps {
 /** 分類：書目的最後一行（EXPERIENCE.md 畫面 8 第 2 點）。 */
 export function ClassificationLine({ block, names, firstBadge }: ClassificationProps) {
   const { t } = useTranslation("paper");
+  // 有內容卻沒有來歷：不顯示內容（ADR-0010 第 8 點、ADR-0015），照「還沒產生」那一行（Codex 審查 3.8 中 1）。
+  if (block.state === "ready" && block.provenance === null) {
+    return <ClassificationStateLine state={block.state} text={t("paper.state.pending")} provenance="missing" />;
+  }
   switch (block.state) {
     case "failed":
       return <ClassificationStateLine state={block.state} text={t("paper.state.failed")} />;
@@ -130,7 +169,7 @@ export function ClassificationLine({ block, names, firstBadge }: ClassificationP
       return null;
   }
   const value = block.value;
-  if (value === null) {
+  if (value === null || names === null) {
     return null;
   }
   const topics = new Map(names.topics.map((entry) => [entry.key, entry.name]));
@@ -142,8 +181,8 @@ export function ClassificationLine({ block, names, firstBadge }: ClassificationP
   if (fields.length === 0) {
     return null;
   }
-  // 修正過的人數：API 只有每一欄各自的人數，取比較大的那一欄（兩欄合起來的人數要等 3.11 的修正歷史）。
-  const fixers = Math.max(0, ...fields.map((field) => field.fix_member_count));
+  // 修正過的人數：整篇去重（A 修主題、B 修方法是 2 位；API 的 fix_member_count，Codex 審查 3.8 中 5）。
+  const fixers = value.fix_member_count;
   const disagree = fields.some((field) => field.members_disagree);
   return (
     <div data-block="classification" data-block-state="ready">
@@ -190,14 +229,22 @@ function BiblioLink({ href, children }: { href: string; children: ReactNode }) {
 
 interface PaperBiblioProps {
   page: PaperPageResponse;
-  names: DisplayNames;
+  /** 顯示名稱；沒有讀到是 null。 */
+  names: DisplayNames | null;
+  /** 顯示名稱沒有讀到時，「重試」要做的事。 */
+  onRetryNames?: () => void;
   firstBadge: boolean;
 }
 
-export function PaperBiblio({ page, names, firstBadge }: PaperBiblioProps) {
+export function PaperBiblio({ page, names, onRetryNames, firstBadge }: PaperBiblioProps) {
   const { t } = useTranslation("paper");
   const { paper } = page;
-  const journal = paper.journal === null ? null : (names.journals.find((entry) => entry.key === paper.journal)?.name ?? null);
+  const journal =
+    paper.journal === null || names === null
+      ? null
+      : (names.journals.find((entry) => entry.key === paper.journal)?.name ?? null);
+  // 顯示名稱沒讀到、而這一頁用得到它（期刊名稱或分類標籤）：分類那一行的位置顯示訊息條＋「重試」。
+  const namesFailed = names === null && (paper.journal !== null || classificationHasTags(page.classification));
   const volume = formatVolume(paper);
   // DOI 連結要有 DOI 號碼才放（字是號碼）；網址只收 http(s)。
   const doiUrl = paper.doi === null ? null : externalUrl(paper.doi_url);
@@ -267,6 +314,7 @@ export function PaperBiblio({ page, names, firstBadge }: PaperBiblioProps) {
         <AbstractMark has={page.abstract !== null} />
       </div>
       <ClassificationLine block={page.classification} names={names} firstBadge={firstBadge} />
+      {namesFailed ? <NamesFailed onRetry={onRetryNames ?? (() => {})} /> : null}
     </div>
   );
 }

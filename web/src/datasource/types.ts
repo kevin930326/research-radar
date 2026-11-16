@@ -44,12 +44,20 @@ export type { DisplayNames };
  */
 export type PaperResult = { kind: "found"; page: PaperPage } | { kind: "notFound" } | { kind: "signedOut" };
 
+/**
+ * 讀顯示名稱的結果（Story 3.8）：
+ * - `found`：讀到了。
+ * - `signedOut`：沒登入或登入過期（401），和論文的 401 一樣回登入頁。
+ * 其他錯誤丟出例外，畫面只有分類那一行顯示「沒有載入成功」與「重試」。
+ */
+export type DisplayNamesResult = { kind: "found"; names: DisplayNames } | { kind: "signedOut" };
+
 /** 論文頁用的讀取函式（只有成員版有；示範站的論文頁是 Story 3.9）。 */
 export interface PaperSource {
   /** 讀一篇論文。`paperId` 由呼叫端先確認是 UUID。 */
   paper(paperId: string): Promise<PaperResult>;
-  /** 顯示名稱；沒有成功時丟出例外（401 也是）。 */
-  displayNames(): Promise<DisplayNames>;
+  /** 顯示名稱；401 回 `signedOut`，其他沒有成功時丟出例外。 */
+  displayNames(): Promise<DisplayNamesResult>;
 }
 
 export interface DataSource {

@@ -246,6 +246,17 @@
   }
 
   /*
+   * 論文頁 899px 以下的底部固定列（「開啟全文」，Story 3.8）：鍵盤焦點捲進畫面時，瀏覽器只知道視窗底邊，
+   * 會把焦點捲到固定列後面（WCAG 2.4.11）。底部留出固定列的高度：髮線 1px＋上內距 12px＋按鈕高＋下內距 20px，
+   * 再加焦點外框（1px）與外擴（4px）。只影響捲動停在哪裡，畫面的樣子不變。
+   */
+  @media (width < 900px) {
+    html:has([data-full-text="bar"]) {
+      scroll-padding-bottom: calc(1px + 12px + var(--spacing-button-height) + 20px + 1px + 4px);
+    }
+  }
+
+  /*
    * 減少動態（UX-DR6、ADR-0010 第 14 點）：系統設定要求減少動態時，全站的過場與動畫一律關掉。
    * 放在 base 層並加 !important：分層的 !important 是前面的層優先，所以連 utilities 層也蓋得過。
    * 程式裡要知道這個設定時，只能用 src/hooks/use-reduced-motion.ts。

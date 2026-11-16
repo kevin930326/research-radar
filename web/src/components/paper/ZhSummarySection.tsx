@@ -7,7 +7,10 @@ import { BlockLine, NoteLine, SECTION_CLASS, SectionHeading, badgeProvenance } f
 
 // 中文重點（EXPERIENCE.md 畫面 8 第 3 點；設計稿 paper.html「正常狀態」的第二塊）：四欄（研究問題、方法、理論、發現），
 // AI 標章，固定一行「供篩選閱讀，不可直接放入論文」。四欄自動換行、不限行數（每欄最長約 100 字）。
-// - 摘要沒提到的欄位寫「摘要未提及」（第三層文字色）；`empty`（四欄都沒有）就四欄都是這句。
+// - 摘要沒提到的欄位寫「摘要未提及」（第三層文字色）；`empty`（四欄都沒有）就四欄都是這句，不讀 `value`
+//   （信封的規則：只有 ready 帶內容，ADR-0015；Codex 審查 3.8 中 2）。
+// - 有內容的狀態（ready、empty）卻沒有來歷：不顯示內容（ADR-0010 第 8 點、ADR-0015「沒有來歷就不顯示內容」），
+//   位置照「還沒產生」那一行（State Patterns 既有的句子），沒有標章（Codex 審查 3.8 中 1）。
 // - 有成員回報、還沒處理的欄位，那一欄下面一行「有成員回報此欄可能有誤」（設計稿沒畫，沿用固定一行的樣子）。
 // - 沒有產生成功／還在產生／額度用完：標題下一行狀態（paper-ai-failed.html），沒有標章與固定一行。
 // - 「回報錯誤」在 Story 3.12 才放（AR-67）。
@@ -38,7 +41,12 @@ export function ZhSummarySection({ block, firstBadge }: ZhSummarySectionProps) {
   switch (block.state) {
     case "ready":
     case "empty":
-      body = null;
+      body =
+        block.provenance === null ? (
+          <BlockLine state={block.state} provenance="missing">
+            {t("paper.state.pending")}
+          </BlockLine>
+        ) : null;
       break;
     case "failed":
       body = <BlockLine state={block.state}>{t("paper.state.failed")}</BlockLine>;
@@ -62,7 +70,8 @@ export function ZhSummarySection({ block, firstBadge }: ZhSummarySectionProps) {
       </section>
     );
   }
-  const value = block.value;
+  // 只有 ready 讀內容；empty 就算夾帶了值也不看（四欄都是「摘要未提及」，沒有回報的標記）。
+  const value = block.state === "ready" ? block.value : null;
   const reported = new Set(value?.reported_fields ?? []);
   return (
     <section data-block="zh_summary" data-block-state={block.state} aria-labelledby="paper-zh-summary" className={SECTION_CLASS}>

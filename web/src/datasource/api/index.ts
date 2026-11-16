@@ -1,7 +1,7 @@
 // 成員版的資料來源：呼叫同網域的後端 API（呼叫函式由 orval 從 openapi.json 產生，Story 3.4）。
 import { displayNames as getDisplayNames, fakeLogin, fakeLoginOptions, logout, me as getMe, paper as getPaper } from "../../generated/api";
 import { FakeLoginMode, type FakeLoginBody } from "../../generated/model";
-import type { DataSource, DisplayNames, LoginOutcome, Member, MemberSession, PaperResult, PaperSource } from "../types";
+import type { DataSource, DisplayNamesResult, LoginOutcome, Member, MemberSession, PaperResult, PaperSource } from "../types";
 
 /** 後端 API 的基底路徑（Conventions「API」）。 */
 export const API_BASE = "/api/v1";
@@ -68,10 +68,14 @@ const papers: PaperSource = {
     throw new Error(`GET ${API_BASE}/papers/{id}: HTTP ${response.status}`);
   },
 
-  async displayNames(): Promise<DisplayNames> {
+  async displayNames(): Promise<DisplayNamesResult> {
     const response = await getDisplayNames();
     if (response.status === 200) {
-      return response.data;
+      return { kind: "found", names: response.data };
+    }
+    // 和論文的 401 一樣：登入過期由路由清快取、回登入頁（Codex 審查 3.8 中 3）。
+    if (response.status === 401) {
+      return { kind: "signedOut" };
     }
     throw new Error(`GET ${API_BASE}/display-names: HTTP ${response.status}`);
   },

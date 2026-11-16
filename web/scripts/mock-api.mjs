@@ -25,6 +25,8 @@
 //   http://127.0.0.1:4180/__mock?logoutDelay=5000        登出要等幾毫秒（看「登出中…」）
 //   http://127.0.0.1:4180/__mock?signedIn=false          登出（或 true：登入）
 //   http://127.0.0.1:4180/__mock?expire=1                讓目前的登入過期（下一次換頁回到登入頁）
+//   http://127.0.0.1:4180/__mock?names=failed            論文頁的顯示名稱：ok／failed（伺服器錯誤：分類那一行是
+//                                                        「沒有載入成功」＋「重試」）／expired（401：回登入頁）
 // 參數可以一起給；回傳目前的情境（JSON）。
 /* global process, URL, setTimeout */
 import { randomUUID } from "node:crypto";
@@ -76,7 +78,7 @@ const MEMBERS = [
   { member_id: "00000000-0000-4000-8000-00000000000b", display_name: "Test Member B" },
 ];
 const PAPERS = JSON.parse(readFileSync(resolve(WEB_ROOT, args.papersFile), "utf-8"));
-const scenario = { login: "ok", logout: "ok", loginDelay: 0, logoutDelay: 0, alwaysSignedIn: args.signedIn };
+const scenario = { login: "ok", logout: "ok", names: "ok", loginDelay: 0, logoutDelay: 0, alwaysSignedIn: args.signedIn };
 /** 有效的 session token → 成員。 */
 const sessions = new Map();
 
@@ -152,7 +154,9 @@ async function api(req, res, path) {
     });
   }
   if (req.method === "GET" && path === "/api/v1/display-names") {
-    return currentMember(req) === null ? problem(res, 401, "not_authenticated") : json(res, 200, PAPERS.displayNames);
+    if (currentMember(req) === null || scenario.names === "expired") return problem(res, 401, "not_authenticated");
+    if (scenario.names === "failed") return problem(res, 500, "internal_error");
+    return json(res, 200, PAPERS.displayNames);
   }
   if (req.method === "GET" && path.startsWith("/api/v1/papers/")) {
     if (currentMember(req) === null) return problem(res, 401, "not_authenticated");
@@ -201,7 +205,7 @@ function paperIndex() {
 }
 
 function control(res, query) {
-  for (const key of ["login", "logout"]) {
+  for (const key of ["login", "logout", "names"]) {
     if (query.has(key)) scenario[key] = query.get(key);
   }
   for (const key of ["loginDelay", "logoutDelay"]) {
