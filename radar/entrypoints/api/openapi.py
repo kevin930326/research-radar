@@ -6,12 +6,14 @@
 - 路由用和正式組裝同一個 `install_api_routes` 裝，所以端點清單和正式的 api 一樣。
 - 只在開了假登入時才有的路由也列出來（這裡把假登入打開）：`openapi.json` 是全部端點的清單，
   換人測試的登記表拿它比對，不能因為環境設定漏掉端點。
-- 不連資料庫、不讀設定：登入路由的函式換成不會被呼叫的替身（只用來產生文件）。
+- 不連資料庫、不讀設定：登入與論文頁路由的函式換成不會被呼叫的替身（只用來產生文件）；顯示名稱是
+  空的（回應的形狀和內容無關）。
 - 輸出固定：縮排 2、中文不跳脫、結尾換行；同一份程式每次輸出一樣，CI 才能用 `git diff` 比對。
 """
 
 import json
 import sys
+import uuid
 from collections.abc import Sequence
 from typing import NoReturn
 
@@ -19,9 +21,13 @@ from fastapi import FastAPI
 
 from radar.domain.auth import AuthenticatedMember, FakeLoginRequest, MemberSummary, NewSession
 from radar.domain.auth_settings import FakeLoginMode
+from radar.domain.contracts import DisplayNames, build_client_config
+from radar.domain.paper_page import PaperPage
+from radar.domain.viewer import MemberViewer
 from radar.entrypoints.api.app import create_app
 from radar.entrypoints.api.auth import AuthRoutes, FakeLoginRoutes
 from radar.entrypoints.api.main import install_api_routes
+from radar.entrypoints.api.papers import PaperRoutes
 
 
 def _not_for_requests(*_args: object) -> NoReturn:
@@ -48,6 +54,10 @@ def _not_ready() -> bool:
     _not_for_requests()
 
 
+def _load_paper(_viewer: MemberViewer, _paper_id: uuid.UUID) -> PaperPage | None:
+    _not_for_requests()
+
+
 def build_schema_app() -> FastAPI:
     """組一個只用來產生文件的 app：路由和正式的一樣，而且假登入的路由也在。"""
     app = create_app(readiness_check=_not_ready)
@@ -61,6 +71,11 @@ def build_schema_app() -> FastAPI:
             fake_login=FakeLoginRoutes(
                 mode=FakeLoginMode.PICK_MEMBER, list_members=_list_members, log_in=_log_in
             ),
+        ),
+        paper_routes=PaperRoutes(
+            load_paper=_load_paper,
+            display_names=DisplayNames(journals=(), topics=(), methods=()),
+            client_config=build_client_config(),
         ),
     )
     return app

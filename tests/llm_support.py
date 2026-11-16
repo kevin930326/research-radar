@@ -1,4 +1,5 @@
-"""LLM 閘門測試共用的小工具：在 tmp 資料夾寫 prompt 檔並暫時登記、讀真的 `config/models.yaml`。
+"""LLM 閘門測試共用的小工具：在 tmp 資料夾寫 prompt 檔並暫時登記、讀真的 `config/models.yaml`；
+另有造論文（含成員看不到的論文）與論文頁路由的組法（Story 3.6）。
 
 prompt 的內容全部是測試自己編的（不是正式的 prompt）。登記寫進 `radar/domain/prompt_hashes.py`
 的登記表（policy 只認那裡的雜湊），`tests/conftest.py` 每個測試結束都會還原。
@@ -15,10 +16,17 @@ from typing import Any
 import psycopg
 
 from radar.adapters.fake import FakeLlmProvider
-from radar.config import load_models_config
+from radar.config import (
+    load_budget_config,
+    load_context_values,
+    load_domain_config,
+    load_models_config,
+    load_taxonomy,
+)
 from radar.domain import prompt_hashes
 from radar.domain.ai_outputs import CallMode, GatewayConfig, LlmTask
 from radar.domain.budget import BudgetConfig
+from radar.domain.contracts import build_client_config, build_display_names
 from radar.domain.fingerprints import prompt_sha256, schema_sha256
 from radar.domain.llm import (
     LlmBatchRequest,
@@ -33,8 +41,10 @@ from radar.domain.policy import CloudPolicy
 from radar.domain.pricing import ModelsConfig
 from radar.domain.prompts import PROMPT_FILE_PATTERN, parse_prompt_file
 from radar.domain.scope import ScopeSettings
+from radar.entrypoints.api.papers import PaperRoutes, build_paper_routes
 from radar.repo.db import Database
 from radar.repo.papers import upsert_by_external_id
+from radar.services.paper_page import PaperPageSetup
 from radar.services.prompt_loader import OUTPUT_SCHEMAS
 from tests.database import TestDatabase
 
@@ -136,7 +146,7 @@ FETCHED_AT = datetime(2026, 11, 1, 3, 0, tzinfo=UTC)
 def create_paper(
     database: Database,
     *,
-    doi: str = "10.1/abc",
+    doi: str | None = "10.1/abc",
     openalex_id: str = "W1",
     title: str = "A study of information systems",
     abstract: str | None = "We study how teams adopt information systems.",
@@ -164,6 +174,66 @@ def create_paper(
             scope=ScopeSettings(frozenset({"0276-7783"})),
         )
     return result.paper_id
+
+
+def create_hidden_paper(
+    database: Database,
+    *,
+    doi: str | None = "10.9/hidden",
+    openalex_id: str = "W9",
+    title: str = "A private study kept by one member",
+    abstract: str | None = "We study something only one member imported.",
+) -> uuid.UUID:
+    """經 `upsert_by_external_id` 新增一篇成員看不到的論文（`lab_visible` 為假：成員匯入、不在追蹤
+    範圍），回它的 id。論文頁的換人測試與金絲雀測試用（Story 3.6）。"""
+    paper = ParsedPaper.model_validate(
+        {
+            "source": "openalex",
+            "fetched_at": FETCHED_AT,
+            "doi": doi,
+            "openalex_id": openalex_id,
+            "title": title,
+            "journal_issn_l": "9999-9994",
+            "publication_year": 2025,
+            "abstract": abstract,
+            "abstract_source": "openalex" if abstract is not None else None,
+        }
+    )
+    with database.transaction() as connection:
+        result = upsert_by_external_id(
+            connection,
+            paper,
+            origin=PaperOrigin.IMPORT,
+            excluded_reason=None,
+            scope=ScopeSettings(frozenset({"0276-7783"})),
+        )
+    return result.paper_id
+
+
+def paper_page_setup(budget: BudgetConfig | None = None) -> PaperPageSetup:
+    """論文頁的設定：真的 `config/` 下的模型、預算、分類表、情境值清單、期刊（預算可以換掉）。"""
+    environ = {"RADAR_CONFIG_DIR": str(ROOT / "config")}
+    return PaperPageSetup(
+        models=models_config(),
+        budget=budget or load_budget_config(environ),
+        taxonomy=load_taxonomy(environ),
+        context_values=load_context_values(environ),
+        journals=load_domain_config(environ).journals,
+    )
+
+
+def paper_routes(
+    database: Database, *, setup: PaperPageSetup | None = None, now: datetime = FETCHED_AT
+) -> PaperRoutes:
+    """和正式的 `main()` 同一個組法的論文頁路由（時鐘固定在 `now`）。"""
+    setup = setup or paper_page_setup()
+    return build_paper_routes(
+        database,
+        setup,
+        build_display_names(setup.journals, setup.taxonomy),
+        build_client_config(),
+        lambda: now,
+    )
 
 
 def execute(db: TestDatabase, sql: str, *params: object) -> list[tuple[Any, ...]]:

@@ -41,6 +41,7 @@ from radar.domain.ai_outputs import CurrentAbstract, PaperLlmSource
 from radar.domain.annotations import AnnotationPaperFacts, AnnotationPaperText
 from radar.domain.identifiers import ExternalId, IdentifierScheme
 from radar.domain.llm_batches import PaperAiSource
+from radar.domain.paper_page import PaperPageFacts
 from radar.domain.papers import (
     ABSTRACT_SOURCE_PRIORITY,
     AbstractSource,
@@ -303,6 +304,73 @@ def find_paper_processing_facts(
         origin=PaperOrigin(row["origin"]),
         excluded_reason=row["excluded_reason"],
         abstract=row["abstract_content"],
+    )
+
+
+def find_paper_page_facts(
+    viewer: Viewer, connection: Connection, paper_id: uuid.UUID
+) -> PaperPageFacts | None:
+    """論文頁要的論文欄位（Story 3.6）：書目、狀態標記、最早記上的 DOI 與 OpenAlex ID
+    （`external_id.created_at, id` 最前面的一個）、目前的摘要（`is_current` 那一筆）。
+
+    一句帶可見條件的查詢：不存在、`viewer` 看不到、被排除的非研究文章（`excluded_reason` 有值，
+    ADR-0015「被排除的非研究文章沒有論文頁」）都回 None，不先查存在或排除（ADR-0002）。
+    """
+    visible = visible_papers(viewer, alias="paper")
+    row = (
+        connection.execute(
+            text(
+                "SELECT paper.id, paper.origin, paper.title, paper.authors,"
+                " paper.publication_year, paper.journal_issn_l, paper.volume, paper.issue,"
+                " paper.first_page, paper.last_page, paper.cited_by_count, paper.in_scope,"
+                " paper.is_retracted,"
+                " (SELECT d.value_norm FROM external_id AS d"
+                "  WHERE d.paper_id = paper.id AND d.scheme = :doi"
+                "  ORDER BY d.created_at, d.id LIMIT 1) AS doi,"
+                " (SELECT o.value_norm FROM external_id AS o"
+                "  WHERE o.paper_id = paper.id AND o.scheme = :openalex"
+                "  ORDER BY o.created_at, o.id LIMIT 1) AS openalex_id,"
+                " a.id AS abstract_id, a.source AS abstract_source,"
+                " a.content AS abstract_content"
+                " FROM paper LEFT JOIN paper_abstract AS a"
+                " ON a.paper_id = paper.id AND a.is_current"
+                f" WHERE {visible} AND paper.excluded_reason IS NULL AND paper.id = :id"
+            ),
+            {
+                "id": paper_id,
+                "doi": IdentifierScheme.DOI.value,
+                "openalex": IdentifierScheme.OPENALEX.value,
+            },
+        )
+        .mappings()
+        .one_or_none()
+    )
+    if row is None:
+        return None
+    abstract = None
+    if row["abstract_id"] is not None:
+        abstract = CurrentAbstract(
+            id=row["abstract_id"],
+            source=AbstractSource(row["abstract_source"]),
+            content=row["abstract_content"],
+        )
+    return PaperPageFacts(
+        paper_id=row["id"],
+        origin=PaperOrigin(row["origin"]),
+        title=row["title"],
+        authors=tuple(row["authors"]),
+        publication_year=row["publication_year"],
+        journal_issn_l=row["journal_issn_l"],
+        volume=row["volume"],
+        issue=row["issue"],
+        first_page=row["first_page"],
+        last_page=row["last_page"],
+        cited_by_count=row["cited_by_count"],
+        in_scope=row["in_scope"],
+        is_retracted=row["is_retracted"],
+        doi=row["doi"],
+        openalex_id=row["openalex_id"],
+        abstract=abstract,
     )
 
 

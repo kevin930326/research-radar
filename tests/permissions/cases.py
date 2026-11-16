@@ -12,7 +12,13 @@
   登記的函式照樣要寫（金絲雀測試用，狀態碼不是預期的就失敗）。
 """
 
-from tests.permissions.framework import EndpointRegistry, EndpointRequest, PermissionContext
+from tests.llm_support import create_hidden_paper
+from tests.permissions.framework import (
+    CANARY,
+    EndpointRegistry,
+    EndpointRequest,
+    PermissionContext,
+)
 
 REGISTRY = EndpointRegistry()
 
@@ -76,3 +82,48 @@ def _fake_login_options(_ctx: PermissionContext) -> EndpointRequest:
 )
 def _fake_login(ctx: PermissionContext) -> EndpointRequest:
     return EndpointRequest(body={"member_id": ctx.other.member_id})
+
+
+# --- 論文頁（Story 3.6、ADR-0048）---------------------------------------------------------------
+
+
+@REGISTRY.case(
+    "GET",
+    "/api/v1/papers/{paper_id}",
+    exempt=(
+        "成員的可見條件現在只有 lab_visible（文獻庫等 3.16），沒有「A 看得到、B 看不到」的論文，"
+        "做不出對照；改由請求一篇看不到、帶金絲雀的論文（預期 404），另有整合測試逐欄比較看不到與"
+        "不存在的兩個 404（tests/integration/test_paper_page_api.py）。3.16 接上文獻庫後改成不豁免"
+    ),
+    status=404,
+)
+def _paper(ctx: PermissionContext) -> EndpointRequest:
+    # 金絲雀放在看不到的論文的標題與摘要：成員 B 的 404 與日誌都不能帶出它。
+    paper_id = create_hidden_paper(
+        ctx.extras["database"],
+        doi="10.9/canary-hidden",
+        openalex_id="W987654321",
+        title=f"Hidden paper {CANARY}",
+        abstract=f"An abstract that only one member may read: {CANARY}.",
+    )
+    return EndpointRequest(path_params={"paper_id": str(paper_id)})
+
+
+@REGISTRY.case(
+    "GET",
+    "/api/v1/display-names",
+    exempt="全站共用的期刊、主題、方法顯示名稱（設定檔），不讀任何成員資料",
+    status=200,
+)
+def _display_names(_ctx: PermissionContext) -> EndpointRequest:
+    return EndpointRequest()
+
+
+@REGISTRY.case(
+    "GET",
+    "/api/v1/client-config",
+    exempt="全站共用的前端設定值（時區），不讀任何成員資料",
+    status=200,
+)
+def _client_config(_ctx: PermissionContext) -> EndpointRequest:
+    return EndpointRequest()

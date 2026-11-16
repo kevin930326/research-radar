@@ -14,11 +14,17 @@ from radar.config import (
     ConfigError,
     database_pool_size,
     load_auth_settings,
+    load_budget_config,
+    load_context_values,
     load_domain_config,
+    load_models_config,
     load_settings,
+    load_taxonomy,
 )
+from radar.domain.contracts import build_client_config, build_display_names
 from radar.entrypoints.api.app import create_app
 from radar.entrypoints.api.auth import AuthRoutes, build_auth_routes, install_auth_routes
+from radar.entrypoints.api.papers import PaperRoutes, build_paper_routes, install_paper_routes
 from radar.entrypoints.api.web import mount_web
 from radar.entrypoints.bootstrap import (
     MigrationsNotFoundError,
@@ -27,6 +33,7 @@ from radar.entrypoints.bootstrap import (
 )
 from radar.entrypoints.logging_config import configure_logging
 from radar.services.health import check_readiness
+from radar.services.paper_page import PaperPageSetup
 
 log = structlog.get_logger(__name__)
 
@@ -35,18 +42,21 @@ log = structlog.get_logger(__name__)
 WEB_DIST = Path("web/dist")
 
 
-def install_api_routes(app: FastAPI, *, auth_routes: AuthRoutes) -> None:
-    """把全部 API 路由裝到 `app` 上（目前只有登入路由）。一定要在 `mount_web` 之前呼叫。
+def install_api_routes(app: FastAPI, *, auth_routes: AuthRoutes, paper_routes: PaperRoutes) -> None:
+    """把全部 API 路由裝到 `app` 上：登入路由、論文頁路由（Story 3.6）。一定要在 `mount_web` 之前
+    呼叫。
 
     正式組裝（下面的 `main`）與輸出 `openapi.json`（`openapi.py`）都只經這個函式裝路由，所以兩邊的
     端點清單一定相同；換人測試的登記表又和 `openapi.json` 比對，新的端點沒登記就失敗（ADR-0047）。
     之後的 Story 新增 router 時加在這裡，不要在 `main` 另外裝。
     """
+    # 經模組層級的名稱呼叫（測試會把 install_auth_routes 換掉，確認 main() 走到組裝這一步）。
     install_auth_routes(app, auth_routes)
+    install_paper_routes(app, paper_routes, auth_routes)
 
 
 def _utc_now() -> datetime:
-    """session 的時鐘。"""
+    """session 與論文頁（預算的台北月份）的時鐘。"""
     return datetime.now(UTC)
 
 
@@ -54,8 +64,18 @@ def main() -> int:
     configure_logging()
     try:
         # 領域設定（config/*.yaml）錯了也不啟動（AD-18）。
-        load_domain_config()
+        domain_config = load_domain_config()
         settings = load_settings()
+        # 論文頁要的設定（Story 3.6）：模型與分類表、情境值清單判定 AI 區塊的「目前這組鍵」，
+        # 預算判定 `deferred_budget`，期刊與分類表也給顯示名稱。錯了一樣不啟動。
+        taxonomy = load_taxonomy()
+        paper_setup = PaperPageSetup(
+            models=load_models_config(),
+            budget=load_budget_config(),
+            taxonomy=taxonomy,
+            context_values=load_context_values(),
+            journals=domain_config.journals,
+        )
         # 登入設定的組合不合法（正式環境開假登入、假登入與 Google 登入同時開、試用環境缺 Access
         # 設定等）也不啟動（ADR-0046）。
         auth_settings = load_auth_settings()
@@ -71,12 +91,19 @@ def main() -> int:
         return 1
 
     app = create_app(readiness_check=partial(check_readiness, probes.ping, probes.schema_state))
-    # 全部 API 路由只經 install_api_routes 裝（openapi.json 也用它，端點清單一致）；登入路由用
-    # 就緒檢查的同一個連線池。一定要在 mount_web 之前裝（install_auth_routes 會檢查）。
+    # 全部 API 路由只經 install_api_routes 裝（openapi.json 也用它，端點清單一致）；登入與論文頁
+    # 路由用就緒檢查的同一個連線池。一定要在 mount_web 之前裝（install_*_routes 會檢查）。
     install_api_routes(
         app,
         auth_routes=build_auth_routes(
             probes.database, auth_settings, build_fake_login_confirm(auth_settings), _utc_now
+        ),
+        paper_routes=build_paper_routes(
+            probes.database,
+            paper_setup,
+            build_display_names(paper_setup.journals, taxonomy),
+            build_client_config(),
+            _utc_now,
         ),
     )
     # 頁面殼另外掛、不經 create_app 的 web_dist 參數：關機的整合測試會把 create_app 換成只收

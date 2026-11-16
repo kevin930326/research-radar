@@ -5,11 +5,36 @@
  * OpenAPI spec version: 0.1.0
  */
 
+export * from './abstractSource.ts';
+export * from './aiBlockState.ts';
+export * from './classificationBlock.ts';
+export * from './classificationContent.ts';
+export * from './classificationField.ts';
+export * from './clientConfig.ts';
+export * from './constructItem.ts';
+export * from './displayName.ts';
+export * from './displayNames.ts';
+export * from './evidenceType.ts';
 export * from './fakeLoginBody.ts';
 export * from './fakeLoginMode.ts';
 export * from './fakeLoginOptionsResponse.ts';
 export * from './fakeLoginResultResponse.ts';
+export * from './fullTextLinks.ts';
 export * from './healthz200.ts';
+export * from './hypothesisItem.ts';
+export * from './inputKind.ts';
 export * from './memberResponse.ts';
+export * from './paperAbstract.ts';
+export * from './paperBiblio.ts';
+export * from './paperOrigin.ts';
+export * from './paperPageResponse.ts';
 export * from './problemDetails.ts';
 export * from './problemDetailsCode.ts';
+export * from './provenance.ts';
+export * from './researchModelBlock.ts';
+export * from './researchModelContent.ts';
+export * from './snapshotRef.ts';
+export * from './summaryField.ts';
+export * from './supportLevel.ts';
+export * from './zhSummaryBlock.ts';
+export * from './zhSummaryContent.ts';
