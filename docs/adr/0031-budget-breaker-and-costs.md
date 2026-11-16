@@ -108,3 +108,24 @@
 ## 名詞
 
 新名詞見 `docs/glossary.md`：熔斷線、功能預算、只檢索、台北月份、到達即擋、超支上限、悲觀記帳、`BudgetStatus`、`BudgetGuard`、預算不准時的接續、`radar costs`。
+
+## 註記：付了錢卻沒記帳的呼叫，Kevin 2026-11-15 選 A（維持現狀）
+
+（2026-11-15 加在文件後面。上面「決定」「待 Kevin 決定」的文字與這份 ADR 的狀態都沒有改；這一段只記下 Kevin 的選擇。）
+
+Kevin 2026-11-15 對上方「待 Kevin 決定」選 **A：維持現狀，只寫進文件**。程式不改：閘門照舊只在拿到回應的用量（usage）時記帳，不做悲觀記帳（D）、不加暫停（B）、不加專門的警告（C）。
+
+**會漏記的情況**（照 #56 的說明與 `radar/services/llm_gateway.py`、`radar/adapters/anthropic/__init__.py` 現在的寫法）：
+
+1. **記帳交易失敗**：模型已經回應，但寫 `llm_call` 的那個交易失敗（`_record_call` 丟出例外），`_try_fail_run` 把 run 記成 `llm_gateway_error`。錢付了，帳本沒有這一筆，下一次還會重付。資料庫整個連不上時不會一直漏：讀帳本也會失敗，預算檢查 fail closed（決定 12）。
+2. **讀取逾時或連線中斷，但 Anthropic 其實已經計費**：adapter 丟 `LlmTimeoutError`（含讀回應本文時才逾時的「讀取回應逾時」）或 `LlmConnectionError`，沒有用量；閘門把 run 記成 `llm_timeout`／`llm_connection_error`，不記帳。adapter 每次逾時 `RADAR_ANTHROPIC_TIMEOUT`（預設 60 秒）、最多試 `RADAR_ANTHROPIC_ATTEMPTS`（預設 3）次，總時限 `RADAR_ANTHROPIC_DEADLINE`（預設 180 秒），之後工作層還會再排。斷線或逾時後 Anthropic 是否照樣計費，還沒有用真的 key 確認。
+3. **呼叫到一半行程被殺**（容器 `mem_limit` 的 OOM、部署重啟、SIGTERM）：run 停在 `running`，sweep 超過 `RADAR_LLM_RUN_STALE_AFTER` 後改成 `llm_run_expired`，下一次新建 run 重付。
+4. **adapter 丟出不是 `Llm*` 的例外**（例如判讀回應時的程式錯誤）：閘門走 `except BaseException`，run 記 `llm_gateway_error`，沒有用量、不記帳。
+5. （照程式補充，#56 沒有單獨列）**回應是 200，但本文不是合法 JSON，或本文裡的 `usage` 讀不出來**：`to_completion` 丟 `LlmMalformedResponseError` 時，`usage` 驗得過才帶上；帶不上（`usage` 是 None）時 `_record_call` 不記帳，但 `ai_results` 照拒收寫 `rejected`（`llm_malformed_response`），之後 `should_run` 會跳過同一組鍵，所以不會一直重付。
+
+**為什麼可以接受**：
+
+- 熔斷線 `monthly_breaker_usd` 是 50 美元，Anthropic workspace 的每月上限 `workspace_limit_usd` 是 70 美元（`config/budget.yaml`），中間有 **20 美元的餘裕**。帳本漏記時，應用層的熔斷可能晚一點才觸發，但實際花費最多到 Anthropic 那邊的 70 美元就會被擋下，不會無上限。
+- 每次漏記的金額很小。決定 6 的單次上限約 0.042 美元（輸入 100,000 tokens＋輸出 64,000 tokens 的上限）；如果逾時也會計費，再乘嘗試次數約 0.126 美元。20 美元的餘裕在最壞的估法下也要漏記約 158 次才會用完。現在三個正式 prompt 的 `max_tokens` 是 1024／512／2560（`prompts/*/v*.md`），實際每次的輸出費用遠低於 64,000 tokens 的上限。
+- 2.3 的確認審查發現選項 D（悲觀記帳）會把一定沒計費的連線錯誤也算進去，一次 Anthropic 當機或主機斷網，約 400 筆就會讓剩下整個月熔斷，而且沒有開關可以解除；它的代價比漏記大。
+- 事後可以發現：用 `radar costs` 對照 Anthropic 主控台的月用量（PRD §11 第 11 項），差太多時再改成 C 或 D。之後隨時可以改（A → C、D 都不用遷移）。

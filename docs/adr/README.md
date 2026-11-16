@@ -45,6 +45,7 @@
 | [0036](0036-frontend-serving-security-headers-and-web-ci.md) | （0029～0035 由 Epic 2 的 PR 使用）成員版前端由 api 送出：全站安全標頭只有一份（`radar/entrypoints/api/security_headers.json`，api 與 `vite preview` 都讀），每個回應都帶（含 404、500、`/healthz`）；建置資料夾裡的檔案照送、其餘非 `/api/` 的 GET／HEAD 回頁面殼、`/api/` 維持 404 JSON、擋路徑穿越；建置結果固定在工作目錄下的 `web/dist`；HSTS 不在應用程式設；CI 另開和 `checks` 平行的 `web` job（Playwright 三種引擎）；示範站的「找不到這一頁」不放回首頁連結 | 已接受（Kevin 2026-11-15） | AD-21、AD-22、AD-24 |
 | [0037](0037-design-tokens-guard-and-a11y-floor.md) | 設計代幣與無障礙底線：`styles.css` 主題放 `DESIGN.md` YAML 的全部代幣＋五個字體＋四個斷點，測試逐項比對；Vite 外掛用 Tailwind 自己的設計系統讓「不產生 CSS 的類別」建置失敗；ESLint 擋寫死的色碼與字級（版面任意值不擋）；焦點外框與減少動態各一條 base 層規則，程式只能用 `use-reduced-motion.ts` 判斷；無障礙六項檢查跑正式頁面清單＋開發伺服器的元件示範頁 | 已接受（Kevin 2026-11-15） | AD-21、AD-22 |
 | [0038](0038-design-reference-and-visual-compare.md) | 前端畫面以 `docs/ux/reference/screens/` 的設計稿為準；做完用 `web/scripts/design-compare.mjs` 量差異（字級、行高、顏色、字重、字距、距離、髮線），報告貼 PR、差異要有原因，是合併門檻；`DESIGN.md` 加字級、行高、字距三組尺度（另一個 PR 實作）；沒有設計稿的畫面先問 Kevin | 提議 | AD-21 |
+| [0039](0039-extract-model-v2-magnitudes-and-result-quotes.md) | （第四輪 0-A，Kevin 2026-11-15 對 2.6 決定 13、14 都選 B）研究模型擷取 prompt 升 v2（v1 不動）：規則 5 量級寫成完整的數、`12M`／`10k` 這類字母縮寫填 null，`structured_numbers` 把字母縮寫的量級當成讀不懂；結果原文對得上這條關係放寬成四種（因或果的名稱、縮寫、原句唯一的假設代號、全部假設而原句是假設），研究問題後面另一個子句寫了明確結果也算；驗證器不分 prompt 版本；不確定的一律不判 | 提議 | AD-7、AD-8 |
 | [0060](0060-license-mit.md) | 這個 repo 用 MIT 授權；BMAD、各 skill、字體、設計稿裡的 CC BY 摘要、OpenAlex 書目照各自的授權（編號跳到 0060，避開兩條線保留的 0039～0059） | 已接受 | AR-48 |
 
 「提議」表示還沒經過 Kevin 確認；PR 合併後改成「已接受」。
