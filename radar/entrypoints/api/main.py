@@ -8,6 +8,7 @@ from types import FrameType
 
 import structlog
 import uvicorn
+from fastapi import FastAPI
 
 from radar.config import (
     ConfigError,
@@ -17,7 +18,7 @@ from radar.config import (
     load_settings,
 )
 from radar.entrypoints.api.app import create_app
-from radar.entrypoints.api.auth import build_auth_routes, install_auth_routes
+from radar.entrypoints.api.auth import AuthRoutes, build_auth_routes, install_auth_routes
 from radar.entrypoints.api.web import mount_web
 from radar.entrypoints.bootstrap import (
     MigrationsNotFoundError,
@@ -32,6 +33,16 @@ log = structlog.get_logger(__name__)
 # 成員版前端的建置結果：和 migrations/、config/ 一樣固定在工作目錄下（映像的 WORKDIR 是 /app），
 # 不另設設定欄位。不存在時 mount_web 記一筆警告，api 照常只提供 API。
 WEB_DIST = Path("web/dist")
+
+
+def install_api_routes(app: FastAPI, *, auth_routes: AuthRoutes) -> None:
+    """把全部 API 路由裝到 `app` 上（目前只有登入路由）。一定要在 `mount_web` 之前呼叫。
+
+    正式組裝（下面的 `main`）與輸出 `openapi.json`（`openapi.py`）都只經這個函式裝路由，所以兩邊的
+    端點清單一定相同；換人測試的登記表又和 `openapi.json` 比對，新的端點沒登記就失敗（ADR-0047）。
+    之後的 Story 新增 router 時加在這裡，不要在 `main` 另外裝。
+    """
+    install_auth_routes(app, auth_routes)
 
 
 def _utc_now() -> datetime:
@@ -60,10 +71,11 @@ def main() -> int:
         return 1
 
     app = create_app(readiness_check=partial(check_readiness, probes.ping, probes.schema_state))
-    # 登入路由用就緒檢查的同一個連線池；一定要在 mount_web 之前裝（install_auth_routes 會檢查）。
-    install_auth_routes(
+    # 全部 API 路由只經 install_api_routes 裝（openapi.json 也用它，端點清單一致）；登入路由用
+    # 就緒檢查的同一個連線池。一定要在 mount_web 之前裝（install_auth_routes 會檢查）。
+    install_api_routes(
         app,
-        build_auth_routes(
+        auth_routes=build_auth_routes(
             probes.database, auth_settings, build_fake_login_confirm(auth_settings), _utc_now
         ),
     )

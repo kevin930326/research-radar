@@ -501,8 +501,13 @@ def test_api_main_mounts_web_after_the_auth_routes(
     fake_login = client.post("/api/v1/auth/fake-login", json={"extra": 1}, headers=origin)
 
     assert (me.status_code, logout.status_code, fake_login.status_code) == (401, 204, 422)
-    assert me.json() == {"detail": "not_authenticated"}
-    assert fake_login.headers["content-type"].startswith("application/json")
+    assert me.json() == {
+        "type": "about:blank",
+        "title": "Unauthorized",
+        "status": 401,
+        "code": "not_authenticated",
+    }
+    assert fake_login.headers["content-type"] == "application/problem+json"
     assert shell not in me.text + fake_login.text
     # 頁面殼確實掛上了。
     assert client.get("/guide").text == shell

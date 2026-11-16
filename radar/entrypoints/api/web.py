@@ -153,8 +153,11 @@ class _WebShell:
         return FileResponse(index, headers=SHELL_HEADERS)
 
 
+def is_web_shell(endpoint: object) -> bool:
+    """`endpoint` 是不是 `mount_web` 掛的頁面殼（權限測試用它辨認這條不在 openapi.json 的路由）。"""
+    return isinstance(endpoint, _WebShell)
+
+
 def web_mounted(app: FastAPI) -> bool:
     """`mount_web` 是不是已經把「其餘路徑」掛上：掛上之後再加的 API 路由會被頁面殼蓋掉。"""
-    return any(
-        isinstance(getattr(route, "endpoint", None), _WebShell) for route in app.router.routes
-    )
+    return any(is_web_shell(getattr(route, "endpoint", None)) for route in app.router.routes)

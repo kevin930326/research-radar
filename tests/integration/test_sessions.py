@@ -299,7 +299,12 @@ def test_member_not_on_allowlist_cannot_log_in(
     )
 
     assert response.status_code == 403
-    assert response.json() == {"detail": "login_rejected"}
+    assert response.json() == {
+        "type": "about:blank",
+        "title": "Forbidden",
+        "status": 403,
+        "code": "login_rejected",
+    }
     assert _sessions(db) == []
 
 
@@ -469,7 +474,12 @@ def test_trial_without_admin_member_prints_the_two_commands(
     response = _trial_login(trial_client, _assertion(access_key, ADMIN_EMAIL))
 
     assert response.status_code == 403
-    assert response.json() == {"detail": "admin_member_missing"}
+    assert response.json() == {
+        "type": "about:blank",
+        "title": "Forbidden",
+        "status": 403,
+        "code": "admin_member_missing",
+    }
     assert _sessions(db) == []
     output = capsys.readouterr().out
     records = [json.loads(line) for line in output.splitlines() if line.startswith("{")]

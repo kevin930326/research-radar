@@ -65,6 +65,14 @@ jobs:
         name: pytest（unit）
         run: uv run --no-sync pytest -m unit
 
+      # openapi.json 進版控（AD-21、NFR-12、ADR-0047）：用程式重新輸出，和版控裡的不一樣就失敗。
+      - id: openapi-drift
+        name: openapi.json 和程式一致
+        run: |
+          set -euo pipefail
+          uv run --no-sync radar export-schema
+          git diff --exit-code -- openapi.json
+
       # integration、arch 的測試資料庫與 alembic-check 都連這個 db（compose 的初始化腳本建好兩個角色
       # 與擴充套件）。專案名稱另取，不和本機的 research-radar 混在一起。
       - name: 起 compose 的 db（測試資料庫與 alembic check 用）
@@ -141,6 +149,17 @@ jobs:
       - id: web-npm-ci
         name: npm ci（照 package-lock.json）
         run: npm ci --no-audit --no-fund
+
+      # 前端型別由 orval 從 openapi.json 產生（ADR-0047）：重新產生後 src/generated/ 有任何差異
+      # （有人手改、或 openapi.json 改了沒重新產生、多出新檔）就失敗。
+      - id: web-generated-drift
+        name: orval 產生的檔和 openapi.json 一致
+        run: |
+          set -euo pipefail
+          npm run generate:api
+          git diff --exit-code -- src/generated
+          changed=$(git status --porcelain --untracked-files=all -- src/generated)
+          if [ -n "${changed}" ]; then echo "${changed}" >&2; exit 1; fi
 
       - id: web-lint
         name: ESLint

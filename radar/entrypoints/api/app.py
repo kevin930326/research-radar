@@ -1,4 +1,4 @@
-"""FastAPI 應用程式：健康檢查、request ID 與安全標頭中介層、成員版前端（頁面殼）。"""
+"""FastAPI 應用程式：健康檢查、request ID 與安全標頭中介層、錯誤格式、成員版前端（頁面殼）。"""
 
 import re
 import time
@@ -8,8 +8,16 @@ from pathlib import Path
 
 import structlog
 from fastapi import FastAPI, Request, Response
-from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.responses import JSONResponse
+from fastapi.routing import APIRoute
 
+from radar.domain.errors import ErrorCode
+from radar.entrypoints.api.problems import (
+    PROBLEM_RESPONSES,
+    install_problem_handlers,
+    problem_openapi,
+    problem_response,
+)
 from radar.entrypoints.api.web import apply_security_headers, mount_web, security_headers
 
 REQUEST_ID_HEADER = "X-Request-ID"
@@ -26,12 +34,26 @@ def resolve_request_id(candidate: str | None) -> str:
     return uuid.uuid4().hex
 
 
+def _operation_id(route: APIRoute) -> str:
+    return route.name
+
+
 def create_app(readiness_check: Callable[[], bool], *, web_dist: Path | None = None) -> FastAPI:
     """建立應用程式。`readiness_check` 回 True 表示可以接請求（由入口組裝好傳進來）。
 
     `web_dist` 有給時，在 API 路由之後掛上前端建置結果（`mount_web`）。
     """
-    app = FastAPI(title="Research Radar")
+    # 每個端點在 OpenAPI 裡都有 RFC 9457 的錯誤回應；錯誤一律經 problems.py 組成同一種格式
+    # （ADR-0047）。
+    # operationId 用路由函式的名稱（me、logout…）：orval 產生的前端函式名稱就是它，比預設的
+    # 「名稱＋路徑＋方法」好讀；名稱要全站唯一（測試檢查）。
+    app = FastAPI(
+        title="Research Radar",
+        responses=PROBLEM_RESPONSES,
+        generate_unique_id_function=_operation_id,
+    )
+    install_problem_handlers(app)
+    app.openapi = problem_openapi(app)  # type: ignore[method-assign]
     # 啟動時就讀一次：安全標頭檔壞掉時 api 不啟動，而不是等第一個請求才出錯。
     security_headers()
 
@@ -51,9 +73,9 @@ def create_app(readiness_check: Callable[[], bool], *, web_dist: Path | None = N
                     path=request.url.path,
                     duration_ms=round((time.perf_counter() - started) * 1000, 1),
                 )
-                # 自己回 500（內容和 Starlette 預設相同），回應才帶得到 request ID；
+                # 自己回 500（RFC 9457，只有代碼、不帶例外訊息），回應才帶得到 request ID；
                 # 例外已經連同 traceback 記進上面那筆日誌。
-                response = PlainTextResponse("Internal Server Error", status_code=500)
+                response = problem_response(ErrorCode.INTERNAL_ERROR)
                 response.headers[REQUEST_ID_HEADER] = request_id
                 apply_security_headers(response)
                 return response
@@ -75,7 +97,16 @@ def create_app(readiness_check: Callable[[], bool], *, web_dist: Path | None = N
         """行程活著就回 200；不碰資料庫。"""
         return {"status": "ok"}
 
-    @app.get("/readyz")
+    # 503 是健康狀態（compose 與冒煙測試讀它），不是 RFC 9457 的錯誤回應（ADR-0047）。
+    @app.get(
+        "/readyz",
+        responses={
+            503: {
+                "description": "還沒準備好",
+                "content": {"application/json": {"example": {"status": "not_ready"}}},
+            }
+        },
+    )
     def readyz() -> JSONResponse:
         """資料庫連得上、遷移版本不落後回 200，否則 503（AD-15）。
 

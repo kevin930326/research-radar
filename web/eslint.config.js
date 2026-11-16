@@ -15,6 +15,10 @@
 //    版面寬度的任意值（w-[40%]）不擋。焦點外框不得拿掉或改寫（outline-none、outline-0、outline-hidden、
 //    focus:outline-…），過場不得用整組的 transition／transition-all（會連焦點外框一起淡入）。
 // 4. 「減少動態」只有一個判斷：字串 prefers-reduced-motion 只准出現在 src/hooks/use-reduced-motion.ts。
+// 5. src/generated/ 是 orval 從 openapi.json 產生的檔（Story 3.4、ADR-0047）：不是人寫的、也不准手改
+//    （CI 重新產生後比對），lint 規則改不了它，所以整個資料夾不檢查（只排除這一個資料夾）。它裡面的
+//    呼叫函式會 fetch，所以資料來源層以外只准 `import type` 產生的檔（靜態 import 的值、動態 import()
+//    都擋），頁面與元件拿不到 API 呼叫函式（ADR-0010 第 1 點）。
 // lint-fixtures/ 是故意違反規則的檔案，不在正式檢查範圍；src/lint.test.ts、src/style-lint.test.ts
 // 用 ESLint 程式介面對它跑。
 import js from "@eslint/js";
@@ -36,13 +40,21 @@ const CJK_SELECTORS = [
 ];
 // 資料來源實作的路徑：靜態 import（no-restricted-imports）與動態 import()（no-restricted-syntax）共用。
 const DATASOURCE_IMPL_PATTERNS = ["(^|/)datasource/(api|static)(/|$)", "^#datasource-impl$"];
+// 產生的 API 呼叫函式：資料來源層以外只准 import type（型別可以用，函式不行）。
+const GENERATED_PATTERN = "(^|/)generated(/|$)";
+const GENERATED_MESSAGE =
+  "src/generated/ 的呼叫函式只有資料來源層能用；頁面與元件只能 import type（ADR-0010 第 1 點、ADR-0047）。";
 // esquery 的正規表示式寫在兩個 / 之間、裡面不能再有 /，所以換成 \x2F（同一個字元）。
 const forSelector = (pattern) => pattern.replaceAll("/", "\\x2F");
-const DYNAMIC_IMPORT_SELECTORS = DATASOURCE_IMPL_PATTERNS.flatMap((pattern) => [
+const DYNAMIC_IMPORT_SELECTORS = [
+  ...DATASOURCE_IMPL_PATTERNS.map((pattern) => [pattern, DATASOURCE_MESSAGE]),
+  // 動態 import() 一定是載入值，所以產生的檔也一律擋。
+  [GENERATED_PATTERN, GENERATED_MESSAGE],
+].flatMap(([pattern, message]) => [
   // import("../datasource/api")
-  { selector: `ImportExpression[source.value=/${forSelector(pattern)}/]`, message: DATASOURCE_MESSAGE },
+  { selector: `ImportExpression[source.value=/${forSelector(pattern)}/]`, message },
   // import(`../datasource/api`)
-  { selector: `ImportExpression TemplateElement[value.raw=/${forSelector(pattern)}/]`, message: DATASOURCE_MESSAGE },
+  { selector: `ImportExpression TemplateElement[value.raw=/${forSelector(pattern)}/]`, message },
 ]);
 // 動態 import() 的參數不是純字串就擋：路徑不是寫死的，上面的路徑比對就看不出來。
 const NON_LITERAL_IMPORT_MESSAGE =
@@ -182,6 +194,8 @@ export default defineConfig(
       "test-results/**",
       "playwright-report/**",
       "e2e/screenshots/**",
+      // orval 產生的檔（上面第 5 點）。
+      "src/generated/**",
     ],
   },
   js.configs.recommended,
@@ -226,7 +240,12 @@ export default defineConfig(
       ],
       "no-restricted-imports": [
         "error",
-        { patterns: DATASOURCE_IMPL_PATTERNS.map((regex) => ({ regex, message: DATASOURCE_MESSAGE })) },
+        {
+          patterns: [
+            ...DATASOURCE_IMPL_PATTERNS.map((regex) => ({ regex, message: DATASOURCE_MESSAGE })),
+            { regex: GENERATED_PATTERN, allowTypeImports: true, message: GENERATED_MESSAGE },
+          ],
+        },
       ],
       // 寫死的色碼、字級、自己查減少動態也在這裡擋（同名規則後蓋前，所以全部列在同一段）。
       "no-restricted-syntax": ["error", ...SRC_BASE_SELECTORS, ...STYLE_SELECTORS, ...REDUCED_MOTION_SELECTORS],

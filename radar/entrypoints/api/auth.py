@@ -10,8 +10,8 @@
 - 假登入的兩條路由只在開了假登入時註冊；沒開時打這些路徑是 404 JSON（掛了前端也一樣）。
 - `Origin` 與 `Cf-Access-Jwt-Assertion` 重複出現一律拒絕（不同層可能各取一個，就算其中一個是對的
   也不收）。
-- 回應不帶 email；被拒的原因只進日誌，回應只有代碼（`domain/errors.py`）。錯誤格式在 3.4 換成
-  RFC 9457，這裡先用 FastAPI 預設的 `{"detail": <代碼>}`。
+- 回應不帶 email；被拒的原因只進日誌，回應只有代碼（`domain/errors.py`），格式是 RFC 9457
+  （`problems.py`，Story 3.4）。成功的回應都有 Pydantic 模型，前端型別由 `openapi.json` 產生。
 """
 
 import uuid
@@ -21,8 +21,7 @@ from datetime import datetime
 from typing import Final
 
 import structlog
-from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, Response
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, Depends, FastAPI, Request, Response
 from pydantic import BaseModel, ConfigDict
 
 from radar.domain.auth import (
@@ -44,6 +43,7 @@ from radar.domain.auth_settings import (
     session_policy,
 )
 from radar.domain.errors import ErrorCode
+from radar.entrypoints.api.problems import ApiProblemError
 from radar.entrypoints.api.web import web_mounted
 from radar.entrypoints.bootstrap import Database
 from radar.services.auth import (
@@ -139,6 +139,32 @@ class FakeLoginBody(BaseModel):
     next: str | None = None
 
 
+class MemberResponse(BaseModel):
+    """一位成員：ID 與顯示名稱（不含 email）。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    member_id: uuid.UUID
+    display_name: str
+
+
+class FakeLoginOptionsResponse(BaseModel):
+    """假登入的模式與可以選的成員（試用環境不能選人，清單是空的）。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: FakeLoginMode
+    members: list[MemberResponse]
+
+
+class FakeLoginResultResponse(BaseModel):
+    """假登入成功：登入後要轉回的站內路徑。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    next: str
+
+
 def _set_session_cookie(response: Response, token: str, max_age: int) -> None:
     response.set_cookie(
         SESSION_COOKIE,
@@ -153,10 +179,6 @@ def _set_session_cookie(response: Response, token: str, max_age: int) -> None:
 
 def _clear_session_cookie(response: Response) -> None:
     response.delete_cookie(SESSION_COOKIE, path="/", secure=True, httponly=True, samesite="lax")
-
-
-def _member_json(member_id: uuid.UUID, display_name: str) -> dict[str, str]:
-    return {"member_id": str(member_id), "display_name": display_name}
 
 
 def install_auth_routes(app: FastAPI, routes: AuthRoutes) -> None:
@@ -181,23 +203,22 @@ def install_auth_routes(app: FastAPI, routes: AuthRoutes) -> None:
                 path=request.url.path,
                 origin_count=len(origins),
             )
-            raise HTTPException(status_code=403, detail=ErrorCode.ORIGIN_REJECTED.value)
+            raise ApiProblemError(ErrorCode.ORIGIN_REJECTED)
 
     router = APIRouter(prefix=API_V1_PREFIX, dependencies=[Depends(check_origin)])
 
     def current_member(request: Request) -> AuthenticatedMember:
         member = routes.authenticate(request.cookies.get(SESSION_COOKIE))
         if member is None:
-            raise HTTPException(
-                status_code=401, detail=ErrorCode.NOT_AUTHENTICATED.value, headers=NO_STORE
-            )
+            raise ApiProblemError(ErrorCode.NOT_AUTHENTICATED, headers=NO_STORE)
         return member
 
     @router.get("/me")
-    def me(request: Request) -> JSONResponse:
+    def me(request: Request, response: Response) -> MemberResponse:
         """我是誰：成員 ID 與顯示名稱（不含 email）；沒登入 401。"""
         member = current_member(request)
-        return JSONResponse(_member_json(member.member_id, member.display_name), headers=NO_STORE)
+        response.headers.update(NO_STORE)
+        return MemberResponse(member_id=member.member_id, display_name=member.display_name)
 
     @router.post("/auth/logout", status_code=204)
     def logout(request: Request) -> Response:
@@ -213,21 +234,25 @@ def install_auth_routes(app: FastAPI, routes: AuthRoutes) -> None:
     if fake is not None:
 
         @router.get("/auth/fake-login")
-        def fake_login_options() -> JSONResponse:
+        def fake_login_options(response: Response) -> FakeLoginOptionsResponse:
             """假登入的模式與可以選的成員（試用環境不能選人，清單是空的）。"""
-            members = [_member_json(m.member_id, m.display_name) for m in fake.list_members()]
-            return JSONResponse({"mode": fake.mode.value, "members": members}, headers=NO_STORE)
+            members = [
+                MemberResponse(member_id=m.member_id, display_name=m.display_name)
+                for m in fake.list_members()
+            ]
+            response.headers.update(NO_STORE)
+            return FakeLoginOptionsResponse(mode=fake.mode, members=members)
 
         @router.post("/auth/fake-login")
-        def fake_login(body: FakeLoginBody, request: Request) -> JSONResponse:
+        def fake_login(
+            body: FakeLoginBody, request: Request, response: Response
+        ) -> FakeLoginResultResponse:
             """假登入：確認身分、建 session、設 cookie，回站內的轉回路徑。"""
             # Access 的 JWT 最多一個：重複就拒絕（不管哪一個有效、排在前面還是後面）。
             assertions = request.headers.getlist(ACCESS_ASSERTION_HEADER)
             if len(assertions) > 1:
                 log.warning("假登入被拒", reason=LoginRejection.ASSERTION_DUPLICATED.value)
-                raise HTTPException(
-                    status_code=403, detail=ErrorCode.LOGIN_REJECTED.value, headers=NO_STORE
-                )
+                raise ApiProblemError(ErrorCode.LOGIN_REJECTED, headers=NO_STORE)
             login_request = FakeLoginRequest(
                 member_id=body.member_id,
                 access_assertion=assertions[0] if assertions else None,
@@ -235,19 +260,15 @@ def install_auth_routes(app: FastAPI, routes: AuthRoutes) -> None:
             try:
                 session = fake.log_in(login_request)
             except LoginRejectedError:
-                raise HTTPException(
-                    status_code=403, detail=ErrorCode.LOGIN_REJECTED.value, headers=NO_STORE
-                ) from None
+                raise ApiProblemError(ErrorCode.LOGIN_REJECTED, headers=NO_STORE) from None
             except AdminMemberMissingError as exc:
                 log.error(
                     "試用環境的管理者成員還沒建立，假登入被拒；先執行下面兩個指令",
                     commands=list(exc.commands),
                 )
-                raise HTTPException(
-                    status_code=403, detail=ErrorCode.ADMIN_MEMBER_MISSING.value, headers=NO_STORE
-                ) from None
-            response = JSONResponse({"next": safe_next_path(body.next)}, headers=NO_STORE)
+                raise ApiProblemError(ErrorCode.ADMIN_MEMBER_MISSING, headers=NO_STORE) from None
+            response.headers.update(NO_STORE)
             _set_session_cookie(response, session.token, routes.cookie_max_age)
-            return response
+            return FakeLoginResultResponse(next=safe_next_path(body.next))
 
     app.include_router(router)

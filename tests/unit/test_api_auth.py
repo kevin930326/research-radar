@@ -196,7 +196,12 @@ def test_rejected_fake_login_is_403_without_cookie(error: Exception) -> None:
     response = client.post("/api/v1/auth/fake-login", json={}, headers={"Origin": ORIGIN})
 
     assert response.status_code == 403
-    assert response.json() == {"detail": "login_rejected"}
+    assert response.json() == {
+        "type": "about:blank",
+        "title": "Forbidden",
+        "status": 403,
+        "code": "login_rejected",
+    }
     assert "set-cookie" not in response.headers
 
 
@@ -212,7 +217,12 @@ def test_duplicate_access_assertion_headers_are_403_without_logging_in(
     response = _client(auth).post("/api/v1/auth/fake-login", json={}, headers=headers)
 
     assert response.status_code == 403
-    assert response.json() == {"detail": "login_rejected"}
+    assert response.json() == {
+        "type": "about:blank",
+        "title": "Forbidden",
+        "status": 403,
+        "code": "login_rejected",
+    }
     assert auth.login_requests == []
     assert "set-cookie" not in response.headers
 
@@ -226,7 +236,12 @@ def test_missing_admin_member_is_403_and_logs_the_two_commands(
     response = client.post("/api/v1/auth/fake-login", json={}, headers={"Origin": ORIGIN})
 
     assert response.status_code == 403
-    assert response.json() == {"detail": "admin_member_missing"}
+    assert response.json() == {
+        "type": "about:blank",
+        "title": "Forbidden",
+        "status": 403,
+        "code": "admin_member_missing",
+    }
     records = [json.loads(line) for line in capsys.readouterr().out.splitlines() if line]
     (record,) = [r for r in records if r.get("level") == "error"]
     assert record["commands"] == [
@@ -269,7 +284,12 @@ def test_fake_login_with_wrong_or_missing_origin_is_403_and_creates_nothing(
     )
 
     assert response.status_code == 403
-    assert response.json() == {"detail": "origin_rejected"}
+    assert response.json() == {
+        "type": "about:blank",
+        "title": "Forbidden",
+        "status": 403,
+        "code": "origin_rejected",
+    }
     assert auth.login_requests == []
     assert "set-cookie" not in response.headers
 
@@ -291,7 +311,12 @@ def test_duplicate_origin_headers_are_403(origins: list[str], path: str) -> None
     response = _client(auth).post(path, json={"member_id": str(MEMBER_ID)}, headers=headers)
 
     assert response.status_code == 403
-    assert response.json() == {"detail": "origin_rejected"}
+    assert response.json() == {
+        "type": "about:blank",
+        "title": "Forbidden",
+        "status": 403,
+        "code": "origin_rejected",
+    }
     assert auth.login_requests == []
     assert auth.logged_out == []
     assert "set-cookie" not in response.headers
@@ -337,8 +362,13 @@ def test_me_without_valid_session_is_401(cookie: str | None) -> None:
     response = _client(auth).get("/api/v1/me", headers=headers)
 
     assert response.status_code == 401
-    assert response.json() == {"detail": "not_authenticated"}
-    assert response.headers["content-type"].startswith("application/json")
+    assert response.json() == {
+        "type": "about:blank",
+        "title": "Unauthorized",
+        "status": 401,
+        "code": "not_authenticated",
+    }
+    assert response.headers["content-type"] == "application/problem+json"
 
 
 # --- 登出 -------------------------------------------------------------------------------------
@@ -404,7 +434,7 @@ def test_fake_login_paths_are_404_json_when_disabled(
     )
 
     assert response.status_code == 404
-    assert response.headers["content-type"].startswith("application/json")
+    assert response.headers["content-type"] == "application/problem+json"
     assert SHELL not in response.text
 
 
@@ -430,7 +460,9 @@ def test_new_api_paths_still_return_json_after_web_is_mounted(
     response = client.request(method, path, json={"member_id": str(MEMBER_ID)}, headers=headers)
 
     assert response.status_code == status
-    assert response.headers["content-type"].startswith("application/json")
+    # 成功是 application/json，錯誤是 RFC 9457 的 application/problem+json（Story 3.4）。
+    expected = "application/json" if status < 400 else "application/problem+json"
+    assert response.headers["content-type"] == expected
     assert SHELL not in response.text
     # 對照：一般頁面仍是頁面殼。
     assert client.get("/guide").text == SHELL

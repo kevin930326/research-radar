@@ -13,6 +13,7 @@ PACKAGE_JSON = ROOT / "web" / "package.json"
 # 和本機 web/ 的 npm scripts 同一組，順序固定。
 WEB_STEPS = [
     "web-npm-ci",
+    "web-generated-drift",
     "web-lint",
     "web-typecheck",
     "web-test",
@@ -102,3 +103,14 @@ def test_dockerfile_node_major_matches_nvmrc() -> None:
 
     assert majors, "Dockerfile 沒有 node 的建置段"
     assert set(majors) == {(ROOT / "web" / ".nvmrc").read_text(encoding="utf-8").strip()}
+
+
+def test_web_job_fails_when_generated_files_drift() -> None:
+    # Story 3.4（ADR-0047）：orval 重新產生後 src/generated/ 有差異（手改、沒重產、新檔）就失敗。
+    run = _runs()["web-generated-drift"]
+    scripts = json.loads(PACKAGE_JSON.read_text(encoding="utf-8"))["scripts"]
+
+    assert "npm run generate:api" in run
+    assert "git diff --exit-code -- src/generated" in run
+    assert "--untracked-files=all -- src/generated" in run
+    assert scripts["generate:api"].startswith("orval ")
