@@ -236,7 +236,7 @@ def test_show_reports_blocks_provenance_and_history(db: TestDatabase, database: 
         (LlmTask.CLASSIFY, "rejected", "llm_malformed_response"),
     ]
     assert {row.abstract_source for row in report.history} == {AbstractSource.OPENALEX}
-    assert report.active_prompt_version(LlmTask.ZH_SUMMARY) == 2
+    assert report.active_prompt_version(LlmTask.ZH_SUMMARY) == 3
     text = "\n".join(render_paper_ai_report(report))
     assert "來歷：人工（沒有 AI 值）" in text
     assert "主題：e_commerce（人工值）" in text
