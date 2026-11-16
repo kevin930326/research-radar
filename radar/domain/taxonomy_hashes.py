@@ -18,4 +18,5 @@
 # 分類表版本 → 內容雜湊。
 TAXONOMY_CONTENT_HASHES: dict[int, str] = {
     1: "094fb1c98efa935dbf681f47801eecf4a32e6d50a6d448c625e8398aad886610",
+    2: "0872617c0ac1795514cb764a151fc17a8a232247a5c2e5749d7d27b3a206d28d",
 }
