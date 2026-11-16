@@ -11,7 +11,7 @@ context:
   - '{project-root}/_bmad-output/implementation-artifacts/epic-3-context.md'
   - '{project-root}/docs/adr/0002-read-authorization-viewer.md'
   - '{project-root}/docs/adr/0010-frontend-stack.md'
-  - '/Users/kevin/Documents/research-radar/docs/runs/epic-3b/brief-3-4.md'
+  - '<repo>/docs/runs/epic-3b/brief-3-4.md'
 warnings: ['oversized']
 deferred:
   - summary: >-
@@ -48,7 +48,7 @@ deferred:
 ## Boundaries & Constraints
 
 **Always:**
-- 只在 worktree `/Users/kevin/Documents/research-radar/.claude/worktrees/epic3b`；本機 pytest 一律加 `RADAR_TEST_ADMIN_DATABASE_URL=postgresql://postgres@127.0.0.1:1/postgres`；npm／npx 一律照 brief 的別名設定跑（那個網址不寫進任何 commit 的檔）。
+- 只在 worktree `<repo>/.claude/worktrees/epic3b`；本機 pytest 一律加 `RADAR_TEST_ADMIN_DATABASE_URL=postgresql://postgres@127.0.0.1:1/postgres`；npm／npx 一律照 brief 的別名設定跑（那個網址不寫進任何 commit 的檔）。
 - 和另一條線共用的檔只加最少的行、加在尾端：`radar/domain/errors.py`（檔尾）、`radar/entrypoints/cli/__init__.py`（一行 import＋一行註冊）、`.github/workflows/ci.yml`、`docs/adr/README.md`、`docs/glossary.md`、`sprint-status.yaml`。
 - 錯誤回應只有 `type`（固定 `about:blank`）、`title`（HTTP 狀態的標準英文片語）、`status`、`code`；不回 `detail`、不回例外訊息、不回驗證錯誤的輸入值。headers（`Allow`、`Cache-Control: no-store`）照留。
 - `openapi.json` 的錯誤代碼列舉只含 api 會回的代碼（`problems.py` 的對照表），不是整個 `ErrorCode`：另一條線加 LLM 代碼時 `openapi.json` 不會變。

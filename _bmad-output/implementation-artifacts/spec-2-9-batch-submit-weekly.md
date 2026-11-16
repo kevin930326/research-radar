@@ -7,7 +7,7 @@ baseline_revision: 'ccec182e63f1da22492b3c187acd6b39e0e8ae6b'
 review_loop_iteration: 0
 followup_review_recommended: true
 context:
-  - '/Users/kevin/Documents/research-radar/docs/runs/epic-2b/api-reference.md'
+  - '<repo>/docs/runs/epic-2b/api-reference.md'
   - '{project-root}/AGENTS.md'
   - '{project-root}/docs/adr/0004-background-jobs-and-scheduling.md'
   - '{project-root}/docs/adr/0031-budget-breaker-and-costs.md'
@@ -180,9 +180,9 @@ deferred: []
 
 **操作限制（硬性）：**
 - 一個真的網路請求都不送；不讀、不印 `.env*`（`.env.example` 除外）；不跑 `docker compose config`。
-- 測試資料庫是 radar-ci 的 db 容器，**現在已經在跑**：先用 `docker ps --filter name=radar-ci-db-1` 確認；在跑就直接用，**不要再下 `up`**（從 worktree 的 compose.yaml 下 `up` 會重建容器、打斷別的代理的測試）。只有不在跑時才用 `docker compose --env-file /dev/null --project-name radar-ci --file /Users/kevin/Documents/research-radar/compose.yaml up --detach --wait db`。**做完不要 down**；絕不用 `-p radar`。不刪不是自己測試建的資料庫。測試跑到一半資料庫斷線就再確認一次、重跑。
+- 測試資料庫是 radar-ci 的 db 容器，**現在已經在跑**：先用 `docker ps --filter name=radar-ci-db-1` 確認；在跑就直接用，**不要再下 `up`**（從 worktree 的 compose.yaml 下 `up` 會重建容器、打斷別的代理的測試）。只有不在跑時才用 `docker compose --env-file /dev/null --project-name radar-ci --file <repo>/compose.yaml up --detach --wait db`。**做完不要 down**；絕不用 `-p radar`。不刪不是自己測試建的資料庫。測試跑到一半資料庫斷線就再確認一次、重跑。
 - 不用掃描工具掃 repo 根目錄；不新增套件；不改既有測試去配合程式（需求改變的照 Code Map 列的改，並列理由）；不 commit、不 push（由上層處理）。
-- 在 worktree `/private/tmp/claude-501/-Users-kevin-Documents-research-radar/2151c064-b1a1-494a-ae91-221da01d8c08/scratchpad/wt-2-9` 裡做，不切分支、不 stash、不動主資料夾 `/Users/kevin/Documents/research-radar` 的任何程式檔。
+- 在 worktree `<scratchpad>/wt-2-9` 裡做，不切分支、不 stash、不動主資料夾 `<repo>` 的任何程式檔。
 
 **Commands:**
 - `uv run ruff check . && uv run ruff format --check . && uv run mypy` -- 全過（mypy 連 tests）
