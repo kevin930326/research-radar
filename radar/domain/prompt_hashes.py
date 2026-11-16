@@ -11,15 +11,15 @@
   執行期由別的資料組出來；`radar/` 裡只有 `domain/policy.py` 與 `services/prompt_loader.py` 讀它。
 - 登記只增不改：已登記的版本不改雜湊，內容或設定區改了就新增 `v<N+1>.md` 並在這裡加一列。
 
-正式 prompt：`zh_summary` v2（Story 2.4、ADR-0032；v2 改規則 5 的字數說明，見 ADR-0032 的
-2026-11-16 更新）、`classify` v2（Story 2.5、ADR-0033；
+正式 prompt：`zh_summary` v3（Story 2.4、ADR-0032；v2 改規則 5 的字數說明、v3 加台灣慣用說法，
+見 ADR-0032 的 2026-11-16 更新）、`classify` v2（Story 2.5、ADR-0033；
 v2 換成分類表第 2 版的清單）、
-`extract_model` v2（Story 2.6、ADR-0034；v2 改規則 5 的量級寫法與規則 7 的結果原文，0-A、
-ADR-0039）。
+`extract_model` v3（Story 2.6、ADR-0034；v2 改規則 5 的量級寫法與規則 7 的結果原文，0-A、
+ADR-0039；v3 的 label_zh 加台灣慣用說法）。
 """
 
 # 工作代碼 → 目前用的版本。
-CURRENT_PROMPT_VERSIONS: dict[str, int] = {"zh_summary": 2, "classify": 2, "extract_model": 2}
+CURRENT_PROMPT_VERSIONS: dict[str, int] = {"zh_summary": 3, "classify": 2, "extract_model": 3}
 
 # 工作代碼 → 版本 → (整個 prompt 檔的 SHA-256, 凍結的輸出 schema 字串的 SHA-256)；
 # 沒有結構化輸出時第二個是 None。
@@ -31,6 +31,10 @@ PROMPT_FILE_HASHES: dict[str, dict[int, tuple[str, str | None]]] = {
         ),
         2: (
             "ea175ac3e1e9df84d1bb129127a977c682bfd9e21a524f4a33fe9ee18e0b7223",
+            "0de6e57cd05014d0c54aff8bd0db5d9cab9e5748be372d90ed8b0f7fe5ce1899",
+        ),
+        3: (
+            "a61daf5c97974b1ec0f68fd8f594ecc4a870ef25f747a8ff70d0b304f0c08982",
             "0de6e57cd05014d0c54aff8bd0db5d9cab9e5748be372d90ed8b0f7fe5ce1899",
         ),
     },
@@ -51,6 +55,10 @@ PROMPT_FILE_HASHES: dict[str, dict[int, tuple[str, str | None]]] = {
         ),
         2: (
             "d7de0ff7bacd7252c37bd21a9595fcdb719ec868a5c9b9beb8b56ac021db85ed",
+            "3069864a203ec7c369c2780b453e5232e0c23c54545dfeb49ff35c7c59f0a00a",
+        ),
+        3: (
+            "82339226aa2124122a2294cd25c9089dd5c36094b3f527784a3297cdc710d5cd",
             "3069864a203ec7c369c2780b453e5232e0c23c54545dfeb49ff35c7c59f0a00a",
         ),
     },

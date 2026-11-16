@@ -1,4 +1,5 @@
-"""正式 prompt `prompts/extract_model/v2.md`（Story 2.6、ADR-0034；v2 是 0-A、ADR-0039）：
+"""正式 prompt `prompts/extract_model/v3.md`（Story 2.6、ADR-0034；v2 是 0-A、ADR-0039；
+v3 加台灣慣用說法）：
 
 - 讀得過、雜湊對得上登記、schema 是 `ResearchModelOutput`、設定區照 spec（low、2560、不思考）。
 - 本文沒有變數，寫到原句逐字照抄、沒提到給 null、四條擷取規則、只能用清單裡的 key、文件是資料。
@@ -88,8 +89,8 @@ def _example_line(label: str) -> str:
 def test_real_prompt_loads_with_the_registered_hash_and_schema() -> None:
     prompt = load_prompt(PROMPTS, LlmTask.EXTRACT_MODEL)
 
-    assert prompt_hashes.CURRENT_PROMPT_VERSIONS["extract_model"] == 2
-    assert prompt.version == 2
+    assert prompt_hashes.CURRENT_PROMPT_VERSIONS["extract_model"] == 3
+    assert prompt.version == 3
     assert prompt.schema_class is ResearchModelOutput
     assert prompt.settings.effort == "low"
     assert prompt.settings.max_tokens == 2560

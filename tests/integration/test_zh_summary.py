@@ -1,4 +1,4 @@
-"""中文重點對真的 PostgreSQL（Story 2.4）：真的 prompt（`prompts/zh_summary/v2.md`、正式登記）＋
+"""中文重點對真的 PostgreSQL（Story 2.4）：真的 prompt（`prompts/zh_summary/v3.md`、正式登記）＋
 模型替身，spec 2.4 的 I/O 表每一列。
 
 - `plan_for` 說不做（被排除、手填、沒摘要）時不呼叫閘門、不寫任何列。
@@ -94,7 +94,7 @@ def database(db: TestDatabase) -> Database:
 
 @pytest.fixture
 def config() -> GatewayConfig:
-    # 真的 prompt 資料夾，登記表不換（正式的 zh_summary v2）。
+    # 真的 prompt 資料夾，登記表不換（正式的 zh_summary v3）。
     return gateway_config(ROOT / "prompts")
 
 
@@ -169,7 +169,7 @@ def test_good_reply_is_stored_as_active_zh_hant_with_four_fields(
     assert request.effort == "low"
     assert request.disable_thinking is True
     assert "research_question" in system_prompt(request)
-    assert execute(db, "SELECT prompt_version, task FROM derivation_run") == [(2, "zh_summary")]
+    assert execute(db, "SELECT prompt_version, task FROM derivation_run") == [(3, "zh_summary")]
 
 
 def test_content_is_normalized_before_it_is_stored(

@@ -107,3 +107,10 @@
 ## 名詞
 
 新名詞見 `docs/glossary.md`：情境值清單、`terms`（明確寫出的字樣）、萃取 schema 版本、原文欄位、正規化名稱（`normalize_name`）、構面提及（`construct_mention`）、假設原句雜湊（`sentence_sha256`）、`dropped_context_value_count`、`unsupported_context_value_count`、`corrected_support_count`、`ResearchModelOutput`、`ResearchModelValidator`、現在的情境值清單。
+
+## 2026-11-16 更新：研究模型的中文標籤加「台灣慣用說法」（prompt v3）
+
+- **發生什麼事**：第一次用真的 key 試跑，有構面的中文標籤寫成「在線評分」；字是繁體，用的卻是中國大陸的說法。驗證只擋簡體專用字，擋不到這種。
+- **決定**（Kevin 2026-11-16）：在 prompt 的規則 3 加一句「用台灣資訊管理領域慣用的說法，例如寫線上、資訊、軟體、網路、演算法、品質，不寫在線、信息、軟件、網絡、算法、質量」。`prompts/extract_model/v3.md` 和 v2 只差這一句，其他都不變。
+- **為什麼只改 prompt、不加驗證**：這類用詞沒有完整的清單，寫成拒收規則會誤擋（例如「質量」在物理的意思、「信息」出現在專有名詞裡）；先看 prompt 的效果。
+- **取捨**：模型偶爾還是會寫出偏掉的詞，不保證全部改掉；之後合併同義構面那一步也會統一用字。全庫 Batch 送出之前改，避免事後整批重跑。效果還沒量。
