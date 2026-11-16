@@ -153,6 +153,47 @@ test.describe("desktop nav bar", () => {
     await expect(page).toHaveURL(`${member.baseURL}/login`);
   });
 
+  test("logout loading: the disabled item still gets the hover background", async ({ page, apiMock }) => {
+    // 設計稿的停用項目滑過也有底色；字色維持第三層文字色，不跟著變亮。Base UI 1.9 滑過停用的項目也會設
+    // data-highlighted，所以 hover: 與 data-[highlighted]: 兩個底色類別任一個在就會過，兩個都拿掉才失敗。
+    const [logoutGate, release] = gate();
+    apiMock.logoutGate = logoutGate;
+    await openNotice(page, DESKTOP);
+    const tokenColor = (property: "backgroundColor" | "color", variable: string) =>
+      page.evaluate(
+        ([name, value]) => {
+          const probe = document.createElement("div");
+          probe.style[name] = `var(${value})`;
+          document.body.append(probe);
+          const color = getComputedStyle(probe)[name];
+          probe.remove();
+          return color;
+        },
+        [property, variable] as const,
+      );
+    const hover = await tokenColor("backgroundColor", "--color-menu-item-hover");
+    const tertiary = await tokenColor("color", "--color-text-tertiary");
+    expect(hover).not.toBe("rgba(0, 0, 0, 0)");
+    await page.getByRole("button", { name: ACCOUNT }).click();
+    await page.getByRole("menuitem", { name: LOGOUT }).click();
+    const item = page.getByRole("menuitem", { name: LOGGING_OUT });
+    await expect(item).toHaveAttribute("aria-disabled", "true");
+    const style = () =>
+      item.evaluate((element) => {
+        const computed = getComputedStyle(element);
+        return { background: computed.backgroundColor, color: computed.color };
+      });
+
+    // 先把滑鼠移到別的項目上，停用的那一項沒有底色；再滑回來就有。
+    await page.getByRole("menuitem", { name: NOTICE }).hover();
+    await expect.poll(async () => (await style()).background).toBe("rgba(0, 0, 0, 0)");
+    await item.hover();
+    await expect.poll(async () => (await style()).background).toBe(hover);
+    expect((await style()).color).toBe(tertiary);
+    release();
+    await expect(page).toHaveURL(`${member.baseURL}/login`);
+  });
+
   test("logout failed: one line above logout, the menu stays open", async ({ page, apiMock }) => {
     apiMock.logout = "failed";
     await openNotice(page, DESKTOP);

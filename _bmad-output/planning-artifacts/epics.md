@@ -3067,6 +3067,7 @@ So that 離開的人不會留著能用的登入。
 **When** `radar members revoke <email>` 之後，同一個 email 再 `radar members allow`
 **Then** `revoke` 只把 `allowed_email` 標記為已移出，不刪那一列；標記已移出的 email 登入時照樣回「不在名單」
 **And** 再 `allow` 時清掉標記、接回原本的成員：同一個 `member` ID，以前的判斷與私人資料都還在（測試）
+**And** 要在 `allowed_email` 加一個「已移出」欄位（遷移），並改 `revoke`、`allow` 兩個指令（Kevin 2026-11-16 決定）
 
 **Given** 三個 `radar members` 指令
 **When** 執行
@@ -3160,8 +3161,10 @@ So that 同學在試用期間留下的文獻庫、修正、問答紀錄不會因
 
 **Given** api 的 `/docs`、`/redoc`、`/openapi.json`（Kevin 2026-11-16 決定）
 **When** 開放同學之前
-**Then** api 不再提供這三個網址（回 404），`release.sh` 之後的冒煙測試確認；理由：這是第一次讓 Kevin 以外的人連進來，這三個網址不用登入就看得到完整的 API 文件，連假登入的路由也列在上面
+**Then** api 不再提供 API 文件（關掉 FastAPI 預設的文件頁），`release.sh` 之後的冒煙測試確認這三個網址的回應不是 API 文件；理由：這是第一次讓 Kevin 以外的人連進來，這三個網址不用登入就看得到完整的 API 文件，連假登入的路由也列在上面
 **And** 版控裡的 `openapi.json` 檔與 CI 的一致性檢查照舊（NFR-12），不受影響
+**And** 不是回 404：api 同時送前端頁面，`/api/` 以外找不到的網址回頁面殼（200，顯示「找不到這一頁」）（Kevin 2026-11-16 決定）
+**And** `tests/unit/test_api_web.py` 有兩個測試假設文件頁存在，做的時候要跟著改（Kevin 2026-11-16 決定）
 
 **Given** Google 用戶端與 Access
 **When** 部署
@@ -3181,7 +3184,7 @@ So that 同學在試用期間留下的文獻庫、修正、問答紀錄不會因
 2. 使用須知四段都在（第 1、2 段已經由 5.5、6.11 接上，第 3、4 段在 3.1）
 3. 假登入已經關掉，四道都測過（冒煙測試的結果附上）
 4. 每晚備份成功過一次（上面那次手動觸發的結果附上）
-5. 冒煙測試通過：Google 登入、找論文、論文頁、問答、上傳頁打得開；`/healthz`、`/readyz` 回 200；`/docs`、`/redoc`、`/openapi.json` 回 404（Kevin 2026-11-16 決定）；worker 與 cron 在跑
+5. 冒煙測試通過：Google 登入、找論文、論文頁、問答、上傳頁打得開；`/healthz`、`/readyz` 回 200；`/docs`、`/redoc`、`/openapi.json` 的回應不是 API 文件（Kevin 2026-11-16 決定）；worker 與 cron 在跑
 **And** api 與 worker 的記憶體貼進 PR 說明；不用假負載，不動 k3s 的資料
 
 ---
