@@ -4,7 +4,7 @@ LLM 工作的 prompt 檔（AD-8、ADR-0009 第 3 步、ADR-0030）。目前的�
 
 | 工作 | 目前版本 | schema | 說明 |
 |---|---|---|---|
-| `zh_summary` | v1 | `ZhSummaryOutput` | 中文重點四欄（Story 2.4、ADR-0032）；內容的驗證在 `radar/domain/validators/zh_summary.py` |
+| `zh_summary` | v2 | `ZhSummaryOutput` | 中文重點四欄（Story 2.4、ADR-0032；v2 改規則 5：英文與標點也算字數、發現只寫最重要的一到兩項）；內容的驗證在 `radar/domain/validators/zh_summary.py` |
 | `classify` | v1 | `ClassificationOutput` | 主題與方法分類（Story 2.5、ADR-0033）；分類清單寫死在模板裡，要和 `config/taxonomy.yaml` 一字不差（`tests/unit/test_classify_prompt.py`）；清單外的標籤由 `radar/domain/validators/classification.py` 丟掉並計數 |
 | `extract_model` | v2 | `ResearchModelOutput` | 研究模型擷取（Story 2.6、ADR-0034；v2 改規則 5 的量級寫法與規則 7 的結果原文，ADR-0039）；情境值清單寫死在模板裡，要和 `config/context_values.yaml` 一字不差（`tests/unit/test_extract_model_prompt.py`）；內容的驗證在 `radar/domain/validators/research_model.py` |
 
@@ -41,7 +41,7 @@ output_schema: FakeResearchQuestion
 ## 雜湊登記（`radar/domain/prompt_hashes.py`）
 
 ```python
-CURRENT_PROMPT_VERSIONS: dict[str, int] = {"zh_summary": 1, "classify": 1, "extract_model": 2}
+CURRENT_PROMPT_VERSIONS: dict[str, int] = {"zh_summary": 2, "classify": 1, "extract_model": 2}
 
 PROMPT_FILE_HASHES: dict[str, dict[int, tuple[str, str | None]]] = {
     "zh_summary": {1: ("<整個檔的 SHA-256>", "<凍結 schema 的 SHA-256 或 None>")},
