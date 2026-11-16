@@ -1,4 +1,4 @@
-"""正式 prompt `prompts/zh_summary/v1.md`（Story 2.4、ADR-0032）：
+"""正式 prompt `prompts/zh_summary/v2.md`（Story 2.4、ADR-0032；v2 改規則 5 的字數說明）：
 
 - 讀得過、雜湊對得上登記、schema 是 `ZhSummaryOutput`、設定區照 spec（low、1024、不思考）。
 - 本文沒有變數（不 `.format`），寫到四欄、null、繁中、不逐句翻譯、80 字。
@@ -26,7 +26,7 @@ from radar.services.prompt_loader import load_prompt
 from tests.llm_support import ROOT
 
 PROMPTS = ROOT / "prompts"
-PATH = PROMPTS / "zh_summary" / "v1.md"
+PATH = PROMPTS / "zh_summary" / "v2.md"
 TEXT = PATH.read_text(encoding="utf-8")
 BODY = parse_prompt_file(TEXT).body
 
@@ -34,8 +34,8 @@ BODY = parse_prompt_file(TEXT).body
 def test_real_prompt_loads_with_the_registered_hash_and_schema() -> None:
     prompt = load_prompt(PROMPTS, LlmTask.ZH_SUMMARY)
 
-    assert prompt_hashes.CURRENT_PROMPT_VERSIONS["zh_summary"] == 1
-    assert prompt.version == 1
+    assert prompt_hashes.CURRENT_PROMPT_VERSIONS["zh_summary"] == 2
+    assert prompt.version == 2
     assert prompt.schema_class is ZhSummaryOutput
     assert prompt.settings.effort == "low"
     assert prompt.settings.max_tokens == 1024
@@ -60,6 +60,8 @@ def test_body_covers_the_rules() -> None:
         "不推測",
         "不要逐句翻譯",
         "80 字以內",
+        "都算字數",
+        "最重要的一到兩項",
         "摘要未提及",
     ):
         assert required in BODY, required
