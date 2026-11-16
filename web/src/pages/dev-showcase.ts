@@ -20,6 +20,7 @@ export const COLOR_SWATCHES: readonly string[] = [
   "bg-hairline",
   "bg-border",
   "bg-popover-surface",
+  "bg-menu-item-hover",
   "bg-scrim",
   "bg-data-warm",
   "bg-data-white",
@@ -101,6 +102,7 @@ export const LINE_HEIGHT_SCALE: readonly string[] = [
   "leading-180",
   "leading-185",
   "leading-190",
+  "leading-normal",
 ];
 
 export const LETTER_SPACING_SCALE: readonly string[] = [

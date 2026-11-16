@@ -169,12 +169,12 @@ function expectedFont(fontFamily: string): { font: string; italic: boolean } {
 
 describe("DESIGN.md tokens equal the Tailwind theme", () => {
   it("reads the expected number of tokens from DESIGN.md", () => {
-    expect(Object.keys(colors)).toHaveLength(19);
+    expect(Object.keys(colors)).toHaveLength(20);
     expect(Object.keys(typography)).toHaveLength(21);
     expect(Object.keys(spacing)).toHaveLength(17);
     expect(Object.keys(rounded)).toHaveLength(2);
     expect(Object.keys(fontSizes)).toHaveLength(26);
-    expect(Object.keys(lineHeights)).toHaveLength(16);
+    expect(Object.keys(lineHeights)).toHaveLength(17);
     expect(Object.keys(letterSpacings)).toHaveLength(11);
     for (const [name, properties] of Object.entries(typography)) {
       expect(properties, name).toHaveProperty("fontFamily");
@@ -241,6 +241,11 @@ describe("DESIGN.md tokens equal the Tailwind theme", () => {
       expect(name).toBe(`s${Number.parseInt(value, 10)}`);
     }
     for (const [name, value] of Object.entries(lineHeights)) {
+      // 例外只有 normal（瀏覽器預設的行高，Kevin 2026-11-16 決定加進尺度）：名稱和值都是 normal。
+      if (name === "normal") {
+        expect(value).toBe("normal");
+        continue;
+      }
       expect(value, name).toMatch(/^\d(?:\.\d+)?$/);
       expect(name).toBe(String(Math.round(Number(value) * 100)));
     }

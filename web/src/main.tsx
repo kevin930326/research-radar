@@ -12,8 +12,9 @@ import { createRoot } from "react-dom/client";
 
 import { createAppRouter } from "./router";
 
-const router = createAppRouter();
+// 路由的登入檢查與畫面共用同一份資料快取。
 const queryClient = new QueryClient();
+const router = createAppRouter({ queryClient });
 
 const rootElement = document.getElementById("root");
 if (rootElement === null) {

@@ -7,15 +7,17 @@ import ai from "./zh-TW/ai.json";
 import caveat from "./zh-TW/caveat.json";
 import common from "./zh-TW/common.json";
 import errors from "./zh-TW/errors.json";
+import login from "./zh-TW/login.json";
+import nav from "./zh-TW/nav.json";
 import notice from "./zh-TW/notice.json";
 
 export const LANGUAGE = "zh-TW";
 
 export const resources = {
-  [LANGUAGE]: { common, notice, caveat, ai, errors },
+  [LANGUAGE]: { common, notice, caveat, ai, errors, login, nav },
 } as const;
 
-export const NAMESPACES = ["common", "notice", "caveat", "ai", "errors"] as const;
+export const NAMESPACES = ["common", "notice", "caveat", "ai", "errors", "login", "nav"] as const;
 
 void i18n.use(initReactI18next).init({
   lng: LANGUAGE,

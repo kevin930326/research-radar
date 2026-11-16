@@ -13,7 +13,8 @@ export interface Site {
 export const MISSING_PATH = "/no/such/page";
 
 export const SITES: Site[] = [
-  { name: "member", baseURL: MEMBER_URL, pages: ["/notice"] },
+  // /login 是登入頁（Story 3.5），不用登入；其他頁要登入（測試裡由 api-mock.ts 回「已登入」）。
+  { name: "member", baseURL: MEMBER_URL, pages: ["/notice", "/login"] },
   // 示範站首頁在 Epic 13、論文清單在 3.14 才有；目前沒有頁面，只檢查「找不到這一頁」。
   { name: "demo", baseURL: DEMO_URL, pages: [] },
 ];

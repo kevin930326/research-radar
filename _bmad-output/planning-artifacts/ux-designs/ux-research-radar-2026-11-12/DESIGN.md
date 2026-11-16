@@ -5,7 +5,7 @@ status: final
 sources:
   - docs/ux/homepage-visual-spec.md
   - _bmad-output/planning-artifacts/prds/prd-research-radar-2026-11-06/prd.md
-updated: 2026-11-13
+updated: 2026-11-16
 colors:
   background: '#050609'
   background-glow-inner: '#0B0F19'
@@ -19,6 +19,7 @@ colors:
   hairline: '#EFEAE029'
   border: '#EFEAE042'
   popover-surface: '#050609EB'
+  menu-item-hover: '#EFEAE00F'
   scrim: '#050609B8'
   data-warm: '#FFECD0'
   data-white: '#F4F5FA'
@@ -185,6 +186,7 @@ line-heights:
   '180': '1.8'
   '185': '1.85'
   '190': '1.9'
+  normal: normal
 letter-spacings:
   'n001': -0.01em
   '0': '0'
@@ -413,6 +415,7 @@ v1 的 Must 畫面裡只有示範站首頁是探索類。之後的 2D 鄰居圖�
 | `hairline` | `#EFEAE0` 不透明度 16% | 分隔線、表格列線、圖表座標軸 | 外框 | — |
 | `border` | `#EFEAE0` 不透明度 26% | 次要按鈕、輸入框、說明框、狀態標記的框 | — | — |
 | `popover-surface` | `#050609` 不透明度 92% | 說明框、選單的底 | — | — |
+| `menu-item-hover` | `#EFEAE0` 不透明度 6% | 選單項目滑過時的底色（Kevin 2026-11-16 決定） | 大面積底色 | — |
 | `scrim` | `#050609` 不透明度 72% | 彈出視窗後面壓暗頁面 | — | — |
 | `data-warm`、`data-white`、`data-cool` | `#FFECD0`、`#F4F5FA`、`#C4D6FF` | 資料。星系裡由內圈到外圈；圖表的主要線條用 `data-white` | 按鈕、文字 | 17.5、18.6、13.9 : 1 |
 | `data-dim` | `#7E8CAC` | 不完整或作為背景的資料：沒有摘要的星、圖表裡沒被選取的線 | — | 6.0 : 1 |
@@ -473,7 +476,7 @@ v1 的 Must 畫面裡只有示範站首頁是探索類。之後的 2D 鄰居圖�
 
 尺度（ADR-0038）：
 
-- 上表的每個代幣是「角色」：把字級、行高、字距、字重綁成一組並取名。尺度是另外三組可以自由搭配的值：`font-sizes`（字級，26 個，11–68px，名稱是 `s` 加 px 數，例如 `s15`）、`line-heights`（行高，16 個，名稱是行高乘 100，例如 `185` 是 1.85）、`letter-spacings`（字距，11 個，名稱是 em 值拿掉小數點，例如 `004` 是 0.04em；負值前面加 `n`，`n001` 是 -0.01em）。值只收設計稿（`docs/ux/reference/screens/`）用到的。
+- 上表的每個代幣是「角色」：把字級、行高、字距、字重綁成一組並取名。尺度是另外三組可以自由搭配的值：`font-sizes`（字級，26 個，11–68px，名稱是 `s` 加 px 數，例如 `s15`）、`line-heights`（行高，共 17 個：16 個的名稱是行高乘 100，例如 `185` 是 1.85；第 17 個是 `normal`，是瀏覽器預設的行高，給設計稿沒寫行高的文字用（Kevin 2026-11-16 決定））、`letter-spacings`（字距，11 個，名稱是 em 值拿掉小數點，例如 `004` 是 0.04em；負值前面加 `n`，`n001` 是 -0.01em）。值只收設計稿（`docs/ux/reference/screens/`）用到的。
 - 什麼時候用：設計稿某段文字的字級、行高、字距剛好等於某個角色，就用角色；否則用尺度組出來。尺度裡也沒有的值不能用，先停下來列為 Kevin 的決定。
 - 尺度沒有字重。需要角色的字重、但行高或字級和角色不同時，用角色再加尺度蓋掉不同的那一項。
 

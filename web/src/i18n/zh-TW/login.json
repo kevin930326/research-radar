@@ -1,0 +1,15 @@
+{
+  "login": {
+    "page": {
+      "subtitle": "實驗室成員用 Google 帳號登入"
+    },
+    "button": {
+      "idle": "用 Google 帳號登入",
+      "pending": "登入中…"
+    },
+    "note": {
+      "failed": "沒有登入成功，再試一次",
+      "denied": "這個帳號不在實驗室的名單裡。如果你是實驗室成員，請找管理者加入。"
+    }
+  }
+}
