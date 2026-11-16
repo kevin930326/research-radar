@@ -30,10 +30,33 @@ PRD_TOPIC_KEYS = frozenset(
         "it_project_management",
         "information_economics",
         "ai_data_analytics",
+        "it_adoption_use",
+        "security_privacy",
+        "it_strategy_digital_transformation",
+        "digital_platforms",
+        "social_media_communities",
+        "knowledge_collaboration",
+        "hci_user_experience",
+        "health_it",
+        "fintech_blockchain",
+        "software_development_open_source",
+        "it_workforce",
+        "it_and_society",
+        "innovation_technology_management",
     }
 )
 PRD_METHOD_KEYS = frozenset(
-    {"survey_sem", "interview_case_study", "experiment", "data_analysis_ml", "literature_review"}
+    {
+        "survey_sem",
+        "interview_case_study",
+        "experiment",
+        "secondary_data_econometrics",
+        "data_analysis_ml",
+        "analytical_modeling_simulation",
+        "design_science",
+        "conceptual_theory",
+        "literature_review",
+    }
 )
 
 
@@ -75,8 +98,8 @@ def _items(data: dict[str, object], name: str) -> list[dict[str, str]]:
 def test_real_taxonomy_is_the_prd_list() -> None:
     taxonomy = load_taxonomy({"RADAR_CONFIG_DIR": str(ROOT / "config")})
 
-    assert taxonomy.version == 1
-    assert taxonomy.version_label == "1"
+    assert taxonomy.version == 2
+    assert taxonomy.version_label == "2"
     assert set(taxonomy.keys(TaxonomyField.TOPIC)) == PRD_TOPIC_KEYS
     assert set(taxonomy.keys(TaxonomyField.METHOD)) == PRD_METHOD_KEYS
     assert taxonomy_registry_problems(taxonomy) == []
@@ -88,7 +111,7 @@ def test_version_is_the_first_key_of_the_real_file() -> None:
     first_key = document.value[0][0]
 
     assert first_key.value == "version"
-    assert REAL.splitlines()[0] == "version: 1"
+    assert REAL.splitlines()[0] == "version: 2"
 
 
 def test_real_file_documents_its_sources_and_the_bump_rule() -> None:
@@ -129,18 +152,18 @@ def test_content_changed_without_version_bump_is_refused(tmp_path: Path, change:
     problems = _problems(tmp_path, data)
 
     assert problems == [
-        f"{TAXONOMY_FILE}：version：版本 1 的內容和登記的雜湊不一樣"
+        f"{TAXONOMY_FILE}：version：版本 2 的內容和登記的雜湊不一樣"
         "（key、定義或欄位改了就要升版，並登記新版本的雜湊）"
     ]
 
 
 def test_bumped_version_without_registration_is_refused(tmp_path: Path) -> None:
-    data = _real_data() | {"version": 2}
+    data = _real_data() | {"version": 3}
 
     problems = _problems(tmp_path, data)
 
     assert problems == [
-        f"{TAXONOMY_FILE}：version：版本 2 沒有登記在 radar/domain/taxonomy_hashes.py"
+        f"{TAXONOMY_FILE}：version：版本 3 沒有登記在 radar/domain/taxonomy_hashes.py"
         "（升版要一起登記內容雜湊）"
     ]
 
@@ -148,16 +171,16 @@ def test_bumped_version_without_registration_is_refused(tmp_path: Path) -> None:
 def test_bumped_and_registered_version_loads(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    data = _real_data() | {"version": 2}
+    data = _real_data() | {"version": 3}
     _items(data, "topics")[0]["definition"] = "企業資源規劃系統。"
     changed = Taxonomy.model_validate(data)
     monkeypatch.setattr(
         taxonomy_hashes,
         "TAXONOMY_CONTENT_HASHES",
-        taxonomy_hashes.TAXONOMY_CONTENT_HASHES | {2: taxonomy_content_sha256(changed)},
+        taxonomy_hashes.TAXONOMY_CONTENT_HASHES | {3: taxonomy_content_sha256(changed)},
     )
 
-    assert _load(tmp_path, data).version == 2
+    assert _load(tmp_path, data).version == 3
 
 
 def test_only_names_and_order_changed_still_loads_with_the_same_hash(tmp_path: Path) -> None:

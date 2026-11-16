@@ -247,7 +247,7 @@ def test_llm_job_accepts_matching_taxonomy() -> None:
     assert _job().taxonomy is TAXONOMY
 
 
-@pytest.mark.parametrize("version", [None, "2", "v1"])
+@pytest.mark.parametrize("version", [None, "1", "v2"])
 def test_llm_job_refuses_taxonomy_version_that_does_not_match(version: str | None) -> None:
     with pytest.raises(ValueError, match="taxonomy_version"):
         _job(taxonomy_version=version)

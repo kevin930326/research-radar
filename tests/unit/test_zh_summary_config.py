@@ -31,7 +31,7 @@ def test_real_config_has_the_prd_defaults() -> None:
     rules = load_zh_summary_rules({"RADAR_CONFIG_DIR": str(ROOT / "config")})
 
     assert rules == ZhSummaryRules(
-        max_chars_per_field=80, translation_min_abstract_sentences=5, min_cjk_percent=50
+        max_chars_per_field=150, translation_min_abstract_sentences=5, min_cjk_percent=50
     )
 
 

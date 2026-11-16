@@ -1,8 +1,9 @@
-version: 1
+version: 2
 
 # 主題與方法的分類表（PRD FR-15、FR-36、ADR-0033）：分類（`classify`）只能選這裡的 `key`，
 # 清單外的標籤丟掉並計數；主題一個都不剩時存 `unclassified`（保留字，不能當 `key`）。
-# 清單照 PRD FR-15（沿用 brief 初版），只經 `radar/config.py` 的 `load_taxonomy` 讀。
+# 清單照 PRD FR-15；第 2 版（2026-11-16，ADR-0033 的更新）主題從 6 個加到 19 個、方法從 5 個加到 9 個。
+# 只經 `radar/config.py` 的 `load_taxonomy` 讀。
 #
 # - `key`：小寫英文加底線，寫進 `classification_label`，寫出去之後不改名。
 # - `name`：顯示名稱（畫面用）。只改 `name` 或項目順序不算改內容：分類表與 prompt 都不必升版
@@ -24,7 +25,7 @@ topics:
     definition: 供應鏈管理，以及資訊系統支援的物流、採購、庫存與供應商協同。
   - key: e_commerce
     name: 電子商務
-    definition: 電子商務、線上購物、數位平台與線上市集，以及網路上的消費者行為與行銷。
+    definition: 電子商務、線上購物與線上零售，以及網路上的消費者行為與行銷。
   - key: it_project_management
     name: IT 專案管理
     definition: 資訊系統開發與 IT 專案的規劃、執行、風險、外包與專案成敗。
@@ -34,6 +35,45 @@ topics:
   - key: ai_data_analytics
     name: AI／資料分析
     definition: 人工智慧、機器學習、大數據與商業分析的應用、採用與影響。
+  - key: it_adoption_use
+    name: 科技採用與使用
+    definition: 個人或組織對資訊科技的接受、採用、持續使用、抗拒與停用。
+  - key: security_privacy
+    name: 資訊安全與隱私
+    definition: 資訊安全事件與防護、資安政策的遵守、隱私顧慮與個人資料保護。
+  - key: it_strategy_digital_transformation
+    name: IT 策略與數位轉型
+    definition: IT 策略與治理、IT 與業務的配合、數位轉型，以及 IT 能力與組織績效的關係。
+  - key: digital_platforms
+    name: 數位平台與生態系
+    definition: 數位平台的經營與治理、多邊市場、共享經濟、應用程式商店與平台生態系。
+  - key: social_media_communities
+    name: 社群媒體與線上社群
+    definition: 社群媒體、線上社群、使用者產生的內容、線上評論與群眾外包。
+  - key: knowledge_collaboration
+    name: 知識管理與協作
+    definition: 知識管理與知識分享、遠距工作、虛擬團隊與協作科技。
+  - key: hci_user_experience
+    name: 人機互動與使用者體驗
+    definition: 人機互動、介面與系統設計對使用者的影響、使用者體驗，以及人與推薦系統或對話代理人的互動。
+  - key: health_it
+    name: 醫療資訊
+    definition: 醫療與健康照護的資訊科技，例如電子病歷、遠距醫療、健康應用程式。
+  - key: fintech_blockchain
+    name: 金融科技與區塊鏈
+    definition: 金融科技、行動支付、群眾募資、加密貨幣與區塊鏈的應用。
+  - key: software_development_open_source
+    name: 軟體開發與開源
+    definition: 軟體開發的方法與實務、敏捷開發、開源軟體與開源社群、軟體團隊的運作。
+  - key: it_workforce
+    name: IT 人力與工作
+    definition: 資訊人員的職涯與管理、科技帶來的壓力，以及資訊科技對工作與員工的影響。
+  - key: it_and_society
+    name: 資訊與社會
+    definition: 資訊科技的社會影響，例如數位落差、電子化政府、倫理、永續與發展中地區的資訊應用。
+  - key: innovation_technology_management
+    name: 創新與科技管理
+    definition: 創新管理、研發管理、新產品開發、技術移轉與科技創業。
 
 methods:
   - key: survey_sem
@@ -45,9 +85,21 @@ methods:
   - key: experiment
     name: 實驗
     definition: 實驗室實驗、線上實驗或田野實驗：操弄變數、比較不同組別。
+  - key: secondary_data_econometrics
+    name: 次級資料／計量
+    definition: 分析既有的資料庫、交易或行為紀錄等次級資料，用計量經濟或統計模型估計關係。
   - key: data_analysis_ml
-    name: 資料分析／機器學習
-    definition: 分析次級資料、交易或行為紀錄、網路資料，或用機器學習、計量模型建模。
+    name: 機器學習／文字探勘
+    definition: 用機器學習、文字探勘、網路分析等計算方法分析資料或做預測。
+  - key: analytical_modeling_simulation
+    name: 數學模型／模擬
+    definition: 賽局理論、經濟分析模型、數學規劃與最佳化、模擬。
+  - key: design_science
+    name: 設計科學
+    definition: 設計並評估一個系統、演算法、方法或其他人造物。
+  - key: conceptual_theory
+    name: 概念／理論
+    definition: 沒有實證資料的理論建構、概念性論文、評論與研究議程。
   - key: literature_review
     name: 文獻回顧
     definition: 文獻回顧、系統性回顧、後設分析或書目計量分析。

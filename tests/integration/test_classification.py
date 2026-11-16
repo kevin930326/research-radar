@@ -182,7 +182,7 @@ def test_good_reply_is_stored_as_active_zxx_with_labels(
     assert "- supply_chain：" in system_prompt(request)
     assert len(request.content) == 2
     assert execute(db, "SELECT task, prompt_version, taxonomy_version FROM derivation_run") == [
-        ("classify", 1, "1")
+        ("classify", 2, "2")
     ]
 
 
@@ -400,7 +400,7 @@ def test_taxonomy_bump_reruns_every_paper_and_supersedes_the_old_rows(
         assert again.result.outcome is GatewayOutcome.SKIPPED
     assert len(provider.requests) == 2
 
-    bumped = Taxonomy.model_validate(taxonomy.model_dump() | {"version": 2})
+    bumped = Taxonomy.model_validate(taxonomy.model_dump() | {"version": 3})
     provider.add(
         _reply({"topics": ["erp"], "methods": []}),
         _reply({"topics": ["supply_chain"], "methods": []}),
@@ -431,7 +431,7 @@ def test_taxonomy_bump_reruns_every_paper_and_supersedes_the_old_rows(
             " ORDER BY created_at",
             paper,
         )
-        assert [row[0] for row in runs] == ["1", "2"]
+        assert [row[0] for row in runs] == ["2", "3"]
         assert runs[0][1] != runs[1][1]
 
 
@@ -492,8 +492,8 @@ def test_classification_output_without_taxonomy_is_refused_and_nothing_is_writte
         db,
         "INSERT INTO derivation_run (paper_id, task, prompt_version, prompt_sha256, model,"
         " input_sha256, input_kind, params, code_version, call_mode, taxonomy_version, status)"
-        " VALUES (%s, 'classify', 1, %s, 'claude-haiku-5-5', %s, 'abstract', '{}', 'test',"
-        " 'interactive', '1', 'running') RETURNING id",
+        " VALUES (%s, 'classify', 2, %s, 'claude-haiku-5-5', %s, 'abstract', '{}', 'test',"
+        " 'interactive', '2', 'running') RETURNING id",
         paper_id,
         "a" * 64,
         "b" * 64,
@@ -515,9 +515,9 @@ def test_classification_output_without_taxonomy_is_refused_and_nothing_is_writte
         )
 
     with pytest.raises(ValueError, match="分類表"):
-        record(taxonomy_version="1")
+        record(taxonomy_version="2")
     with pytest.raises(ValueError, match="版本"):
-        record(taxonomy_version="2", taxonomy=taxonomy)
+        record(taxonomy_version="3", taxonomy=taxonomy)
     assert _headers(db) == []
     assert execute(db, "SELECT status FROM derivation_run") == [("running",)]
 

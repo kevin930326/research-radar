@@ -75,7 +75,7 @@ def test_every_broken_file_is_listed_together(config: Path, tmp_path: Path) -> N
 
 def test_taxonomy_and_context_values_hash_registry_is_checked(config: Path) -> None:
     # 升了版卻沒登記雜湊。
-    _replace(config / "taxonomy.yaml", "version: 1\n", "version: 99\n")
+    _replace(config / "taxonomy.yaml", "version: 2\n", "version: 99\n")
     _replace(config / "context_values.yaml", "version: 1\n", "version: 99\n")
 
     with pytest.raises(ConfigError) as caught:
