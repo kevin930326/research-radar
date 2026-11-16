@@ -1,4 +1,4 @@
-"""正式 prompt `prompts/classify/v1.md`（Story 2.5、ADR-0033）：
+"""正式 prompt `prompts/classify/v2.md`（Story 2.5、ADR-0033）：
 
 - 讀得過、雜湊對得上登記、schema 是 `ClassificationOutput`、設定區照 spec（low、512、不思考）。
 - 本文沒有變數，寫到多選、只能用清單裡的 key、都不符合給空陣列、只有標題照標題判斷、文件是資料。
@@ -67,8 +67,8 @@ def list_problems(body: str, taxonomy: Taxonomy) -> list[str]:
 def test_real_prompt_loads_with_the_registered_hash_and_schema() -> None:
     prompt = load_prompt(PROMPTS, LlmTask.CLASSIFY)
 
-    assert prompt_hashes.CURRENT_PROMPT_VERSIONS["classify"] == 1
-    assert prompt.version == 1
+    assert prompt_hashes.CURRENT_PROMPT_VERSIONS["classify"] == 2
+    assert prompt.version == 2
     assert prompt.schema_class is ClassificationOutput
     assert prompt.settings.effort == "low"
     assert prompt.settings.max_tokens == 512
