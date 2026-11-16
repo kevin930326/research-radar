@@ -81,7 +81,13 @@ SWEEP = JobSpec("sweep", Queue.MAINTENANCE, schedule="sweep")
 WEEKLY_UPDATE = JobSpec("weekly_update", Queue.INGEST, schedule="weekly-update")
 RUN_WEEKLY_UPDATE = JobSpec("run_weekly_update", Queue.INGEST, lock="weekly_update")
 
-JOBS: tuple[JobSpec, ...] = (SWEEP, WEEKLY_UPDATE, RUN_WEEKLY_UPDATE)
+# 向量化（Story 2.8、AD-12、ADR-0040）：每週更新發佈快照、commit 之後排入（沒有參數、沒有排程）。
+# 工作本身照 `plan_for` 找出還沒有向量或輸入變了的論文，一批一批做到完或到今天的額度比例為止；
+# 帶 `embed_papers` 這把鎖，同時只跑一個（和 `radar embeddings backfill` 之間靠 `derivation_run`
+# 的 running 唯一索引避免重送同一篇）。
+EMBED_PAPERS = JobSpec("embed_papers", Queue.AI, lock="embed_papers")
+
+JOBS: tuple[JobSpec, ...] = (SWEEP, WEEKLY_UPDATE, RUN_WEEKLY_UPDATE, EMBED_PAPERS)
 
 # 排入一個工作：（工作, 參數）→ True＝新排入；False＝同一件事已經在排隊，沒有再排一筆。
 # 參數只有 ID（名稱 `*_id`、值是 UUID）。

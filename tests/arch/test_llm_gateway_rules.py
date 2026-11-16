@@ -1,7 +1,8 @@
 """LLM 閘門的架構規則（AD-8、ADR-0009、ADR-0030）：
 
 - 模型只經閘門呼叫：`radar/` 裡 `.complete(...)` 的呼叫只准在 `radar/services/llm_gateway.py`。
-- 工作代碼固定六個（寫進 `derivation_run.task` 之後不改名），資料庫的 CHECK 列的是同一組。
+- 工作代碼固定六個（寫進 `derivation_run.task` 之後不改名），資料庫的 CHECK 列的是同一組，
+  外加不經閘門的向量化 `embed`（AD-12、Story 2.8：向量也記來歷，但不是 LLM 工作）。
 - `hashlib` 只准在算指紋與原始資料雜湊的模組 import（新的雜湊要集中到 `domain/fingerprints.py`）。
 - `input_sha256`、`prompt_sha256`、`schema_sha256`、`run_lock_key` 只在
   `domain/fingerprints.py` 定義。
@@ -15,6 +16,7 @@ from collections.abc import Mapping
 from pathlib import Path
 
 from radar.domain.ai_outputs import LlmTask
+from radar.domain.embeddings import EMBED_TASK
 from tests.database import OWNER_ROLE, TestDatabase
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -128,4 +130,5 @@ def test_database_task_check_lists_same_codes(migrated_database: TestDatabase) -
             if row[0].startswith("CHECK ((task = ANY")
         ]
     assert len(definitions) == 1, definitions
-    assert set(re.findall(r"'([a-z_]+)'", definitions[0])) == TASK_CODES
+    # Story 2.8：向量化（embed）也寫 derivation_run（AD-12），但不經閘門、不是 LlmTask。
+    assert set(re.findall(r"'([a-z_]+)'", definitions[0])) == TASK_CODES | {EMBED_TASK}

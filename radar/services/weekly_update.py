@@ -39,6 +39,8 @@ AD-14、AD-19、AD-25、ADR-0004、ADR-0014、ADR-0025）。
 - `apply_weekly_update`：14 本都抓完後，一個交易先把 `weekly_run` 從 `fetching` 改成
   `published`（搶不到就不做），建快照、逐批把暫存列寫進論文、指定 `first_snapshot_id`、發佈快照、
   刪掉這一批暫存列；commit 之後才送 `weekly-update` 心跳。中途失敗整個交易退回。
+  有傳 `enqueue` 時，心跳之後排入向量化（`embed_papers`，Story 2.8）：新的、標題或摘要變了的
+  論文由那個工作照 `plan_for` 與輸入指紋挑出來做；排入失敗只記警告，不影響已發佈的快照。
 - `advance_weekly_update`（worker 的 `run_weekly_update` 工作用）：先照
   `open_and_run_weekly_update` 抓，抓完了才讀追蹤範圍、接著套用。
 
@@ -62,7 +64,7 @@ import structlog
 from radar.domain.collection import collection_skip_reason
 from radar.domain.domain_config import ExclusionRulesConfig, Journal, JournalsConfig, OpenAlexQuota
 from radar.domain.exclusion import exclusion_reason
-from radar.domain.jobs import RUN_WEEKLY_UPDATE, WEEKLY_UPDATE, Enqueue
+from radar.domain.jobs import EMBED_PAPERS, RUN_WEEKLY_UPDATE, WEEKLY_UPDATE, Enqueue
 from radar.domain.papers import (
     KeywordSource,
     PaperOrigin,
@@ -407,6 +409,7 @@ def advance_weekly_update(
     parse: Parse = parse_openalex_work,
     clock: Callable[[], datetime] = _utc_now,
     max_failures: int = DEFAULT_MAX_FAILURES,
+    enqueue: Enqueue | None = None,
 ) -> WeeklyAdvanceResult:
     """推進這一次每週更新：先照 `open_and_run_weekly_update` 抓；全部抓完了才 `load_scope()`
     讀追蹤範圍，再 `apply_weekly_update` 套用。
@@ -415,7 +418,7 @@ def advance_weekly_update(
     `apply` 是 None，不讀範圍。
     `load_scope` 丟錯時：記錯誤日誌「每週更新準備套用失敗」（只帶錯誤類別）、`_record_failure`
     更新 `updated_at` 並記一次失敗，再原樣往上丟（sweep 照 2 小時的時限補排）。`max_failures`
-    一路傳給抓取段與套用段。
+    一路傳給抓取段與套用段，`enqueue` 傳給套用段（發佈後排入向量化）。
 
     Raises:
         PermissionDeniedError: `actor` 不是系統工作（不碰資料庫、不呼叫任何傳入的函式）。
@@ -453,6 +456,7 @@ def advance_weekly_update(
         scope=scope,
         send_heartbeat=send_heartbeat,
         max_failures=max_failures,
+        enqueue=enqueue,
     )
     return WeeklyAdvanceResult(fetch=fetch, apply=applied)
 
@@ -466,6 +470,7 @@ def apply_weekly_update(
     send_heartbeat: SendHeartbeat,
     batch_size: int = 500,
     max_failures: int = DEFAULT_MAX_FAILURES,
+    enqueue: Enqueue | None = None,
 ) -> WeeklyApplyResult:
     """套用這一次每週更新：一個交易把暫存列寫進論文並發佈快照，commit 之後才送心跳。
 
@@ -487,7 +492,9 @@ def apply_weekly_update(
     5. `update_snapshot_published`（`as_of`＝發佈的時間）。
     6. `delete_staged_papers`：刪掉這一批暫存列。
 
-    commit 之後送 `weekly-update` 心跳一次、記 info（篇數、快照編號、秒數）。任何例外：記錯誤日誌
+    commit 之後送 `weekly-update` 心跳一次、記 info（篇數、快照編號、秒數）；有傳 `enqueue` 時
+    再排入 `embed_papers`（向量化新的與變了的論文，AD-30；排入失敗只記警告、不丟錯，下一次
+    發佈或 `radar embeddings backfill` 會補上）。略過、被 reparse 擋下時不排。任何例外：記錯誤日誌
     （只帶 `weekly_run_id` 與錯誤類別）、`_record_failure` 更新 `updated_at` 並記一次失敗，再原樣
     往上丟；交易整個退回，快照、論文、`weekly_run` 狀態與暫存列都是套用前的樣子，重跑一次就好。
     累計到 `max_failures` 時另一個交易把那一筆改成 `failed`、暫存列刪掉，之後不再套用；這個收尾
@@ -573,6 +580,8 @@ def apply_weekly_update(
 
     # commit 之後才送：送的時候沒有開著的交易，送不出去也不影響已發佈的快照。
     send_heartbeat(WEEKLY_UPDATE.check)
+    if enqueue is not None:
+        _enqueue_embeddings(enqueue, weekly_run_id)
     result = WeeklyApplyResult(
         weekly_run_id=weekly_run_id,
         snapshot_id=tally.snapshot_id,
@@ -604,6 +613,20 @@ def apply_weekly_update(
         seconds=round(time.monotonic() - started, 1),
     )
     return result
+
+
+def _enqueue_embeddings(enqueue: Enqueue, weekly_run_id: uuid.UUID) -> None:
+    """發佈之後排入向量化（Story 2.8）。排不進去只記警告：快照已經發佈，向量下次再補。"""
+    try:
+        queued = enqueue(EMBED_PAPERS, {})
+    except Exception as exc:
+        log.warning(
+            "每週更新發佈後排入向量化失敗",
+            weekly_run_id=str(weekly_run_id),
+            error=type(exc).__name__,
+        )
+        return
+    log.info("每週更新發佈後已排入向量化", weekly_run_id=str(weekly_run_id), queued=queued)
 
 
 @dataclass

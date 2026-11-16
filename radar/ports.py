@@ -65,8 +65,17 @@ class LlmProvider(Protocol):
 class EmbeddingProvider(Protocol):
     """向量化（AD-9）。只收 `CloudSafeText`；`embed_documents` 與 `embed_query` 分開，不得互換。
 
-    真實的實作在 Story 2.8（Cloudflare Workers AI）；替身是
-    `radar.adapters.fake.FakeEmbeddingProvider`。
+    真實的實作是 `radar.adapters.workers_ai.WorkersAiEmbeddingProvider`（Cloudflare Workers AI，
+    Story 2.8、ADR-0040）；替身是 `radar.adapters.fake.FakeEmbeddingProvider`。
+    一次最多 `radar.domain.embeddings.MAX_BATCH_SIZE`（32）段；切批是 services 的事。
+    失敗丟 `radar.domain.embeddings.EmbeddingError` 的子類別（暫時性、設定錯、請求不合法、
+    回應不對），訊息不含金鑰、帳號與網址。
+    真實的實作在每次 HTTP 嘗試（含內部重試）前後呼叫目前的
+    `radar.domain.embeddings.current_attempt_hooks()`（服務用 `report_attempts_to` 交給它），
+    讓服務每次嘗試前占住額度、嘗試後記用量；`before()` 丟的例外（`EmbeddingQuotaReachedError`、
+    等額度鎖逾時的 `LockWaitTimeoutError`）原樣丟出、不送、不再重試；嘗試前就停下（總時限已到）時
+    呼叫 `after(sent=False)`。不回報的實作（替身），服務把整次呼叫當成一次嘗試記帳。
+    `embed_documents` 回的向量裡轉成 halfvec 後全是 0 的那幾筆照樣回傳，由服務逐篇判斷。
     """
 
     @property
@@ -79,6 +88,8 @@ class EmbeddingProvider(Protocol):
 
         Raises:
             NotCloudSafeError: 傳的是 `str`，或有一段不是 `CloudSafeText`；在送出任何請求前丟出。
+            ValueError: 超過 32 段；在送出任何請求前丟出。
+            EmbeddingError: 呼叫或回應失敗（子類別見類別說明）。
         """
         ...
 
@@ -87,6 +98,7 @@ class EmbeddingProvider(Protocol):
 
         Raises:
             NotCloudSafeError: 不是 `CloudSafeText`；在送出任何請求前丟出。
+            EmbeddingError: 呼叫或回應失敗（子類別見類別說明）。
         """
         ...
 

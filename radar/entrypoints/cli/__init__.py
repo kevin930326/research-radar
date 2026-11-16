@@ -13,6 +13,7 @@ from radar.config import (
     database_pool_size,
     load_budget_config,
     load_domain_config,
+    load_embedding_config,
     load_import_baseline,
     load_migration_settings,
     load_settings,
@@ -21,19 +22,32 @@ from radar.domain.budget import render_cost_report
 from radar.domain.coverage import render_coverage_report
 from radar.domain.cube import UnknownJournalError
 from radar.domain.database_requirements import DatabaseRequirementsError
+from radar.domain.embeddings import (
+    EmbeddingConfigurationError,
+    render_backfill_report,
+    render_backlog_estimate,
+)
 from radar.domain.import_report import render_import_report
 from radar.domain.jobs import UnknownJobError, find_scheduled_job
 from radar.domain.viewer import SystemViewer
 from radar.entrypoints.bootstrap import (
     MigrationsNotFoundError,
     build_database,
+    build_embedding_provider,
     build_job_enqueuer,
     build_migration_runner,
     build_object_store,
+    code_version,
 )
 from radar.entrypoints.logging_config import configure_logging
 from radar.services.budget import get_budget_status
 from radar.services.coverage import get_coverage
+from radar.services.embeddings import (
+    EmbeddingModelMismatchError,
+    check_embedding_model,
+    embed_papers,
+    estimate_embedding_backlog,
+)
 from radar.services.import_report import get_import_report
 from radar.services.jobs import enqueue_scheduled_job
 from radar.services.migrations import migrate_database
@@ -55,6 +69,8 @@ log = structlog.get_logger(__name__)
 # 資源指令：`radar weekly-run <動詞>`（Conventions「CLI」：`radar <名詞> <動詞>`）。
 weekly_run_app = typer.Typer(help="每週更新（weekly_run）。", no_args_is_help=True)
 app.add_typer(weekly_run_app, name="weekly-run")
+embeddings_app = typer.Typer(help="向量（embedding）。", no_args_is_help=True)
+app.add_typer(embeddings_app, name="embeddings")
 
 
 @app.callback()
@@ -297,6 +313,91 @@ def costs() -> None:
         _fail(f"讀取費用失敗（{type(exc).__name__}）；細節見日誌", [])
     for line in render_cost_report(status):
         typer.echo(line)
+
+
+@embeddings_app.command("backfill")
+def embeddings_backfill(
+    limit: Annotated[
+        int | None,
+        typer.Option("--limit", min=1, help="這次最多送幾篇；不給就做到全部做完或今天的額度比例"),
+    ] = None,
+    estimate: Annotated[
+        bool,
+        typer.Option("--estimate", help="只用本地資料估還要幾篇、幾個 token、幾天；不送任何請求"),
+    ] = False,
+) -> None:
+    """把還沒有向量（或標題、摘要變了）的論文向量化（Cloudflare Workers AI）。
+
+    照 config/embeddings.yaml 的模型、每批篇數與每日額度；到今天的額度比例就停下（不算失敗），
+    再跑一次會從沒做完的接著做，已經做過、輸入沒變的不重送。印出這次做了幾篇、估計用了多少
+    token，並照這次的平均推算全庫還要多少 token、幾天。
+
+    --estimate 只讀資料庫，不需要 Cloudflare 的 token。設定錯誤、讀不到資料庫、token 或帳號
+    不對、這次有一批失敗或有任何一篇標成失敗（其他論文照做）：退出碼 1；錯誤只印類別或狀態碼，
+    不印 token、帳號或連線字串。
+    """
+    configure_logging()
+    if estimate and limit is not None:
+        _fail("--estimate 只估算、不送請求，不能和 --limit 一起用", [])
+    try:
+        settings = load_settings()
+        config = load_embedding_config()
+    except ConfigError as exc:
+        log.error("設定錯誤，無法向量化", problems=exc.problems)
+        _fail("設定錯誤，沒有向量化：", exc.problems)
+    try:
+        database = build_database(settings, pool_size=database_pool_size(settings, "cli"))
+        if estimate:
+            check_embedding_model(database, config)
+            backlog = estimate_embedding_backlog(
+                SystemViewer(), database, config, settings.cloud_policy
+            )
+            for line in render_backlog_estimate(backlog, config.quota, config.model_id):
+                typer.echo(line)
+            return
+        with build_embedding_provider(settings, config) as provider:
+            result = embed_papers(
+                SystemViewer(),
+                database,
+                provider,
+                config,
+                settings.cloud_policy,
+                code_version=code_version(),
+                clock=_utc_now,
+                limit=limit,
+            )
+    except ConfigError as exc:
+        log.error("設定錯誤，無法向量化", problems=exc.problems)
+        _fail("設定錯誤，沒有向量化：", exc.problems)
+    except EmbeddingModelMismatchError as exc:
+        log.error("向量模型的設定對不上", reason=str(exc))
+        _fail("向量模型的設定對不上，沒有送任何請求：", [str(exc)])
+    except EmbeddingConfigurationError as exc:
+        log.error("Cloudflare 拒絕請求", http_status=exc.http_status)
+        _fail(
+            f"Cloudflare 拒絕請求（HTTP {exc.http_status}），這一批沒有寫入：",
+            [
+                "確認 RADAR_CLOUDFLARE_ACCOUNT_ID 是 Cloudflare 的 account id",
+                "確認 RADAR_CLOUDFLARE_API_TOKEN 有 Workers AI 的 Read 與 Edit 權限、沒有過期",
+            ],
+        )
+    except Exception as exc:
+        # 例外訊息可能含主機與帳號，只記類別名稱。
+        log.error("向量化失敗", error_type=type(exc).__name__)
+        _fail(f"向量化失敗（{type(exc).__name__}）；細節見日誌", [])
+    try:
+        backlog = estimate_embedding_backlog(
+            SystemViewer(), database, config, settings.cloud_policy
+        )
+    except Exception as exc:
+        # 向量已經寫進去了；只是推算剩下的失敗，照樣印出這次做了多少。
+        log.error("推算剩下的篇數失敗", error_type=type(exc).__name__)
+        typer.echo(f"這次寫入向量：{result.embedded:,} 篇（送出 {result.requests:,} 次請求）")
+        _fail(f"推算剩下的篇數失敗（{type(exc).__name__}）；細節見日誌", [])
+    for line in render_backfill_report(result, backlog, config.quota, config.model_id):
+        typer.echo(line)
+    if result.has_failures:
+        raise typer.Exit(1)
 
 
 def _fail(headline: str, problems: list[str]) -> NoReturn:

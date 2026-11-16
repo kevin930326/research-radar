@@ -18,6 +18,7 @@ from radar.domain.domain_config import (
     KeywordSourcesConfig,
     OpenAlexConfig,
 )
+from radar.domain.embeddings import EmbeddingConfig
 from radar.domain.import_report import ImportBaseline
 from radar.domain.jobs import scheduled_jobs
 from radar.domain.pricing import ModelsConfig
@@ -172,6 +173,9 @@ ZH_SUMMARY_FILE = "zh_summary.yaml"
 TAXONOMY_FILE = "taxonomy.yaml"
 # 研究情境的值清單（PRD FR-3、ADR-0034）：跑 `extract_model` 的工作讀（`load_context_values`）。
 CONTEXT_VALUES_FILE = "context_values.yaml"
+# 向量化（PRD FR-5、FR-9、ADR-0040）：向量化的工作與 `radar embeddings` 讀
+# （`load_embedding_config`）。
+EMBEDDINGS_FILE = "embeddings.yaml"
 
 
 def config_dir(environ: Mapping[str, str] | None = None) -> Path:
@@ -323,6 +327,22 @@ def load_context_values(environ: Mapping[str, str] | None = None) -> ContextValu
     if problems or values is None:
         raise ConfigError(problems)
     return values
+
+
+def load_embedding_config(environ: Mapping[str, str] | None = None) -> EmbeddingConfig:
+    """讀 `RADAR_CONFIG_DIR` 下的 `embeddings.yaml`（模型、維度、端點、每日額度）並驗證。
+
+    讀法與錯誤格式和 `load_domain_config` 相同（「檔名：欄位路徑：原因」）。Cloudflare 的 account id
+    與 token 不在這份檔案裡（`Settings` 的環境變數）。
+
+    Raises:
+        ConfigError: 缺檔、不是合法 YAML、鍵寫兩次或內容不對。
+    """
+    problems: list[str] = []
+    config = _load_yaml_model(config_dir(environ), EMBEDDINGS_FILE, EmbeddingConfig, problems)
+    if problems or config is None:
+        raise ConfigError(problems)
+    return config
 
 
 def _load_yaml_model[T: BaseModel](

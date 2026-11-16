@@ -5,6 +5,10 @@ ADR-0030）。
   失敗、設定錯、sweep 判定逾時）。（對象, 工作, prompt 版本, 模型, input_sha256）有只算
   `running` 而且不是評估的部分唯一索引：同一份輸入同時只有一個在跑。已經存下輸出卻沒寫成結果的
   run 標 `failed`（`llm_result_pending`），下一次同一組鍵把它改回 `running` 接續（ADR-0030）。
+- 向量化（task＝embed，Story 2.8、ADR-0040）也記在 `derivation_run`：沒有 prompt（兩個 prompt 欄
+  是 NULL）、沒有 `llm_call`；同一篇、同一個模型、同一份輸入同時只有一個 running
+  （`uq_derivation_run_embed_running`）。依鍵查的讀取函式都帶 LLM 的工作代碼，讀不到 embed 的列；
+  依 id 讀的 `find_derivation_run` 只給閘門讀自己建的 run。
 - `llm_call`：一次呼叫的 tokens、費用（`numeric(12,6)`，美元）與存下的輸出；`run_id` 唯一。應用
   程式角色對它沒有 UPDATE、DELETE（遷移 0010 收回）：帳只能新增。
 - 兩張表都由 services 用自己的短交易寫、立刻 commit（Conventions 的例外：主交易回滾時帳照記）。
@@ -48,6 +52,7 @@ from radar.domain.ai_outputs import (
     RunStatus,
     SavedLlmOutput,
 )
+from radar.domain.embeddings import EMBED_TASK, NewEmbedRun
 from radar.domain.errors import ErrorCode
 from radar.domain.viewer import SystemViewer, Viewer
 from radar.repo.models import Base
@@ -64,8 +69,9 @@ derivation_run_table = Table(
     Column("id", Uuid, primary_key=True, server_default=text("uuidv7()")),
     Column("paper_id", Uuid, ForeignKey("paper.id"), nullable=False),
     Column("task", Text, nullable=False),
-    Column("prompt_version", Integer, nullable=False),
-    Column("prompt_sha256", Text, nullable=False),
+    # 向量化（task＝embed）沒有 prompt，這兩欄是 NULL；其他工作一定有（遷移 0015、ADR-0040）。
+    Column("prompt_version", Integer),
+    Column("prompt_sha256", Text),
     Column("model", Text, nullable=False),
     Column("input_sha256", Text, nullable=False),
     Column("input_kind", Text, nullable=False),
@@ -90,6 +96,16 @@ derivation_run_table = Table(
         unique=True,
         postgresql_where=text("status = 'running' AND eval_run_id IS NULL"),
     ),
+    # 向量化：同一篇論文、同一個模型、同一份輸入同時只有一個 running（prompt 欄是 NULL，上面那個
+    # 索引擋不到；遷移 0015、ADR-0040）。
+    Index(
+        "uq_derivation_run_embed_running",
+        "paper_id",
+        "model",
+        "input_sha256",
+        unique=True,
+        postgresql_where=text("task = 'embed' AND status = 'running'"),
+    ),
     # sweep 找逾時的互動 running（看 `updated_at`：接續時會重設）。
     Index(
         "ix_derivation_run_running_updated_at",
@@ -98,8 +114,15 @@ derivation_run_table = Table(
     ),
     CheckConstraint(
         "task IN ('zh_summary', 'classify', 'extract_model', 'merge_judge', 'qa_answer',"
-        " 'eval_judge')",
+        " 'eval_judge', 'embed')",
         name="task",
+    ),
+    CheckConstraint(
+        "(task = 'embed') = (prompt_version IS NULL)", name="prompt_version_iff_not_embed"
+    ),
+    CheckConstraint(
+        "(prompt_version IS NULL) = (prompt_sha256 IS NULL)",
+        name="prompt_sha256_iff_prompt_version",
     ),
     CheckConstraint("prompt_version >= 1", name="prompt_version_positive"),
     CheckConstraint(f"prompt_sha256 ~ {_SHA256}", name="prompt_sha256_format"),
@@ -399,6 +422,39 @@ def create_derivation_run(connection: Connection, run: NewDerivationRun) -> uuid
             "code_version": run.code_version,
             "call_mode": CallMode(run.call_mode).value,
             "eval_run_id": run.eval_run_id,
+        },
+    ).scalar_one_or_none()
+    return None if value is None else uuid.UUID(str(value))
+
+
+def create_embed_derivation_run(connection: Connection, run: NewEmbedRun) -> uuid.UUID | None:
+    """新增一筆向量化（task＝embed）的 `running` `derivation_run`，回它的 id
+    （Story 2.8、ADR-0040）。
+
+    沒有 prompt（`prompt_version`、`prompt_sha256` 是 NULL）；呼叫方式記互動，卡住時由 sweep 收。
+    同一篇論文、同一個模型、同一份輸入已經有 `running`（`uq_derivation_run_embed_running`）時
+    什麼都不寫、回 None。在呼叫端開好的交易裡做，不 commit。
+    """
+    value = connection.execute(
+        text(
+            "INSERT INTO derivation_run"
+            " (paper_id, task, prompt_version, prompt_sha256, model, input_sha256, input_kind,"
+            " params, code_version, call_mode, status)"
+            " VALUES (:paper_id, :task, NULL, NULL, :model, :input_sha256, :input_kind,"
+            " CAST(:params AS jsonb), :code_version, :call_mode, 'running')"
+            " ON CONFLICT (paper_id, model, input_sha256)"
+            " WHERE task = 'embed' AND status = 'running' DO NOTHING"
+            " RETURNING id"
+        ),
+        {
+            "paper_id": run.paper_id,
+            "task": EMBED_TASK,
+            "model": run.model,
+            "input_sha256": run.input_sha256,
+            "input_kind": InputKind(run.input_kind).value,
+            "params": json.dumps(dict(run.params), sort_keys=True, ensure_ascii=False),
+            "code_version": run.code_version,
+            "call_mode": CallMode.INTERACTIVE.value,
         },
     ).scalar_one_or_none()
     return None if value is None else uuid.UUID(str(value))

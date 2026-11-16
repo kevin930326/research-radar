@@ -2,9 +2,19 @@
 
 值是小寫加底線的字串，會寫進資料庫（例如 2.2 的 `derivation_run`、`llm_call`）與日誌，
 寫出去之後不改名；新增代碼時加在這裡。
+
+另有 `LockWaitTimeoutError`：`repo/db.Database.transaction_with_lock_timeout` 等鎖逾時丟的例外
+（放在 domain，services 不必 import 資料庫套件就能攔）。
 """
 
 from enum import StrEnum, unique
+
+
+class LockWaitTimeoutError(Exception):
+    """交易裡等鎖超過 `lock_timeout`；丟出時交易已經退回。訊息固定，不帶連線資訊。"""
+
+    def __init__(self) -> None:
+        super().__init__("等鎖超過時限，這個交易已退回")
 
 
 @unique
@@ -77,3 +87,20 @@ class ErrorCode(StrEnum):
     RESEARCH_MODEL_UNSUPPORTED_CONTENT = "research_model_unsupported_content"
     # 同一句、同一條關係給了互相衝突的值（證據類型、支持與否或統計數字不同）
     RESEARCH_MODEL_CONFLICTING_HYPOTHESIS = "research_model_conflicting_hypothesis"
+
+    # 向量化（`radar/services/embeddings.py`、`radar/adapters/workers_ai/`，Story 2.8、ADR-0040）：
+    # 寫進 `derivation_run.failure_reason`（task＝embed）；向量化沒有「拒收」，都是 failed
+    EMBED_TRANSIENT = "embed_transient"  # 重試用完仍是逾時、限流、服務端錯誤或連線錯誤
+    EMBED_CONFIGURATION = "embed_configuration"  # 401、403、404：token、帳號或模型設定不對
+    EMBED_REQUEST_INVALID = "embed_request_invalid"  # 400、413、422 等：請求本身不合法
+    # 回應的信封、筆數、維度或數字不對（例如不是 1,024 維、有 NaN）：整批不寫；只有某一篇的向量轉成
+    # halfvec 後全是 0 時只有那一篇不寫
+    EMBED_RESPONSE_INVALID = "embed_response_invalid"
+    EMBED_INPUT_CHANGED = "embed_input_changed"  # 寫入前核對：送出後標題或摘要又變了，這篇不寫
+    EMBED_FAILED = "embed_failed"  # 向量化服務自己出錯（例如寫入的交易失敗），run 改 failed
+    # 重試途中今天的額度放不下下一次嘗試：這一批不寫、不算失敗，下一次續跑
+    EMBED_QUOTA_REACHED = "embed_quota_reached"
+    # 寫入前等論文那一列的鎖超過 lock_timeout：這篇不寫，下一次重算
+    EMBED_LOCK_TIMEOUT = "embed_lock_timeout"
+    # 占用額度時等額度鎖超過 lock_timeout：這一批不送（已取得資格的 run 改 failed），其他論文照做
+    EMBED_QUOTA_LOCK_TIMEOUT = "embed_quota_lock_timeout"

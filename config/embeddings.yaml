@@ -1,0 +1,78 @@
+# 向量化的設定（PRD FR-5、FR-9，AD-12、AD-29，ADR-0005、ADR-0040；Story 2.8）。
+# 向量化的工作（embed_papers）與 `radar embeddings backfill` 讀這份（radar/config.py 驗證）。
+# Cloudflare 的 account id 與 token 不放這裡：用環境變數 RADAR_CLOUDFLARE_ACCOUNT_ID、
+# RADAR_CLOUDFLARE_API_TOKEN。
+#
+# 數字的來源（2026-11-15 讀 Cloudflare 官方文件，docs/runs/epic-2b/api-reference.md 第二節）：
+# - 模型頁 https://developers.cloudflare.com/workers-ai/models/qwen3-embedding-0.6b/
+# - 價格頁 https://developers.cloudflare.com/workers-ai/platform/pricing/ （Last updated Nov 12, 2026）
+
+# 目前使用的模型（AD-12）。要已經登記在 embedding_model（遷移 0015 登記了這一個）；
+# 換模型要另寫遷移登記新模型並建它的 HNSW 索引，舊模型的向量留著，新舊並存。
+model_id: "@cf/qwen/qwen3-embedding-0.6b"
+# 向量維度：官方文件沒寫，照 ADR-0005 用 1,024；每筆回應的長度不是這個數字就整批不寫。
+# 要和 embedding_model 登記的維度一樣（開始前核對）。
+dimensions: 1024
+# 一次請求送幾篇。輸入 schema 規定陣列最多 32 筆。
+batch_size: 32
+# 查詢（embed_query）帶的指示文字。null＝不帶，用模型的預設值
+# "Given a web search query, retrieve relevant passages that answer the query"。
+# 文件（論文）一律不帶指示（ADR-0005）。
+query_instruction: null
+
+api:
+  # 只寫到 /client/v4；account id 與模型路徑由程式接上。
+  base_url: https://api.cloudflare.com/client/v4
+  # 單一次 HTTP 嘗試各階段（連線、送出、每次讀取）的逾時秒數。
+  timeout_seconds: 60
+  # 一次請求含所有重試與等待的總時限（秒）：到了就不再開始新的嘗試、不再等，正在讀的回應也中斷。
+  # 對方正常回標頭的前提下，一次請求最久 = total_timeout_seconds ＋ 2 × timeout_seconds
+  # （480＋120＝600 秒）；對方慢慢吐標頭時會更久，由 sweep 與額度占用過期兜底（ADR-0040 取捨）。
+  # 一筆向量化的 run 最久 = 上面 ＋ (2 × batch_size ＋ 2) × lock_timeout_seconds（600＋66 × 2＝732 秒），
+  # 要小於 RADAR_LLM_RUN_STALE_AFTER（預設 900 秒），否則還在等回應的 run 會被 sweep 誤判逾時；
+  # 不符時建 adapter（worker 跑向量化工作、radar embeddings backfill 開始前）就丟設定錯誤。
+  total_timeout_seconds: 480
+  # 408、429、5xx、連線錯誤與逾時的重試（adapter 裡的 stamina 指數退避）。
+  retry:
+    # 最多嘗試幾次（含第一次）。
+    attempts: 5
+    # 退避從幾秒開始、每次加倍、最多幾秒，再加 0～jitter 秒的隨機抖動。
+    wait_initial_seconds: 1
+    wait_max_seconds: 30
+    wait_jitter_seconds: 1
+    # 對方回 Retry-After 時照它給的秒數等；要等的超過這個秒數就不再重試，這一批算失敗。
+    retry_after_max_seconds: 120
+
+# 取得執行資格、寫入時等論文那一列的鎖，以及占用額度時等額度鎖的上限（秒）。
+# 等不到：取得資格 → 當成別的工作正在做、這篇這次不送；寫入 → 這篇標成失敗、下一次重算；
+# 占用額度 → 這一批這次不送、算失敗，其他論文照做。
+lock_timeout_seconds: 2
+
+# 每日免費額度（Cloudflare 每天 UTC 00:00 重置）。每次 HTTP 嘗試（含重試）前，今天的估計用量加上
+# 其他 worker 占用中（還沒回應）的估計，再加上這次嘗試，換成 neurons 超過
+# daily_free_neurons × stop_at_ratio 就不送、停下、記警告、不算失敗，留到下一次續跑。
+# Workers AI 的向量回應沒有用量欄位，「今天的用量」是 api_call 記的自己估的 token。
+# 停在 90% 留下的 10% 只在「實際 token ≤ 估計 × 1 ÷ 0.9（約 1.11 倍）」時擋得住超額：
+# 實際 token 比估計多出 11% 以上，就可能用超過免費額度。所以 20 篇試跑後要先校正下面的除數。
+quota:
+  # 價格頁：Workers AI 每天免費 10,000 neurons。
+  daily_free_neurons: 10000
+  # 價格頁表格：這個模型 1,075 neurons／百萬 input token（$0.012／百萬 input token）。
+  neurons_per_million_input_tokens: 1075
+  # 到每日免費額度的幾成就停（字串，避免浮點數失真）。
+  stop_at_ratio: "0.9"
+  verified_on: 2026-11-15
+  source_url: https://developers.cloudflare.com/workers-ai/platform/pricing/
+
+# 自己估 token 的方法（Workers AI 不回報用量）：每段 ceil(UTF-8 位元組 ÷ bytes_per_token)
+# ＋ overhead_tokens_per_text。
+# bytes_per_token 是經驗值，不是保守上界：來源是「英文平均約 4 個字元一個 token」的常見說法
+# （例如 OpenAI 的說明文件，講的是 GPT 的分詞器，不是 Qwen 的；這次沒有重新查證），取比 4 小的 3
+# 想多估一點。縮寫、罕見詞、符號或多語文字的切法可能不同，沒有「一定估多」的保證；離線沒有 Qwen 的
+# 分詞器（要新增套件），所以先用這個。
+# 要校正：Kevin 跑 20 篇試跑後，用 Cloudflare 後台當天的 neurons 換回 token（× 1,000,000 ÷
+# neurons_per_million_input_tokens），和 api_call 記的估計 token 比；實際比估計多，就把除數調小
+# （例如實際是估計的 1.2 倍 → 3 ÷ 1.2 ＝ 2.5）。
+token_estimate:
+  bytes_per_token: "3"
+  overhead_tokens_per_text: 4
