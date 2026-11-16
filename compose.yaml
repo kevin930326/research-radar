@@ -6,7 +6,9 @@
 # （見 .env.radar.example，ADR-0024），不進 git；乾淨的 clone、CI 沒有這個檔時照樣起得來。
 # environment 寫的值（DATABASE_URL 等）優先於 env_file。整個 .env 不載入容器。
 # api、worker 只拿應用程式角色（radar_app）的連線字串；擁有者（radar_owner）的只在執行
-# `radar migrate` 時用 `docker compose run -e RADAR_MIGRATION_DATABASE_URL=... api radar migrate` 傳入。
+# `radar migrate` 時用 `docker compose run --rm -e RADAR_MIGRATION_DATABASE_URL api radar migrate` 傳入：
+# `-e` 後面只寫變數名稱、不寫值，值從執行指令的 shell 環境帶進去。把連線字串直接寫在指令裡，
+# 會留在 shell 歷史，也會出現在程序清單（ps）。
 name: research-radar
 
 x-logging: &logging
