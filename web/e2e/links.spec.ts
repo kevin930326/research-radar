@@ -27,7 +27,10 @@ for (const site of SITES) {
       };
       await open();
       const linkCount = await page.locator("main a[href]").count();
-      const buttonCount = await page.locator("main button").count();
+      // 看得到的按鈕才點：同一個按鈕在另一種寬度才出現的（例如論文頁手機版底部的「開啟全文」，Story 3.8）
+      // 用 CSS 藏起來，點不到；它在那一種寬度的行為由各自的測試看。
+      const buttons = page.locator("main button:visible");
+      const buttonCount = await buttons.count();
 
       for (let index = 0; index < linkCount; index += 1) {
         await open();
@@ -53,7 +56,7 @@ for (const site of SITES) {
       for (let index = 0; index < buttonCount; index += 1) {
         await open();
         const before = page.url();
-        await page.locator("main button").nth(index).click();
+        await buttons.nth(index).click();
         // 換頁可能是非同步的（點完才發請求、才導航）：先短暫等網址離開原頁，等不到就當作沒換頁。
         try {
           await page.waitForURL((url) => url.toString() !== before, { timeout: BUTTON_NAVIGATION_WAIT_MS });

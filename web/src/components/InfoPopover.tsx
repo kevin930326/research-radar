@@ -25,14 +25,20 @@ interface InfoPopoverProps {
   children: ReactNode;
   /** 觸發按鈕額外的類別（例如對齊方式）。 */
   triggerClassName?: string;
+  /**
+   * 報讀器唸的按鈕名稱（也是說明框的名稱）。看得到的字裡有裝飾符號時才給（例如資料日期列的「· #12」唸成「#12」）；
+   * 沒給就是按鈕上的字。
+   */
+  triggerLabel?: string;
 }
 
-export function InfoPopover({ trigger, children, triggerClassName }: InfoPopoverProps) {
+export function InfoPopover({ trigger, children, triggerClassName, triggerLabel }: InfoPopoverProps) {
   const triggerId = useId();
   return (
     <Popover.Root>
       <Popover.Trigger
         id={triggerId}
+        aria-label={triggerLabel}
         data-info-popover-trigger
         openOnHover
         delay={HOVER_DELAY_MS}

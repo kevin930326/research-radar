@@ -2,6 +2,7 @@
 // 測試結束時必須是空的。事件一發生就經 exposeBinding 送回測試這邊，換頁也不會遺失。
 // Playwright 的 init script 與 binding 不受頁面 CSP 限制，所以收得到。
 // 另外每個測試自動裝上後端替身（api-mock.ts，Story 3.5）：預設已登入；要別的情境就改 apiMock 的欄位。
+// 站外的請求一律擋掉（Story 3.8）：論文頁的「開啟全文」會開新分頁到 doi.org，測試不連外部服務。
 import { test as base, expect } from "@playwright/test";
 
 import { createApiState, installApiMock, type ApiMockState } from "./api-mock.ts";
@@ -16,6 +17,10 @@ export const test = base.extend<{ cspViolations: string[]; apiMock: ApiMockState
   apiMock: [
     async ({ page }, use) => {
       const state = createApiState();
+      await page.context().route(
+        (url) => url.hostname !== "127.0.0.1" && url.hostname !== "localhost" && url.protocol.startsWith("http"),
+        (route) => route.abort(),
+      );
       await installApiMock(page, state);
       await use(state);
     },

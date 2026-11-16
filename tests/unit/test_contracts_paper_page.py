@@ -76,7 +76,7 @@ ZH = ZhSummaryValue(
 TOPIC = ClassificationFieldValue(
     keys=("collaboration", "erp"), human_verified=True, fix_member_count=2, members_disagree=True
 )
-CLASSIFICATION = ClassificationValue(topic=TOPIC, method=None)
+CLASSIFICATION = ClassificationValue(topic=TOPIC, method=None, fix_member_count=2)
 TRUST = uuid.UUID(int=0x71)
 LOYALTY = uuid.UUID(int=0x72)
 RESEARCH_MODEL = ResearchModelValue(
@@ -303,6 +303,7 @@ def test_classification_block_has_the_fields_for_verified_and_disagreement() -> 
             "members_disagree": True,
         },
         "method": None,
+        "fix_member_count": 2,
     }
 
 

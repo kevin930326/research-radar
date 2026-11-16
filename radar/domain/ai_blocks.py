@@ -191,12 +191,16 @@ class ClassificationValue:
     """有效的分類：主題與方法兩欄，沒有任何值的那一欄是 None（只會發生在只有人工修正、沒有 AI 值
     的時候）。
 
+    - `fix_member_count`：修正過這篇分類（主題或方法）的成員人數，整篇去重（論文頁「有 N 位成員
+      修正過」，Story 3.8）。一位成員修了兩欄算一位；兩位成員各修一欄算兩位。
+
     Raises:
-        ValueError: 兩欄都是 None。
+        ValueError: 兩欄都是 None；整篇人數不是 ≥ 0 的整數，或比任何一欄的人數少、比兩欄相加多。
     """
 
     topic: ClassificationFieldValue | None
     method: ClassificationFieldValue | None
+    fix_member_count: int
 
     def __post_init__(self) -> None:
         for name in ("topic", "method"):
@@ -205,6 +209,12 @@ class ClassificationValue:
                 raise ValueError(f"{name} 要是 ClassificationFieldValue 或 None")
         if self.topic is None and self.method is None:
             raise ValueError("分類至少要有一欄有值")
+        if type(self.fix_member_count) is not int or self.fix_member_count < 0:
+            raise ValueError("fix_member_count 要是 ≥ 0 的整數")
+        fields = [field for field in (self.topic, self.method) if field is not None]
+        counts = [field.fix_member_count for field in fields]
+        if not max(counts) <= self.fix_member_count <= sum(counts):
+            raise ValueError("整篇的修正人數要介於各欄人數的最大值與兩欄相加之間")
 
 
 def _check_decimal(name: str, value: object) -> None:

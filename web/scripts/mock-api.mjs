@@ -1,6 +1,9 @@
 // 本機看畫面與設計稿比對用的模擬後端（Story 3.5）：送出成員版的建置結果（web/dist，帶和正式環境同一份
 // 安全標頭），並模擬登入相關的四個端點（/api/v1/me、/api/v1/auth/fake-login 的 GET 與 POST、
 // /api/v1/auth/logout），回應的形狀照 openapi.json。不需要資料庫、不需要 docker。
+// Story 3.8 加上論文頁的兩個端點（/api/v1/papers/{id}、/api/v1/display-names）：資料來自
+// e2e/fixtures/papers.json（自己編的假論文，和 e2e 共用），每一種狀態是一個論文 ID，啟動時把網址印出來；
+// 畫面上沒有切換列。
 // 畫面是真正的建置結果；這支只代替後端，不是給測試用的（Playwright 測試用 e2e/api-mock.ts 的 page.route）。
 //
 // 用法（在 web/ 底下，先 npm run build:member）：
@@ -11,6 +14,9 @@
 //   --dist          要送出的資料夾，預設 dist
 //   --member-name   測試成員的顯示名稱，預設 Test Member A
 //   --signed-in     一開始就是登入狀態（設計稿比對時，每次都是新的瀏覽器，沒有 cookie）
+//   --papers-file   論文頁的假資料，預設 e2e/fixtures/papers.json（格式同那一份）
+//
+// 論文頁：http://127.0.0.1:4180/__mock/papers 列出每一種狀態的網址（啟動時也印出來）。
 //
 // 切換情境（例如看登入失敗、登出失敗）：打開或 curl
 //   http://127.0.0.1:4180/__mock?login=failed            登入：ok／failed（伺服器錯誤）／denied（不在名單裡）
@@ -19,6 +25,8 @@
 //   http://127.0.0.1:4180/__mock?logoutDelay=5000        登出要等幾毫秒（看「登出中…」）
 //   http://127.0.0.1:4180/__mock?signedIn=false          登出（或 true：登入）
 //   http://127.0.0.1:4180/__mock?expire=1                讓目前的登入過期（下一次換頁回到登入頁）
+//   http://127.0.0.1:4180/__mock?names=failed            論文頁的顯示名稱：ok／failed（伺服器錯誤：分類那一行是
+//                                                        「沒有載入成功」＋「重試」）／expired（401：回登入頁）
 // 參數可以一起給；回傳目前的情境（JSON）。
 /* global process, URL, setTimeout */
 import { randomUUID } from "node:crypto";
@@ -45,7 +53,7 @@ const TYPES = {
 };
 
 function parseArgs(argv) {
-  const args = { port: 4180, dist: "dist", memberName: "Test Member A", signedIn: false };
+  const args = { port: 4180, dist: "dist", memberName: "Test Member A", signedIn: false, papersFile: "e2e/fixtures/papers.json" };
   for (let i = 0; i < argv.length; i += 1) {
     const key = argv[i];
     if (key === "--signed-in") {
@@ -56,6 +64,7 @@ function parseArgs(argv) {
     if (key === "--port") args.port = Number(value);
     else if (key === "--dist") args.dist = value;
     else if (key === "--member-name") args.memberName = value;
+    else if (key === "--papers-file") args.papersFile = value;
     else throw new Error(`unknown option: ${key}`);
     i += 1;
   }
@@ -68,7 +77,8 @@ const MEMBERS = [
   { member_id: "00000000-0000-4000-8000-00000000000a", display_name: args.memberName },
   { member_id: "00000000-0000-4000-8000-00000000000b", display_name: "Test Member B" },
 ];
-const scenario = { login: "ok", logout: "ok", loginDelay: 0, logoutDelay: 0, alwaysSignedIn: args.signedIn };
+const PAPERS = JSON.parse(readFileSync(resolve(WEB_ROOT, args.papersFile), "utf-8"));
+const scenario = { login: "ok", logout: "ok", names: "ok", loginDelay: 0, logoutDelay: 0, alwaysSignedIn: args.signedIn };
 /** 有效的 session token → 成員。 */
 const sessions = new Map();
 
@@ -143,6 +153,15 @@ async function api(req, res, path) {
       "Set-Cookie": `${COOKIE}=${token}; Path=/; HttpOnly; SameSite=Lax`,
     });
   }
+  if (req.method === "GET" && path === "/api/v1/display-names") {
+    if (currentMember(req) === null || scenario.names === "expired") return problem(res, 401, "not_authenticated");
+    if (scenario.names === "failed") return problem(res, 500, "internal_error");
+    return json(res, 200, PAPERS.displayNames);
+  }
+  if (req.method === "GET" && path.startsWith("/api/v1/papers/")) {
+    if (currentMember(req) === null) return problem(res, 401, "not_authenticated");
+    return paper(res, decodeURIComponent(path.slice("/api/v1/papers/".length)));
+  }
   if (req.method === "POST" && path === "/api/v1/auth/logout") {
     const outcome = scenario.logout;
     await sleep(scenario.logoutDelay);
@@ -156,8 +175,37 @@ async function api(req, res, path) {
   return problem(res, 404, "not_found");
 }
 
+/** 論文頁：ID 對到假資料的一篇、一種錯誤，或「很慢」（等一下再回某一篇）；其他 ID 都是 404（同後端）。 */
+async function paper(res, id) {
+  const error = PAPERS.errors?.[id];
+  if (error !== undefined) {
+    const codes = { 401: "not_authenticated", 404: "not_found", 500: "internal_error" };
+    return problem(res, error.status, codes[error.status]);
+  }
+  const slow = PAPERS.slow?.[id];
+  if (slow !== undefined) {
+    await sleep(slow.delayMs);
+    if (res.destroyed) return undefined;
+    return paper(res, slow.of);
+  }
+  const entry = PAPERS.papers[id];
+  return entry === undefined ? problem(res, 404, "not_found") : json(res, 200, entry.page);
+}
+
+/** 每一種狀態的網址（給人看的清單）。 */
+function paperIndex() {
+  const base = `http://127.0.0.1:${args.port}/papers/`;
+  const rows = [
+    ...Object.entries(PAPERS.papers).map(([id, entry]) => [entry.label, id, entry.note]),
+    ...Object.entries(PAPERS.slow ?? {}).map(([id, entry]) => [entry.label, id, entry.note]),
+    ...Object.entries(PAPERS.errors ?? {}).map(([id, entry]) => [entry.label, id, entry.note]),
+    ["bad-id", "not-a-uuid", "網址上的 ID 不是 UUID（不送請求，直接找不到這一頁）"],
+  ];
+  return rows.map(([label, id, note]) => ({ label, url: `${base}${id}`, note }));
+}
+
 function control(res, query) {
-  for (const key of ["login", "logout"]) {
+  for (const key of ["login", "logout", "names"]) {
     if (query.has(key)) scenario[key] = query.get(key);
   }
   for (const key of ["loginDelay", "logoutDelay"]) {
@@ -196,6 +244,7 @@ function staticFile(res, path) {
 createServer((req, res) => {
   const url = new URL(req.url ?? "/", "http://127.0.0.1");
   if (url.pathname === "/__mock") return control(res, url.searchParams);
+  if (url.pathname === "/__mock/papers") return json(res, 200, paperIndex());
   if (url.pathname.startsWith("/api/")) {
     api(req, res, url.pathname).catch((error) => {
       process.stderr.write(`${error}\n`);
@@ -206,4 +255,5 @@ createServer((req, res) => {
   return staticFile(res, url.pathname);
 }).listen(args.port, "127.0.0.1", () => {
   process.stdout.write(`mock api: http://127.0.0.1:${args.port}/login (dist: ${DIST})\n`);
+  for (const row of paperIndex()) process.stdout.write(`  ${row.label.padEnd(18)} ${row.url}\n`);
 });

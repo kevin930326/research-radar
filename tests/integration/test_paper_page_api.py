@@ -269,6 +269,46 @@ def test_member_reads_a_visible_paper(db: TestDatabase, database: Database, api:
     assert body["snapshot"] == {"number": 2, "as_of": "2026-11-07T19:30:00Z"}
 
 
+def test_paper_fix_member_count_counts_each_member_once(
+    db: TestDatabase, database: Database, api: Api
+) -> None:
+    # 「有 N 位成員修正過」是整篇去重的人數（Story 3.8）：A 修主題、B 修方法 → 2（兩欄各 1）；
+    # A 再修一次方法仍是 2（同一人不重複算）。
+    paper_id = create_paper(database, doi="10.1/fixers", openalex_id="W3")
+    insert_classification(db, paper_id, ["erp"], ["survey"])
+
+    def fix_by(member_id: uuid.UUID, field: TaxonomyField, keys: list[str]) -> None:
+        create_event(
+            database,
+            classification_fix(
+                member_id=member_id,
+                actor_role=ActorRole.MEMBER,
+                paper_id=paper_id,
+                field=field,
+                keys=keys,
+                reason=None,
+            ),
+        )
+
+    def classification() -> dict[str, Any]:
+        response = api.get(f"/api/v1/papers/{paper_id}", api.other_token)
+        assert response.status_code == 200, response.text
+        value: dict[str, Any] = response.json()["classification"]["value"]
+        return value
+
+    assert classification()["fix_member_count"] == 0
+    fix_by(api.owner_id, TaxonomyField.TOPIC, ["collaboration"])
+    fix_by(api.other_id, TaxonomyField.METHOD, ["case_study"])
+    value = classification()
+    assert (value["topic"]["fix_member_count"], value["method"]["fix_member_count"]) == (1, 1)
+    assert value["fix_member_count"] == 2
+
+    fix_by(api.owner_id, TaxonomyField.METHOD, ["survey"])
+    value = classification()
+    assert value["method"]["fix_member_count"] == 2
+    assert value["fix_member_count"] == 2
+
+
 def test_paper_without_doi_snapshot_or_abstract(database: Database, api: Api) -> None:
     paper_id = create_paper(database, doi=None, openalex_id="W2", abstract=None)
 

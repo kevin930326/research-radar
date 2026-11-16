@@ -40,3 +40,11 @@
 | 沒寫行高（瀏覽器預設 `line-height: normal`） | 導覽列、帳號選單、手機選單、登入頁的品牌與按鈕 | 行高尺度沒有 `normal`，先用行內樣式 `lineHeight: "normal"` | 已加代幣：行高尺度加 `normal`（Kevin 2026-11-16 決定），程式改成 `leading-normal` 類別 |
 | 選單項目滑過的底色 `rgba(239,234,224,0.06)` | 桌機帳號選單 | 顏色代幣沒有這個值，先不做，只換字色 | 已加代幣：顏色加 `menu-item-hover`（`#EFEAE00F`，Kevin 2026-11-16 決定），帳號選單的項目滑過時用它 |
 | 選單背景模糊 `backdrop-filter: blur(6px)` | 桌機帳號選單 | `DESIGN.md` 寫「不用毛玻璃」，3.2 的說明框也沒有，照 `DESIGN.md` 不加 | 維持不用，不加代幣（Kevin 2026-11-16 決定） |
+
+## Story 3.8（論文頁成員版）
+
+清查 `paper.html`（正常狀態、沒有摘要）與 `paper-ai-failed.html`（只有中文重點沒成功、三個都沒成功）的行內樣式：字級、行高、字距、顏色都在 `DESIGN.md` 的角色或尺度裡（`rgba(239,234,224,0.16)`＝`hairline`、`0.26`＝`border`；沒寫行高的是 `leading-normal`、沒寫字距的是 `tracking-0`），只有下面一個缺口。間距照設計稿的數字寫任意值（例如 `mt-[20px]`），ADR-0037 不擋。
+
+| 設計稿的值 | 在哪裡 | 一開始怎麼做 | 已處理 |
+|---|---|---|---|
+| 英文原文摘要的字體 `-apple-system, 'Helvetica Neue', 'Segoe UI', system-ui, sans-serif` | 論文頁「原文摘要」 | 用代幣 `font-reading-en`（`-apple-system, "Segoe UI", Roboto, sans-serif`），沒有加 `Helvetica Neue`。Safari 兩邊都用系統字、看不出差別；Chrome 與 Firefox 不認得 `-apple-system`，設計稿退到 Helvetica Neue、做出來退到 Helvetica，斷行不同（設計稿比對 390 寬「佔幾行」24 對 23） | 待 Kevin 決定：在 `DESIGN.md` 的 `reading-en` 補上 `Helvetica Neue`，或維持現狀 |
