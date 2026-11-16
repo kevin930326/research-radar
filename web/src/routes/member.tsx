@@ -35,7 +35,7 @@ function AppLayout() {
   return (
     <div className={`flex min-h-screen flex-col ${mobileMenuOpen ? "max-split:hidden" : ""}`}>
       <SiteHeader member={member} mobileMenuOpen={mobileMenuOpen} onMobileMenuChange={setMobileMenuOpen} />
-      {/* 標題離導覽列：900px 以上 72px、899px 以下 40px（設計稿）；頁尾在之後的外框 Story 才接上。 */}
+      {/* 標題離導覽列：900px 以上 72px、899px 以下 40px（設計稿）；頁尾歸 Story 3.15（Kevin 2026-11-16 決定）。 */}
       <main className="flex-1 px-gutter-mobile pt-[40px] pb-24 tablet:px-gutter-tablet split:pt-[72px] wide:px-gutter-desktop">
         <Offline />
         <Outlet />

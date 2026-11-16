@@ -12,7 +12,7 @@
 @theme {
   --*: initial;
 
-  /* colors（DESIGN.md colors，19 個） */
+  /* colors（DESIGN.md colors，20 個） */
   --color-background: #050609;
   --color-background-glow-inner: #0b0f19;
   --color-background-glow-mid: #07090f;
@@ -25,6 +25,7 @@
   --color-hairline: #efeae029;
   --color-border: #efeae042;
   --color-popover-surface: #050609eb;
+  --color-menu-item-hover: #efeae00f;
   --color-scrim: #050609b8;
   --color-data-warm: #ffecd0;
   --color-data-white: #f4f5fa;
@@ -118,9 +119,9 @@
   --text-table-number--font-weight: 400;
 
   /*
-   * 尺度（DESIGN.md font-sizes 26 個、line-heights 16 個、letter-spacings 11 個；ADR-0038）：
+   * 尺度（DESIGN.md font-sizes 26 個、line-heights 17 個、letter-spacings 11 個；ADR-0038）：
    * 設計稿的字級、行高、字距組合不等於上面任何一個角色時，用這三組自由搭配。
-   * text-s15 只設字級（不帶行高與字距）、leading-185 是行高 1.85、tracking-004 是字距 0.04em（n001 是 -0.01em）。
+   * text-s15 只設字級（不帶行高與字距）、leading-185 是行高 1.85（leading-normal 是瀏覽器預設的 normal）、tracking-004 是字距 0.04em（n001 是 -0.01em）。
    * 尺度以外的 leading-…／tracking-…（含負號、任意值、間距代幣）、text-[…]／text-(…)、
    * 任意屬性寫字體屬性或改寫主題變數（[line-height:1.7]、[--text-s15:30px]）由 tailwind-guard.ts 擋。
    */
@@ -166,6 +167,7 @@
   --leading-180: 1.8;
   --leading-185: 1.85;
   --leading-190: 1.9;
+  --leading-normal: normal;
   --tracking-n001: -0.01em;
   --tracking-0: 0;
   --tracking-0005: 0.005em;

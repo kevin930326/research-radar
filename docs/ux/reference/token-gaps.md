@@ -35,8 +35,8 @@
 
 ## Story 3.5（登入頁、導覽列、帳號選單）沒有對應代幣的地方
 
-| 設計稿的值 | 在哪裡 | 這次怎麼做 | 要 Kevin 決定 |
+| 設計稿的值 | 在哪裡 | 一開始怎麼做 | 已處理 |
 |---|---|---|---|
-| 沒寫行高（瀏覽器預設 `line-height: normal`） | 導覽列、帳號選單、手機選單、登入頁的品牌與按鈕 | 行高尺度沒有 `normal`，用 `style={{ lineHeight: "normal" }}`（`web/src/components/Brand.tsx` 的 `LINE_HEIGHT_NORMAL`），量出來和設計稿一樣 | 尺度要不要加 `normal`（加了就能改回類別寫法） |
-| 選單項目滑過的底色 `rgba(239,234,224,0.06)` | 桌機帳號選單 | 顏色代幣沒有這個值，先不做，只換字色 | 要不要加一個「滑過底色」代幣 |
-| 選單背景模糊 `backdrop-filter: blur(6px)` | 桌機帳號選單 | `DESIGN.md` 寫「不用毛玻璃」，3.2 的說明框也沒有，照 `DESIGN.md` 不加 | 設計稿與 `DESIGN.md` 以哪個為準 |
+| 沒寫行高（瀏覽器預設 `line-height: normal`） | 導覽列、帳號選單、手機選單、登入頁的品牌與按鈕 | 行高尺度沒有 `normal`，先用行內樣式 `lineHeight: "normal"` | 已加代幣：行高尺度加 `normal`（Kevin 2026-11-16 決定），程式改成 `leading-normal` 類別 |
+| 選單項目滑過的底色 `rgba(239,234,224,0.06)` | 桌機帳號選單 | 顏色代幣沒有這個值，先不做，只換字色 | 已加代幣：顏色加 `menu-item-hover`（`#EFEAE00F`，Kevin 2026-11-16 決定），帳號選單的項目滑過時用它 |
+| 選單背景模糊 `backdrop-filter: blur(6px)` | 桌機帳號選單 | `DESIGN.md` 寫「不用毛玻璃」，3.2 的說明框也沒有，照 `DESIGN.md` 不加 | 維持不用，不加代幣（Kevin 2026-11-16 決定） |

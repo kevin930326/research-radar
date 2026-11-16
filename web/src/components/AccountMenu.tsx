@@ -6,27 +6,28 @@ import { useTranslation } from "react-i18next";
 import type { Member } from "../datasource/types";
 import { PHONE_QUERY, useCloseAcrossBreakpoint } from "../hooks/use-close-across-breakpoint";
 import { useLogOut } from "../hooks/use-log-out";
-import { LINE_HEIGHT_NORMAL } from "./Brand";
 
 // 帳號選單（畫面 18、State Patterns「18. 帳號選單」）：導覽列右上的「帳號」點開。
 // 依 AR-67 只有名稱、使用須知、登出（「我的問答紀錄」在 Epic 5 加上）。
 // 行為用 Base UI Menu（ADR-0010）：Esc 關、焦點回到「帳號」、方向鍵移動、aria-expanded。
 // 樣子照設計稿 docs/ux/reference/screens/login-account.html 的 .amenu：寬 232、上下內距 6、
 // 半透明深底＋1px 框（DESIGN.md 只有兩層：浮起來的東西靠底色加框區分）。
-// 和設計稿不同的兩處（報告裡寫明）：
-// - 設計稿的選單有 6px 的背景模糊；DESIGN.md 寫「不用毛玻璃」，說明框（3.2）也沒有，這裡照 DESIGN.md 不加。
-// - 項目滑過時的底色 rgba(239,234,224,0.06) 不在代幣裡（token-gaps.md「Story 3.5」），先不做，只換字色。
+// 項目滑過時照設計稿換字色並加淡底色（menu-item-hover，Kevin 2026-11-16 決定加進 DESIGN.md）。Base UI 的
+// data-highlighted 是「目前的那一項」：滑鼠移上去和方向鍵移到都會設，同一時間只有一項；字色本來就跟著它，
+// 底色也跟著，滑鼠和鍵盤看到的才是同一項（鍵盤另外還有焦點外框）。設計稿的停用項目滑過也有底色，照做。
+// 和設計稿不同的地方（報告裡寫明）：
+// - 設計稿的選單有 6px 的背景模糊；DESIGN.md 寫「不用毛玻璃」，這裡不加（Kevin 2026-11-16 決定維持不用）。
 // - 項目高 44px（設計稿 42px）：ADR-0037 第 5 點，看得到的按鈕與連結至少 44×44，無障礙底線優先於設計稿。
 
 /** 選單的上緣在「帳號」所在那一格頂端往下 44px（設計稿 .amenu 的 top: 44px）。 */
 const MENU_TOP = 44;
 
 const TRIGGER_CLASS =
-  "group inline-flex cursor-pointer items-center gap-[7px] py-[13px] pl-4 text-nav text-text-secondary transition-[color] duration-200 hover:text-text-primary data-[popup-open]:text-text-primary";
-const POPUP_CLASS = "w-[232px] border border-border bg-popover-surface py-[6px]";
+  "group inline-flex cursor-pointer items-center gap-[7px] py-[13px] pl-4 text-nav leading-normal text-text-secondary transition-[color] duration-200 hover:text-text-primary data-[popup-open]:text-text-primary";
+const POPUP_CLASS = "w-[232px] border border-border bg-popover-surface py-[6px] leading-normal";
 const NAME_CLASS = "mb-[6px] border-b border-hairline px-[18px] pt-[10px] pb-[12px] text-nav text-text-secondary";
 const ITEM_CLASS =
-  "flex h-tap-target w-full cursor-pointer items-center px-[18px] text-left text-nav text-text-reading no-underline transition-[color] duration-200 hover:not-data-[disabled]:text-text-primary data-[highlighted]:not-data-[disabled]:text-text-primary data-[disabled]:cursor-default data-[disabled]:text-text-tertiary";
+  "flex h-tap-target w-full cursor-pointer items-center px-[18px] text-left text-nav text-text-reading no-underline transition-[background-color,color] duration-200 hover:bg-menu-item-hover data-[highlighted]:bg-menu-item-hover hover:not-data-[disabled]:text-text-primary data-[highlighted]:not-data-[disabled]:text-text-primary data-[disabled]:cursor-default data-[disabled]:text-text-tertiary";
 const ERROR_CLASS = "px-[18px] pt-[8px] pb-[4px] text-s13 leading-160 tracking-004 text-danger";
 
 /** 「帳號」右邊的小箭頭：選單打開時轉 180 度。 */
@@ -71,7 +72,7 @@ export function AccountMenu({ member, triggerRef, phoneFocusRef }: AccountMenuPr
   });
   return (
     <Menu.Root open={open} onOpenChange={changeOpen}>
-      <Menu.Trigger ref={triggerRef} className={TRIGGER_CLASS} style={LINE_HEIGHT_NORMAL}>
+      <Menu.Trigger ref={triggerRef} className={TRIGGER_CLASS}>
         {t("nav.account.trigger")}
         <Caret />
       </Menu.Trigger>
@@ -85,7 +86,6 @@ export function AccountMenu({ member, triggerRef, phoneFocusRef }: AccountMenuPr
         >
           <Menu.Popup
             className={POPUP_CLASS}
-            style={LINE_HEIGHT_NORMAL}
             finalFocus={() => {
               if (!closedByBreakpoint.current) return true;
               closedByBreakpoint.current = false;

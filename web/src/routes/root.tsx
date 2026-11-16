@@ -36,7 +36,7 @@ function RootNotFound() {
 }
 
 // 兩種建置共用的最外層。找不到的網址一律由這裡顯示（router 設 notFoundMode: "root"），不經過登入檢查。
-// 頁尾在之後的外框 Story 才接上（AR-67）。
+// 頁尾歸 Story 3.15（Kevin 2026-11-16 決定，AR-67）。
 export const rootRoute = createRootRouteWithContext<RouterContext>()({
   component: RootLayout,
   notFoundComponent: RootNotFound,

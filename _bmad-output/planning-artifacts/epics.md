@@ -1987,6 +1987,11 @@ So that 我知道資料缺在哪裡，看趨勢與排行表時不會誤讀。
 **Then** 五個部分照畫面 9：白話說明、三個讀數（成員版第三個是本週新增、示範站是有完整內容的篇數）、14 本 × 每年的覆蓋率表（未滿 50% 金色空心、當年度欄名加註「未滿一年」）、Elsevier 四本的說明、名詞說明
 **And** 接上入口（AR-67）：資料日期列的連結、使用須知第 4 段的「資料涵蓋範圍」
 
+**Given** 頁尾（Kevin 2026-11-16 決定歸這個 Story）
+**When** 成員版與示範站版打開有導覽列的頁面
+**Then** 頁尾照設計稿與 `EXPERIENCE.md`：資料來源（OpenAlex 開放書目資料）、資料涵蓋範圍的連結、更新頻率；成員版多一個使用須知的連結
+**And** 示範站首頁的頁尾已鎖定，照首頁規格 §4.2，不加連結（示範站首頁在 Epic 13）
+
 **Given** AR-69 的共通條件
 **When** 驗收這個 Story
 **Then** State Patterns「9. 資料涵蓋範圍」的「載入中」、「錯誤」、「沒有依據：某本期刊某一年沒有論文」各有測試；「空的」寫明不會發生
@@ -3050,13 +3055,18 @@ So that 離開的人不會留著能用的登入。
 
 **Given** `radar members revoke <email>`
 **When** 執行
-**Then** 同一個交易裡移出 `allowed_email`、刪掉他所有的 session、寫稽核事件（AD-23）
+**Then** 同一個交易裡把 `allowed_email` 標記為已移出（不刪那一列）、刪掉他所有的 session、寫稽核事件（AD-23）
 **And** 他的下一個請求回未登入，前端轉到登入頁；再用 Google 登入時回「不在名單」
 **And** 他的私人資料不刪（成員離開的規則屬於 Should 的交接包）
 
 **Given** 移出之後再 `radar members allow` 同一個 email
 **When** 他登入
 **Then** `sub` 一樣時對回原本的 `member`；不一樣時照 7.1 拒絕並寫稽核事件
+
+**Given** 移出改成軟刪除（Kevin 2026-11-16 決定；3.3 的 `revoke` 是刪掉那一列，這個 Story 改）
+**When** `radar members revoke <email>` 之後，同一個 email 再 `radar members allow`
+**Then** `revoke` 只把 `allowed_email` 標記為已移出，不刪那一列；標記已移出的 email 登入時照樣回「不在名單」
+**And** 再 `allow` 時清掉標記、接回原本的成員：同一個 `member` ID，以前的判斷與私人資料都還在（測試）
 
 **Given** 三個 `radar members` 指令
 **When** 執行
@@ -3148,6 +3158,11 @@ So that 同學在試用期間留下的文獻庫、修正、問答紀錄不會因
 **Then** (1) 部署設定拿掉假登入；(2) 程式啟動時，Google 登入與假登入同時開著就不啟動；(3) `release.sh` 之後的冒煙測試確認假登入的網址回 404、登入頁是真的 Google 登入；(4) 單元測試涵蓋各種設定組合
 **And** Kevin 用自己的 Google 帳號登入，看得到試用期間用假登入建立的文獻庫與修正（7.1 的同一位成員，在主機上實際確認一次）
 
+**Given** api 的 `/docs`、`/redoc`、`/openapi.json`（Kevin 2026-11-16 決定）
+**When** 開放同學之前
+**Then** api 不再提供這三個網址（回 404），`release.sh` 之後的冒煙測試確認；理由：這是第一次讓 Kevin 以外的人連進來，這三個網址不用登入就看得到完整的 API 文件，連假登入的路由也列在上面
+**And** 版控裡的 `openapi.json` 檔與 CI 的一致性檢查照舊（NFR-12），不受影響
+
 **Given** Google 用戶端與 Access
 **When** 部署
 **Then** **等 Kevin 操作**：在 Google Cloud 建立 OAuth 用戶端（轉回網址是試用主機的網址），用戶端 ID 與秘密由 Kevin 放進主機的環境變數
@@ -3166,7 +3181,7 @@ So that 同學在試用期間留下的文獻庫、修正、問答紀錄不會因
 2. 使用須知四段都在（第 1、2 段已經由 5.5、6.11 接上，第 3、4 段在 3.1）
 3. 假登入已經關掉，四道都測過（冒煙測試的結果附上）
 4. 每晚備份成功過一次（上面那次手動觸發的結果附上）
-5. 冒煙測試通過：Google 登入、找論文、論文頁、問答、上傳頁打得開；`/healthz`、`/readyz` 回 200；worker 與 cron 在跑
+5. 冒煙測試通過：Google 登入、找論文、論文頁、問答、上傳頁打得開；`/healthz`、`/readyz` 回 200；`/docs`、`/redoc`、`/openapi.json` 回 404（Kevin 2026-11-16 決定）；worker 與 cron 在跑
 **And** api 與 worker 的記憶體貼進 PR 說明；不用假負載，不動 k3s 的資料
 
 ---

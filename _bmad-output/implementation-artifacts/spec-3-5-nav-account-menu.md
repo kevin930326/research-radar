@@ -94,6 +94,11 @@ deferred:
 
 ## Spec Change Log
 
+### 2026-11-16 — Kevin 的決定（SUMMARY 第 6 節，全部照建議）
+- 「關閉選單」寫進 `EXPERIENCE.md`「18. 帳號選單」；`designOnly` 拿掉，這句移到 `strings`。
+- `DESIGN.md` 行高尺度加 `normal`、顏色加 `menu-item-hover`；`LINE_HEIGHT_NORMAL` 的行內樣式改成 `leading-normal`，帳號選單項目滑過（含 `data-highlighted`）加底色；背景模糊維持不用。
+- 頁尾歸 Story 3.15；epics.md 7.2（軟刪除）、7.5（關掉 `/docs`、`/redoc`、`/openapi.json`）各加一組驗收條件。
+
 ## Review Triage Log
 
 ### 2026-11-16 — Review pass

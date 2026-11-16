@@ -8,7 +8,7 @@ import AxeBuilder from "@axe-core/playwright";
 import type { Page } from "@playwright/test";
 
 import { MEMBERS, gate } from "./api-mock.ts";
-import { DESIGN_ONLY, TEXT } from "./expected.ts";
+import { TEXT } from "./expected.ts";
 import { expect, test } from "./fixtures.ts";
 import { expectValidLanding, recordDocumentResponses } from "./landing.ts";
 import { SITES } from "./pages.ts";
@@ -25,7 +25,7 @@ const LOGOUT = TEXT["nav:nav.account.logout"];
 const LOGGING_OUT = TEXT["nav:nav.account.loggingOut"];
 const LOGOUT_FAILED = TEXT["nav:nav.account.logoutFailed"];
 const MENU = TEXT["nav:nav.menu.open"];
-const CLOSE_MENU = DESIGN_ONLY["nav:nav.menu.close"]!;
+const CLOSE_MENU = TEXT["nav:nav.menu.close"];
 const DESKTOP = { width: 1280, height: 900 };
 const PHONE = { width: 390, height: 844 };
 
@@ -103,6 +103,40 @@ test.describe("desktop nav bar", () => {
     await expect(page.getByRole("menu")).toBeHidden();
     await expect(trigger).toBeFocused();
     await expect(trigger).toHaveAttribute("aria-expanded", "false");
+  });
+
+  test("menu items get the hover background on hover and on the arrow keys", async ({ page }) => {
+    await openNotice(page, DESKTOP);
+    // 設計代幣 menu-item-hover 的實際顏色（Kevin 2026-11-16 決定；設計稿 .amenu .mi:hover）。
+    const hover = await page.evaluate(() => {
+      const probe = document.createElement("div");
+      probe.style.backgroundColor = "var(--color-menu-item-hover)";
+      document.body.append(probe);
+      const color = getComputedStyle(probe).backgroundColor;
+      probe.remove();
+      return color;
+    });
+    expect(hover).not.toBe("rgba(0, 0, 0, 0)");
+    const items = page.getByRole("menu").getByRole("menuitem");
+    const background = (index: number) =>
+      items.nth(index).evaluate((element) => getComputedStyle(element).backgroundColor);
+
+    // 鍵盤：Enter 打開時第一項是目前的那一項，方向鍵往下，底色跟著走，上一項不留。
+    const trigger = page.getByRole("button", { name: ACCOUNT });
+    await trigger.focus();
+    await page.keyboard.press("Enter");
+    await expect.poll(() => background(0)).toBe(hover);
+    await expect.poll(() => background(1)).toBe("rgba(0, 0, 0, 0)");
+    await page.keyboard.press("ArrowDown");
+    await expect.poll(() => background(1)).toBe(hover);
+    await expect.poll(() => background(0)).toBe("rgba(0, 0, 0, 0)");
+    await page.keyboard.press("Escape");
+
+    // 滑鼠：滑過哪一項，哪一項有底色。
+    await trigger.click();
+    await items.last().hover();
+    await expect.poll(() => background(1)).toBe(hover);
+    await expect.poll(() => background(0)).toBe("rgba(0, 0, 0, 0)");
   });
 
   test("logout loading: the item says logging out and is disabled", async ({ page, apiMock }) => {

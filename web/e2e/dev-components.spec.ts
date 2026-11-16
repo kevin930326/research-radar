@@ -27,7 +27,7 @@ test("lists the six kinds of components", async ({ page }) => {
     SECTIONS.statusTags,
     SECTIONS.focus,
   ]);
-  await expect(page.locator("[data-color-token]")).toHaveCount(19);
+  await expect(page.locator("[data-color-token]")).toHaveCount(20);
   await expect(page.locator("[data-type-token]")).toHaveCount(21);
 
   const buttons = page.locator("[data-dev-section='buttons'] button");

@@ -3,7 +3,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import { useTranslation } from "react-i18next";
 
-import { BrandName, LINE_HEIGHT_NORMAL, RadarIcon } from "../components/Brand";
+import { BrandName, RadarIcon } from "../components/Brand";
 import { Offline } from "../components/states/Offline";
 import { FIRST_PAGE, clearMemberQueries, memberSession, safeNextPath, type LoginSearch } from "../routes/session";
 
@@ -89,10 +89,7 @@ export function LoginPage({ search }: { search: LoginSearch }) {
           : null;
 
   return (
-    <main
-      className="flex min-h-screen flex-col justify-center pb-[80px] split:items-center split:px-gutter-desktop split:pb-[60px]"
-      style={LINE_HEIGHT_NORMAL}
-    >
+    <main className="flex min-h-screen flex-col justify-center pb-[80px] leading-normal split:items-center split:px-gutter-desktop split:pb-[60px]">
       <div className="mx-auto flex w-full max-w-[430px] flex-col items-start px-gutter-mobile split:w-[360px] split:max-w-full split:items-center split:px-[0px]">
         <Offline />
         <h1 className="flex items-center gap-[14px] split:gap-[18px]">

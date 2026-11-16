@@ -6,7 +6,7 @@
     "Component Patterns AI 標章（AI 整理、AI 生成・未經人工核對、已核對、AI 生成・已核對）",
     "State Patterns 全站共用的錯誤代碼（errors.<code>：登入過期、找不到這一頁）",
     "10. 登入（說明、按鈕、登入中、兩種訊息條；「回示範站」在 Epic 13）",
-    "18. 帳號選單（帳號、使用須知、登出、登出中、登出失敗；「我的問答紀錄」在 Epic 5）與成員版導覽列（品牌、手機的選單按鈕）",
+    "18. 帳號選單（帳號、使用須知、登出、登出中、登出失敗；「我的問答紀錄」在 Epic 5）與成員版導覽列（品牌、手機的選單按鈕與關閉選單）",
     "State Patterns 全站共用的登入過期（沿用 errors.not_authenticated）"
   ],
   "strings": {
@@ -48,14 +48,8 @@
     "nav:nav.account.logout": "登出",
     "nav:nav.account.loggingOut": "登出中…",
     "nav:nav.account.logoutFailed": "沒有登出成功，再試一次",
-    "nav:nav.menu.open": "選單"
-  },
-  "designOnly": {
-    "nav:nav.menu.close": {
-      "text": "關閉選單",
-      "design": "docs/ux/reference/screens/login-account.html",
-      "note": "手機滿版選單的關閉按鈕（aria-label）。EXPERIENCE.md 沒有這句，先照設計稿做；Kevin 決定後寫進 EXPERIENCE.md，再移到 strings。"
-    }
+    "nav:nav.menu.open": "選單",
+    "nav:nav.menu.close": "關閉選單"
   },
   "absent": [
     "問答的資料怎麼處理",

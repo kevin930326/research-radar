@@ -7,7 +7,7 @@ import { useTranslation } from "react-i18next";
 import type { Member } from "../datasource/types";
 import { DESKTOP_QUERY, useCloseAcrossBreakpoint } from "../hooks/use-close-across-breakpoint";
 import { useLogOut } from "../hooks/use-log-out";
-import { BrandLink, HEADER_CLASS, LINE_HEIGHT_NORMAL } from "./Brand";
+import { BrandLink, HEADER_CLASS } from "./Brand";
 
 // 手機（899px 以下）的滿版選單（畫面 18、EXPERIENCE.md Responsive「導覽列」）：右上的「選單」按鈕打開，
 // 「關閉選單」或 Esc 關上。依 AR-67 這一輪只有帳號那幾項（名稱、使用須知、登出）；導覽連結在 3.14 起接上。
@@ -95,10 +95,7 @@ export function MobileMenu({ member, open, onOpenChange, triggerRef, desktopFocu
               <CloseIcon />
             </Dialog.Close>
           </div>
-          <nav
-            className="flex-1 px-gutter-mobile pt-[28px] pb-[40px] tablet:px-gutter-tablet"
-            style={LINE_HEIGHT_NORMAL}
-          >
+          <nav className="flex-1 px-gutter-mobile pt-[28px] pb-[40px] leading-normal tablet:px-gutter-tablet">
             <div className="mt-[36px] border-t border-border pt-[22px]">
               <div className="pb-[8px] text-nav text-text-secondary">{member.display_name}</div>
               <Link to="/notice" onClick={close} className={ITEM_CLASS}>

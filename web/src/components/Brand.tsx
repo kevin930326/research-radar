@@ -1,16 +1,10 @@
 import { Link } from "@tanstack/react-router";
-import type { CSSProperties } from "react";
 import { useTranslation } from "react-i18next";
 
 // 品牌（DESIGN.md Components「導覽列」：左邊金色雷達圖示加品牌名）：導覽列與登入頁共用。
 // 圖示與字的大小、間距照設計稿（docs/ux/reference/screens/login-account.html），由使用的地方給類別。
-
-/**
- * 設計稿沒寫行高的文字（品牌、導覽、選單、按鈕）：行高是瀏覽器預設的 normal。
- * 頁面的 body 用 text-body 的 1.9，所以這幾處要明寫回 normal；DESIGN.md 的行高尺度只收倍數，
- * normal 不是尺度裡的值，也不是任意值（是 CSS 的初始值）。要不要把 normal 加進尺度：要 Kevin 決定（token-gaps.md）。
- */
-export const LINE_HEIGHT_NORMAL: CSSProperties = { lineHeight: "normal" };
+// 設計稿沒寫行高的文字（品牌、導覽、選單、按鈕）是瀏覽器預設的 normal；頁面的 body 用 text-body 的 1.9，
+// 所以這幾處用行高尺度的 leading-normal 寫回 normal（Kevin 2026-11-16 決定加進 DESIGN.md 的尺度）。
 
 /** 金色雷達圖示（裝飾，螢幕報讀器略過）。 */
 export function RadarIcon({ className }: { className: string }) {
@@ -28,7 +22,7 @@ export function RadarIcon({ className }: { className: string }) {
 export function BrandName({ className }: { className: string }) {
   const { t } = useTranslation("common");
   return (
-    <span className={`font-display text-text-primary ${className}`} style={LINE_HEIGHT_NORMAL}>
+    <span className={`font-display leading-normal text-text-primary ${className}`}>
       {t("brand.name.research")} <span className="italic">{t("brand.name.radar")}</span>
     </span>
   );
