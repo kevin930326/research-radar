@@ -173,7 +173,8 @@ def test_sweep_entry_table_must_start_with_letter() -> None:
 
 
 def test_registry_has_weekly_run() -> None:
-    [entry] = SWEEP_REGISTRY
+    # Story 2.9 起登記清單不只一列（batch_submission 也登記了），找 weekly_run 那一列。
+    [entry] = [entry for entry in SWEEP_REGISTRY if entry.table == "weekly_run"]
     assert (entry.table, entry.status_column, entry.start_status, entry.time_column) == (
         "weekly_run",
         "status",

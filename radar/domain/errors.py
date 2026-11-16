@@ -104,3 +104,29 @@ class ErrorCode(StrEnum):
     EMBED_LOCK_TIMEOUT = "embed_lock_timeout"
     # 占用額度時等額度鎖超過 lock_timeout：這一批不送（已取得資格的 run 改 failed），其他論文照做
     EMBED_QUOTA_LOCK_TIMEOUT = "embed_quota_lock_timeout"
+
+    # Batch 送出（`radar/services/llm_batches.py`，Story 2.9、ADR-0041）
+    # 送出前重建請求，和規劃時記的 run 鍵對不上（摘要、prompt 版本、模型或設定版本變了，或論文
+    # 沒了）：那筆 run 改 failed、不送（`derivation_run.failure_reason`）；整批都對不上時批次
+    # 也記這個
+    BATCH_INPUT_CHANGED = "batch_input_changed"
+    # 送出時逾時、斷線、5xx、回應看不懂或非預期的例外（含一般的 TypeError、ValueError）：不知道
+    # 供應商有沒有建好批次，標 `needs_attention`、不自動重送（沒有冪等鍵）；停在 submitting 太久
+    # 也記這個。一定沒建立的另記：4xx 照狀態碼；送出前就丟的 `NotCloudSafeError` 記
+    # `cloud_text_not_registered`、沒有狀態碼的 `LlmConfigurationError` 記 `llm_configuration`
+    BATCH_SUBMIT_UNCERTAIN = "batch_submit_uncertain"
+    # 供應商明確回了 4xx（429、401、403、404 以外）：一定沒有建立，批次與 run 都改 failed
+    BATCH_SUBMIT_REJECTED = "batch_submit_rejected"
+    # 送出時在台北時間月初窗口裡：不動、不送，列維持 queued，sweep 之後補排
+    BATCH_MONTH_START_HOLD = "batch_month_start_hold"
+    # 送出時本月已熔斷：不動、不送，列維持 queued，sweep 之後補排
+    BATCH_BUDGET_TRIPPED = "batch_budget_tripped"
+    # 送出前最後確認（全域 Batch 預算鎖裡）：本月帳＋全部尚未結束的 Batch 預留超過熔斷線或這批工作的
+    # 功能預算（規劃之後互動又花了、或預算調低）：不動、不送，列維持 queued，sweep 之後補排
+    BATCH_BUDGET_EXCEEDED = "batch_budget_exceeded"
+    # 送出前最後確認：這批再等也放不下（熔斷線或功能預算調低後，這批自己的預留加上排在它前面、還在
+    # queued 的批次的預留就超過；`domain/llm_batches.batch_never_fits`）：同一個交易把批次從
+    # queued 改 failed、這批的 run 改 failed（釋放預留），下一次規劃依新預算重排
+    BATCH_BUDGET_CANNOT_FIT = "batch_budget_cannot_fit"
+    # 送出時等全域 Batch 預算鎖逾時（規劃的長交易拿著）：不動、不送，列維持 queued，sweep 之後補排
+    BATCH_BUDGET_LOCK_BUSY = "batch_budget_lock_busy"

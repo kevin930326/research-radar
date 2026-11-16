@@ -21,6 +21,7 @@ from radar.domain.domain_config import (
 from radar.domain.embeddings import EmbeddingConfig
 from radar.domain.import_report import ImportBaseline
 from radar.domain.jobs import scheduled_jobs
+from radar.domain.llm_batches import LlmBatchConfig
 from radar.domain.pricing import ModelsConfig
 from radar.domain.settings import MigrationSettings, Settings, heartbeat_url_field
 from radar.domain.taxonomy import Taxonomy, taxonomy_registry_problems
@@ -176,6 +177,8 @@ CONTEXT_VALUES_FILE = "context_values.yaml"
 # 向量化（PRD FR-5、FR-9、ADR-0040）：向量化的工作與 `radar embeddings` 讀
 # （`load_embedding_config`）。
 EMBEDDINGS_FILE = "embeddings.yaml"
+# Batch 送出（Story 2.9、ADR-0041）：Batch 規劃的工作讀（`load_llm_batch_config`）。
+LLM_BATCHES_FILE = "llm_batches.yaml"
 
 
 def config_dir(environ: Mapping[str, str] | None = None) -> Path:
@@ -340,6 +343,21 @@ def load_embedding_config(environ: Mapping[str, str] | None = None) -> Embedding
     """
     problems: list[str] = []
     config = _load_yaml_model(config_dir(environ), EMBEDDINGS_FILE, EmbeddingConfig, problems)
+    if problems or config is None:
+        raise ConfigError(problems)
+    return config
+
+
+def load_llm_batch_config(environ: Mapping[str, str] | None = None) -> LlmBatchConfig:
+    """讀 `RADAR_CONFIG_DIR` 下的 `llm_batches.yaml`（每批最多幾個請求、月初延後到幾點）並驗證。
+
+    讀法與錯誤格式和 `load_domain_config` 相同（「檔名：欄位路徑：原因」）。
+
+    Raises:
+        ConfigError: 缺檔、不是合法 YAML、鍵寫兩次或內容不對（例如不是整數、超出範圍、多鍵）。
+    """
+    problems: list[str] = []
+    config = _load_yaml_model(config_dir(environ), LLM_BATCHES_FILE, LlmBatchConfig, problems)
     if problems or config is None:
         raise ConfigError(problems)
     return config

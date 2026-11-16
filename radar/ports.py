@@ -7,7 +7,7 @@
 from collections.abc import Sequence
 from typing import Protocol
 
-from radar.domain.llm import LlmRequest, LlmResult
+from radar.domain.llm import LlmBatchRequest, LlmRequest, LlmResult
 from radar.domain.policy import CloudSafeText
 from radar.domain.raw_records import JournalQuery, RawSource, SourcePage
 
@@ -58,6 +58,26 @@ class LlmProvider(Protocol):
                 回應格式不對（`LlmMalformedResponseError`）、請求不合法（`LlmInvalidRequestError`）。
             LlmTransientError: 重試用完仍是逾時、限流、服務端錯誤或連線錯誤。
             LlmConfigurationError: 金鑰、權限或模型設定不對（401、403、404）。
+        """
+        ...
+
+    def submit_batch(self, requests: Sequence[LlmBatchRequest]) -> str:
+        """建一個 Message Batch（Story 2.9、ADR-0041），回供應商的 batch ID。只由
+        `services/llm_gateway.send_llm_batch` 呼叫。
+
+        **不重試**：建立批次沒有冪等鍵，送出後沒拿到回應時供應商那邊可能已經建好；要不要再送由
+        呼叫端決定（ADR-0004 決定第 4 點）。每筆的 `params` 由供應商非同步驗證，不合法的請求不會在
+        這裡失敗，而是在結果裡變成 `errored`。
+
+        Raises:
+            NotCloudSafeError, TypeError, ValueError: 不是 `LlmBatchRequest` 的序列、是空的、超過
+                100,000 筆、`custom_id` 重複，或請求裡有不是 `CloudSafeText` 的文字；在送出任何
+                請求前丟出。
+            LlmError: 子類別同 `complete`（狀態碼在 `status`）。HTTP 4xx 代表一定沒有建立；沒有
+                狀態碼的 `LlmConfigurationError`（SDK 讀不到憑證這類）在送出前丟出，也一定沒有建立；
+                逾時、連線錯誤、5xx、200 但回應看不懂（`LlmMalformedResponseError`，回應裡有像樣
+                的 batch ID 時放在 `response_id`）都不確定有沒有建立。呼叫端只把
+                `NotCloudSafeError` 當成送出前丟的；一般的 TypeError、ValueError 當成不確定。
         """
         ...
 

@@ -6,6 +6,8 @@
 - `prompt_sha256`／`schema_sha256`：prompt 檔與結構化輸出 schema 的雜湊，登記在
   `domain/prompt_hashes.py`，改了內容卻沒升版就對不上。
 - `run_lock_key`：取得執行資格時 advisory lock 的鍵（64 位元有號整數）。
+- `LLM_BATCH_BUDGET_LOCK_KEY`：Batch 規劃時計算預算預留的全域 advisory lock 鍵（固定名稱算出的
+  64 位元有號整數，Story 2.9、ADR-0041）。
 - `taxonomy_content_sha256`：分類表會進 prompt 的內容的雜湊，登記在 `domain/taxonomy_hashes.py`，
   內容改了卻沒升版就對不上（Story 2.5、ADR-0033）。
 - `context_values_content_sha256`：情境值清單會影響結果的內容的雜湊，登記在
@@ -165,6 +167,24 @@ def run_lock_key(key: RunKey) -> int:
         ).encode("utf-8")
     ).digest()
     return int.from_bytes(digest[:8], "big", signed=True)
+
+
+def named_lock_key(name: str) -> int:
+    """固定名稱的 advisory lock 鍵：`radar-lock:<名稱>` 的 SHA-256 前 8 個位元組，當成大端序的
+    64 位元有號整數。和 `run_lock_key`、`repo/db.py` 的固定鍵撞到的機率約 2^-64；撞到只是多等一下。
+
+    Raises:
+        ValueError: `name` 不是非空字串。
+    """
+    if not isinstance(name, str) or not name:
+        raise ValueError("鎖的名稱要是非空字串")
+    digest = hashlib.sha256(f"radar-lock:{name}".encode()).digest()
+    return int.from_bytes(digest[:8], "big", signed=True)
+
+
+# Batch 規劃（Story 2.9、ADR-0041）：每一批的交易一開始拿這把獨佔交易級鎖，鎖裡讀「本月帳＋尚未結束
+# 的 Batch 預留」再決定放得下哪些；兩個規劃不會同時用掉同一份剩餘預算。
+LLM_BATCH_BUDGET_LOCK_KEY: Final = named_lock_key("llm_batch_budget")
 
 
 # --- 分類表（Story 2.5、ADR-0033） ----------------------------------------------------------

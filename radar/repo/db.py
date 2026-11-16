@@ -13,6 +13,10 @@ from radar.domain.errors import LockWaitTimeoutError
 
 log = structlog.get_logger(__name__)
 
+# 交易連線的型別別名：services 不能 import sqlalchemy（import-linter `pkg-sqlalchemy`），函式要收
+# 呼叫端開好的交易連線時用這個標型別（例如 `services/llm_gateway.claim_batch_run`，Story 2.9）。
+type DbConnection = Connection
+
 # --- advisory lock 的鍵 -----------------------------------------------------------------------
 # advisory lock：PostgreSQL 提供、用途由程式自己約定的鎖，用一個 bigint 當名字。整個資料庫
 # 共用同一個鍵空間（Procrastinate 不用 advisory lock），新增的鎖不能和這裡的重複；

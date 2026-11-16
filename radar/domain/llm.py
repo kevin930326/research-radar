@@ -3,6 +3,7 @@
 - `LlmRequest`：一次呼叫要送的內容。系統提示（工作的部分）與使用者訊息的每個區塊都是
   `CloudSafeText`；送出的系統提示永遠是 `system_prompt(request)`，開頭是固定聲明
   `DATA_NOT_INSTRUCTIONS`（防 prompt injection）。不給工具。
+- `LlmBatchRequest`：Batch 裡的一筆（`custom_id`＋`LlmRequest`，Story 2.9）。
 - `Completion`：adapter 從供應商的回應取出的中立形狀；`interpret_completion` 把它判讀成
   `LlmResult`，或丟有型別的錯誤。替身也走同一個函式，所以兩邊丟的是同一批類別。
 - 錯誤分三大類（2.2 的閘門只看類別）：
@@ -16,6 +17,7 @@
 
 import json
 import math
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
@@ -429,6 +431,47 @@ def snapshot_llm_request(obj: object) -> LlmRequest:
         disable_thinking=request.disable_thinking,
         output_schema=request.output_schema,
     )
+
+
+# Batch 請求的 `custom_id`：`batch_item.id` 的 32 個小寫十六進位字元（UUID 的 `.hex`），符合
+# Anthropic「1～64 個英數字、`-`、`_`」的規定（ADR-0004 決定第 4 點、ADR-0041）。
+CUSTOM_ID_PATTERN: Final = re.compile(r"[0-9a-f]{32}")
+
+
+@final
+@dataclass(frozen=True, slots=True)
+class LlmBatchRequest:
+    """Batch 裡的一筆請求：`custom_id`（`batch_item.id.hex`）＋一個 `LlmRequest`。
+
+    Raises:
+        ValueError: `custom_id` 不是 32 個小寫十六進位字元。
+        NotCloudSafeError, TypeError, ValueError: `request` 不是合法的 `LlmRequest`
+            （同 `check_llm_request`）。
+    """
+
+    custom_id: str
+    request: LlmRequest
+
+    def __init_subclass__(cls) -> None:
+        raise TypeError("LlmBatchRequest 不能被繼承")
+
+    def __post_init__(self) -> None:
+        if type(self.custom_id) is not str or CUSTOM_ID_PATTERN.fullmatch(self.custom_id) is None:
+            raise ValueError("LlmBatchRequest.custom_id 要是 32 個小寫十六進位字元")
+        check_llm_request(self.request)
+
+
+def snapshot_llm_batch_request(obj: object) -> LlmBatchRequest:
+    """adapter 入口：真實型別一定是 `LlmBatchRequest`，用讀到的值重建一份（裡面的 `LlmRequest`
+    也經 `snapshot_llm_request` 重建），之後只讀這一份。
+
+    Raises:
+        NotCloudSafeError: 不是 `LlmBatchRequest`，或請求裡有不是 `CloudSafeText` 的文字。
+        TypeError, ValueError: 同 `LlmBatchRequest` 與 `LlmRequest`。
+    """
+    if type(obj) is not LlmBatchRequest:
+        raise NotCloudSafeError(_not_cloud_safe("LlmProvider.submit_batch 的請求", obj))
+    return LlmBatchRequest(custom_id=obj.custom_id, request=snapshot_llm_request(obj.request))
 
 
 def check_cloud_safe_text(obj: object) -> CloudSafeText:

@@ -26,16 +26,21 @@
 
 記帳之後（8、9）出非預期的錯（驗證函式丟了 `OutputRejectedError` 以外的例外、寫入的交易失敗）
 時，帳照記，run 改成 `failed`（`llm_result_pending`），例外原樣丟出；下一次同一組鍵從存下的輸出
-接續 8、9，不再呼叫模型、不再記帳（ADR-0030）。只支援互動呼叫；Batch 由 Batch 的 Story 另做。
+接續 8、9，不再呼叫模型、不再記帳（ADR-0030）。`run_llm_job` 只收互動呼叫。
 
-預算檢查是「呼叫前看帳本」，帳在第 7 步才記，所以同時在途的呼叫彼此看不到（熔斷線與每個功能預算
-都一樣）：超支上限＝同時在途的呼叫數（worker 與所有呼叫閘門的 CLI 等行程加起來）× 單次最大費用
-（約 0.042 美元；只在帳都記得進去、沒有工作打開 `allow_over_input_limit` 時成立，ADR-0031 決定 6）。
-Anthropic workspace 的每月上限是第二道。
+Batch（Story 2.9、ADR-0041）共用第 1、3、4 步（`prepare_llm_request`）與第 5 步的鎖內邏輯
+（`claim_batch_run`：在 `services/llm_batches.py` 開的交易裡新增 `call_mode='batch'` 的 run；
+有可接續的 `llm_result_pending` 時不新增，留給互動接續）；送出只經 `send_llm_batch`（唯一呼叫
+`provider.submit_batch` 的地方）。批次的狀態轉移與預算預留在 `services/llm_batches.py`。
+
+預算檢查是「呼叫前看帳本＋尚未結束的 Batch 預留」（ADR-0041），帳在第 7 步才記，所以同時在途的
+呼叫彼此看不到（熔斷線與每個功能預算都一樣）：超支上限＝同時在途的呼叫數（worker 與所有呼叫閘門的
+CLI 等行程加起來）× 單次最大費用（約 0.042 美元；只在帳都記得進去、沒有工作打開
+`allow_over_input_limit` 時成立，ADR-0031 決定 6）。Anthropic workspace 的每月上限是第二道。
 """
 
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import timedelta
 from decimal import Decimal
@@ -58,6 +63,7 @@ from radar.domain.ai_outputs import (
     NoLlmInputError,
     OutputLang,
     OutputRejectedError,
+    PaperLlmSource,
     ResultStatus,
     RunKey,
     SavedLlmOutput,
@@ -69,6 +75,7 @@ from radar.domain.context_values import ContextValues
 from radar.domain.errors import ErrorCode
 from radar.domain.fingerprints import input_sha256, run_lock_key
 from radar.domain.llm import (
+    LlmBatchRequest,
     LlmConfigurationError,
     LlmRejectedError,
     LlmRequest,
@@ -86,7 +93,7 @@ from radar.domain.validators.research_model import ResearchModelValidator
 from radar.domain.viewer import SystemViewer, Viewer
 from radar.ports import LlmProvider
 from radar.repo.ai_outputs import find_blocking_ai_result
-from radar.repo.db import Database
+from radar.repo.db import Database, DbConnection
 from radar.repo.llm_ledger import (
     create_derivation_run,
     create_llm_call,
@@ -104,13 +111,19 @@ from radar.services.prompt_loader import LoadedPrompt, current_prompt_version, l
 
 # `GatewayConfig` 定義在 domain（bootstrap 不能 import services），從這裡也拿得到。
 __all__ = [
+    "BatchClaim",
+    "BatchClaimOutcome",
     "GatewayConfig",
     "GatewayOutcome",
     "GatewayResult",
     "LlmJob",
     "OutputValidator",
+    "PreparedLlmRequest",
+    "claim_batch_run",
     "expire_stale_runs",
+    "prepare_llm_request",
     "run_llm_job",
+    "send_llm_batch",
 ]
 
 log = structlog.get_logger(__name__)
@@ -233,6 +246,38 @@ class _Claim:
     saved: SavedLlmOutput | None
 
 
+@dataclass(frozen=True)
+class PreparedLlmRequest:
+    """放行、算過指紋、組好也檢查過大小的請求（`prepare_llm_request` 回的；互動與 Batch 共用）。
+
+    - `key`：這次的 `RunKey`（Batch 送出前重建時拿來核對）。
+    - `estimated_input_tokens`：離線保守估計的輸入 token（含系統提示與凍結 schema；Batch 預留用）。
+    """
+
+    job: LlmJob
+    prompt: LoadedPrompt
+    llm_input: LlmInput
+    key: RunKey
+    request: LlmRequest
+    estimated_input_tokens: int
+
+
+class BatchClaimOutcome(StrEnum):
+    """`claim_batch_run` 的結果。"""
+
+    CLAIMED = "claimed"  # 新增了 call_mode='batch' 的 running run
+    SKIPPED = "skipped"  # should_run 說不用跑（已有 running、active 或平常流程的 rejected）
+    RESUMABLE = "resumable"  # 有可接續的 llm_result_pending：留給互動接續，不新增
+
+
+@dataclass(frozen=True)
+class BatchClaim:
+    """一次 `claim_batch_run` 的結果：`run_id` 只有 `CLAIMED` 時有。"""
+
+    outcome: BatchClaimOutcome
+    run_id: uuid.UUID | None = None
+
+
 def run_llm_job(
     actor: Viewer,
     database: Database,
@@ -263,7 +308,7 @@ def run_llm_job(
     if config.call_mode is not CallMode.INTERACTIVE:
         # Batch 的計價（五折）與生命週期（不受 sweep 時限、跟著批次結果走）要等真正的 Batch
         # 流程；現在這個入口是同步呼叫，照 Batch 記帳會少記一半（ADR-0030）。
-        raise ValueError("閘門目前只支援互動呼叫；Batch 由 Batch 的 Story 另做")
+        raise ValueError("閘門目前只支援互動呼叫；Batch 走 services/llm_batches.py")
     task = LlmTask(job.task)
     if task not in HEADER_TABLES:
         raise ValueError(f"{task.value} 還沒有表頭表，閘門不支援（2.2 只支援有表頭的工作）")
@@ -274,18 +319,10 @@ def run_llm_job(
         source = find_paper_llm_source(viewer, connection, job.paper_id, for_update=False)
     if source is None:
         raise LookupError("找不到論文")
-    try:
-        llm_input = build_llm_input(source, job.input_kind)
-    except NoLlmInputError:
-        return GatewayResult(GatewayOutcome.NO_INPUT)
-    try:
-        content = tuple(
-            clear_for_cloud(block.text, block.source, None, config.cloud_policy)
-            for block in llm_input.blocks
-        )
-    except CloudClearanceError as exc:
-        log.info("LLM 輸入放行擋下", task=task.value, source=exc.source.value, reason=exc.reason)
-        return GatewayResult(GatewayOutcome.BLOCKED, reason=exc.reason)
+    cleared = _clear_input(config, job, source)
+    if isinstance(cleared, GatewayResult):
+        return cleared
+    llm_input, content = cleared
 
     # 2. 預算檢查。不准時只剩一條路：同一組鍵已經付過錢、只差寫結果的 run（`llm_result_pending`）
     # 照樣接續，因為接續不呼叫模型、不再記帳（ADR-0031）；其餘一律 DEFERRED_BUDGET（不讀 prompt、
@@ -294,31 +331,16 @@ def run_llm_job(
     if resume_only and not _has_resumable_run(database, config, job, llm_input, eval_run_id):
         return GatewayResult(GatewayOutcome.DEFERRED_BUDGET)
 
-    # 3. prompt、指紋、請求。
+    # 3、4. prompt、指紋、請求；輸入太大就不送。
     prompt = load_prompt(config.prompts_root, task)
-    task_model = config.models.task_model(task)
-    fingerprint = input_sha256(
-        llm_input.blocks,
-        task,
-        taxonomy_version=job.taxonomy_version,
-        context_values_version=job.context_values_version,
-    )
-    key = RunKey(job.paper_id, task, prompt.version, task_model.model, fingerprint)
-    request = _build_request(prompt, task_model.model, content)
-
-    # 4. 輸入太大就不送。
-    # 送出的 JSON schema 也算進輸入，一起估。
-    sent_texts = [system_prompt(request), *(cloud_text(block) for block in request.content)]
-    if prompt.schema_class is not None:
-        sent_texts.append(frozen_schema_json(prompt.schema_class))
-    estimated = estimate_input_tokens(sent_texts, config.models.token_estimate)
-    if estimated > config.models.max_input_tokens and not task_model.allow_over_input_limit:
-        return GatewayResult(GatewayOutcome.TOO_LARGE, reason=ErrorCode.LLM_INPUT_TOO_LARGE)
+    prepared = _prepare_request(config, job, prompt, llm_input, content)
+    if isinstance(prepared, GatewayResult):
+        return prepared
+    key = prepared.key
+    request = prepared.request
 
     # 5. 取得執行資格（短交易，立刻 commit）。
-    claim = _acquire(
-        database, config, job, key, prompt, llm_input, eval_run_id, resume_only=resume_only
-    )
+    claim = _acquire(database, config, prepared, eval_run_id, resume_only=resume_only)
     if claim is None:
         # 預算不准而且鎖裡已經沒有可接續的 run（別人接續完、或已經有結果）：照預算不准回報。
         return GatewayResult(
@@ -408,6 +430,67 @@ def expire_stale_runs(actor: Viewer, database: Database, older_than: timedelta) 
     return expired
 
 
+# --- Batch（Story 2.9、ADR-0041；狀態轉移在 `services/llm_batches.py`） -------------------------
+
+
+def prepare_llm_request(
+    config: GatewayConfig, job: LlmJob, source: PaperLlmSource, prompt: LoadedPrompt
+) -> PreparedLlmRequest | GatewayResult:
+    """`run_llm_job` 第 1、3、4 步的同一段（Batch 規劃與送出前重建用）：從 `source` 推出輸入並放行、
+    算指紋、組 `RunKey` 與 `LlmRequest`、估計輸入 token。擋下時回 `GatewayResult`（`NO_INPUT`、
+    `BLOCKED`、`TOO_LARGE`）。不碰資料庫、不看預算。
+
+    Raises:
+        ValueError: 工作沒有表頭表、`source` 不是 `job` 的論文，或 `prompt` 不是這個工作的。
+    """
+    task = LlmTask(job.task)
+    if task not in HEADER_TABLES:
+        raise ValueError(f"{task.value} 還沒有表頭表，閘門不支援")
+    if source.paper_id != job.paper_id:
+        raise ValueError("source 不是這件工作的論文")
+    if prompt.task is not task:
+        raise ValueError("prompt 不是這個工作的")
+    cleared = _clear_input(config, job, source)
+    if isinstance(cleared, GatewayResult):
+        return cleared
+    llm_input, content = cleared
+    return _prepare_request(config, job, prompt, llm_input, content)
+
+
+def claim_batch_run(
+    actor: Viewer, connection: DbConnection, config: GatewayConfig, prepared: PreparedLlmRequest
+) -> BatchClaim:
+    """在呼叫端開好的交易裡取得 Batch 的執行資格（AD-8）：advisory lock → 查 running → 查表頭
+    → 有可接續的 `llm_result_pending` 就 `RESUMABLE` → 新增 `call_mode='batch'` 的 `running` run
+    （部分唯一索引兜底）。鎖是交易級的，呼叫端 commit 或退回時放掉；新增的 run 跟著呼叫端的交易。
+
+    Raises:
+        PermissionDeniedError: `actor` 不是系統工作。
+        ValueError: `config.call_mode` 不是 Batch。
+    """
+    require(actor, Action.RUN_AI_JOBS, None)
+    if config.call_mode is not CallMode.BATCH:
+        raise ValueError("claim_batch_run 要用 call_mode=batch 的閘門設定")
+    claim = _claim_locked(connection, config, prepared, None, resume_only=False, batch=True)
+    if isinstance(claim, _Claim):
+        return BatchClaim(BatchClaimOutcome.CLAIMED, claim.run_id)
+    return BatchClaim(claim)
+
+
+def send_llm_batch(
+    actor: Viewer, provider: LlmProvider, requests: Sequence[LlmBatchRequest]
+) -> str:
+    """把一批請求送給供應商（`radar/` 裡唯一呼叫 `submit_batch` 的地方），回供應商 batch ID。
+    不重試（沒有冪等鍵，ADR-0041）；不開著交易呼叫。
+
+    Raises:
+        PermissionDeniedError: `actor` 不是系統工作（不呼叫供應商）。
+        LlmError: 供應商的錯誤原樣丟出（分類由 `services/llm_batches.py` 做）。
+    """
+    require(actor, Action.RUN_AI_JOBS, None)
+    return provider.submit_batch(requests)
+
+
 # --- 各步驟 ---------------------------------------------------------------------------------
 
 
@@ -427,21 +510,69 @@ def _build_request(
     )
 
 
-def _acquire(
-    database: Database,
+def _clear_input(
+    config: GatewayConfig, job: LlmJob, source: PaperLlmSource
+) -> tuple[LlmInput, tuple[CloudSafeText, ...]] | GatewayResult:
+    """第 1 步（互動與 Batch 共用）：從資料列推出要送的文字與來源，每段經 `clear_for_cloud` 放行。
+    沒有輸入回 `NO_INPUT`；放行擋下回 `BLOCKED`（帶原因代碼）。"""
+    try:
+        llm_input = build_llm_input(source, job.input_kind)
+    except NoLlmInputError:
+        return GatewayResult(GatewayOutcome.NO_INPUT)
+    try:
+        content = tuple(
+            clear_for_cloud(block.text, block.source, None, config.cloud_policy)
+            for block in llm_input.blocks
+        )
+    except CloudClearanceError as exc:
+        log.info(
+            "LLM 輸入放行擋下",
+            task=LlmTask(job.task).value,
+            source=exc.source.value,
+            reason=exc.reason,
+        )
+        return GatewayResult(GatewayOutcome.BLOCKED, reason=exc.reason)
+    return llm_input, content
+
+
+def _prepare_request(
     config: GatewayConfig,
     job: LlmJob,
-    key: RunKey,
     prompt: LoadedPrompt,
     llm_input: LlmInput,
-    eval_run_id: uuid.UUID | None,
-    *,
-    resume_only: bool = False,
-) -> _Claim | None:
-    """取得執行資格：同一個短交易裡上鎖、重問 `should_run`、接續 `llm_result_pending` 的 run 或
-    新增 `running`。不用跑回 None。`resume_only`（預算不准）時只接續、不新增，沒有可接續的就回
-    None，所以預算不准時一定不會呼叫模型。"""
-    viewer = SystemViewer()
+    content: tuple[CloudSafeText, ...],
+) -> PreparedLlmRequest | GatewayResult:
+    """第 3、4 步（互動與 Batch 共用）：算 `input_sha256`、組 `RunKey` 與 `LlmRequest`、離線保守估計
+    輸入 token；超過 `max_input_tokens` 而且工作沒允許回 `TOO_LARGE`。"""
+    task = LlmTask(job.task)
+    task_model = config.models.task_model(task)
+    fingerprint = input_sha256(
+        llm_input.blocks,
+        task,
+        taxonomy_version=job.taxonomy_version,
+        context_values_version=job.context_values_version,
+    )
+    key = RunKey(job.paper_id, task, prompt.version, task_model.model, fingerprint)
+    request = _build_request(prompt, task_model.model, content)
+    # 送出的 JSON schema 也算進輸入，一起估。
+    sent_texts = [system_prompt(request), *(cloud_text(block) for block in request.content)]
+    if prompt.schema_class is not None:
+        sent_texts.append(frozen_schema_json(prompt.schema_class))
+    estimated = estimate_input_tokens(sent_texts, config.models.token_estimate)
+    if estimated > config.models.max_input_tokens and not task_model.allow_over_input_limit:
+        return GatewayResult(GatewayOutcome.TOO_LARGE, reason=ErrorCode.LLM_INPUT_TOO_LARGE)
+    return PreparedLlmRequest(
+        job=job,
+        prompt=prompt,
+        llm_input=llm_input,
+        key=key,
+        request=request,
+        estimated_input_tokens=estimated,
+    )
+
+
+def _run_params(prompt: LoadedPrompt, task: LlmTask) -> dict[str, object]:
+    """記進 `derivation_run.params` 的來歷。"""
     settings = prompt.settings
     params: dict[str, object] = {
         "effort": settings.effort,
@@ -451,21 +582,67 @@ def _acquire(
         # 送出的凍結 schema 字串的雜湊：`Field(description=...)` 這類改動也看得出來（來歷）。
         "output_schema_sha256": prompt.schema_sha256,
     }
-    if LlmTask(job.task) is LlmTask.EXTRACT_MODEL:
+    if LlmTask(task) is LlmTask.EXTRACT_MODEL:
         # 萃取 schema 的版本（PRD FR-3「定版並記版本號」，和 prompt 版本一起當版本號；ADR-0034）。
         params["extraction_schema_version"] = EXTRACTION_SCHEMA_VERSION
+    return params
+
+
+def _acquire(
+    database: Database,
+    config: GatewayConfig,
+    prepared: PreparedLlmRequest,
+    eval_run_id: uuid.UUID | None,
+    *,
+    resume_only: bool = False,
+) -> _Claim | None:
+    """取得執行資格（互動）：一個短交易裡呼叫 `_claim_locked`，立刻 commit。不用跑回 None。
+    `resume_only`（預算不准）時只接續、不新增，沒有可接續的就回 None，所以預算不准時一定不會呼叫
+    模型。"""
     with database.transaction() as connection:
-        # 阻塞的交易級鎖：交易結束（commit 或退回）時自動放掉。
-        Database.transaction_lock(connection, run_lock_key(key))
-        # 先查 running 再查表頭：READ COMMITTED 下兩句各自取快照，別人的表頭與 run 改 succeeded
-        # 在同一個交易 commit。先查表頭再查 running 的話，對方剛好在兩句之間 commit 時兩句都查不到，
-        # 就會再付一次錢；這個順序下一定看得到其中一個。
-        # 評估也查 running（只看同一個 eval_run_id）：別人剛把 pending 改回 running、離開鎖去
-        # 驗證時，這裡找不到 pending，不擋就會新增 run、再付一次錢。評估不查表頭（`should_run`）。
-        if find_running_derivation_run_id(viewer, connection, key, eval_run_id) is not None:
-            return None
-        if eval_run_id is None and find_blocking_ai_result(viewer, connection, key) is not None:
-            return None
+        claim = _claim_locked(
+            connection, config, prepared, eval_run_id, resume_only=resume_only, batch=False
+        )
+    return claim if isinstance(claim, _Claim) else None
+
+
+def _claim_locked(
+    connection: DbConnection,
+    config: GatewayConfig,
+    prepared: PreparedLlmRequest,
+    eval_run_id: uuid.UUID | None,
+    *,
+    resume_only: bool,
+    batch: bool,
+) -> _Claim | BatchClaimOutcome:
+    """在呼叫端開好的交易裡上鎖、重問 `should_run`，再接續或新增 `running` 的 run（AD-8）。
+
+    - 有 `running`、或（不是評估時）有 `active`／平常流程的 `rejected` → `SKIPPED`。
+    - 互動：有 `llm_result_pending` 的 run 就改回 `running` 接續（回帶存下輸出的 `_Claim`）；
+      `resume_only` 時沒有可接續的就 `SKIPPED`。
+    - Batch（`batch=True`）：有可接續的 `llm_result_pending` 就 `RESUMABLE`（留給互動接續，不改、
+      不新增，不重付）。
+    - 否則新增 `call_mode=config.call_mode` 的 `running` run；部分唯一索引擋下時 `SKIPPED`。
+    鎖是交易級的，交易結束（commit 或退回）時自動放掉。
+    """
+    viewer = SystemViewer()
+    key = prepared.key
+    # 阻塞的交易級鎖：交易結束（commit 或退回）時自動放掉。
+    Database.transaction_lock(connection, run_lock_key(key))
+    # 先查 running 再查表頭：READ COMMITTED 下兩句各自取快照，別人的表頭與 run 改 succeeded
+    # 在同一個交易 commit。先查表頭再查 running 的話，對方剛好在兩句之間 commit 時兩句都查不到，
+    # 就會再付一次錢；這個順序下一定看得到其中一個。
+    # 評估也查 running（只看同一個 eval_run_id）：別人剛把 pending 改回 running、離開鎖去
+    # 驗證時，這裡找不到 pending，不擋就會新增 run、再付一次錢。評估不查表頭（`should_run`）。
+    if find_running_derivation_run_id(viewer, connection, key, eval_run_id) is not None:
+        return BatchClaimOutcome.SKIPPED
+    if eval_run_id is None and find_blocking_ai_result(viewer, connection, key) is not None:
+        return BatchClaimOutcome.SKIPPED
+    if batch:
+        # 已經付過錢、只差寫結果的 run：留給互動接續（不重付），Batch 不新增。
+        if find_resumable_derivation_run_id(viewer, connection, key, eval_run_id) is not None:
+            return BatchClaimOutcome.RESUMABLE
+    else:
         # 已經付過錢、只差寫結果的 run：改回 running，從存下的輸出接續（不再呼叫模型）。
         resumed = update_derivation_run_resumed(connection, key, eval_run_id)
         if resumed is not None:
@@ -474,22 +651,23 @@ def _acquire(
                 raise RuntimeError("接續的 derivation_run 沒有存下的輸出")
             return _Claim(resumed, saved)
         if resume_only:
-            return None
-        run_id = create_derivation_run(
-            connection,
-            NewDerivationRun(
-                key=key,
-                prompt_sha256=prompt.sha256,
-                input_kind=llm_input.input_kind,
-                params=params,
-                taxonomy_version=job.taxonomy_version,
-                context_values_version=job.context_values_version,
-                code_version=config.code_version,
-                call_mode=config.call_mode,
-                eval_run_id=eval_run_id,
-            ),
-        )
-    return None if run_id is None else _Claim(run_id, None)
+            return BatchClaimOutcome.SKIPPED
+    job = prepared.job
+    run_id = create_derivation_run(
+        connection,
+        NewDerivationRun(
+            key=key,
+            prompt_sha256=prepared.prompt.sha256,
+            input_kind=prepared.llm_input.input_kind,
+            params=_run_params(prepared.prompt, key.task),
+            taxonomy_version=job.taxonomy_version,
+            context_values_version=job.context_values_version,
+            code_version=config.code_version,
+            call_mode=config.call_mode,
+            eval_run_id=eval_run_id,
+        ),
+    )
+    return BatchClaimOutcome.SKIPPED if run_id is None else _Claim(run_id, None)
 
 
 def _has_resumable_run(

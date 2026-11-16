@@ -92,9 +92,13 @@ def _jobs(database: TestDatabase) -> list[dict[str, object]]:
         return [dict(zip(names, row, strict=True)) for row in cursor.fetchall()]
 
 
+# 每週更新發佈後排入的 AI 工作（Story 2.8 向量化、Story 2.9 Batch 規劃與送出）。
+_AFTER_PUBLISH_JOBS = frozenset({"embed_papers", "plan_llm_batches", "submit_llm_batch"})
+
+
 def _weekly_jobs(database: TestDatabase) -> list[dict[str, object]]:
-    """每週更新的工作（不含發佈後排入的 `embed_papers`，Story 2.8）。"""
-    return [job for job in _jobs(database) if job["task_name"] != "embed_papers"]
+    """每週更新的工作（不含發佈後排入的 AI 工作，Story 2.8、2.9）。"""
+    return [job for job in _jobs(database) if job["task_name"] not in _AFTER_PUBLISH_JOBS]
 
 
 def _embed_jobs(database: TestDatabase) -> list[dict[str, object]]:
@@ -164,7 +168,7 @@ def test_migration_creates_queue_objects_without_extensions(fresh_database: Test
     assert _admin_rows(fresh_database, "SELECT extname FROM pg_extension ORDER BY 1") == (
         extensions_before
     )
-    assert fresh_database.revisions() == {"0015"}
+    assert fresh_database.revisions() == {"0016"}
 
 
 def test_downgrade_to_0001_removes_every_queue_object(fresh_database: TestDatabase) -> None:

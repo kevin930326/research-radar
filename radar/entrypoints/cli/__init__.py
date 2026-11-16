@@ -40,6 +40,7 @@ from radar.entrypoints.bootstrap import (
     code_version,
 )
 from radar.entrypoints.logging_config import configure_logging
+from radar.entrypoints.startup import check_ai_config
 from radar.services.budget import get_budget_status
 from radar.services.coverage import get_coverage
 from radar.services.embeddings import (
@@ -81,6 +82,12 @@ def _root() -> None:
         load_domain_config()
     except ConfigError as exc:
         _fail("領域設定錯誤，沒有執行：", exc.problems)
+    # AI 設定（prompt 登記、models、budget、zh_summary、分類表、情境值清單、llm_batches）錯了也
+    # 不執行（Story 2.9）。
+    try:
+        check_ai_config()
+    except ConfigError as exc:
+        _fail("AI 設定錯誤，沒有執行：", exc.problems)
 
 
 @app.command()
