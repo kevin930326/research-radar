@@ -3,7 +3,16 @@ import { useTranslation } from "react-i18next";
 import type { ConstructItem, HypothesisItem, ResearchModelBlock } from "../../generated/model";
 import { AiBadge } from "../AiBadge";
 import { AiText } from "../AiText";
-import { BlockLine, MONO_LABEL_CLASS, NoteLine, SECTION_CLASS, SectionHeading, badgeProvenance } from "./parts";
+import { InfoPopover } from "../InfoPopover";
+import {
+  BlockLine,
+  InfoGlyph,
+  MONO_LABEL_CLASS,
+  NoteLine,
+  SECTION_CLASS,
+  SectionHeading,
+  badgeProvenance,
+} from "./parts";
 
 // 研究模型（EXPERIENCE.md 畫面 8 第 4 點；設計稿 paper.html「正常狀態」的第三塊）：
 // 構面清單（中文名稱＋英文原名）→ 關係清單（因 → 果、證據類型、是否成立、證據來源、假設原句）→ 固定一行
@@ -12,8 +21,10 @@ import { BlockLine, MONO_LABEL_CLASS, NoteLine, SECTION_CLASS, SectionHeading, b
 // - `empty`：一行「摘要裡沒有寫出可以擷取的假設」，有標章（設計稿沒畫，沿用 failed 那一行）。
 // - `no_input`（沒有摘要）：一行「沒有摘要，所以沒有研究模型。」，沒有標章（設計稿「沒有摘要」）。
 // - 沒有產生成功／還在產生／額度用完：一行狀態，沒有標章。
-// - 有內容的狀態（ready、empty）卻沒有來歷：不顯示內容（ADR-0010 第 8 點、ADR-0015），照「還沒產生」那一行，
-//   沒有標章（Codex 審查 3.8 中 1）。只有 ready 讀 `value`（中 2）。
+// - 有內容的狀態（ready、empty）卻沒有來歷：不顯示內容（ADR-0010 第 8 點、ADR-0015），顯示「沒有產生成功」那一行，
+//   沒有標章（Codex 審查 3.8 中 1；這是資料壞了、不會自己好，所以不寫「還在產生」，Kevin 2026-11-17 決定）。
+//   只有 ready 讀 `value`（中 2）。
+// - 是否成立是「未說明」或「不判定」時，旁邊有說明圖示，說明框解釋兩者的差別（EXPERIENCE.md「沒有依據：是否成立」）。
 // - 「找相似論文」在 Epic 4 才放（AR-67）。
 
 const ARROW = (
@@ -25,6 +36,24 @@ const ARROW = (
 /** 「構面 3 個」「關係 2 條」：數字放進佔位符，整句同一個樣式。 */
 function CountLabel({ text }: { text: string }) {
   return <span className={MONO_LABEL_CLASS}>{text}</span>;
+}
+
+/**
+ * 「未說明」「不判定」旁邊的說明圖示（EXPERIENCE.md State Patterns「沒有依據：是否成立」）：既有的說明框，
+ * 兩行解釋兩者的差別。圖示 13px，可點範圍 44×44 用負外距收回去，不撐開這一行。
+ */
+function SupportInfo() {
+  const { t } = useTranslation("paper");
+  return (
+    <InfoPopover
+      trigger={<InfoGlyph className="shrink-0" />}
+      triggerLabel={t("paper.supportInfo.label")}
+      triggerClassName="-m-[15px]"
+    >
+      <span className="block">{t("paper.supportInfo.not_stated")}</span>
+      <span className="mt-1 block">{t("paper.supportInfo.not_determined")}</span>
+    </InfoPopover>
+  );
 }
 
 function ConstructName({ construct }: { construct: ConstructItem }) {
@@ -57,9 +86,19 @@ function Relation({ hypothesis, constructs, fromFulltext, index }: RelationProps
           <span>
             {t("paper.model.evidenceType")} <span className="text-text-primary">{t(`paper.evidence.${hypothesis.evidence_type}`)}</span>
           </span>
-          <span>
-            {t("paper.model.support")} <span className="text-text-primary">{t(`paper.support.${hypothesis.support}`)}</span>
-          </span>
+          {hypothesis.support === "not_stated" || hypothesis.support === "not_determined" ? (
+            <span data-support-info className="inline-flex items-center gap-[7px]">
+              <span>
+                {t("paper.model.support")}{" "}
+                <span className="text-text-primary">{t(`paper.support.${hypothesis.support}`)}</span>
+              </span>
+              <SupportInfo />
+            </span>
+          ) : (
+            <span>
+              {t("paper.model.support")} <span className="text-text-primary">{t(`paper.support.${hypothesis.support}`)}</span>
+            </span>
+          )}
           <span className="inline-flex items-center gap-[7px]">
             {t("paper.model.evidenceSource")}{" "}
             <span
@@ -100,10 +139,10 @@ export function ResearchModelSection({ block, firstBadge }: ResearchModelSection
   let line: string | null;
   switch (block.state) {
     case "ready":
-      line = withoutProvenance ? t("paper.state.pending") : noConstructs ? t("paper.model.empty") : null;
+      line = withoutProvenance ? t("paper.state.failed") : noConstructs ? t("paper.model.empty") : null;
       break;
     case "empty":
-      line = withoutProvenance ? t("paper.state.pending") : t("paper.model.empty");
+      line = withoutProvenance ? t("paper.state.failed") : t("paper.model.empty");
       break;
     case "no_input":
       line = t("paper.model.noAbstract");

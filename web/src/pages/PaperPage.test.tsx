@@ -194,6 +194,13 @@ describe("State Patterns 8: blocks", () => {
     for (const key of ["analytical", "simulation", "qualitative", "conceptual"]) {
       expect(html).toContain(TEXT[`paper:paper.evidence.${key}`]);
     }
+    // 只有「未說明」「不判定」旁邊有說明圖示（名稱給報讀器）；其他三種沒有。
+    const supports = fixture("support-variants").research_model.value!.hypotheses.map((item) => item.support);
+    const withInfo = supports.filter((support) => support === "not_stated" || support === "not_determined").length;
+    expect(withInfo).toBeGreaterThan(0);
+    expect(count(html, "data-support-info")).toBe(withInfo);
+    expect(count(html, `aria-label="${TEXT["paper:paper.supportInfo.label"]}"`)).toBe(withInfo);
+    expect(render(fixture("normal"))).not.toContain("data-support-info");
     // 證據來源是全文：寫「全文」，沒有「只根據摘要」那一行。
     expect(html).toContain(TEXT["paper:paper.model.fromFulltext"]);
     expect(html).not.toContain(TEXT["paper:paper.model.abstractOnly"]);
@@ -250,7 +257,7 @@ describe("State Patterns 8: blocks", () => {
 describe("review fixes", () => {
   const SUMMARY_TEXT = "only-in-the-empty-value-marker";
 
-  it("ready or empty without provenance: no content and no badge, the 'still generating' line instead", () => {
+  it("ready or empty without provenance: no content and no badge, the 'not generated' line instead", () => {
     const page = fixture("normal");
     page.zh_summary.provenance = null;
     page.research_model.provenance = null;
@@ -259,7 +266,8 @@ describe("review fixes", () => {
     const value = fixture("normal");
     for (const name of ["zh_summary", "research_model", "classification"]) {
       const part = block(html, name);
-      expect(part, name).toContain(PENDING);
+      expect(part, name).toContain(FAILED);
+      expect(part, name).not.toContain(PENDING);
       expect(part, name).toContain('data-provenance="missing"');
       expect(part, name).not.toContain("data-ai-badge");
     }
@@ -274,9 +282,9 @@ describe("review fixes", () => {
     empty.zh_summary.provenance = null;
     empty.research_model.provenance = null;
     const emptyHtml = render(empty);
-    expect(block(emptyHtml, "zh_summary")).toContain(PENDING);
+    expect(block(emptyHtml, "zh_summary")).toContain(FAILED);
     expect(block(emptyHtml, "zh_summary")).not.toContain(TEXT["paper:paper.summary.notMentioned"]);
-    expect(block(emptyHtml, "research_model")).toContain(PENDING);
+    expect(block(emptyHtml, "research_model")).toContain(FAILED);
     expect(block(emptyHtml, "research_model")).not.toContain(TEXT["paper:paper.model.empty"]);
     expect(block(emptyHtml, "zh_summary")).not.toContain("data-ai-badge=");
     expect(block(emptyHtml, "research_model")).not.toContain("data-ai-badge=");

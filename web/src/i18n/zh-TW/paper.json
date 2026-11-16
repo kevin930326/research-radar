@@ -55,6 +55,11 @@
       "not_stated": "未說明",
       "not_determined": "不判定"
     },
+    "supportInfo": {
+      "label": "未說明與不判定的差別",
+      "not_stated": "未說明：這篇有檢定這條假設，但摘要沒寫結果。",
+      "not_determined": "不判定：這篇不是用統計檢定的研究，例如訪談或概念性文章，所以沒有成立與否。"
+    },
     "abstract": {
       "heading": "原文摘要",
       "source": "來源 {{source}}"

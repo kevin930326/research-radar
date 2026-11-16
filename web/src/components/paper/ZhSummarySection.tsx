@@ -10,7 +10,7 @@ import { BlockLine, NoteLine, SECTION_CLASS, SectionHeading, badgeProvenance } f
 // - 摘要沒提到的欄位寫「摘要未提及」（第三層文字色）；`empty`（四欄都沒有）就四欄都是這句，不讀 `value`
 //   （信封的規則：只有 ready 帶內容，ADR-0015；Codex 審查 3.8 中 2）。
 // - 有內容的狀態（ready、empty）卻沒有來歷：不顯示內容（ADR-0010 第 8 點、ADR-0015「沒有來歷就不顯示內容」），
-//   位置照「還沒產生」那一行（State Patterns 既有的句子），沒有標章（Codex 審查 3.8 中 1）。
+//   顯示「沒有產生成功」那一行，沒有標章（Codex 審查 3.8 中 1；資料壞了不會自己好，Kevin 2026-11-17 決定）。
 // - 有成員回報、還沒處理的欄位，那一欄下面一行「有成員回報此欄可能有誤」（設計稿沒畫，沿用固定一行的樣子）。
 // - 沒有產生成功／還在產生／額度用完：標題下一行狀態（paper-ai-failed.html），沒有標章與固定一行。
 // - 「回報錯誤」在 Story 3.12 才放（AR-67）。
@@ -44,7 +44,7 @@ export function ZhSummarySection({ block, firstBadge }: ZhSummarySectionProps) {
       body =
         block.provenance === null ? (
           <BlockLine state={block.state} provenance="missing">
-            {t("paper.state.pending")}
+            {t("paper.state.failed")}
           </BlockLine>
         ) : null;
       break;

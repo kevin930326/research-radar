@@ -150,9 +150,10 @@ interface ClassificationProps {
 /** 分類：書目的最後一行（EXPERIENCE.md 畫面 8 第 2 點）。 */
 export function ClassificationLine({ block, names, firstBadge }: ClassificationProps) {
   const { t } = useTranslation("paper");
-  // 有內容卻沒有來歷：不顯示內容（ADR-0010 第 8 點、ADR-0015），照「還沒產生」那一行（Codex 審查 3.8 中 1）。
+  // 有內容卻沒有來歷：不顯示內容（ADR-0010 第 8 點、ADR-0015），顯示「沒有產生成功」那一行（Codex 審查 3.8 中 1；
+  // 資料壞了不會自己好，所以不寫「還在產生」，Kevin 2026-11-17 決定）。
   if (block.state === "ready" && block.provenance === null) {
-    return <ClassificationStateLine state={block.state} text={t("paper.state.pending")} provenance="missing" />;
+    return <ClassificationStateLine state={block.state} text={t("paper.state.failed")} provenance="missing" />;
   }
   switch (block.state) {
     case "failed":
