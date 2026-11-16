@@ -18,7 +18,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 
-from radar.domain.ai_outputs import GatewayConfig, LlmTask, OutputLang
+from radar.domain.ai_outputs import GatewayConfig, LlmTask, OutputLang, RunKey
 from radar.domain.budget import BudgetConfig
 from radar.domain.context_values import ContextValues
 from radar.domain.permissions import Action, require
@@ -51,8 +51,10 @@ def run_research_model(
     paper_id: uuid.UUID,
     *,
     clock: Callable[[], datetime],
+    confirmed_key: RunKey | None = None,
 ) -> ResearchModelRun:
     """跑一篇論文的研究模型擷取（見模組說明）。`clock` 給預算檢查算台北月份用。
+    `confirmed_key`：試跑確認過的鍵，原樣交給閘門核對（Story 2.10；見 `run_llm_job`）。
 
     Raises:
         PermissionDeniedError: `actor` 不是系統工作（不碰資料庫）。
@@ -82,5 +84,6 @@ def run_research_model(
             context_values=context_values,
         ),
         budget_allows=BudgetGuard(database, budget, clock),
+        confirmed_key=confirmed_key,
     )
     return ResearchModelRun(plan, result)

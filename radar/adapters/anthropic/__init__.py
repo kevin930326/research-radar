@@ -18,9 +18,12 @@
   - 401、403、404 → `LlmConfigurationError`；400、413、422 與其他 4xx → `LlmInvalidRequestError`；
   - 408 與讀寫逾時 → `LlmTimeoutError`；429 → `LlmRateLimitedError`；409、5xx（含 529）→
     `LlmServerError`；連不上 → `LlmConnectionError`。
+- 每次失敗的嘗試（含重試的每一次與 Batch 送出）記一筆警告日誌：只有錯誤類別、狀態碼、錯誤本文的
+  `error.type`（只收 `^[a-z_]{1,64}$`）與本文頂層鍵（只收英數底線），不記訊息與內容（Story 2.10）。
 - 重試：只重試 `LlmTransientError`，最多 `attempts` 次（含第一次）；帶 `Retry-After` 時不超過
   `retry_after_max` 秒就照它等，超過就不再重試、丟出最後一次的錯誤（不提早重送）。
   `deadline`（秒）是含所有重試的總時限（交給 stamina 的 `timeout`），預設 None 不限。
+  `attempts` 屬性讀得到這個次數（試跑的最壞花費＝單次上限 × attempts，Story 2.10）。
 - Batch（`submit_batch`，Story 2.9、ADR-0041）：`POST {base_url}/v1/messages/batches`，每筆
   `{"custom_id", "params"}`，`params` 和 `complete` 送的一樣（同一份系統提示、訊息、思考與輸出
   設定）。**只送一次、不重試**（建立批次沒有冪等鍵）；錯誤沿用 `to_llm_error`；回應用 Pydantic 驗
@@ -29,6 +32,7 @@
 """
 
 import json
+import re
 from collections.abc import Sequence
 from types import TracebackType
 from typing import Final, Literal, Self
@@ -36,6 +40,7 @@ from typing import Final, Literal, Self
 import anthropic
 import httpx2
 import stamina
+import structlog
 from anthropic.types import MessageParam, OutputConfigParam, TextBlockParam
 from anthropic.types.message_create_params import MessageCreateParamsNonStreaming
 from anthropic.types.messages.batch_create_params import Request as BatchRequestParam
@@ -69,6 +74,11 @@ from radar.domain.policy import cloud_text
 ANTHROPIC_BASE_URL: Final = "https://api.anthropic.com"
 CONFIGURATION_STATUSES: Final = frozenset({401, 403, 404})
 SERVER_STATUSES: Final = frozenset({409})
+# 失敗嘗試的日誌只收這種名稱（錯誤本文的 `error.type` 與頂層鍵），其他寫 `<?>`。
+_ERROR_TYPE: Final = re.compile(r"[a-z_]{1,64}")
+_BODY_KEY: Final = re.compile(r"[A-Za-z0-9_]{1,64}")
+
+log = structlog.get_logger(__name__)
 
 
 # --- 回應形狀（只取用得到的欄位，其餘忽略） ----------------------------------------------------
@@ -258,6 +268,43 @@ def to_llm_error(exc: anthropic.AnthropicError) -> LlmError:
     return LlmConfigurationError(f"SDK 錯誤（{type(exc).__name__}）")
 
 
+# --- 失敗嘗試的日誌（Story 2.10、ADR-0042） ----------------------------------------------------
+
+
+def _api_error_type(body: object) -> str | None:
+    """錯誤本文的 `error.type`（例如 `rate_limit_error`）；不符合 `^[a-z_]{1,64}$` 的寫 `<?>`。"""
+    if not isinstance(body, dict):
+        return None
+    error = body.get("error")
+    if not isinstance(error, dict) or "type" not in error:
+        return None
+    value = error["type"]
+    return value if isinstance(value, str) and _ERROR_TYPE.fullmatch(value) else "<?>"
+
+
+def _body_keys(body: object) -> list[str] | None:
+    """錯誤本文的頂層鍵（排好序）；不符合 `^[A-Za-z0-9_]{1,64}$` 的寫 `<?>`。"""
+    if not isinstance(body, dict):
+        return None
+    return sorted(
+        key if isinstance(key, str) and _BODY_KEY.fullmatch(key) else "<?>" for key in body
+    )
+
+
+def _log_failed_attempt(operation: str, error: LlmError, exc: BaseException | None) -> None:
+    """每次失敗的嘗試記一筆警告：只有操作、錯誤類別、狀態碼、`error.type` 與本文的頂層鍵。
+    不記錯誤訊息、本文內容、金鑰與送出的文件（重試的每一次都記，`--verbose` 看得到發生過幾次）。"""
+    body = exc.body if isinstance(exc, anthropic.APIStatusError) else None
+    log.warning(
+        "Anthropic 請求失敗",
+        operation=operation,
+        error_class=type(error).__name__,
+        http_status=error.status,
+        api_error_type=_api_error_type(body),
+        body_keys=_body_keys(body),
+    )
+
+
 # --- adapter -------------------------------------------------------------------------------
 
 
@@ -302,6 +349,12 @@ class AnthropicLlmProvider:
             open_telemetry=False,
             http_client=http_client,
         )
+
+    @property
+    def attempts(self) -> int:
+        """`complete` 每個請求最多送幾次（含第一次；`submit_batch` 不重試）。試跑的最壞花費照它算
+        （Story 2.10）。"""
+        return self._attempts
 
     def __repr__(self) -> str:
         # 不印 key。
@@ -373,11 +426,17 @@ class AnthropicLlmProvider:
             raw = self._client.messages.batches.with_raw_response.create(requests=body)
             data = raw.read()
         except anthropic.AnthropicError as exc:
-            raise to_llm_error(exc) from None
+            error = to_llm_error(exc)
+            _log_failed_attempt("batches", error, exc)
+            raise error from None
         except httpx2.TimeoutException:
-            raise LlmTimeoutError("讀取回應逾時") from None
+            error = LlmTimeoutError("讀取回應逾時")
+            _log_failed_attempt("batches", error, None)
+            raise error from None
         except httpx2.HTTPError as exc:
-            raise LlmConnectionError(f"連線錯誤（{type(exc).__name__}）") from None
+            error = LlmConnectionError(f"連線錯誤（{type(exc).__name__}）")
+            _log_failed_attempt("batches", error, None)
+            raise error from None
         return to_batch_id(data, raw.request_id)
 
     def _create_once(self, request: LlmRequest) -> Completion:
@@ -394,13 +453,19 @@ class AnthropicLlmProvider:
             )
             body = raw.read()
         except anthropic.AnthropicError as exc:
-            raise to_llm_error(exc) from None
+            error = to_llm_error(exc)
+            _log_failed_attempt("messages", error, exc)
+            raise error from None
         except httpx2.TimeoutException:
             # 讀本文時才逾時（SDK 沒有包起來的）。
-            raise LlmTimeoutError("讀取回應逾時") from None
+            error = LlmTimeoutError("讀取回應逾時")
+            _log_failed_attempt("messages", error, None)
+            raise error from None
         except httpx2.HTTPError as exc:
             # 讀本文時才斷線之類（SDK 沒有包起來的）：當成連線錯誤，可以重試。
-            raise LlmConnectionError(f"連線錯誤（{type(exc).__name__}）") from None
+            error = LlmConnectionError(f"連線錯誤（{type(exc).__name__}）")
+            _log_failed_attempt("messages", error, None)
+            raise error from None
         return to_completion(body, raw.request_id)
 
 

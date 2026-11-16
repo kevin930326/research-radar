@@ -54,7 +54,7 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
-from typing import Final
+from typing import Final, Protocol
 
 import structlog
 
@@ -166,10 +166,24 @@ class LlmBatchSetup:
             raise ValueError("Batch 的閘門設定要用 call_mode=batch")
 
 
+class LlmJobSettings(Protocol):
+    """`llm_job` 要的三份設定（`LlmBatchSetup` 與 2.10 的 `TrialSetup` 都符合）。"""
+
+    @property
+    def zh_summary_rules(self) -> ZhSummaryRules: ...
+
+    @property
+    def taxonomy(self) -> Taxonomy: ...
+
+    @property
+    def context_values(self) -> ContextValues: ...
+
+
 def llm_job(
-    setup: LlmBatchSetup, paper_id: uuid.UUID, task: LlmTask, input_kind: InputKind
+    setup: LlmJobSettings, paper_id: uuid.UUID, task: LlmTask, input_kind: InputKind
 ) -> LlmJob:
-    """三個 Batch 工作的 `LlmJob`（和 2.4～2.6 的 service 一樣的語言、驗證與設定版本）。
+    """三個 Batch 工作的 `LlmJob`（和 2.4～2.6 的 service 一樣的語言、驗證與設定版本）。2.10 的
+    試跑預估也用它，所以指紋和實跑一樣。
 
     Raises:
         ValueError: `task` 不是 Batch 工作。

@@ -1,8 +1,10 @@
 """`radar` 指令：專案唯一的 CLI 入口（NFR-11）。typer 只能出現在這個套件。"""
 
+import itertools
 import uuid
 from datetime import UTC, datetime
 from importlib.metadata import version as package_version
+from pathlib import Path
 from typing import Annotated, NoReturn
 
 import structlog
@@ -12,11 +14,15 @@ from radar.config import (
     ConfigError,
     database_pool_size,
     load_budget_config,
+    load_context_values,
     load_domain_config,
     load_embedding_config,
     load_import_baseline,
     load_migration_settings,
+    load_models_config,
     load_settings,
+    load_taxonomy,
+    load_zh_summary_rules,
 )
 from radar.domain.budget import render_cost_report
 from radar.domain.coverage import render_coverage_report
@@ -29,12 +35,29 @@ from radar.domain.embeddings import (
 )
 from radar.domain.import_report import render_import_report
 from radar.domain.jobs import UnknownJobError, find_scheduled_job
+from radar.domain.trial_runs import (
+    MAX_TRIAL_PAPERS,
+    TRIAL_TASKS,
+    TrialArgumentError,
+    TrialItem,
+    TrialTargets,
+    check_sample_size,
+    format_trial_ids,
+    parse_trial_ids_file,
+    parse_trial_targets,
+    render_trial_estimate,
+    render_trial_item,
+    render_trial_selection,
+    render_trial_summary,
+)
 from radar.domain.viewer import SystemViewer
 from radar.entrypoints.bootstrap import (
     MigrationsNotFoundError,
     build_database,
     build_embedding_provider,
+    build_gateway_config,
     build_job_enqueuer,
+    build_llm_provider,
     build_migration_runner,
     build_object_store,
     code_version,
@@ -58,6 +81,14 @@ from radar.services.reparse import (
     WeeklyUpdateInProgressError,
     reparse_papers,
 )
+from radar.services.trial_runs import (
+    TrialPapersNotFoundError,
+    TrialSetup,
+    estimate_trial,
+    resolve_trial_papers,
+    run_trial,
+    sample_trial_papers,
+)
 
 # 例外時不印區域變數：裡面可能有連線字串。
 app = typer.Typer(
@@ -72,6 +103,10 @@ weekly_run_app = typer.Typer(help="每週更新（weekly_run）。", no_args_is_
 app.add_typer(weekly_run_app, name="weekly-run")
 embeddings_app = typer.Typer(help="向量（embedding）。", no_args_is_help=True)
 app.add_typer(embeddings_app, name="embeddings")
+runs_app = typer.Typer(help="AI 工作的執行（derivation_run）。", no_args_is_help=True)
+app.add_typer(runs_app, name="runs")
+# Ctrl-C 中斷時的退出碼（128 + SIGINT）。
+INTERRUPTED_EXIT_CODE = 130
 
 
 @app.callback()
@@ -405,6 +440,230 @@ def embeddings_backfill(
         typer.echo(line)
     if result.has_failures:
         raise typer.Exit(1)
+
+
+def _read_ids_file(path: Path) -> TrialTargets:
+    """讀 `--ids-file`（UTF-8；開頭有 BOM 也收，有些編輯器或試算表匯出時會加）。
+
+    Raises:
+        TrialArgumentError: 讀不到、不是 UTF-8，或內容看不懂（見 `parse_trial_ids_file`）。
+    """
+    try:
+        text = path.read_text(encoding="utf-8-sig")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise TrialArgumentError(f"讀不到名單檔（{type(exc).__name__}）") from None
+    return parse_trial_ids_file(text)
+
+
+def _trial_request(
+    targets: list[str],
+    sample: int | None,
+    seed: int | None,
+    ids_file: Path | None = None,
+    save_ids: Path | None = None,
+) -> TrialTargets | tuple[int, int]:
+    """`radar runs trial` 的參數：指定清單或名單檔（`TrialTargets`），或抽樣（N, seed）。
+
+    Raises:
+        TrialArgumentError: 清單、--ids-file、--sample 給了不只一種、--sample 沒給 --seed（或反過
+            來）、都沒給、N 不在範圍內、清單或名單檔看不懂、超過上限，或 --save-ids 的檔案已經存在。
+    """
+    if save_ids is not None and save_ids.exists():
+        raise TrialArgumentError(f"--save-ids 的檔案已經存在，不覆寫：{save_ids}")
+    if sum((bool(targets), sample is not None, ids_file is not None)) > 1:
+        raise TrialArgumentError("論文清單、--ids-file、--sample 只能擇一")
+    if ids_file is not None:
+        if seed is not None:
+            raise TrialArgumentError("--seed 只能和 --sample 一起用")
+        return _read_ids_file(ids_file)
+    if sample is None:
+        if seed is not None:
+            raise TrialArgumentError("--seed 只能和 --sample 一起用")
+        if not targets:
+            raise TrialArgumentError("要指定論文 ID 或 DOI，或用 --sample N --seed S 抽樣")
+        return parse_trial_targets(targets)
+    if seed is None:
+        raise TrialArgumentError(
+            "--sample 要和 --seed 一起用（同一個 seed、同一時間點的候選才抽得到同一批）"
+        )
+    check_sample_size(sample)
+    return sample, seed
+
+
+@runs_app.command("trial")
+def runs_trial(
+    targets: Annotated[
+        list[str] | None,
+        typer.Argument(help="論文 ID（UUID）或 DOI，可以給多個", show_default=False),
+    ] = None,
+    sample: Annotated[
+        int | None,
+        typer.Option(
+            "--sample", help=f"從調整組抽幾篇（1～{MAX_TRIAL_PAPERS}），要和 --seed 一起用"
+        ),
+    ] = None,
+    seed: Annotated[
+        int | None,
+        typer.Option(
+            "--seed",
+            help="抽樣的 seed（候選沒變時同一個 seed 抽到同一批；要固定名單用 --save-ids）",
+        ),
+    ] = None,
+    ids_file: Annotated[
+        Path | None,
+        typer.Option(
+            "--ids-file",
+            help="從名單檔讀論文（一行一個 ID 或 DOI，# 開頭與空行略過）；重跑同一份名單用",
+        ),
+    ] = None,
+    save_ids: Annotated[
+        Path | None,
+        typer.Option(
+            "--save-ids", help="把選到的論文 ID 存成名單檔（不覆寫；確認前就寫，按 n 也會留下）"
+        ),
+    ] = None,
+    yes: Annotated[bool, typer.Option("--yes", help="不問確認，直接執行")] = False,
+    verbose: Annotated[
+        bool,
+        typer.Option(
+            "--verbose", help="每項另印耗時、tokens、回應形狀與送出字元數（不印論文內容與輸出）"
+        ),
+    ] = False,
+    show_output: Annotated[
+        bool, typer.Option("--show-output", help="印驗證過的輸出；被拒收時印模型原文")
+    ] = False,
+) -> None:
+    """只對指定的論文，用目前的 prompt 跑一次 AI（中文重點、分類、研究模型）。
+
+    給論文 ID／DOI（最多 100 篇）、用 --ids-file 讀名單檔，或用 --sample N --seed S 從調整組抽
+    N 篇（--save-ids 把選到的存成名單檔）。先印選到的論文、含重試的最壞費用與本月預算，確認後才跑
+    （--yes 不問）；只跑確認過的項目，確認後輸入變了的標 input_changed、不呼叫。每項都經同一個
+    閘門（互動呼叫，照常略過已有結果的、記帳、受熔斷限制）。每做完一項印一行，最後印每篇每種工作
+    的狀態、拒收統計、這次有沒有呼叫模型與這次的費用。
+
+    參數看不懂、清單／--ids-file／--sample 給了不只一種、--sample 沒給 --seed、超過 100 篇、名單檔
+    讀不到、--save-ids 的檔案已經存在：退出碼 2（不碰資料庫）。有論文找不到、名單檔寫不進去、沒有
+    確認、設定錯、有暫時性失敗、出錯或輸入在確認後變了的項目：退出碼 1。Ctrl-C：退出碼 130，重跑
+    同一個指令只做沒做完的。錯誤只印類別或狀態碼，不印金鑰與連線字串。
+    """
+    configure_logging()
+    try:
+        request = _trial_request(targets or [], sample, seed, ids_file, save_ids)
+    except TrialArgumentError as exc:
+        typer.echo(f"參數看不懂，沒有執行：{exc}", err=True)
+        raise typer.Exit(2) from None
+    try:
+        settings = load_settings()
+        setup = TrialSetup(
+            gateway=build_gateway_config(settings, load_models_config()),
+            budget=load_budget_config(),
+            zh_summary_rules=load_zh_summary_rules(),
+            taxonomy=load_taxonomy(),
+            context_values=load_context_values(),
+        )
+        provider_context = build_llm_provider(settings)
+    except ConfigError as exc:
+        log.error("設定錯誤，無法試跑", problems=exc.problems)
+        _fail("設定錯誤，沒有執行：", exc.problems)
+    with provider_context as provider:
+        # 執行前（選論文、預估、確認）按 Ctrl-C：什麼都還沒寫，退出碼 130。
+        try:
+            try:
+                database = build_database(settings, pool_size=database_pool_size(settings, "cli"))
+                if isinstance(request, TrialTargets):
+                    selection = resolve_trial_papers(SystemViewer(), database, request)
+                else:
+                    selection = sample_trial_papers(SystemViewer(), database, *request)
+            except TrialPapersNotFoundError as exc:
+                log.error("找不到指定的論文", missing=list(exc.missing))
+                _fail("找不到這些論文，一篇都沒有跑：", list(exc.missing))
+            except Exception as exc:
+                # 例外訊息可能含主機與帳號，只記類別名稱。
+                log.error("讀取論文失敗", error_type=type(exc).__name__)
+                _fail(f"讀取論文失敗（{type(exc).__name__}）；細節見日誌", [])
+            for line in render_trial_selection(selection):
+                typer.echo(line)
+            if not selection.papers:
+                typer.echo("沒有可以跑的論文，沒有執行")
+                return
+            if save_ids is not None:
+                try:
+                    with save_ids.open("x", encoding="utf-8") as file:
+                        file.write(format_trial_ids(selection.papers))
+                except OSError as exc:
+                    log.error("名單檔寫不進去", error_type=type(exc).__name__)
+                    _fail(f"名單檔寫不進去（{type(exc).__name__}），沒有執行", [])
+                log.info("試跑名單已存檔", papers=len(selection.papers))
+                typer.echo(f"名單已存到 {save_ids}（{len(selection.papers)} 篇）")
+            # 預估 → 確認 → 執行 → 總表。最壞花費照 adapter 實際的重試次數算。
+            try:
+                estimate = estimate_trial(
+                    SystemViewer(), database, setup, selection, attempts=provider.attempts
+                )
+                status = get_budget_status(SystemViewer(), database, setup.budget, now=_utc_now())
+            except Exception as exc:
+                log.error("試跑的預估失敗", error_type=type(exc).__name__)
+                _fail(f"預估失敗（{type(exc).__name__}），沒有執行；細節見日誌", [])
+            for line in render_trial_estimate(estimate, status):
+                typer.echo(line)
+            if not yes:
+                try:
+                    confirmed = typer.confirm("要執行嗎？", default=False)
+                except typer.Abort as exc:
+                    # click 把 Ctrl-C 與 EOF 都換成 Abort；原本的例外留在 __context__。
+                    if isinstance(exc.__context__, KeyboardInterrupt):
+                        raise KeyboardInterrupt from None
+                    confirmed = False
+                if not confirmed:
+                    typer.echo("沒有執行", err=True)
+                    raise typer.Exit(1)
+        except KeyboardInterrupt:
+            log.warning("試跑在執行前被中斷")
+            typer.echo("中斷了，沒有執行", err=True)
+            raise typer.Exit(INTERRUPTED_EXIT_CODE) from None
+        total = len(selection.papers) * len(TRIAL_TASKS)
+        counter = itertools.count(1)
+
+        def print_item(item: TrialItem) -> None:
+            for line in render_trial_item(
+                next(counter), total, item, verbose=verbose, show_output=show_output
+            ):
+                typer.echo(line)
+
+        try:
+            report = run_trial(
+                SystemViewer(),
+                database,
+                provider,
+                setup,
+                selection,
+                clock=_utc_now,
+                estimate=estimate,
+                diagnostics=verbose,
+                show_output=show_output,
+                on_item=print_item,
+            )
+        except KeyboardInterrupt:
+            log.warning("試跑被中斷")
+            typer.echo("中斷了：做完的已經寫好，重跑同一個指令只做沒做完的（不重付）", err=True)
+            raise typer.Exit(INTERRUPTED_EXIT_CODE) from None
+        except Exception as exc:
+            log.error("試跑失敗", error_type=type(exc).__name__)
+            _fail(f"試跑失敗（{type(exc).__name__}）；做完的已經寫好，細節見日誌", [])
+        for line in render_trial_summary(report, verbose=verbose):
+            typer.echo(line)
+        if report.stopped_by_configuration:
+            statuses = sorted(
+                {str(item.http_status) for item in report.items if item.http_status is not None}
+            )
+            shown = f"HTTP {'、'.join(statuses)}" if statuses else "沒有狀態碼"
+            typer.echo(
+                f"金鑰、權限或模型設定錯誤（{shown}），停下；確認 RADAR_ANTHROPIC_API_KEY 與"
+                " config/models.yaml",
+                err=True,
+            )
+        if report.exit_code:
+            raise typer.Exit(report.exit_code)
 
 
 def _fail(headline: str, problems: list[str]) -> NoReturn:

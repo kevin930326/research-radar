@@ -16,6 +16,9 @@
   「不同原句」數得出來（FR-3 擷取規則 3、Story 2.6）。
 - `embedding_input_sha256`：送去向量化的文字的指紋，存在 `embedding.input_sha256` 與
   `derivation_run.input_sha256`（task＝embed）；變了才重算（AD-12、Story 2.8）。
+- `eval_split_sha256`：調整組／測試組切分看的雜湊，只算正規化後的 DOI（`domain/eval_split.py`、
+  Story 2.10、ADR-0042）。
+- `trial_sample_sha256`：試跑抽樣的排序鍵（seed, 正規化後的 DOI）（`domain/trial_runs.py`）。
 
 ## source_hash
 
@@ -32,6 +35,8 @@ import hashlib
 import json
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Final
+
+from radar.domain.identifiers import normalize_doi
 
 if TYPE_CHECKING:
     from radar.domain.ai_outputs import LlmInputBlock, LlmTask, RunKey
@@ -276,4 +281,47 @@ def embedding_input_sha256(text: str, input_kind: str) -> str:
         raise ValueError("embedding_input_sha256 要收不是空白的文字")
     return _canonical_sha256(
         {"v": EMBEDDING_INPUT_VERSION, "task": "embed", "input_kind": str(input_kind), "text": text}
+    )
+
+
+# --- 調整組／測試組與試跑抽樣（Story 2.10、ADR-0042） ------------------------------------------
+
+# 算法版本：改了算進雜湊的欄位或序列化方式時加一。**改了等於重新切分**：原本在測試組的論文可能跑到
+# 調整組，之前拿調整組調過的提示詞就碰過測試組了，所以不要隨便改（`tests/unit/test_eval_split.py`
+# 的黃金值守著）。
+EVAL_SPLIT_VERSION: Final = 1
+TRIAL_SAMPLE_VERSION: Final = 1
+
+
+def _check_normalized_doi(doi: str) -> None:
+    if not isinstance(doi, str) or normalize_doi(doi) != doi:
+        raise ValueError("要傳正規化後的 DOI（identifiers.normalize_doi 的結果）")
+
+
+def eval_split_sha256(doi: str) -> str:
+    """調整組／測試組切分用的雜湊（64 位小寫十六進位 SHA-256）：只算正規化後的 DOI（加算法版本與
+    用途），和 paper_id、資料庫、行程（`PYTHONHASHSEED`）無關。
+
+    Raises:
+        ValueError: `doi` 不是正規化後的 DOI。
+        InvalidIdentifierError: `doi` 根本不是 DOI。
+    """
+    _check_normalized_doi(doi)
+    return _canonical_sha256({"v": EVAL_SPLIT_VERSION, "purpose": "eval_split", "doi": doi})
+
+
+def trial_sample_sha256(seed: int, doi: str) -> str:
+    """試跑抽樣的排序鍵（64 位小寫十六進位 SHA-256）：（seed, 正規化後的 DOI）。和 paper_id 無關，
+    所以候選相同時，本機與試用主機用同一個 seed 抽到同樣的 DOI；新增論文不會打亂既有論文之間
+    的先後（但可能排進前 N、換掉名單，要固定名單用名單檔）。
+
+    Raises:
+        ValueError: `seed` 不是整數（`bool` 也不收），或 `doi` 不是正規化後的 DOI。
+        InvalidIdentifierError: `doi` 根本不是 DOI。
+    """
+    if type(seed) is not int:
+        raise ValueError("seed 要是整數")
+    _check_normalized_doi(doi)
+    return _canonical_sha256(
+        {"v": TRIAL_SAMPLE_VERSION, "purpose": "trial_sample", "seed": seed, "doi": doi}
     )

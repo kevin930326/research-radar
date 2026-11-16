@@ -11,6 +11,9 @@
 3. 讀 prompt（`prompts/<工作>/v<N>.md`；policy 核對 domain 寫死的雜湊登記才放行）、算
    `input_sha256`、組 `LlmRequest`。
 4. 離線保守估計輸入 token；超過 `max_input_tokens` 而且工作沒允許 → `TOO_LARGE`。
+   呼叫端帶了 `confirmed_key`（試跑確認過的鍵，Story 2.10）而這次算出的 `RunKey` 不一樣（輸入、
+   prompt 版本或模型在確認後變了）→ 丟 `ConfirmedRequestChangedError`，還沒寫任何列、不呼叫模型。
+   鍵是從這次真的要送的內容算的，所以核對過就保證送出的就是確認時的那份。
 5. 取得執行資格的短交易：advisory lock → 再問一次 `should_run`（有 `active`、平常流程的
    `rejected` 或 `running` 就 `SKIPPED`）→ 有 `llm_result_pending` 的 run 就改回 `running` 接續，
    否則新增 `running` 的 `derivation_run`（部分唯一索引兜底），立刻 commit。評估（帶
@@ -113,6 +116,7 @@ from radar.services.prompt_loader import LoadedPrompt, current_prompt_version, l
 __all__ = [
     "BatchClaim",
     "BatchClaimOutcome",
+    "ConfirmedRequestChangedError",
     "GatewayConfig",
     "GatewayOutcome",
     "GatewayResult",
@@ -146,6 +150,16 @@ class GatewayOutcome(StrEnum):
     DEFERRED_BUDGET = "deferred_budget"  # 預算不准
     TOO_LARGE = "too_large"  # 預估輸入超過上限
     TRANSIENT_FAILURE = "transient_failure"  # 逾時、限流、服務端錯誤、連線錯誤：下一次可以再跑
+
+
+class ConfirmedRequestChangedError(Exception):
+    """這次算出的 `RunKey` 和呼叫端確認過的（`confirmed_key`）不一樣：輸入、prompt 版本或模型在
+    確認後變了。丟出時還沒寫任何列、沒有呼叫模型（Story 2.10、ADR-0042）。"""
+
+    def __init__(self, confirmed: RunKey, current: RunKey) -> None:
+        super().__init__("輸入在確認後變了，沒有呼叫模型")
+        self.confirmed = confirmed
+        self.current = current
 
 
 _RESULT_OUTCOME = {
@@ -287,8 +301,10 @@ def run_llm_job(
     *,
     budget_allows: Callable[[LlmTask], bool],
     eval_run_id: uuid.UUID | None = None,
+    confirmed_key: RunKey | None = None,
 ) -> GatewayResult:
-    """照 AD-8 的固定步驟跑一件 LLM 工作（見模組說明）。
+    """照 AD-8 的固定步驟跑一件 LLM 工作（見模組說明）。`confirmed_key` 有值時，這次算出的
+    `RunKey` 要和它一樣才往下（第 4 步之後、取得執行資格之前核對）。
 
     Raises:
         PermissionDeniedError: `actor` 不是系統工作（不碰資料庫）。
@@ -297,6 +313,8 @@ def run_llm_job(
             資料庫）。
         LookupError: 論文不存在。
         PromptIntegrityError, PromptFormatError: prompt 檔或登記不對（還沒寫任何列）。
+        ConfirmedRequestChangedError: 帶了 `confirmed_key` 而這次的鍵不一樣（還沒寫任何列、
+            沒有呼叫模型）。
         LlmConfigurationError: 金鑰、權限或模型設定不對（run 已改成 `failed`）。
         ValueError: 預算檢查的時鐘回了沒有時區的時間（`BudgetGuard`；還沒呼叫模型、沒寫任何列）。
         Exception: 預算檢查讀帳本時的資料庫錯誤原樣丟出（fail closed：不呼叫模型、不回
@@ -338,6 +356,9 @@ def run_llm_job(
         return prepared
     key = prepared.key
     request = prepared.request
+    if confirmed_key is not None and key != confirmed_key:
+        # 確認之後輸入（例如補上摘要）、prompt 版本或模型變了：不呼叫、不寫列（Story 2.10）。
+        raise ConfirmedRequestChangedError(confirmed_key, key)
 
     # 5. 取得執行資格（短交易，立刻 commit）。
     claim = _acquire(database, config, prepared, eval_run_id, resume_only=resume_only)
