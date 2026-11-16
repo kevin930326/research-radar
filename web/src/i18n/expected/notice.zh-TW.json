@@ -7,7 +7,8 @@
     "State Patterns 全站共用的錯誤代碼（errors.<code>：登入過期、找不到這一頁）",
     "10. 登入（說明、按鈕、登入中、兩種訊息條；「回示範站」在 Epic 13）",
     "18. 帳號選單（帳號、使用須知、登出、登出中、登出失敗；「我的問答紀錄」在 Epic 5）與成員版導覽列（品牌、手機的選單按鈕與關閉選單）",
-    "State Patterns 全站共用的登入過期（沿用 errors.not_authenticated）"
+    "State Patterns 全站共用的登入過期（沿用 errors.not_authenticated）",
+    "8. 論文頁（成員版：書目、分類、中文重點、研究模型、原文摘要、取得全文；State Patterns「8. 論文頁」）與 Component Patterns 資料日期列、文字連結（開新分頁）"
   ],
   "strings": {
     "notice:notice.page.title": "使用須知",
@@ -49,7 +50,62 @@
     "nav:nav.account.loggingOut": "登出中…",
     "nav:nav.account.logoutFailed": "沒有登出成功，再試一次",
     "nav:nav.menu.open": "選單",
-    "nav:nav.menu.close": "關閉選單"
+    "nav:nav.menu.close": "關閉選單",
+    "paper:paper.biblio.authorSeparator": "、",
+    "paper:paper.biblio.doi": "DOI",
+    "paper:paper.biblio.openAlex": "OpenAlex",
+    "paper:paper.biblio.citations": "被引用 {{citations}} 次 · 平均每年 {{perYear}} 次",
+    "paper:paper.biblio.citationsOnly": "被引用 {{citations}} 次",
+    "paper:paper.biblio.hasAbstract": "有摘要",
+    "paper:paper.biblio.noAbstract": "沒有摘要",
+    "paper:paper.classification.topic": "主題",
+    "paper:paper.classification.method": "方法",
+    "paper:paper.classification.label": "分類",
+    "paper:paper.classification.unclassified": "未分類",
+    "paper:paper.classification.titleOnly": "只根據標題分類",
+    "paper:paper.classification.fixed": "有 {{members}} 位成員修正過",
+    "paper:paper.classification.disagree": "有 {{members}} 位成員修正過，意見不同",
+    "paper:paper.summary.heading": "中文重點",
+    "paper:paper.summary.researchQuestion": "研究問題",
+    "paper:paper.summary.method": "方法",
+    "paper:paper.summary.theory": "理論",
+    "paper:paper.summary.findings": "發現",
+    "paper:paper.summary.notMentioned": "摘要未提及",
+    "paper:paper.summary.screeningOnly": "供篩選閱讀，不可直接放入論文",
+    "paper:paper.summary.reported": "有成員回報此欄可能有誤",
+    "paper:paper.model.heading": "研究模型",
+    "paper:paper.model.evidenceType": "證據類型",
+    "paper:paper.model.support": "是否成立",
+    "paper:paper.model.evidenceSource": "證據來源",
+    "paper:paper.model.fromAbstract": "摘要",
+    "paper:paper.model.fromFulltext": "全文",
+    "paper:paper.model.abstractOnly": "研究模型只根據摘要，可能不完整",
+    "paper:paper.model.empty": "摘要裡沒有寫出可以擷取的假設",
+    "paper:paper.evidence.empirical_test": "實證檢定",
+    "paper:paper.evidence.qualitative": "質性",
+    "paper:paper.evidence.conceptual": "概念主張",
+    "paper:paper.support.supported": "支持",
+    "paper:paper.support.not_supported": "不支持",
+    "paper:paper.support.partially_supported": "部分支持",
+    "paper:paper.support.not_stated": "未說明",
+    "paper:paper.support.not_determined": "不判定",
+    "paper:paper.abstract.heading": "原文摘要",
+    "paper:paper.source.openalex": "OpenAlex",
+    "paper:paper.source.semantic_scholar": "Semantic Scholar",
+    "paper:paper.noAbstract.message": "這篇論文在 OpenAlex 沒有摘要，所以沒有中文重點。",
+    "paper:paper.noAbstract.publisher": "到出版社頁面看這篇（DOI）",
+    "paper:paper.state.failed": "沒有產生成功，可以請管理者重跑",
+    "paper:paper.state.pending": "還在產生，晚一點再回來看",
+    "paper:paper.state.budget": "這個月的 AI 額度用完了，下個月才會產生",
+    "paper:paper.fullText.heading": "取得全文",
+    "paper:paper.fullText.open": "開啟全文",
+    "paper:paper.fullText.vpn": "連學校 VPN 時會直接到全文頁",
+    "paper:paper.fullText.openAccess": "開放取用版本",
+    "paper:paper.fullText.noDoi": "這篇沒有 DOI，沒有全文連結",
+    "common:dataDate.bar.asOf": "資料截至 {{date}}",
+    "common:dataDate.bar.snapshot": "· #{{number}}",
+    "common:dataDate.bar.snapshotInfo": "第 {{number}} 次整理出來的資料",
+    "common:links.external.newTab": "（開新分頁）"
   },
   "absent": [
     "問答的資料怎麼處理",
@@ -57,5 +113,43 @@
     "上傳的 PDF 怎麼處理",
     "辨認完就刪除",
     "系統不會自動下載付費全文"
-  ]
+  ],
+  "otherSources": {
+    "paper:paper.model.constructs": {
+      "text": "構面　{{constructs}} 個",
+      "source": "docs/ux/reference/screens/paper.html"
+    },
+    "paper:paper.model.relations": {
+      "text": "關係　{{relations}} 條",
+      "source": "docs/ux/reference/screens/paper.html"
+    },
+    "paper:paper.model.noAbstract": {
+      "text": "沒有摘要，所以沒有研究模型。",
+      "source": "docs/ux/reference/screens/paper.html"
+    },
+    "paper:paper.evidence.analytical": {
+      "text": "分析推導",
+      "source": "_bmad-output/planning-artifacts/prds/prd-research-radar-2026-11-06/prd.md"
+    },
+    "paper:paper.evidence.simulation": {
+      "text": "模擬",
+      "source": "_bmad-output/planning-artifacts/prds/prd-research-radar-2026-11-06/prd.md"
+    },
+    "paper:paper.abstract.source": {
+      "text": "來源 {{source}}",
+      "source": "docs/ux/reference/screens/paper.html"
+    },
+    "paper:paper.noAbstract.heading": {
+      "text": "中文重點與原文摘要",
+      "source": "docs/ux/reference/screens/paper.html"
+    },
+    "paper:paper.noAbstract.detail": {
+      "text": "書目、分類和引用照常可以用。要看內容，請到出版社頁面。",
+      "source": "docs/ux/reference/screens/paper.html"
+    },
+    "paper:paper.fullText.vpnBelow": {
+      "text": "連學校 VPN 時，下方的「開啟全文」會直接到全文頁",
+      "source": "docs/ux/reference/screens/paper.html"
+    }
+  }
 }

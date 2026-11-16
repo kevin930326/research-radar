@@ -85,19 +85,21 @@ describe("AiBadge", () => {
     expect(renderToStaticMarkup(<AiBadge provenance={undefined} first />)).toBe("");
   });
 
+  // 菱形是設計稿的 SVG 圖示（Story 3.8 起；之前是 ◇／◆ 字元），所以看得到的字只有標籤，菱形看 data-ai-badge-mark。
   it("unverified: open diamond + short label, or the full wording for the first one on the page", () => {
-    expect(visibleText(renderToStaticMarkup(<AiBadge provenance={UNVERIFIED} />))).toBe(
-      `◇${text["ai:ai.badge.short"]}`,
-    );
-    expect(visibleText(renderToStaticMarkup(<AiBadge provenance={UNVERIFIED} first />))).toBe(
-      `◇${text["ai:ai.badge.full"]}`,
-    );
+    const short = renderToStaticMarkup(<AiBadge provenance={UNVERIFIED} />);
+    expect(visibleText(short)).toBe(text["ai:ai.badge.short"]);
+    expect(short).toContain('data-ai-badge-mark="open"');
+    const full = renderToStaticMarkup(<AiBadge provenance={UNVERIFIED} first />);
+    expect(visibleText(full)).toBe(text["ai:ai.badge.full"]);
+    expect(full).toContain('data-ai-badge-mark="open"');
   });
 
   it("verified: solid diamond + verified label, first or not", () => {
     for (const first of [false, true]) {
       const html = renderToStaticMarkup(<AiBadge provenance={VERIFIED} first={first} />);
-      expect(visibleText(html)).toBe(`◆${text["ai:ai.badge.verified"]}`);
+      expect(visibleText(html)).toBe(text["ai:ai.badge.verified"]);
+      expect(html).toContain('data-ai-badge-mark="solid"');
       expect(html).toContain('data-ai-badge="verified"');
     }
   });
@@ -127,7 +129,8 @@ describe("taipeiDate", () => {
 describe("AiBadge with a malformed generatedAt", () => {
   it("still renders the badge, without a date", () => {
     const html = renderToStaticMarkup(<AiBadge provenance={{ ...UNVERIFIED, generatedAt: "not-a-date" }} />);
-    expect(visibleText(html)).toBe(`◇${text["ai:ai.badge.short"]}`);
+    expect(visibleText(html)).toBe(text["ai:ai.badge.short"]);
+    expect(html).toContain('data-ai-badge-mark="open"');
   });
 
   it("the popover content shows the model and leaves out the unreadable date", () => {

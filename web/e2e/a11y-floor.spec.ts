@@ -161,6 +161,15 @@ for (const site of A11Y_SITES) {
       expect(scrollWidth).toBeLessThanOrEqual(720);
 
       const overlaps = await page.evaluate((epsilon) => {
+        // 疊在內容上面的固定列（position: sticky／fixed，例如論文頁手機版底部的「開啟全文」，Story 3.8）
+        // 本來就會蓋住捲過去的內容，不算版面重疊；它自己的字照樣和其他固定列比。
+        const pinned = (element: HTMLElement) => {
+          for (let node: HTMLElement | null = element; node !== null; node = node.parentElement) {
+            const position = getComputedStyle(node).position;
+            if (position === "sticky" || position === "fixed") return true;
+          }
+          return false;
+        };
         // 直接含有文字的元素（不含隱藏的）。
         const elements = [...document.querySelectorAll<HTMLElement>("body *")].filter((element) => {
           const hasText = [...element.childNodes].some(
@@ -176,6 +185,7 @@ for (const site of A11Y_SITES) {
             const a = elements[i]!;
             const b = elements[j]!;
             if (a.contains(b) || b.contains(a)) continue;
+            if (pinned(a) !== pinned(b)) continue;
             const ra = a.getBoundingClientRect();
             const rb = b.getBoundingClientRect();
             const width = Math.min(ra.right, rb.right) - Math.max(ra.left, rb.left);

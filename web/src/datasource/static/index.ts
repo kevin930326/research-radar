@@ -5,4 +5,6 @@ import type { DataSource } from "../types";
 export const datasource: DataSource = {
   siteKind: () => "demo",
   session: null,
+  // 示範站的論文頁是 Story 3.9（讀 radar export-demo 匯出的靜態檔）。
+  papers: null,
 };

@@ -1,0 +1,86 @@
+{
+  "paper": {
+    "biblio": {
+      "authorSeparator": "、",
+      "doi": "DOI",
+      "openAlex": "OpenAlex",
+      "citations": "被引用 {{citations}} 次 · 平均每年 {{perYear}} 次",
+      "citationsOnly": "被引用 {{citations}} 次",
+      "hasAbstract": "有摘要",
+      "noAbstract": "沒有摘要"
+    },
+    "classification": {
+      "topic": "主題",
+      "method": "方法",
+      "label": "分類",
+      "unclassified": "未分類",
+      "titleOnly": "只根據標題分類",
+      "fixed": "有 {{members}} 位成員修正過",
+      "disagree": "有 {{members}} 位成員修正過，意見不同"
+    },
+    "summary": {
+      "heading": "中文重點",
+      "researchQuestion": "研究問題",
+      "method": "方法",
+      "theory": "理論",
+      "findings": "發現",
+      "notMentioned": "摘要未提及",
+      "screeningOnly": "供篩選閱讀，不可直接放入論文",
+      "reported": "有成員回報此欄可能有誤"
+    },
+    "model": {
+      "heading": "研究模型",
+      "constructs": "構面　{{constructs}} 個",
+      "relations": "關係　{{relations}} 條",
+      "evidenceType": "證據類型",
+      "support": "是否成立",
+      "evidenceSource": "證據來源",
+      "fromAbstract": "摘要",
+      "fromFulltext": "全文",
+      "abstractOnly": "研究模型只根據摘要，可能不完整",
+      "empty": "摘要裡沒有寫出可以擷取的假設",
+      "noAbstract": "沒有摘要，所以沒有研究模型。"
+    },
+    "evidence": {
+      "empirical_test": "實證檢定",
+      "analytical": "分析推導",
+      "simulation": "模擬",
+      "qualitative": "質性",
+      "conceptual": "概念主張"
+    },
+    "support": {
+      "supported": "支持",
+      "not_supported": "不支持",
+      "partially_supported": "部分支持",
+      "not_stated": "未說明",
+      "not_determined": "不判定"
+    },
+    "abstract": {
+      "heading": "原文摘要",
+      "source": "來源 {{source}}"
+    },
+    "source": {
+      "openalex": "OpenAlex",
+      "semantic_scholar": "Semantic Scholar"
+    },
+    "noAbstract": {
+      "heading": "中文重點與原文摘要",
+      "message": "這篇論文在 OpenAlex 沒有摘要，所以沒有中文重點。",
+      "detail": "書目、分類和引用照常可以用。要看內容，請到出版社頁面。",
+      "publisher": "到出版社頁面看這篇（DOI）"
+    },
+    "state": {
+      "failed": "沒有產生成功，可以請管理者重跑",
+      "pending": "還在產生，晚一點再回來看",
+      "budget": "這個月的 AI 額度用完了，下個月才會產生"
+    },
+    "fullText": {
+      "heading": "取得全文",
+      "open": "開啟全文",
+      "vpn": "連學校 VPN 時會直接到全文頁",
+      "vpnBelow": "連學校 VPN 時，下方的「開啟全文」會直接到全文頁",
+      "openAccess": "開放取用版本",
+      "noDoi": "這篇沒有 DOI，沒有全文連結"
+    }
+  }
+}

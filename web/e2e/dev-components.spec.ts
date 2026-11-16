@@ -41,11 +41,17 @@ test("lists the six kinds of components", async ({ page }) => {
   await expect(links.nth(1)).toHaveAttribute("rel", "noopener noreferrer");
   await expect(links.nth(1)).toHaveText(/↗$/);
 
-  await expect(page.locator("[data-dev-section='ai-badges'] [data-ai-badge]")).toHaveText([
-    `◇${TEXT["ai:ai.badge.full"]}`,
-    `◇${TEXT["ai:ai.badge.short"]}`,
-    `◆${TEXT["ai:ai.badge.verified"]}`,
+  // 菱形是設計稿的 SVG 圖示（Story 3.8 起），字只有標籤；空心或實心看 data-ai-badge-mark。
+  const badgeLabels = page.locator("[data-dev-section='ai-badges'] [data-ai-badge]");
+  await expect(badgeLabels).toHaveText([
+    TEXT["ai:ai.badge.full"],
+    TEXT["ai:ai.badge.short"],
+    TEXT["ai:ai.badge.verified"],
   ]);
+  const marks = page.locator("[data-dev-section='ai-badges'] [data-ai-badge-mark]");
+  await expect(marks.nth(0)).toHaveAttribute("data-ai-badge-mark", "open");
+  await expect(marks.nth(1)).toHaveAttribute("data-ai-badge-mark", "open");
+  await expect(marks.nth(2)).toHaveAttribute("data-ai-badge-mark", "solid");
 
   const tags = page.locator("[data-dev-section='status-tags'] [data-status-tag]");
   await expect(tags).toHaveText([EXAMPLES.outOfScope, EXAMPLES.private]);

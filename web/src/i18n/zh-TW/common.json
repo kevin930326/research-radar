@@ -17,5 +17,17 @@
       "research": "Research",
       "radar": "Radar"
     }
+  },
+  "dataDate": {
+    "bar": {
+      "asOf": "資料截至 {{date}}",
+      "snapshot": "· #{{number}}",
+      "snapshotInfo": "第 {{number}} 次整理出來的資料"
+    }
+  },
+  "links": {
+    "external": {
+      "newTab": "（開新分頁）"
+    }
   }
 }

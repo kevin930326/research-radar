@@ -1,12 +1,18 @@
+import { queryOptions } from "@tanstack/react-query";
 import { Outlet, createRoute, lazyRouteComponent, redirect } from "@tanstack/react-router";
 import { useState } from "react";
 
 import { SiteHeader } from "../components/SiteHeader";
 import { LoadFailed } from "../components/states/LoadFailed";
 import { Offline } from "../components/states/Offline";
+import { NotFound } from "../components/states/NotFound";
 import { PageLoading } from "../components/states/PageLoading";
+import { datasource } from "../datasource";
+import type { PaperSource } from "../datasource/types";
 import { LoginPage } from "../pages/LoginPage";
 import { NoticePage } from "../pages/NoticePage";
+import { PaperPage } from "../pages/PaperPage";
+import { isPaperId } from "../pages/paper-format";
 import { PlainMain, rootRoute } from "./root";
 import { FIRST_PAGE, clearMemberQueries, meQuery, validateLoginSearch } from "./session";
 
@@ -17,6 +23,8 @@ import { FIRST_PAGE, clearMemberQueries, meQuery, validateLoginSearch } from "./
 //   才是「登入過期」，多帶 expired，登入頁顯示「登入已經過期，請再登入一次」。直接打開網址時快取是空的，不顯示。
 //   「我是誰」問不到（網路、伺服器錯誤）是全站共用的「載入失敗」。
 // - 3.14 之前登入後第一頁是使用須知，所以 / 先導到 /notice。
+// - /papers/$paperId：論文頁（Story 3.8）。ID 不是 UUID 時不送請求；看不到或不存在（404）時在導覽列下方顯示
+//   全站共用的「找不到這一頁」；論文 API 回 401 時照登入過期處理。
 // - 找不到的網址由最外層顯示（routes/root.tsx），不用登入。
 
 const loginRoute = createRoute({
@@ -119,7 +127,64 @@ function devRoutes() {
   ] as const;
 }
 
-const appTree = appRoute.addChildren([indexRoute, noticeRoute]);
+/** 成員版才有的論文讀取函式；示範站的論文頁是 Story 3.9。 */
+function paperSource(): PaperSource {
+  const source = datasource.papers;
+  if (source === null) {
+    throw new Error("paper source is only available in the member build");
+  }
+  return source;
+}
+
+const paperQuery = (paperId: string) =>
+  queryOptions({ queryKey: ["papers", paperId], queryFn: () => paperSource().paper(paperId), retry: false });
+
+const displayNamesQuery = queryOptions({
+  queryKey: ["display-names"],
+  queryFn: () => paperSource().displayNames(),
+  retry: false,
+});
+
+const paperRoute = createRoute({
+  getParentRoute: () => appRoute,
+  path: "/papers/$paperId",
+  // 離開這一頁就丟掉路由記住的資料：登出再換人登入時，不會先顯示上一位看過的論文頁再重新讀。
+  gcTime: 0,
+  loader: async ({ params, context, location }) => {
+    const { queryClient } = context;
+    if (!isPaperId(params.paperId)) {
+      return { kind: "notFound" as const };
+    }
+    // 兩個請求一起送；論文先看是不是 401（登入過期），再看顯示名稱。
+    const [paper, names] = await Promise.allSettled([
+      queryClient.fetchQuery(paperQuery(params.paperId)),
+      queryClient.fetchQuery(displayNamesQuery),
+    ]);
+    if (paper.status === "rejected") {
+      throw paper.reason;
+    }
+    if (paper.value.kind === "signedOut") {
+      await clearMemberQueries(queryClient);
+      throw redirect({ to: "/login", search: { next: location.href, expired: true as const }, replace: true });
+    }
+    if (paper.value.kind === "notFound") {
+      return { kind: "notFound" as const };
+    }
+    if (names.status === "rejected") {
+      throw names.reason;
+    }
+    return { kind: "found" as const, page: paper.value.page, names: names.value };
+  },
+  component: function PaperRoute() {
+    const data = paperRoute.useLoaderData();
+    if (data.kind === "notFound") {
+      return <NotFound />;
+    }
+    return <PaperPage page={data.page} names={data.names} />;
+  },
+});
+
+const appTree = appRoute.addChildren([indexRoute, noticeRoute, paperRoute]);
 
 export const routeTree = import.meta.env.DEV
   ? rootRoute.addChildren([loginRoute, appTree, ...devRoutes()])
