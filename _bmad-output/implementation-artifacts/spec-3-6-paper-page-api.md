@@ -120,6 +120,12 @@ deferred: []
   - `[false]` `[reject]` 壞 ID 也回 404 超出驗收條件（intent） — 規格矩陣明列，避免分辨出「格式對但看不到」。
   - `[false]` `[reject]` 抽出 `check_origin`／`current_member`、`find_ai_blocks` 是範圍外（intent） — 規格列出，行為不變。
 
+### 2026-11-16 — Codex 主審查（審 0622335）
+- verdicts: 高 0、中 2、低 0。中 1 不改，中 2 改。
+- findings:
+  - `[medium]` `[defer]` 中 1：`open_access_url` 一律 null，第一條驗收條件的「OpenAlex 最佳 OA 連結（FR-32）」沒做到 — 同意是缺口，這個 Story 不改：補值要讓 parser 讀 OpenAlex 的開放取用欄位、加遷移、全庫重新解析；`tests/arch/test_no_paywalled_download.py` 明文禁用那幾個字（放寬是改安全防線，要 Kevin 決定），全庫重新解析也會碰真實資料。回應形狀已有 `open_access_url`，之後補值不用改形狀。因此 PR 不自動合併，列為 Kevin 決定 2。
+  - `[medium]` `[patch]` 中 2：被排除的非研究文章回 200，和 ADR-0015「沒有論文頁」衝突 — `find_paper_page_facts` 同一句查詢加 `paper.excluded_reason IS NULL`，被排除、看不到、不存在、壞 ID 由同一行丟出同一個 404（不另外先查）；整合測試 `test_excluded_paper_gets_the_same_404_as_a_missing_one` 逐欄比對被排除與不存在的 404（狀態碼、本文、標頭，除 `X-Request-ID`）且沒有金絲雀；ADR-0048 決定 5、取捨、「要 Kevin 決定」第 3 項改寫（照 ADR-0015 回 404，想改 200 要先改 ADR-0015）。
+
 ## Auto Run Result
 
 - **做了什麼**：`GET /api/v1/papers/{paper_id}`（書目、目前的摘要、三個 AI 區塊信封、全文連結、快照）、`/display-names`、`/client-config`；共用形狀放 `domain/contracts.py`；看不到、不存在、壞 ID 同一個 404；權限登記表、openapi.json、前端產生的型別都更新；ADR-0048。

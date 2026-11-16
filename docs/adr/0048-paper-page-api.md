@@ -49,7 +49,8 @@
    - 分類欄位帶 `human_verified`、`fix_member_count`、`members_disagree`（「已核對」「N 位成員修正過、意見不同」）；中文重點帶 `reported_fields`（「有成員回報此欄可能有誤」）。
 3. **書目**：`journal` 是設定檔的期刊代號，用 `journals.yaml` 由 ISSN-L 對回，對不到（不是追蹤的期刊）是 null，`journal_issn_l` 照給；`doi`／`openalex_id` 是正規化後的寫法，一篇有好幾個時取最早記上的那一個（`external_id.created_at, id`）；`doi_url`（`https://doi.org/` 加上編碼過的 DOI）與 `openalex_url` 由它們產生，沒有就是 null；另有 `cited_by_count`、`in_scope`、`origin`、`is_retracted`。
 4. **資料怎麼讀**（`services/paper_page.get_paper_page`）：先用一個短交易讀預算（系統身分，全站的事實），組好三種產出「現在」的設定（`services/ai_blocks.current_ai_block_settings`）；再在一個交易裡讀論文（`repo/papers.find_paper_page_facts`：一句帶 `visible_papers` 的查詢，不先查存在）→ 三個區塊（`services/ai_blocks.find_ai_blocks`，狀態只由 `repo/ai_blocks.find_ai_block` 判定）→ 目前已發佈的快照（系統身分）。`get_ai_blocks` 改成呼叫同兩個函式，行為不變。
-5. **看不到、不存在、壞 ID**：同一個 `raise ApiProblemError(NOT_FOUND, headers=NO_STORE)`，狀態碼、本文、標頭（除 `X-Request-ID`）完全相同（選項 B）。登入檢查在前面，所以沒登入一律 401。
+5. **看不到、不存在、壞 ID、被排除的非研究文章**：同一個 `raise ApiProblemError(NOT_FOUND, headers=NO_STORE)`，狀態碼、本文、標頭（除 `X-Request-ID`）完全相同（選項 B）。被排除的非研究文章（`excluded_reason` 有值）照 ADR-0015「沒有論文頁」：`find_paper_page_facts` 的同一句查詢多一個 `excluded_reason IS NULL` 條件，不另外先查是否被排除。登入檢查在前面，所以沒登入一律 401。
+   - 因此論文頁 API 不會再因為「被排除」回 `not_applicable`；成員看得到的手填書目（AD-30 第二列）仍是 `not_applicable`。信封判定的程式不刪：`radar runs show`（`services/ai_blocks.get_ai_blocks`）照樣會對被排除的文章回 `not_applicable`。
 6. **組裝**：`install_api_routes(app, *, auth_routes, paper_routes)`；`main()` 讀 `models.yaml`、`budget.yaml`、`taxonomy.yaml`、`context_values.yaml`、`journals.yaml` 組 `PaperPageSetup`，任何一個錯了不啟動（`ConfigError`）。`check_origin`／`current_member` 從 `install_auth_routes` 裡抽成 `auth.py` 的模組函式，論文頁 router 共用；行為不變。產生 `openapi.json` 的 app 用不會被呼叫的替身。
 7. **換人測試**：論文頁先豁免（`status=404`，選項 B），請求一篇成員看不到的論文（成員匯入、不在追蹤範圍，`lab_visible` 為假），標題與摘要放金絲雀；`tests/integration/test_paper_page_api.py` 逐欄比較「看不到」「不存在」「壞 ID」三個 404，並在成員 A 修正分類的理由放金絲雀（論文頁不回理由）。顯示名稱與設定值是全站共用的設定檔內容，豁免（`status=200`）。
 8. **開放取用連結**：`full_text_links.open_access_url` 先一律 null。資料庫沒有存這個值（parser 不讀，`tests/arch/test_no_paywalled_download.py` 也禁用相關字），欄位名避開被禁用的字。
@@ -66,7 +67,7 @@
 - **換人測試在 3.16 之前沒有真正的對照**：豁免期間靠金絲雀（B 打看不到的論文得 404、沒有金絲雀）與整合測試的逐欄比較。3.16 把文獻庫接進可見條件後要改成不豁免（登記表的理由已寫明）。
 - **預算與區塊不在同一個交易**：預算先用短交易讀（和 `get_ai_blocks` 一樣），之後才開讀論文的交易；兩者之間預算剛好用完的話，這一次的 `deferred_budget` 判斷晚一個請求才反映。
 - **`openapi.json` 的路徑參數是字串**：前端看不出要傳 UUID；為了讓壞 ID 和找不到的回應相同，接受這一點。
-- **被排除的非研究文章照樣回論文頁**：和 ADR-0015「沒有論文頁」不一致，列在「要 Kevin 決定」第 3 點。
+- **被排除的非研究文章回 404**：照 ADR-0015「沒有論文頁」，和看不到、不存在分不出來；成員從別處（例如之後的清單）點進來會看到「找不到這一頁」，之後的清單也應該不列它們（公開的 `counted_paper` 本來就不含，AD-5）。
 
 ## 要 Kevin 決定
 
@@ -88,14 +89,14 @@
    - 另開 Story：多一次遷移與全庫 reparse；要先確認不違反「不下載付費全文」的規則（只存連結、不下載）。
 4. 建議：先不做。如果不確定就選這個。
 
-**3. 被排除的非研究文章要回 200 還是 404**
+**3. 被排除的非研究文章：照 ADR-0015 回同一個 404**
 
-1. 發生什麼事：ADR-0015 寫被排除的非研究文章「沒有論文頁」，但現在 API 照樣回 200，三個 AI 區塊都是 `not_applicable`。
-2. 要決定什麼：維持 200，還是改成和看不到一樣的 404。
+1. 發生什麼事：ADR-0015 寫被排除的非研究文章「沒有論文頁」。第一版 API 照樣回 200（三個 AI 區塊 `not_applicable`），Codex 主審查指出和 ADR-0015 衝突；現在改成和看不到、不存在一模一樣的 404（同一句查詢多一個條件，不另外先查）。
+2. 要決定什麼：維持 404（照既有的 ADR-0015），還是改成回 200。
 3. 選項：
-   - 維持 200：前端（3.8）自己決定怎麼顯示；之後要改成 404 只要在查詢多一個條件，可以改回。
-   - 改 404：和 ADR-0015 一致，但成員從別處（例如之後的清單）點進來會看到「找不到這一頁」；要再改 ADR-0015 或這份 ADR 的寫法。
-4. 建議：先維持 200，3.8 做畫面時再定。如果不確定就選這個。
+   - 維持 404：和 ADR-0015 一致，不用改任何既有決定；成員從別處點進被排除的文章會看到「找不到這一頁」。之後要改成 200 只要拿掉查詢的一個條件，可以改回。
+   - 改成 200：要先改 ADR-0015（「被排除的非研究文章沒有論文頁」那句），再拿掉查詢條件、改整合測試；3.8 的畫面要多處理「這篇不是研究文章」的狀態。
+4. 建議：維持 404。如果不確定就選這個。
 
 **4. 顯示名稱與設定值兩個端點的路徑與內容**
 

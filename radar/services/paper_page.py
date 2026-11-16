@@ -4,10 +4,10 @@
 
 1. 讀預算狀態（`services/budget.get_budget_status`，一個短交易、系統身分；預算是全站的事實），組好
    三種產出「現在」的設定（`services/ai_blocks.current_ai_block_settings`）。
-2. 一個交易裡依序讀：論文欄位（`repo/papers.find_paper_page_facts`，一句帶可見條件的查詢；不存在與
-   看不到走同一條路，回 None）→ 三個 AI 區塊（`services/ai_blocks.find_ai_blocks`，狀態只由
-   `repo/ai_blocks.find_ai_block` 判定）→ 目前已發佈的快照（`repo/snapshots`，全站的事實，用系統
-   身分讀）。
+2. 一個交易裡依序讀：論文欄位（`repo/papers.find_paper_page_facts`，一句帶可見條件的查詢；不存在、
+   看不到、被排除的非研究文章走同一條路，回 None）→ 三個 AI 區塊
+   （`services/ai_blocks.find_ai_blocks`，狀態只由 `repo/ai_blocks.find_ai_block` 判定）→
+   目前已發佈的快照（`repo/snapshots`，全站的事實，用系統身分讀）。
 
 `setup` 由 api 行程啟動時讀好設定檔組成（services 不讀設定）。
 """

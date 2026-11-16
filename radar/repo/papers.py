@@ -313,7 +313,8 @@ def find_paper_page_facts(
     """論文頁要的論文欄位（Story 3.6）：書目、狀態標記、最早記上的 DOI 與 OpenAlex ID
     （`external_id.created_at, id` 最前面的一個）、目前的摘要（`is_current` 那一筆）。
 
-    一句帶可見條件的查詢：不存在與 `viewer` 看不到都回 None，不先查存在（ADR-0002）。
+    一句帶可見條件的查詢：不存在、`viewer` 看不到、被排除的非研究文章（`excluded_reason` 有值，
+    ADR-0015「被排除的非研究文章沒有論文頁」）都回 None，不先查存在或排除（ADR-0002）。
     """
     visible = visible_papers(viewer, alias="paper")
     row = (
@@ -333,7 +334,7 @@ def find_paper_page_facts(
                 " a.content AS abstract_content"
                 " FROM paper LEFT JOIN paper_abstract AS a"
                 " ON a.paper_id = paper.id AND a.is_current"
-                f" WHERE {visible} AND paper.id = :id"
+                f" WHERE {visible} AND paper.excluded_reason IS NULL AND paper.id = :id"
             ),
             {
                 "id": paper_id,

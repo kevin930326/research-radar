@@ -5,6 +5,7 @@
   取最早記上的那一個。
 - 看不到（成員看不到的私人論文）、不存在、ID 不是 UUID：三個 404 的狀態碼、本文、標頭（除
   `X-Request-ID`）完全相同，而且沒有金絲雀。
+- 被排除的非研究文章（成員看得到、`excluded_reason` 有值）：和不存在的 404 完全相同（ADR-0015）。
 - 沒登入：三個端點都是 401。
 - 沒 DOI／沒快照／沒摘要：對應欄位是 null，區塊照 `find_ai_block`。
 - 摘要只回 `is_current` 那一筆：另有不是目前的摘要時不受影響；只有不是目前的摘要時是 null。
@@ -352,6 +353,35 @@ def test_hidden_missing_and_malformed_get_identical_404s(
         assert _without_request_id(response) == _without_request_id(hidden), name
         texts = [response.text, *(f"{k}: {v}" for k, v in response.headers.items())]
         assert all(CANARY not in text for text in texts), name
+
+
+def test_excluded_paper_gets_the_same_404_as_a_missing_one(
+    db: TestDatabase, database: Database, api: Api
+) -> None:
+    # ADR-0015：被排除的非研究文章沒有論文頁。
+    excluded_id = create_paper(
+        database,
+        title=f"Editorial {CANARY}",
+        abstract=f"An editorial note, not a research paper: {CANARY}.",
+    )
+    execute(db, "UPDATE paper SET excluded_reason = 'editorial' WHERE id = %s", excluded_id)
+    # 前提：成員看得到這篇（`lab_visible` 為真）、帶著金絲雀，只是被排除（不然不能當證據）。
+    assert execute(
+        db, "SELECT lab_visible, excluded_reason, title FROM paper WHERE id = %s", excluded_id
+    ) == [(True, "editorial", f"Editorial {CANARY}")]
+
+    excluded = api.get(f"/api/v1/papers/{excluded_id}", api.other_token)
+    missing = api.get(f"/api/v1/papers/{uuid.uuid4()}", api.other_token)
+
+    assert excluded.status_code == 404
+    assert excluded.json() == NOT_FOUND
+    assert excluded.headers["content-type"] == "application/problem+json"
+    assert excluded.headers["cache-control"] == "no-store"
+    assert missing.status_code == excluded.status_code
+    assert missing.content == excluded.content
+    assert _without_request_id(missing) == _without_request_id(excluded)
+    texts = [excluded.text, *(f"{k}: {v}" for k, v in excluded.headers.items())]
+    assert all(CANARY not in text for text in texts)
 
 
 # --- 沒登入 -----------------------------------------------------------------------------------
