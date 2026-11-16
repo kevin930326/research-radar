@@ -3,6 +3,8 @@
 - 路由都在同一個 `/api/v1` router；router 的相依項檢查 `Origin`：GET／HEAD／OPTIONS 以外的方法，
   `Origin` 缺少或不在允許清單一律 403（ADR-0008 第 3 項）。不做成全站中介層：`/api/` 底下沒註冊的
   路徑不管什麼方法都要回 404（`web.py`）。GET 不改業務資料（session 的最後使用時間除外）。
+  `check_origin`（相依項 `origin_dependency`）與 `current_member` 是模組函式，`/api/v1` 底下其他
+  router（論文頁，`papers.py`）也用同一份（Story 3.6）。
 - 一定要在 `mount_web` 之前裝：頁面殼的「其餘路徑」會蓋掉之後才加的路由，所以頁面殼已經掛上時
   `install_auth_routes` 直接丟錯。
 - session 的 cookie：`__Host-radar_session`、HttpOnly、Secure、SameSite=Lax、Path=/、沒有 Domain；
@@ -15,7 +17,7 @@
 """
 
 import uuid
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Final
@@ -181,6 +183,49 @@ def _clear_session_cookie(response: Response) -> None:
     response.delete_cookie(SESSION_COOKIE, path="/", secure=True, httponly=True, samesite="lax")
 
 
+def check_origin(request: Request, routes: AuthRoutes) -> None:
+    """會改資料的請求：`Origin` 要在允許清單（ADR-0008 第 3 項）。GET／HEAD／OPTIONS 不檢查。
+
+    `/api/v1` 底下每個 router 都把它掛成相依項（`origin_dependency`）。
+
+    Raises:
+        ApiProblemError: `origin_rejected`（`Origin` 缺少、重複或不在允許清單）。
+    """
+    if request.method in SAFE_METHODS:
+        return
+    # 要恰好一個：重複的標頭（即使其中一個是對的）也拒絕，不讓不同層各取一個。
+    origins = request.headers.getlist("origin")
+    if len(origins) != 1 or origins[0] not in routes.allowed_origins:
+        log.warning(
+            "會改資料的請求來源不是本站，拒絕",
+            method=request.method,
+            path=request.url.path,
+            origin_count=len(origins),
+        )
+        raise ApiProblemError(ErrorCode.ORIGIN_REJECTED)
+
+
+def origin_dependency(routes: AuthRoutes) -> Callable[[Request], Awaitable[None]]:
+    """給 `APIRouter(dependencies=[Depends(...)])` 用的 `check_origin`。"""
+
+    async def origin_check(request: Request) -> None:
+        check_origin(request, routes)
+
+    return origin_check
+
+
+def current_member(request: Request, routes: AuthRoutes) -> AuthenticatedMember:
+    """cookie 的 session 認出的成員。
+
+    Raises:
+        ApiProblemError: `not_authenticated`（沒有 cookie、session 無效或過期），帶 `no-store`。
+    """
+    member = routes.authenticate(request.cookies.get(SESSION_COOKIE))
+    if member is None:
+        raise ApiProblemError(ErrorCode.NOT_AUTHENTICATED, headers=NO_STORE)
+    return member
+
+
 def install_auth_routes(app: FastAPI, routes: AuthRoutes) -> None:
     """把登入路由裝到 `app` 上。一定要在 `mount_web` 之前呼叫。
 
@@ -190,33 +235,12 @@ def install_auth_routes(app: FastAPI, routes: AuthRoutes) -> None:
     if web_mounted(app):
         raise RuntimeError("頁面殼已經掛上：API 路由要在 mount_web 之前註冊")
 
-    async def check_origin(request: Request) -> None:
-        """會改資料的請求：`Origin` 要在允許清單（ADR-0008 第 3 項）。"""
-        if request.method in SAFE_METHODS:
-            return
-        # 要恰好一個：重複的標頭（即使其中一個是對的）也拒絕，不讓不同層各取一個。
-        origins = request.headers.getlist("origin")
-        if len(origins) != 1 or origins[0] not in routes.allowed_origins:
-            log.warning(
-                "會改資料的請求來源不是本站，拒絕",
-                method=request.method,
-                path=request.url.path,
-                origin_count=len(origins),
-            )
-            raise ApiProblemError(ErrorCode.ORIGIN_REJECTED)
-
-    router = APIRouter(prefix=API_V1_PREFIX, dependencies=[Depends(check_origin)])
-
-    def current_member(request: Request) -> AuthenticatedMember:
-        member = routes.authenticate(request.cookies.get(SESSION_COOKIE))
-        if member is None:
-            raise ApiProblemError(ErrorCode.NOT_AUTHENTICATED, headers=NO_STORE)
-        return member
+    router = APIRouter(prefix=API_V1_PREFIX, dependencies=[Depends(origin_dependency(routes))])
 
     @router.get("/me")
     def me(request: Request, response: Response) -> MemberResponse:
         """我是誰：成員 ID 與顯示名稱（不含 email）；沒登入 401。"""
-        member = current_member(request)
+        member = current_member(request, routes)
         response.headers.update(NO_STORE)
         return MemberResponse(member_id=member.member_id, display_name=member.display_name)
 

@@ -5,11 +5,14 @@
  * OpenAPI spec version: 0.1.0
  */
 import type {
+  ClientConfig,
+  DisplayNames,
   FakeLoginBody,
   FakeLoginOptionsResponse,
   FakeLoginResultResponse,
   Healthz200,
   MemberResponse,
+  PaperPageResponse,
   ProblemDetails
 } from './model';
 
@@ -338,4 +341,157 @@ const res = await fetch(getFakeLoginUrl(),
 
   const data: fakeLoginResponse['data'] = body ? JSON.parse(body) : {}
   return { data, status: res.status, headers: res.headers } as fakeLoginResponse
+}
+
+
+
+export type paperResponse200 = {
+  data: PaperPageResponse
+  status: 200
+}
+
+export type paperResponseDefault = {
+  data: ProblemDetails
+  status: Exclude<HTTPStatusCodes, 200>
+}
+
+export type paperResponseSuccess = (paperResponse200) & {
+  headers: Headers;
+};
+export type paperResponseError = (paperResponseDefault) & {
+  headers: Headers;
+};
+
+export type paperResponse = (paperResponseSuccess | paperResponseError)
+
+export const getPaperUrl = (paperId: string,) => {
+
+
+
+
+  return `/api/v1/papers/${paperId}`
+}
+
+/**
+ * 一篇論文的論文頁資料；看不到、不存在、ID 不是 UUID 都回同一個 404，沒登入 401。
+ * @summary Paper
+ */
+export const paper = async (paperId: string, options?: RequestInit): Promise<paperResponse> => {
+
+  const res = await fetch(getPaperUrl(paperId),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: paperResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as paperResponse
+}
+
+
+
+export type displayNamesResponse200 = {
+  data: DisplayNames
+  status: 200
+}
+
+export type displayNamesResponseDefault = {
+  data: ProblemDetails
+  status: Exclude<HTTPStatusCodes, 200>
+}
+
+export type displayNamesResponseSuccess = (displayNamesResponse200) & {
+  headers: Headers;
+};
+export type displayNamesResponseError = (displayNamesResponseDefault) & {
+  headers: Headers;
+};
+
+export type displayNamesResponse = (displayNamesResponseSuccess | displayNamesResponseError)
+
+export const getDisplayNamesUrl = () => {
+
+
+
+
+  return `/api/v1/display-names`
+}
+
+/**
+ * 期刊、主題、方法的顯示名稱（照設定檔順序，不含 `unclassified`）；沒登入 401。
+ * @summary Display Names
+ */
+export const displayNames = async ( options?: RequestInit): Promise<displayNamesResponse> => {
+
+  const res = await fetch(getDisplayNamesUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: displayNamesResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as displayNamesResponse
+}
+
+
+
+export type clientConfigResponse200 = {
+  data: ClientConfig
+  status: 200
+}
+
+export type clientConfigResponseDefault = {
+  data: ProblemDetails
+  status: Exclude<HTTPStatusCodes, 200>
+}
+
+export type clientConfigResponseSuccess = (clientConfigResponse200) & {
+  headers: Headers;
+};
+export type clientConfigResponseError = (clientConfigResponseDefault) & {
+  headers: Headers;
+};
+
+export type clientConfigResponse = (clientConfigResponseSuccess | clientConfigResponseError)
+
+export const getClientConfigUrl = () => {
+
+
+
+
+  return `/api/v1/client-config`
+}
+
+/**
+ * 前端要用的設定值（時區）；沒登入 401。
+ * @summary Client Config
+ */
+export const clientConfig = async ( options?: RequestInit): Promise<clientConfigResponse> => {
+
+  const res = await fetch(getClientConfigUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: clientConfigResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as clientConfigResponse
 }
