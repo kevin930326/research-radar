@@ -106,6 +106,8 @@ class Settings(BaseModel):
     heartbeat_url_sweep: SecretStr | None = None
     # 每週更新：發佈快照後才送（Story 1.9）；1.8 只先登記欄位（架構測試要求每個排程一個）。
     heartbeat_url_weekly_update: SecretStr | None = None
+    # Batch 結果查詢（Story 2.11）：沒有錯誤、也沒有 needs_attention 的批次時才送。
+    heartbeat_url_poll_batches: SecretStr | None = None
     # 送一次心跳的 HTTP 逾時（秒）與最多嘗試幾次（含第一次；失敗只記錯誤，不讓工作失敗）。
     heartbeat_timeout: int = Field(default=5, ge=1, le=60)
     heartbeat_attempts: int = Field(default=3, ge=1, le=10)

@@ -1,7 +1,11 @@
 """`radar` 指令：專案唯一的 CLI 入口（NFR-11）。typer 只能出現在這個套件。"""
 
 import itertools
+import re
+import time
 import uuid
+from collections.abc import Callable
+from contextlib import ExitStack
 from datetime import UTC, datetime
 from importlib.metadata import version as package_version
 from pathlib import Path
@@ -18,13 +22,15 @@ from radar.config import (
     load_domain_config,
     load_embedding_config,
     load_import_baseline,
+    load_llm_batch_config,
     load_migration_settings,
     load_models_config,
     load_settings,
     load_taxonomy,
     load_zh_summary_rules,
 )
-from radar.domain.budget import render_cost_report
+from radar.domain.ai_outputs import CallMode
+from radar.domain.budget import format_usd, render_cost_report
 from radar.domain.coverage import render_coverage_report
 from radar.domain.cube import UnknownJournalError
 from radar.domain.database_requirements import DatabaseRequirementsError
@@ -35,6 +41,25 @@ from radar.domain.embeddings import (
 )
 from radar.domain.import_report import render_import_report
 from radar.domain.jobs import UnknownJobError, find_scheduled_job
+from radar.domain.llm_batches import (
+    PROVIDER_BATCH_ID_PATTERN,
+    BatchSubmission,
+    BatchSubmissionStatus,
+    BatchSubmitUncertainError,
+    LlmBatchPlanResult,
+    LlmBatchSubmitResult,
+    PlanStop,
+    ResolveOutcome,
+    SubmitOutcome,
+    is_finished,
+    render_batch_estimate,
+    render_poll_row,
+    render_poll_summary,
+    render_queued_batches,
+    render_wait_progress,
+)
+from radar.domain.run_reports import RunScope, parse_ids_file, parse_since, render_run_report
+from radar.domain.settings import Settings
 from radar.domain.trial_runs import (
     MAX_TRIAL_PAPERS,
     TRIAL_TASKS,
@@ -64,6 +89,7 @@ from radar.entrypoints.bootstrap import (
 )
 from radar.entrypoints.logging_config import configure_logging
 from radar.entrypoints.startup import check_ai_config
+from radar.ports import LlmProvider
 from radar.services.budget import get_budget_status
 from radar.services.coverage import get_coverage
 from radar.services.embeddings import (
@@ -74,6 +100,17 @@ from radar.services.embeddings import (
 )
 from radar.services.import_report import get_import_report
 from radar.services.jobs import enqueue_scheduled_job
+from radar.services.llm_batches import (
+    LlmBatchSetup,
+    count_llm_batch_running_runs,
+    estimate_llm_batches,
+    list_llm_batch_pending_papers,
+    list_llm_batches,
+    plan_llm_batches,
+    poll_llm_batches,
+    resolve_llm_batch,
+    submit_llm_batch,
+)
 from radar.services.migrations import migrate_database
 from radar.services.reparse import (
     AdvisoryLockLostError,
@@ -81,6 +118,7 @@ from radar.services.reparse import (
     WeeklyUpdateInProgressError,
     reparse_papers,
 )
+from radar.services.run_reports import get_run_report
 from radar.services.trial_runs import (
     TrialPapersNotFoundError,
     TrialSetup,
@@ -105,6 +143,8 @@ embeddings_app = typer.Typer(help="向量（embedding）。", no_args_is_help=Tr
 app.add_typer(embeddings_app, name="embeddings")
 runs_app = typer.Typer(help="AI 工作的執行（derivation_run）。", no_args_is_help=True)
 app.add_typer(runs_app, name="runs")
+batches_app = typer.Typer(help="AI 工作的 Batch（batch_submission）。", no_args_is_help=True)
+app.add_typer(batches_app, name="batches")
 # Ctrl-C 中斷時的退出碼（128 + SIGINT）。
 INTERRUPTED_EXIT_CODE = 130
 
@@ -664,6 +704,555 @@ def runs_trial(
             )
         if report.exit_code:
             raise typer.Exit(report.exit_code)
+
+
+# --- Batch（Story 2.11、ADR-0043） -----------------------------------------------------------
+
+# `radar batches wait` 兩次檢查之間的等待（測試換掉它，不真的睡）。
+_sleep = time.sleep
+_BATCH_ID = re.compile(PROVIDER_BATCH_ID_PATTERN)
+_ALL_BATCH_STATUSES = frozenset(BatchSubmissionStatus)
+# `radar batches wait` 連續幾次查詢都有錯誤（例如金鑰失效）就停下，不無限重試。
+_WAIT_MAX_ERROR_ROUNDS = 3
+
+
+def _load_batch_setup(action: str) -> tuple[Settings, LlmBatchSetup]:
+    """讀 Batch 要的設定；設定錯就印出來、退出碼 1。"""
+    try:
+        settings = load_settings()
+        setup = LlmBatchSetup(
+            gateway=build_gateway_config(settings, load_models_config(), call_mode=CallMode.BATCH),
+            budget=load_budget_config(),
+            batches=load_llm_batch_config(),
+            zh_summary_rules=load_zh_summary_rules(),
+            taxonomy=load_taxonomy(),
+            context_values=load_context_values(),
+        )
+    except ConfigError as exc:
+        log.error(f"設定錯誤，無法{action}", problems=exc.problems)
+        _fail(f"設定錯誤，沒有{action}：", exc.problems)
+    return settings, setup
+
+
+def _lazy_provider(settings: Settings, stack: ExitStack) -> Callable[[], LlmProvider]:
+    """第一次真的要查或送時才建 provider（缺金鑰時只碰資料庫的路照樣做得完），之後重用同一個；
+    由 `stack` 關掉。"""
+    built: list[LlmProvider] = []
+
+    def open_provider() -> LlmProvider:
+        if not built:
+            built.append(stack.enter_context(build_llm_provider(settings)))
+        return built[0]
+
+    return open_provider
+
+
+def _confirm(question: str) -> bool:
+    """問 y/N。Ctrl-C 照樣丟 `KeyboardInterrupt`；EOF 當成沒有確認。"""
+    try:
+        return typer.confirm(question, default=False)
+    except typer.Abort as exc:
+        # click 把 Ctrl-C 與 EOF 都換成 Abort；原本的例外留在 __context__。
+        if isinstance(exc.__context__, KeyboardInterrupt):
+            raise KeyboardInterrupt from None
+        return False
+
+
+def _render_plan(result: LlmBatchPlanResult) -> list[str]:
+    lines = [
+        f"排好 {len(result.submission_ids)} 批、共 {result.planned:,} 筆"
+        f"（保守上限 {format_usd(result.estimated_max_cost_usd)} 美元）",
+    ]
+    if result.deferred_budget:
+        lines.append(f"預算放不下、這次不排：{result.deferred_budget:,} 筆")
+    if result.stop is PlanStop.HELD_MONTH_START:
+        lines.append("月初窗口（台北時間每月 1 日早上），規劃延後；過了再跑一次")
+    elif result.stop is PlanStop.BUDGET_TRIPPED:
+        lines.append("已熔斷，規劃不排任何批次")
+    return lines
+
+
+_NOT_SENT = frozenset(
+    {
+        SubmitOutcome.HELD,
+        SubmitOutcome.FAILED,
+        SubmitOutcome.NEEDS_ATTENTION,
+        SubmitOutcome.REQUEUED,
+    }
+)
+
+
+def _render_submit(batch_submission_id: uuid.UUID, result: LlmBatchSubmitResult) -> str:
+    line = f"{batch_submission_id}  {result.outcome.value}  {result.status.value}"
+    if result.outcome is SubmitOutcome.SUBMITTED:
+        line += f"  {result.sent:,} 筆 → {result.provider_batch_id}"
+    if result.input_changed:
+        line += f"  輸入變了、沒送 {result.input_changed:,} 筆"
+    if result.reason is not None:
+        line += f"  原因：{result.reason.value}"
+    return line
+
+
+@batches_app.command("create")
+def batches_create(
+    yes: Annotated[bool, typer.Option("--yes", help="不問確認，直接規劃與送出")] = False,
+    estimate_only: Annotated[
+        bool, typer.Option("--estimate", help="只印預估，不寫任何資料、不送出")
+    ] = False,
+) -> None:
+    """手動規劃全庫的 AI 工作（中文重點、分類、研究模型）並送出 Batch。
+
+    先印預估（各工作筆數、Batch 價的保守上限、本月預算剩餘），以及已經排好、還沒送出的 queued
+    批次（id、筆數、上限）與兩者合計的上限；確認後（--yes 不問）規劃（不看
+    weekly_planning_enabled；月初窗口、熔斷照樣看），再在這個行程裡只送出確認過的批次（確認前列出的
+    queued 批次＋這次規劃建的），印每批結果與下一步（radar batches wait）。確認之後才出現的其他
+    queued 批次（例如同時進行的每週規劃）不送，列出來讓你另外確認。--estimate 只估不寫。
+
+    設定錯、讀不到資料庫、沒有確認、有批次沒送成（延後、失敗、不確定）：退出碼 1。Ctrl-C：退出碼
+    130。錯誤只印類別或狀態碼，不印金鑰與連線字串。
+    """
+    configure_logging()
+    settings, setup = _load_batch_setup("建 Batch")
+    try:
+        try:
+            database = build_database(settings, pool_size=database_pool_size(settings, "cli"))
+            estimate = estimate_llm_batches(SystemViewer(), database, setup)
+            status = get_budget_status(SystemViewer(), database, setup.budget, now=_utc_now())
+            # 確認的範圍：預估（新排的）＋現在已經排好、還沒送出的批次（這次一起送）。
+            confirmed = list_llm_batches(SystemViewer(), database, {BatchSubmissionStatus.QUEUED})
+        except Exception as exc:
+            # 例外訊息可能含主機與帳號，只記類別名稱。
+            log.error("Batch 預估失敗", error_type=type(exc).__name__)
+            _fail(f"預估失敗（{type(exc).__name__}），沒有執行；細節見日誌", [])
+        for line in render_batch_estimate(estimate, status):
+            typer.echo(line)
+        for line in render_queued_batches(confirmed, estimate):
+            typer.echo(line)
+        if estimate_only:
+            return
+        if not yes and not _confirm("要規劃並送出嗎？"):
+            typer.echo("沒有執行", err=True)
+            raise typer.Exit(1)
+    except KeyboardInterrupt:
+        log.warning("建 Batch 在執行前被中斷")
+        typer.echo("中斷了，沒有執行", err=True)
+        raise typer.Exit(INTERRUPTED_EXIT_CODE) from None
+
+    not_sent = False
+    try:
+        try:
+            plan = plan_llm_batches(
+                SystemViewer(),
+                database,
+                setup,
+                weekly_run_id=None,
+                clock=_utc_now,
+                enqueue=lambda *_: False,  # 這個行程自己送，不排入 worker
+                manual=True,
+            )
+        except Exception as exc:
+            log.error("Batch 規劃失敗", error_type=type(exc).__name__)
+            _fail(f"規劃失敗（{type(exc).__name__}）；已排好的批次留著，細節見日誌", [])
+        for line in _render_plan(plan):
+            typer.echo(line)
+        if plan.stop is not PlanStop.COMPLETED:
+            not_sent = True
+        # 只送確認過的：確認前列出的 queued 批次＋這次規劃建的（之後才出現的另行確認）。
+        to_send = list(dict.fromkeys([*(row.id for row in confirmed), *plan.submission_ids]))
+        with ExitStack() as stack:
+            open_provider = _lazy_provider(settings, stack)
+            for submission_id in to_send:
+                try:
+                    result = submit_llm_batch(
+                        SystemViewer(),
+                        database,
+                        open_provider,
+                        setup,
+                        submission_id,
+                        clock=_utc_now,
+                    )
+                except BatchSubmitUncertainError as exc:
+                    log.error("Batch 送出結果不確定", error_type=exc.error_type)
+                    typer.echo(
+                        f"{submission_id}  needs_attention  不確定有沒有送出（{exc.error_type}），"
+                        "停下；用 radar batches resolve 確認",
+                        err=True,
+                    )
+                    raise typer.Exit(1) from None
+                typer.echo(_render_submit(submission_id, result))
+                if result.outcome in _NOT_SENT:
+                    not_sent = True
+        others = [
+            row.id
+            for row in list_llm_batches(SystemViewer(), database, {BatchSubmissionStatus.QUEUED})
+            if row.id not in to_send
+        ]
+        if others:
+            typer.echo(
+                f"另有 {len(others)} 批 queued 不在這次確認的範圍，沒有送"
+                "（worker 會照排程送；要現在送就再跑一次 radar batches create）：",
+                err=True,
+            )
+            for other in others:
+                typer.echo(f"  {other}", err=True)
+    except ConfigError as exc:
+        log.error("設定錯誤，無法送出 Batch", problems=exc.problems)
+        _fail("設定錯誤，沒有送出（批次留在 queued）：", exc.problems)
+    except KeyboardInterrupt:
+        log.warning("建 Batch 被中斷")
+        typer.echo(
+            "中斷了：已送出的照常處理，沒送的留在 queued（worker 的 sweep 會補送，或再跑一次）",
+            err=True,
+        )
+        raise typer.Exit(INTERRUPTED_EXIT_CODE) from None
+    except typer.Exit:
+        raise
+    except Exception as exc:
+        log.error("Batch 送出失敗", error_type=type(exc).__name__)
+        _fail(f"送出失敗（{type(exc).__name__}）；細節見日誌", [])
+    typer.echo("下一步：radar batches wait（等結果回來並匯入）")
+    if not_sent:
+        typer.echo("有批次沒送成（延後、失敗或要人工確認），見上面每批的結果", err=True)
+        raise typer.Exit(1)
+
+
+@batches_app.command("poll")
+def batches_poll(
+    ids: Annotated[
+        list[uuid.UUID] | None,
+        typer.Option("--id", help="只查這幾批（batch_submission id，可重複）", show_default=False),
+    ] = None,
+) -> None:
+    """查一次 submitted／ended 的批次，匯入已結束的（和 worker 的 poll-batches 同一段程式）。
+
+    每批印一行（批次 id、狀態、供應商狀態、這次匯入的各結果計數、逾期），最後印 needs_attention 數
+    與進 ai_done 的每週更新。設定錯、讀不到資料庫、有錯誤、有 needs_attention：退出碼 1。Ctrl-C：
+    退出碼 130（做完的項目已經寫好，再跑一次接著做）。
+    """
+    configure_logging()
+    settings, setup = _load_batch_setup("查 Batch")
+    try:
+        database = build_database(settings, pool_size=database_pool_size(settings, "cli"))
+        with ExitStack() as stack:
+            result = poll_llm_batches(
+                SystemViewer(),
+                database,
+                _lazy_provider(settings, stack),
+                setup,
+                clock=_utc_now,
+                ids=ids or None,
+            )
+    except ConfigError as exc:
+        log.error("設定錯誤，無法查 Batch", problems=exc.problems)
+        _fail("設定錯誤，沒有查 Batch：", exc.problems)
+    except KeyboardInterrupt:
+        log.warning("查 Batch 被中斷")
+        typer.echo("中斷了：做完的項目已經寫好，再跑一次接著做（不重複匯入）", err=True)
+        raise typer.Exit(INTERRUPTED_EXIT_CODE) from None
+    except Exception as exc:
+        log.error("查 Batch 失敗", error_type=type(exc).__name__)
+        _fail(f"查 Batch 失敗（{type(exc).__name__}）；細節見日誌", [])
+    for row in result.rows:
+        typer.echo(render_poll_row(row))
+    for line in render_poll_summary(result):
+        typer.echo(line)
+    if not result.healthy:
+        raise typer.Exit(1)
+
+
+@batches_app.command("wait")
+def batches_wait(
+    ids: Annotated[
+        list[uuid.UUID] | None,
+        typer.Option("--id", help="只等這幾批（batch_submission id，可重複）", show_default=False),
+    ] = None,
+    interval_minutes: Annotated[
+        int | None,
+        typer.Option(
+            "--interval-minutes",
+            min=1,
+            max=1440,
+            help="每隔幾分鐘查一次（預設照 config/llm_batches.yaml 的 poll_interval_minutes）",
+        ),
+    ] = None,
+) -> None:
+    """一直查到目標批次都結束（imported／failed）或出現 needs_attention 為止，邊查邊匯入。
+
+    目標是開始時 submitted／ended 的批次，或 --id 指定的。每次檢查印一行「已結束 X 批、還在跑
+    Y 批」。設定錯、讀不到資料庫、最後一次有錯誤、有 needs_attention（沒有目標時也看全庫的）、
+    目標批次裡還有寫結果失敗等接續的項目（llm_result_pending，印論文 ID 與接續方式；沒有目標時看
+    全部的批次）：退出碼 1。
+    Ctrl-C：退出碼 130，重跑接著收、不重複匯入。
+    """
+    configure_logging()
+    settings, setup = _load_batch_setup("等 Batch")
+    interval = interval_minutes or setup.batches.poll_interval_minutes
+    try:
+        database = build_database(settings, pool_size=database_pool_size(settings, "cli"))
+        if ids:
+            targets = list(dict.fromkeys(ids))
+            _check_wait_targets(
+                targets, list_llm_batches(SystemViewer(), database, _ALL_BATCH_STATUSES, targets)
+            )
+        else:
+            targets = [
+                row.id
+                for row in list_llm_batches(
+                    SystemViewer(),
+                    database,
+                    {BatchSubmissionStatus.SUBMITTED, BatchSubmissionStatus.ENDED},
+                )
+            ]
+        if not targets:
+            # 上次的 wait 收完了才結束、重跑時沒有目標：上次留下的 needs_attention 與等接續的
+            # 結果（全部的批次）都還要看，不能當成成功（確認審查 D3）。
+            stuck = list_llm_batches(
+                SystemViewer(), database, {BatchSubmissionStatus.NEEDS_ATTENTION}
+            )
+            left_pending = list_llm_batch_pending_papers(SystemViewer(), database, None)
+            if not stuck and not left_pending:
+                typer.echo("沒有要等的批次（submitted／ended）")
+                return
+            if stuck:
+                typer.echo("沒有要等的批次（submitted／ended），但有批次要人工確認：", err=True)
+                for stuck_row in stuck:
+                    typer.echo(f"  {stuck_row.id}", err=True)
+                typer.echo(
+                    "radar batches resolve <批次 id> --provider-batch-id <ID> 或 --fail", err=True
+                )
+            if left_pending:
+                if not stuck:
+                    typer.echo("沒有要等的批次（submitted／ended）", err=True)
+                _echo_pending(left_pending)
+            raise typer.Exit(1)
+        with ExitStack() as stack:
+            open_provider = _lazy_provider(settings, stack)
+            error_rounds = 0
+            while True:
+                result = poll_llm_batches(
+                    SystemViewer(), database, open_provider, setup, clock=_utc_now, ids=targets
+                )
+                for row in result.rows:
+                    typer.echo(render_poll_row(row))
+                error_rounds = error_rounds + 1 if any(row.error for row in result.rows) else 0
+                rows = list_llm_batches(SystemViewer(), database, _ALL_BATCH_STATUSES, targets)
+                finished = sum(is_finished(row.status) for row in rows)
+                attention = [
+                    row.id for row in rows if row.status is BatchSubmissionStatus.NEEDS_ATTENTION
+                ]
+                typer.echo(render_wait_progress(finished, len(rows) - finished))
+                if attention or finished == len(rows):
+                    break
+                if error_rounds >= _WAIT_MAX_ERROR_ROUNDS:
+                    typer.echo(
+                        f"連續 {error_rounds} 次查詢都有錯誤，先停下；看日誌排除後重跑"
+                        " radar batches wait",
+                        err=True,
+                    )
+                    break
+                _sleep(interval * 60)
+            pending = list_llm_batch_pending_papers(SystemViewer(), database, targets)
+    except ConfigError as exc:
+        log.error("設定錯誤，無法等 Batch", problems=exc.problems)
+        _fail("設定錯誤，沒有等 Batch：", exc.problems)
+    except KeyboardInterrupt:
+        log.warning("等 Batch 被中斷")
+        typer.echo(
+            "中斷了：匯入過的已經寫好，重跑 radar batches wait 接著收（不重複匯入）", err=True
+        )
+        raise typer.Exit(INTERRUPTED_EXIT_CODE) from None
+    except typer.Exit:
+        raise
+    except Exception as exc:
+        log.error("等 Batch 失敗", error_type=type(exc).__name__)
+        _fail(f"等 Batch 失敗（{type(exc).__name__}）；細節見日誌", [])
+    for line in render_poll_summary(result):
+        typer.echo(line)
+    if attention:
+        typer.echo(
+            f"有 {len(attention)} 批要人工確認：radar batches resolve <批次 id>"
+            " --provider-batch-id <ID> 或 --fail",
+            err=True,
+        )
+    if pending:
+        _echo_pending(pending)
+    if attention or pending or not result.healthy:
+        raise typer.Exit(1)
+
+
+def _echo_pending(pending: list[uuid.UUID]) -> None:
+    """等接續的論文 ID 與接續方式。帳記了、輸出存著，只差寫結果：Batch 不會重排，要用互動接續
+    （那幾項不再呼叫模型、不再記帳）。"""
+    typer.echo(
+        f"有 {len(pending)} 篇論文的結果還沒寫好（寫入失敗、等接續）：用 radar runs trial"
+        " <論文 ID>… 接續（會先印預估、要確認；等接續的那幾項用存下的輸出，不再呼叫模型；"
+        "同一篇其他沒有結果的工作會照常呼叫）",
+        err=True,
+    )
+    for paper_id in pending:
+        typer.echo(f"  {paper_id}", err=True)
+
+
+def _check_wait_targets(targets: list[uuid.UUID], rows: list[BatchSubmission]) -> None:
+    """`--id` 指定的批次要存在，而且已經送出（queued／submitting 不會自己往下走，等不到）。"""
+    found = {row.id: row.status for row in rows}
+    unknown = [str(target) for target in targets if target not in found]
+    if unknown:
+        _fail("找不到這些批次，沒有開始等：", unknown)
+    unsent = [
+        f"{target}（{found[target].value}）"
+        for target in targets
+        if found[target] in (BatchSubmissionStatus.QUEUED, BatchSubmissionStatus.SUBMITTING)
+    ]
+    if unsent:
+        _fail(
+            "wait 只等已經送出的批次，這些還沒送出（先跑 radar batches create 或等 worker 送）：",
+            unsent,
+        )
+
+
+@batches_app.command("resolve")
+def batches_resolve(
+    batch_submission_id: Annotated[
+        uuid.UUID, typer.Argument(help="要確認的批次（batch_submission id）", show_default=False)
+    ],
+    provider_batch_id: Annotated[
+        str | None,
+        typer.Option(
+            "--provider-batch-id",
+            help="在 Anthropic Console 查到的 batch ID（msgbatch_…）：記下來、改回 submitted",
+            show_default=False,
+        ),
+    ] = None,
+    fail: Annotated[
+        bool,
+        typer.Option(
+            "--fail",
+            help="標失敗：這批還在跑的 run 改成失敗，下一次 radar batches create 會再送"
+            "（每週規劃開啟後也會）",
+        ),
+    ] = False,
+    yes: Annotated[bool, typer.Option("--yes", help="--fail 不問確認")] = False,
+) -> None:
+    """人工確認一個 needs_attention 的批次（不呼叫供應商）。
+
+    --provider-batch-id 與 --fail 擇一。--fail 先印會放掉幾筆 run 並提醒先到 Console 取消，確認後
+    （--yes 不問）才改。兩個都給或都沒給、batch ID 格式不對：退出碼 2。設定錯、讀不到資料庫、找不到
+    批次、批次不是 needs_attention、batch ID 已經是別批的、沒有確認：退出碼 1。
+    """
+    configure_logging()
+    if (provider_batch_id is None) == (not fail):
+        typer.echo("參數看不懂，沒有執行：--provider-batch-id 與 --fail 要剛好給一個", err=True)
+        raise typer.Exit(2)
+    if provider_batch_id is not None and not _BATCH_ID.fullmatch(provider_batch_id):
+        typer.echo(
+            "參數看不懂，沒有執行：batch ID 只能有英數字、底線與連字號（例如 msgbatch_…）",
+            err=True,
+        )
+        raise typer.Exit(2)
+    try:
+        settings = load_settings()
+    except ConfigError as exc:
+        log.error("設定錯誤，無法確認 Batch", problems=exc.problems)
+        _fail("設定錯誤，沒有執行：", exc.problems)
+    try:
+        try:
+            database = build_database(settings, pool_size=database_pool_size(settings, "cli"))
+            found = list_llm_batches(
+                SystemViewer(), database, _ALL_BATCH_STATUSES, [batch_submission_id]
+            )
+            running = count_llm_batch_running_runs(SystemViewer(), database, batch_submission_id)
+        except Exception as exc:
+            log.error("讀取批次失敗", error_type=type(exc).__name__)
+            _fail(f"讀取批次失敗（{type(exc).__name__}）；細節見日誌", [])
+        if not found:
+            _fail(f"找不到批次 {batch_submission_id}", [])
+        if found[0].status is not BatchSubmissionStatus.NEEDS_ATTENTION:
+            _fail(f"這批是 {found[0].status.value}，不是 needs_attention，沒有改", [])
+        if fail:
+            typer.echo(f"會把這批還在跑的 {running:,} 筆 run 改成失敗（batch_resolved_failed）")
+            typer.echo("供應商那邊若真的有這批，先到 Anthropic Console 取消（結果回來也不會匯入）")
+            if not yes and not _confirm("要標失敗嗎？"):
+                typer.echo("沒有執行", err=True)
+                raise typer.Exit(1)
+    except KeyboardInterrupt:
+        typer.echo("中斷了，沒有執行", err=True)
+        raise typer.Exit(INTERRUPTED_EXIT_CODE) from None
+    try:
+        result = resolve_llm_batch(
+            SystemViewer(),
+            database,
+            batch_submission_id,
+            provider_batch_id=provider_batch_id,
+            fail=fail,
+        )
+    except Exception as exc:
+        log.error("確認 Batch 失敗", error_type=type(exc).__name__)
+        _fail(f"確認失敗（{type(exc).__name__}）；細節見日誌", [])
+    if result.outcome is ResolveOutcome.RESUMED:
+        typer.echo("已改回 submitted；下一次 poll 會去查這個 batch ID")
+    elif result.outcome is ResolveOutcome.FAILED:
+        typer.echo(
+            f"已標失敗；{result.released_runs:,} 筆 run 改成失敗，"
+            "下一次 radar batches create 會再送"
+        )
+    elif result.outcome is ResolveOutcome.ID_IN_USE:
+        _fail("這個 batch ID 已經記在別的批次，沒有改", [])
+    else:
+        _fail(f"這批現在是 {result.status.value}，不是 needs_attention，沒有改", [])
+
+
+@runs_app.command("report")
+def runs_report(
+    batch: Annotated[
+        list[uuid.UUID] | None,
+        typer.Option("--batch", help="這幾批的 run（batch_submission id，可重複）"),
+    ] = None,
+    ids_file: Annotated[
+        Path | None,
+        typer.Option(
+            "--ids-file",
+            exists=True,
+            dir_okay=False,
+            readable=True,
+            help="論文 ID 清單：每行一個 UUID，空行與 # 開頭的行略過",
+        ),
+    ] = None,
+    since: Annotated[
+        str | None,
+        typer.Option("--since", help="這個時間以後建的 run（ISO 8601；沒寫時區當台北時間）"),
+    ] = None,
+) -> None:
+    """拒收報表：範圍內每篇論文每個 AI 工作最新那一筆 run 的結果（只讀）。
+
+    依工作印篇數、各結果（有效、已取代、拒收、暫時失敗、還在跑），以及拒收、暫時失敗依原因代碼的
+    篇數。--batch、--ids-file、--since 至少給一個（給幾個就同時滿足幾個），都沒給或看不懂：退出碼
+    2。設定錯、讀不到資料庫：退出碼 1。
+    """
+    configure_logging()
+    try:
+        paper_ids = None if ids_file is None else parse_ids_file(ids_file.read_text("utf-8-sig"))
+        since_at = None if since is None else parse_since(since)
+        scope = RunScope(tuple(batch or ()), paper_ids, since_at)
+    except ValueError as exc:
+        typer.echo(f"參數看不懂，沒有執行：{exc}", err=True)
+        raise typer.Exit(2) from None
+    except OSError as exc:
+        typer.echo(f"讀不到 --ids-file（{type(exc).__name__}），沒有執行", err=True)
+        raise typer.Exit(2) from None
+    try:
+        settings = load_settings()
+    except ConfigError as exc:
+        log.error("設定錯誤，無法印報表", problems=exc.problems)
+        _fail("設定錯誤，沒有執行：", exc.problems)
+    try:
+        database = build_database(settings, pool_size=database_pool_size(settings, "cli"))
+        rows = get_run_report(SystemViewer(), database, scope)
+    except Exception as exc:
+        log.error("讀取報表失敗", error_type=type(exc).__name__)
+        _fail(f"讀取報表失敗（{type(exc).__name__}）；細節見日誌", [])
+    for line in render_run_report(rows):
+        typer.echo(line)
 
 
 def _fail(headline: str, problems: list[str]) -> NoReturn:

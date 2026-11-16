@@ -11,6 +11,8 @@
   DOI）。不用 `random`：跨 Python 版本、跨資料庫都一樣，新增論文不會打亂既有論文之間的先後。
 - **預估**：每項記確認時的 `RunKey`（輸入指紋、prompt 版本、模型）與單次呼叫的費用上限；最壞花費
   ＝單次上限 × adapter 每個請求最多送幾次（`attempts`，含第一次；逾時放棄的請求也可能計費）。
+  每項另記確認時會呼叫、接續或略過（`TrialPlanKind`）；上限只算會呼叫的，接續與略過的另列
+  （Story 2.11 確認審查 D1）。
 - **項目狀態**（`TrialItemStatus`）：計畫不做 → `not_applicable`／`no_input`；交給閘門 →
   `GatewayOutcome` 的值；另有 `not_found`（論文在跑之前被刪）、`error`（非預期例外，只記類別名）、
   `not_run`（設定錯停下後剩下的）、`input_changed`（確認後輸入變了，或確認時不會呼叫、現在會：
@@ -256,12 +258,21 @@ def _check_attempts(attempts: int) -> None:
         raise ValueError("attempts 要是至少 1 的整數")
 
 
+class TrialPlanKind(StrEnum):
+    """確認時這一項交給閘門後會怎樣（Story 2.11 確認審查 D1）。只有 `call` 算進費用上限；`resume`
+    與 `skip` 執行時也只准接續或略過，不准呼叫模型（`run_llm_job(call_allowed=False)`）。"""
+
+    CALL = "call"  # 會呼叫模型
+    RESUME = "resume"  # 有同一組鍵的 llm_result_pending：用存下的輸出接續，不呼叫模型、不再記帳
+    SKIP = "skip"  # 已經有結果（active、平常流程的 rejected）或正在跑：閘門會略過
+
+
 @dataclass(frozen=True)
 class TrialPlanItem:
     """一項會交給閘門的工作的預估：單次呼叫的保守費用上限（`max_cost_usd`）、估計輸入 token、
     `max_tokens`、送出的字元數（系統提示、文件內容、JSON schema）、adapter 每個請求最多送幾次
-    （`attempts`，含第一次），以及確認時的 `RunKey`（`key`；執行時只有算出同一個鍵才呼叫，沒有鍵
-    的項目不呼叫）。
+    （`attempts`，含第一次）、確認時的 `RunKey`（`key`；執行時只有算出同一個鍵才交給閘門，沒有鍵
+    的項目不交），以及確認時看到的 `kind`（會呼叫、接續或略過；只有 `call` 算進預估的上限）。
 
     Raises:
         ValueError: `attempts` 不是至少 1 的整數。
@@ -277,9 +288,15 @@ class TrialPlanItem:
     schema_chars: int
     attempts: int = 1
     key: RunKey | None = None
+    kind: TrialPlanKind = TrialPlanKind.CALL
 
     def __post_init__(self) -> None:
         _check_attempts(self.attempts)
+
+    @property
+    def calls_model(self) -> bool:
+        """確認時會呼叫模型（只有這種算進上限、執行時才准呼叫）。"""
+        return self.kind is TrialPlanKind.CALL
 
     @property
     def worst_cost_usd(self) -> Decimal:
@@ -289,8 +306,9 @@ class TrialPlanItem:
 
 @dataclass(frozen=True)
 class TrialEstimate:
-    """執行前的預估：`plan_for` 要做、放行與大小都過了的項目（已有結果的也算，保守）。
-    `attempts` 是 adapter 每個請求最多送幾次（含第一次），每一項的 `attempts` 都要一樣。
+    """執行前的預估：`plan_for` 要做、放行與大小都過了的項目（都會交給閘門）。費用上限只算確認時
+    會呼叫模型的（`kind` 是 `call`）；接續與略過的另外數，執行時也不准呼叫（Story 2.11 確認審查
+    D1）。`attempts` 是 adapter 每個請求最多送幾次（含第一次），每一項的 `attempts` 都要一樣。
 
     Raises:
         ValueError: `attempts` 不是至少 1 的整數，或有項目的 `attempts` 不一樣。
@@ -306,8 +324,12 @@ class TrialEstimate:
 
     @property
     def max_cost_usd(self) -> Decimal:
-        """含重試的最壞花費合計（每項單次上限 × `attempts`）。"""
-        return sum((item.worst_cost_usd for item in self.items), _ZERO)
+        """會呼叫模型的項目含重試的最壞花費合計（每項單次上限 × `attempts`）。"""
+        return sum((item.worst_cost_usd for item in self.items if item.calls_model), _ZERO)
+
+    def count(self, kind: TrialPlanKind) -> int:
+        """確認時是這種（會呼叫、接續、略過）的項目有幾項。"""
+        return sum(item.kind is kind for item in self.items)
 
     def for_item(self, paper_id: uuid.UUID, task: LlmTask) -> TrialPlanItem | None:
         for item in self.items:
@@ -593,14 +615,24 @@ def render_trial_selection(selection: TrialSelection) -> list[str]:
 
 def render_trial_estimate(estimate: TrialEstimate, status: BudgetStatus) -> list[str]:
     """執行前的預估與本月預算狀態。"""
+    calls = estimate.count(TrialPlanKind.CALL)
     lines = [
         f"預估：會交給閘門 {len(estimate.items)} 項，費用上限"
         f" {format_trial_usd(estimate.max_cost_usd)} 美元"
-        f"（含重試的最壞情況：每項最多送 {estimate.attempts} 次；已經有結果、會略過的也算進去）",
+        f"（只算會呼叫模型的 {calls} 項；含重試的最壞情況：每項最多送 {estimate.attempts} 次）",
+    ]
+    resumes = estimate.count(TrialPlanKind.RESUME)
+    skips = estimate.count(TrialPlanKind.SKIP)
+    if resumes or skips:
+        lines.append(
+            f"另外接續 {resumes} 項（用存下的輸出，不呼叫模型、不再記帳）、略過 {skips} 項"
+            "（已經有結果或正在跑）：不算進上限，執行時也不會呼叫模型"
+        )
+    lines.append(
         f"本月（{status.window.label}，台北時間）：已花 {format_usd(status.total_usd)}、"
         f"Batch 預留 {format_usd(status.reserved_usd)}、離熔斷線"
-        f" {format_usd(status.remaining_usd)}（熔斷線 {format_usd(status.breaker_usd)}）",
-    ]
+        f" {format_usd(status.remaining_usd)}（熔斷線 {format_usd(status.breaker_usd)}）"
+    )
     if status.breaker_tripped:
         lines.append("已熔斷：要呼叫模型的項目都會是 deferred_budget（不呼叫、不寫列）")
         return lines

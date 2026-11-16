@@ -23,6 +23,17 @@
 
 核對與切換在同一個交易、先鎖論文：兩筆結果同時要啟用時一定一筆等另一筆做完，最後有效的是
 目前輸入算出來的那一筆。`radar runs promote`（候選升正式，Epic 8）之後走同一個函式的另一個入口。
+
+Batch 匯入走 `record_batch_llm_result`（Story 2.11、ADR-0043），和上面共用同一段寫入，差三點：
+
+- 同一個交易先鎖批次列（`FOR SHARE`，`repo/llm_batches.find_batch_submission_importing`），再鎖
+  論文、再鎖 run。鎖住 run 以後它已經不是 `running`（另一個 poller 匯入過、sweep 或
+  `resolve --fail` 改成 `failed`）→ 什麼都不寫、回 None（同一行結果匯入兩次、兩個 poller 同時
+  匯入都只寫一列表頭）。
+- run 還是 `running`、但批次已經不是 `ended` 或供應商 batch ID 不是這次匯入的（別的 poll 把它
+  標成 `needs_attention`、人工確認換了 ID）→ 什麼都不寫、丟 `BatchImportStoppedError`（審查後）。
+- 判斷「還是不是現在該用的」時多問一次 `plan_for`（在同一把論文鎖裡）：論文被排除、或該用的輸入
+  種類變了 → `superseded`。
 """
 
 import uuid
@@ -49,21 +60,24 @@ from radar.domain.ai_outputs import (
 from radar.domain.context_values import ContextValues
 from radar.domain.errors import ErrorCode
 from radar.domain.fingerprints import input_sha256
+from radar.domain.llm_batches import BatchImportStoppedError
 from radar.domain.llm_schemas import ClassificationOutput, ResearchModelOutput, ZhSummaryOutput
 from radar.domain.permissions import Action, require
+from radar.domain.processing import ProcessingTask, plan_for
 from radar.domain.taxonomy import Taxonomy
 from radar.domain.validators.classification import normalize_classification
 from radar.domain.validators.research_model import validate_research_model
 from radar.domain.validators.zh_summary import normalize_zh_summary
 from radar.domain.viewer import SystemViewer, Viewer
 from radar.repo.ai_outputs import create_ai_result, update_ai_results_superseded
-from radar.repo.db import Database
+from radar.repo.db import Database, DbConnection
+from radar.repo.llm_batches import find_batch_submission_importing
 from radar.repo.llm_ledger import (
     find_derivation_run,
     update_derivation_run_pending_settled,
     update_derivation_run_succeeded,
 )
-from radar.repo.papers import find_paper_llm_source
+from radar.repo.papers import find_paper_llm_source, find_paper_processing_facts
 from radar.services.prompt_loader import current_prompt_version
 
 
@@ -109,6 +123,93 @@ def record_llm_result(
         PromptIntegrityError, PromptFormatError: 讀不出目前的 prompt 版本。
     """
     require(actor, Action.RUN_AI_JOBS, None)
+    status = _record(
+        database,
+        config,
+        paper_id=paper_id,
+        run_id=run_id,
+        lang=lang,
+        abstract_id=abstract_id,
+        reject_reason=reject_reason,
+        taxonomy_version=taxonomy_version,
+        context_values_version=context_values_version,
+        output=output,
+        taxonomy=taxonomy,
+        context_values=context_values,
+        llm_input=llm_input,
+        batch=None,
+    )
+    assert status is not None  # 平常的入口不會略過
+    return status
+
+
+def record_batch_llm_result(
+    actor: Viewer,
+    database: Database,
+    config: GatewayConfig,
+    *,
+    batch_submission_id: uuid.UUID,
+    provider_batch_id: str,
+    paper_id: uuid.UUID,
+    run_id: uuid.UUID,
+    lang: OutputLang,
+    abstract_id: uuid.UUID | None,
+    reject_reason: ErrorCode | None,
+    taxonomy_version: str | None = None,
+    context_values_version: str | None = None,
+    output: BaseModel | str | None = None,
+    taxonomy: Taxonomy | None = None,
+    context_values: ContextValues | None = None,
+    llm_input: LlmInput | None = None,
+) -> ResultStatus | None:
+    """Batch 匯入的入口（見模組說明）：`batch_submission_id`／`provider_batch_id` 是這次匯入的批次與
+    下載的供應商 batch ID，其餘參數和 `record_llm_result` 一樣；鎖住 run 時它已經不是 `running`
+    就什麼都不寫、回 None，否則回寫成的狀態。
+
+    Raises:
+        BatchImportStoppedError: run 還是 `running`，但批次已經不是 `ended` 或換了供應商 batch ID
+            （什麼都沒寫，整個交易退回）。
+        其餘同 `record_llm_result`。
+    """
+    require(actor, Action.RUN_AI_JOBS, None)
+    return _record(
+        database,
+        config,
+        paper_id=paper_id,
+        run_id=run_id,
+        lang=lang,
+        abstract_id=abstract_id,
+        reject_reason=reject_reason,
+        taxonomy_version=taxonomy_version,
+        context_values_version=context_values_version,
+        output=output,
+        taxonomy=taxonomy,
+        context_values=context_values,
+        llm_input=llm_input,
+        batch=(batch_submission_id, provider_batch_id),
+    )
+
+
+def _record(
+    database: Database,
+    config: GatewayConfig,
+    *,
+    paper_id: uuid.UUID,
+    run_id: uuid.UUID,
+    lang: OutputLang,
+    abstract_id: uuid.UUID | None,
+    reject_reason: ErrorCode | None,
+    taxonomy_version: str | None,
+    context_values_version: str | None,
+    output: BaseModel | str | None,
+    taxonomy: Taxonomy | None,
+    context_values: ContextValues | None,
+    llm_input: LlmInput | None,
+    batch: tuple[uuid.UUID, str] | None,
+) -> ResultStatus | None:
+    """兩個入口共用的寫入（權限已經查過）。`batch` 是 Batch 匯入的（批次 id, 供應商 batch ID）：
+    有給時先鎖批次列、run 不是 `running` 就略過（回 None）、批次不在匯入這個 ID 就丟
+    `BatchImportStoppedError`，「還是不是現在該用的」也多問 `plan_for`。"""
     if taxonomy is not None:
         if taxonomy_version is not None and taxonomy_version != taxonomy.version_label:
             raise ValueError("taxonomy_version 和分類表的版本不一樣")
@@ -122,10 +223,20 @@ def record_llm_result(
         context_values_version = context_values.version_label
     viewer = SystemViewer()
     with database.transaction() as connection:
+        # 鎖的順序：批次 → 論文 → run（匯入的其他寫入交易也是先批次）。
+        importing = batch is not None and find_batch_submission_importing(
+            viewer, connection, batch[0], batch[1]
+        )
         source = find_paper_llm_source(viewer, connection, paper_id, for_update=True)
         run = find_derivation_run(viewer, connection, run_id, for_update=True)
         if source is None or run is None or run.key.paper_id != paper_id:
             raise ResultTargetNotFoundError("找不到要寫結果的論文或 derivation_run")
+        if batch is not None and run.status is not RunStatus.RUNNING:
+            # 另一個 poller 已經匯入、或 sweep／`resolve --fail` 已經改成 failed：不重寫。
+            return None
+        if batch is not None and not importing:
+            # 批次被別的 poll 標成 needs_attention、或人工確認換了 ID：這次的結果不寫。
+            raise BatchImportStoppedError(batch[0])
         task = run.key.task
         if task not in HEADER_TABLES:
             raise ValueError(f"{task.value} 沒有表頭表")
@@ -144,8 +255,10 @@ def record_llm_result(
             status = ResultStatus.REJECTED
         elif run.eval_run_id is not None:
             status = ResultStatus.CANDIDATE
-        elif run.status is not RunStatus.RUNNING or not _still_current(
-            config, run, source, taxonomy_version, context_values_version
+        elif (
+            run.status is not RunStatus.RUNNING
+            or not _still_current(config, run, source, taxonomy_version, context_values_version)
+            or (batch is not None and not _still_planned(connection, run))
         ):
             # sweep 已經判定失敗，或輸入／prompt／模型已經不是現在該用的：只留作歷史。
             status = ResultStatus.SUPERSEDED
@@ -229,6 +342,15 @@ def _research_model_content(
     if context_values is None or llm_input is None:
         raise ValueError("extract_model 的輸出要對照情境值清單與送出的輸入寫內容，沒給")
     return validate_research_model(output, llm_input, context_values)
+
+
+def _still_planned(connection: DbConnection, run: DerivationRun) -> bool:
+    """`plan_for` 現在還要這篇論文做這個工作、而且用同一種輸入（Batch 匯入用；在論文鎖裡讀）。"""
+    facts = find_paper_processing_facts(SystemViewer(), connection, run.key.paper_id)
+    if facts is None:
+        return False
+    plan = plan_for(facts).for_task(ProcessingTask(run.key.task.value))
+    return plan.input_kind is run.input_kind
 
 
 def _still_current(

@@ -52,7 +52,10 @@ from radar.domain.ai_outputs import (
     ResearchModelContent,
     ResultStatus,
     RunKey,
+    RunStatus,
 )
+from radar.domain.llm_batches import BATCH_TASKS
+from radar.domain.run_reports import RunOutcomeRow, RunScope, run_outcome
 from radar.domain.viewer import SystemViewer, Viewer
 from radar.repo.constructs import upsert_constructs
 from radar.repo.models import Base
@@ -496,6 +499,54 @@ def find_rejected_ai_result_id(
             )
     value = connection.execute(sql, params).scalar_one_or_none()
     return None if value is None else uuid.UUID(str(value))
+
+
+def list_run_outcomes(
+    viewer: SystemViewer, connection: Connection, scope: RunScope
+) -> list[RunOutcomeRow]:
+    """`radar runs report` 的列：範圍內三個 Batch 工作的平常流程 run（不含評估），每篇每工作只取
+    `created_at` 最新的一筆，連同它的表頭狀態（有的話）與原因代碼（拒收是表頭的 `reject_reason`，
+    失敗是 run 的 `failure_reason`）。依論文 id、工作排序。
+
+    Raises:
+        TypeError: `viewer` 不是 `SystemViewer`。
+    """
+    visible = visible_to_system_only(viewer)
+    filters = ""
+    params: dict[str, object] = {"tasks": [task.value for task in BATCH_TASKS]}
+    if scope.batch_ids:
+        filters += (
+            " AND r.id IN (SELECT run_id FROM batch_item"
+            " WHERE batch_submission_id = ANY(:batch_ids))"
+        )
+        params["batch_ids"] = list(scope.batch_ids)
+    if scope.paper_ids is not None:
+        filters += " AND r.paper_id = ANY(:paper_ids)"
+        params["paper_ids"] = list(scope.paper_ids)
+    if scope.since is not None:
+        filters += " AND r.created_at >= :since"
+        params["since"] = scope.since
+    rows = connection.execute(
+        text(
+            "SELECT DISTINCT ON (r.paper_id, r.task) r.paper_id, r.task, r.status,"
+            " r.failure_reason, h.status AS header_status, h.reject_reason"
+            " FROM derivation_run AS r LEFT JOIN ("
+            " SELECT run_id, status, reject_reason FROM zh_summary"
+            " UNION ALL SELECT run_id, status, reject_reason FROM classification"
+            " UNION ALL SELECT run_id, status, reject_reason FROM research_model"
+            ") AS h ON h.run_id = r.id"
+            f" WHERE {visible} AND r.eval_run_id IS NULL AND r.task = ANY(:tasks){filters}"
+            " ORDER BY r.paper_id, r.task, r.created_at DESC, r.id DESC"
+        ),
+        params,
+    ).mappings()
+    result: list[RunOutcomeRow] = []
+    for row in rows:
+        header = None if row["header_status"] is None else ResultStatus(row["header_status"])
+        outcome = run_outcome(RunStatus(row["status"]), header)
+        reason = row["reject_reason"] if header is ResultStatus.REJECTED else row["failure_reason"]
+        result.append(RunOutcomeRow(row["paper_id"], LlmTask(row["task"]), outcome, reason))
+    return result
 
 
 # --- 寫入 ---------------------------------------------------------------------------------

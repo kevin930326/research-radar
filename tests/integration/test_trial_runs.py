@@ -17,7 +17,7 @@ from collections.abc import Iterator
 import pytest
 from structlog.testing import capture_logs
 
-from radar.domain.ai_outputs import LlmTask
+from radar.domain.ai_outputs import LlmTask, RunKey
 from radar.domain.eval_split import EvalSplit
 from radar.domain.llm import LlmConfigurationError, LlmTimeoutError
 from radar.domain.permissions import PermissionDeniedError
@@ -25,13 +25,16 @@ from radar.domain.trial_runs import (
     TrialEstimate,
     TrialItem,
     TrialItemStatus,
+    TrialPlanKind,
     TrialReport,
     TrialSelection,
     parse_trial_targets,
+    render_trial_estimate,
 )
 from radar.domain.viewer import MemberViewer, SystemViewer
 from radar.repo.db import Database
 from radar.services import trial_runs
+from radar.services.budget import get_budget_status
 from radar.services.prompt_loader import current_prompt_version
 from radar.services.trial_runs import (
     TrialPapersNotFoundError,
@@ -41,7 +44,7 @@ from radar.services.trial_runs import (
     run_trial,
     sample_trial_papers,
 )
-from tests.batch_support import NOW
+from tests.batch_support import NOW, insert_pending_run, insert_run
 from tests.database import TestDatabase, create_database, drop_database, migrate
 from tests.llm_support import (
     budget_config,
@@ -684,3 +687,77 @@ def test_unconfirmed_item_error_is_reported_and_others_continue(
     ]
     assert report.items[1].reason == "RuntimeError"
     assert dict(provider.calls) == {LlmTask.ZH_SUMMARY: 1, LlmTask.EXTRACT_MODEL: 1}
+
+
+# --- Story 2.11 確認審查 D1：接續與略過的不算進上限、也不准呼叫 -------------------------------
+
+
+def _keys(estimate: TrialEstimate) -> dict[LlmTask, RunKey]:
+    return {item.task: item.key for item in estimate.items if item.key is not None}
+
+
+def test_estimate_lists_resume_and_skip_apart_from_calls(
+    db: TestDatabase, database: Database
+) -> None:
+    """中文重點有可接續的 llm_result_pending、研究模型正在跑、分類什麼都沒有：預估把它們分成接續、
+    略過、會呼叫，上限只算分類那一項；實跑只呼叫分類。"""
+    paper = banking_paper(database, doi_in(EvalSplit.TUNING, "1"), 1)
+    selection = _select(database, str(paper))
+    setup = trial_setup()
+    keys = _keys(estimate_trial(SYSTEM, database, setup, selection, attempts=3))
+    insert_pending_run(db, keys[LlmTask.ZH_SUMMARY])
+    insert_run(db, keys[LlmTask.EXTRACT_MODEL], status="running")
+
+    estimate = estimate_trial(SYSTEM, database, setup, selection, attempts=3)
+
+    assert [(item.task, item.kind) for item in estimate.items] == [
+        (LlmTask.ZH_SUMMARY, TrialPlanKind.RESUME),
+        (LlmTask.CLASSIFY, TrialPlanKind.CALL),
+        (LlmTask.EXTRACT_MODEL, TrialPlanKind.SKIP),
+    ]
+    classify = estimate.for_item(paper, LlmTask.CLASSIFY)
+    assert classify is not None
+    assert estimate.max_cost_usd == classify.worst_cost_usd > 0
+    status = get_budget_status(SYSTEM, database, setup.budget, now=NOW)
+    lines = render_trial_estimate(estimate, status)
+    assert lines[0].startswith("預估：會交給閘門 3 項，費用上限 ")
+    assert "只算會呼叫模型的 1 項" in lines[0]
+    assert lines[1].startswith("另外接續 1 項（用存下的輸出，不呼叫模型、不再記帳）、略過 1 項")
+    provider = SchemaReplyProvider(good_replies())
+
+    report = _run(database, provider, selection, setup, estimate=estimate)
+
+    assert dict(provider.calls) == {LlmTask.CLASSIFY: 1}
+    zh, classified, model = report.items
+    assert zh.resumed
+    assert classified.status is TrialItemStatus.ACTIVE
+    assert model.status is TrialItemStatus.SKIPPED
+    assert report.cost_usd <= estimate.max_cost_usd
+
+
+def test_items_confirmed_without_a_call_never_call_the_model(
+    db: TestDatabase, database: Database
+) -> None:
+    """確認時中文重點正在跑（略過、不算進上限）；確認後那筆 run 暫時失敗結束，閘門本來會重新呼叫。
+    確認時沒算錢的項目不准呼叫：中文重點 `skipped`、模型沒被呼叫，總花費不超過確認的上限。"""
+    paper = banking_paper(database, doi_in(EvalSplit.TUNING, "1"), 1)
+    selection = _select(database, str(paper))
+    setup = trial_setup()
+    keys = _keys(estimate_trial(SYSTEM, database, setup, selection, attempts=1))
+    running = insert_run(db, keys[LlmTask.ZH_SUMMARY], status="running")
+    estimate = estimate_trial(SYSTEM, database, setup, selection, attempts=1)
+    assert estimate.items[0].kind is TrialPlanKind.SKIP
+    execute(
+        db,
+        "UPDATE derivation_run SET status = 'failed', failure_reason = 'llm_timeout',"
+        " finished_at = now() WHERE id = %s",
+        running,
+    )
+    provider = SchemaReplyProvider(good_replies())
+
+    report = _run(database, provider, selection, setup, estimate=estimate)
+
+    assert report.items[0].status is TrialItemStatus.SKIPPED
+    assert LlmTask.ZH_SUMMARY not in provider.calls
+    assert provider.total_calls == 2
+    assert report.cost_usd <= estimate.max_cost_usd

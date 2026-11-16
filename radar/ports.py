@@ -4,10 +4,16 @@
 各自由第一個用到的 Story 加進來；還沒有用到的不先建。參數與回傳只用 `radar.domain` 的型別。
 """
 
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from typing import Protocol
 
-from radar.domain.llm import LlmBatchRequest, LlmRequest, LlmResult
+from radar.domain.llm import (
+    LlmBatchRequest,
+    LlmBatchResult,
+    LlmBatchStatus,
+    LlmRequest,
+    LlmResult,
+)
 from radar.domain.policy import CloudSafeText
 from radar.domain.raw_records import JournalQuery, RawSource, SourcePage
 
@@ -78,6 +84,32 @@ class LlmProvider(Protocol):
                 逾時、連線錯誤、5xx、200 但回應看不懂（`LlmMalformedResponseError`，回應裡有像樣
                 的 batch ID 時放在 `response_id`）都不確定有沒有建立。呼叫端只把
                 `NotCloudSafeError` 當成送出前丟的；一般的 TypeError、ValueError 當成不確定。
+        """
+        ...
+
+    def retrieve_batch(self, provider_batch_id: str) -> LlmBatchStatus:
+        """查一個 Message Batch 的狀態（Story 2.11、ADR-0043）。只由
+        `services/llm_gateway.fetch_llm_batch` 呼叫。GET，暫時性錯誤照 `complete` 的規則在 adapter
+        裡重試。
+
+        Raises:
+            ValueError: `provider_batch_id` 格式不對（在送出任何請求前丟出）。
+            LlmConfigurationError: 401、403、404（404＝供應商找不到這個批次，`status` 是 404）。
+            LlmTransientError: 重試用完仍是逾時、限流、服務端錯誤或連線錯誤。
+            LlmMalformedResponseError: 回應形狀不對（例如 `processing_status` 不認得）。
+            LlmError: 其他子類別同 `complete`。
+        """
+        ...
+
+    def batch_results(self, provider_batch_id: str) -> Iterator[LlmBatchResult]:
+        """逐行下載一個已結束批次的結果（JSONL，順序不保證和送出相同，用 `custom_id` 對）。只由
+        `services/llm_gateway.iter_llm_batch_results` 呼叫。串流、不重試；整行看不懂（不是 JSON
+        物件、`result.type` 不認得）回 `unreadable`（連 `custom_id` 都讀不到時 `custom_id` 是
+        None），`succeeded` 但訊息形狀不對回 `malformed`，都不丟錯。
+
+        Raises:
+            ValueError: `provider_batch_id` 格式不對（在送出任何請求前丟出）。
+            LlmError: 下載途中失敗（子類別同 `complete`，在迭代時丟出）；已經回的行照樣有效。
         """
         ...
 

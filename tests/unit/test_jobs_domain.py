@@ -8,6 +8,7 @@ import pytest
 from radar.domain.jobs import (
     JOBS,
     PDF_LOCK,
+    POLL_BATCHES,
     RUN_WEEKLY_UPDATE,
     SWEEP,
     WEEKLY_UPDATE,
@@ -45,7 +46,7 @@ def test_sweep_is_scheduled_on_maintenance() -> None:
     assert find_job("sweep") is SWEEP
     assert SWEEP.check == "sweep"
     assert SWEEP.lock is None
-    assert scheduled_jobs() == [SWEEP, WEEKLY_UPDATE]
+    assert scheduled_jobs() == [POLL_BATCHES, SWEEP, WEEKLY_UPDATE]
 
 
 def test_weekly_update_jobs() -> None:
@@ -83,7 +84,7 @@ def test_unknown_schedule_lists_available() -> None:
         find_scheduled_job("nope")
 
     assert caught.value.name == "nope"
-    assert caught.value.available == ["sweep", "weekly-update"]
+    assert caught.value.available == ["poll-batches", "sweep", "weekly-update"]
 
 
 def test_unknown_job_name() -> None:

@@ -8,11 +8,14 @@
   `domain/trial_runs.sample_tuning_papers`）；seed 與抽到的論文（ID＋DOI）寫進 info 日誌。
 - `estimate_trial`：執行前的保守費用上限。每項單次上限是 `max_call_cost(估計輸入, max_tokens,
   互動)`，最壞花費再乘 adapter 每個請求最多送幾次（`attempts`，呼叫端從 adapter 讀，含第一次；
-  逾時放棄的請求也可能計費、不進帳本）。已有結果、會被略過的也算。每項記下確認時的 `RunKey`
-  （指紋與實跑一樣，`services/llm_batches.llm_job`）。不碰帳本、不寫列。
+  逾時放棄的請求也可能計費、不進帳本）。每項記下確認時的 `RunKey`（指紋與實跑一樣，
+  `services/llm_batches.llm_job`）與確認時看到的 `TrialPlanKind`（running 或已有結果 → 略過、
+  有可接續的 `llm_result_pending` → 接續、否則會呼叫；和 Batch 預估同一組查詢）。上限只算會呼叫
+  的，接續與略過的另列（Story 2.11 確認審查 D1）。不碰帳本、不寫列。
 - `run_trial`：只跑確認過的項目（`estimate` 裡有鍵的）：逐篇逐工作呼叫既有的
   `run_zh_summary`／`run_classification`／`run_research_model`，帶 `confirmed_key`（互動呼叫、
-  同一個閘門：照常問 `plan_for` 與 `should_run`、記來歷與帳、受 `BudgetGuard` 限制）。閘門算出的
+  同一個閘門：照常問 `plan_for` 與 `should_run`、記來歷與帳、受 `BudgetGuard` 限制）；確認時是
+  接續或略過的項目另帶 `call_allowed=False`，閘門只接續或略過、不會呼叫模型。閘門算出的
   鍵和確認的不一樣（例如確認期間補上了摘要）→ `input_changed`，不呼叫模型。確認時不會呼叫的
   項目不交給 service，只在這裡照預估同樣的步驟重算一次狀態（`not_applicable`、`no_input`、
   `blocked`、`too_large`）；現在變成會呼叫的也是 `input_changed`。所以總花費不會超過確認的上限。
@@ -56,6 +59,7 @@ from radar.domain.trial_runs import (
     TrialItemStatus,
     TrialPaper,
     TrialPlanItem,
+    TrialPlanKind,
     TrialReport,
     TrialSample,
     TrialSelection,
@@ -67,8 +71,13 @@ from radar.domain.trial_runs import (
 from radar.domain.validators.zh_summary import ZhSummaryRules
 from radar.domain.viewer import SystemViewer, Viewer
 from radar.ports import LlmProvider
+from radar.repo.ai_outputs import find_blocking_ai_result
 from radar.repo.db import Database
-from radar.repo.llm_ledger import find_llm_call_diagnostics
+from radar.repo.llm_ledger import (
+    find_llm_call_diagnostics,
+    find_resumable_derivation_run_id,
+    find_running_derivation_run_id,
+)
 from radar.repo.papers import (
     find_paper_ids_by_dois,
     find_paper_llm_source,
@@ -191,7 +200,9 @@ def sample_trial_papers(actor: Viewer, database: Database, size: int, seed: int)
 # --- 預估 ---------------------------------------------------------------------------------
 
 
-def _plan_item(setup: TrialSetup, prepared: PreparedLlmRequest, attempts: int) -> TrialPlanItem:
+def _plan_item(
+    setup: TrialSetup, prepared: PreparedLlmRequest, attempts: int, kind: TrialPlanKind
+) -> TrialPlanItem:
     request = prepared.request
     schema_class = prepared.prompt.schema_class
     return TrialPlanItem(
@@ -211,6 +222,7 @@ def _plan_item(setup: TrialSetup, prepared: PreparedLlmRequest, attempts: int) -
         schema_chars=0 if schema_class is None else len(frozen_schema_json(schema_class)),
         attempts=attempts,
         key=prepared.key,
+        kind=kind,
     )
 
 
@@ -257,9 +269,10 @@ def estimate_trial(
     attempts: int,
 ) -> TrialEstimate:
     """執行前的預估：每篇照 `plan_for` 要做的工作組請求（和實跑同一個 `prepare_llm_request`），
-    放行或大小擋下的不算；已經有結果、會被略過的照算（保守）。`attempts` 是 adapter 每個請求最多
-    送幾次（含第一次；CLI 從 `AnthropicLlmProvider.attempts` 讀），最壞花費＝單次上限 × attempts。
-    每項記下確認時的 `RunKey`，`run_trial` 只跑這些。不看帳本、不寫列。
+    放行或大小擋下的不算；每項再看會呼叫、接續或略過（`_plan_kind`），上限只算會呼叫的。
+    `attempts` 是 adapter 每個請求最多送幾次（含第一次；CLI 從 `AnthropicLlmProvider.attempts`
+    讀），最壞花費＝單次上限 × attempts。每項記下確認時的 `RunKey`，`run_trial` 只跑這些（接續與
+    略過的不准呼叫模型）。不看帳本、不寫列。
 
     Raises:
         PermissionDeniedError: `actor` 不是系統工作（不碰資料庫）。
@@ -279,9 +292,25 @@ def estimate_trial(
         for task in TRIAL_TASKS:
             prepared = _prepare(setup, prompts, paper.paper_id, task, facts, source)
             if isinstance(prepared, PreparedLlmRequest):
-                items.append(_plan_item(setup, prepared, attempts))
+                kind = _plan_kind(database, prepared.key)
+                items.append(_plan_item(setup, prepared, attempts, kind))
             # 其餘（plan_for 不做、放行或大小擋下）不會呼叫模型，不算。
     return TrialEstimate(tuple(items), attempts=attempts)
+
+
+def _plan_kind(database: Database, key: RunKey) -> TrialPlanKind:
+    """（只讀的交易）這組鍵交給閘門後會怎樣：照取得資格的順序看 running → 表頭（`SKIP`）→ 可接續的
+    `llm_result_pending`（`RESUME`），都沒有才會呼叫（`CALL`）。和 Batch 預估同一組查詢。"""
+    viewer = SystemViewer()
+    with database.transaction() as connection:
+        if (
+            find_running_derivation_run_id(viewer, connection, key, None) is not None
+            or find_blocking_ai_result(viewer, connection, key) is not None
+        ):
+            return TrialPlanKind.SKIP
+        if find_resumable_derivation_run_id(viewer, connection, key, None) is not None:
+            return TrialPlanKind.RESUME
+    return TrialPlanKind.CALL
 
 
 # --- 執行 ---------------------------------------------------------------------------------
@@ -375,7 +404,9 @@ def _run_one(
             return TrialItem(paper.paper_id, task, TrialItemStatus.ERROR, reason=type(exc).__name__)
     started = time.monotonic()
     try:
-        run = _call_service(actor, options, paper.paper_id, task, plan_item.key)
+        run = _call_service(
+            actor, options, paper.paper_id, task, plan_item.key, plan_item.calls_model
+        )
     except Exception as exc:
         elapsed = time.monotonic() - started
         if isinstance(exc, ConfirmedRequestChangedError):
@@ -496,6 +527,7 @@ def _call_service(
     paper_id: uuid.UUID,
     task: LlmTask,
     confirmed_key: RunKey,
+    call_allowed: bool,
 ) -> tuple[TaskPlan, GatewayResult | None]:
     setup = options.setup
     if task is LlmTask.ZH_SUMMARY:
@@ -509,6 +541,7 @@ def _call_service(
             paper_id,
             clock=options.clock,
             confirmed_key=confirmed_key,
+            call_allowed=call_allowed,
         )
         return zh.plan, zh.result
     if task is LlmTask.CLASSIFY:
@@ -522,6 +555,7 @@ def _call_service(
             paper_id,
             clock=options.clock,
             confirmed_key=confirmed_key,
+            call_allowed=call_allowed,
         )
         return classified.plan, classified.result
     if task is LlmTask.EXTRACT_MODEL:
@@ -535,6 +569,7 @@ def _call_service(
             paper_id,
             clock=options.clock,
             confirmed_key=confirmed_key,
+            call_allowed=call_allowed,
         )
         return model.plan, model.result
     raise ValueError(f"{task.value} 不是試跑的工作")

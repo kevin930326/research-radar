@@ -45,6 +45,10 @@ AD-14、AD-19、AD-25、ADR-0004、ADR-0014、ADR-0025）。
 - `advance_weekly_update`（worker 的 `run_weekly_update` 工作用）：先照
   `open_and_run_weekly_update` 抓，抓完了才讀追蹤範圍、接著套用。
 
+AI 處理完成（Story 2.11、AD-14）：`mark_weekly_runs_ai_done`（`poll_llm_batches` 每次最後呼叫）
+把這一週的 Batch 都結束了（有批次、全部 `imported`／`failed`）或快照建立已滿 24 小時的
+`published` 改成 `ai_done`（條件式 UPDATE，並行的兩個呼叫只會改一次）。
+
 快照與 `first_snapshot_id` 只由這個模組寫（架構測試守著）。抓取段不寫 `paper` 等論文表；任何時候
 都不在開著的交易裡呼叫 source、物件儲存或心跳。
 """
@@ -72,6 +76,7 @@ from radar.domain.jobs import (
     WEEKLY_UPDATE,
     Enqueue,
 )
+from radar.domain.llm_batches import AI_DONE_AFTER
 from radar.domain.papers import (
     KeywordSource,
     PaperOrigin,
@@ -118,6 +123,7 @@ from radar.repo.weekly_runs import (
     update_weekly_run_published,
     update_weekly_run_touched,
     update_weekly_run_touched_while_fetching,
+    update_weekly_runs_ai_done,
     upsert_weekly_run_journal_page,
 )
 from radar.services.ingest import FetchedPage, JournalFetchError, fetch_journal
@@ -1065,3 +1071,22 @@ def _stage_page(
         )
     tally.pages += 1
     tally.counts = tally.counts.plus(counts)
+
+
+def mark_weekly_runs_ai_done(
+    actor: Viewer, database: Database, *, now: datetime
+) -> list[uuid.UUID]:
+    """把 AI 處理完成的 `published` 每週更新改成 `ai_done`（見模組說明），回改到的 id。
+
+    Raises:
+        PermissionDeniedError: `actor` 不是系統工作（不碰資料庫）。
+        ValueError: `now` 沒有時區（不碰資料庫）。
+    """
+    require(actor, Action.RUN_AI_JOBS, None)
+    if now.tzinfo is None or now.utcoffset() is None:
+        raise ValueError("now 要帶時區（不能是 naive datetime）")
+    with database.transaction() as connection:
+        changed = update_weekly_runs_ai_done(connection, now - AI_DONE_AFTER)
+    for weekly_run_id in changed:
+        log.info("每週更新的 AI 處理完成", weekly_run_id=str(weekly_run_id))
+    return changed

@@ -10,7 +10,7 @@ import json
 import threading
 import uuid
 from collections import Counter
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +24,8 @@ from radar.domain.eval_split import EvalSplit, split_for_doi
 from radar.domain.llm import (
     Completion,
     LlmBatchRequest,
+    LlmBatchResult,
+    LlmBatchStatus,
     LlmRequest,
     LlmResult,
     LlmUsage,
@@ -136,6 +138,12 @@ class SchemaReplyProvider:
 
     def submit_batch(self, requests: Sequence[LlmBatchRequest]) -> str:
         raise AssertionError("試跑不送 Batch")
+
+    def retrieve_batch(self, provider_batch_id: str) -> LlmBatchStatus:
+        raise AssertionError("試跑不查 Batch")
+
+    def batch_results(self, provider_batch_id: str) -> Iterator[LlmBatchResult]:
+        raise AssertionError("試跑不下載 Batch 結果")
 
 
 def trial_setup(budget: BudgetConfig | None = None) -> TrialSetup:

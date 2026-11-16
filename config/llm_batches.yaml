@@ -6,7 +6,8 @@
 
 # 每週更新發佈後要不要自動規劃 Batch（true／false）。全庫第一次 AI 要由 Kevin 先試 20 篇、
 # 再手動跑（epics Story 2.11），Batch 的結果匯入也在 2.11 才做，所以先關著；2.11 之後再打開
-# （ADR-0041，提議）。
+# （ADR-0041，提議）。2.11：先維持 false（保守做法），待 Kevin 決定；全庫第一次用
+# `radar batches create` 手動送（ADR-0043）。
 weekly_planning_enabled: false
 # 一個 batch_submission 最多幾個請求（1～1,000；官方上限 100,000）。一批在一個資料庫交易裡建，
 # 一個交易最多嘗試 2 × 這個數字筆、每筆拿一把 advisory lock（PostgreSQL 共用鎖表預設約 6,400 格），
@@ -16,3 +17,14 @@ max_requests_per_batch: 500
 # 我們的帳用台北月份，Anthropic workspace 上限可能還在用 UTC 的上個月（台北 08:00＝UTC 00:00；
 # ADR-0031 取捨）。延後的那一次不會自己再排，等下一次每週更新（ADR-0041）。
 month_start_hold_hours: 8
+# `radar batches wait` 每隔幾分鐘查一次批次（1～1,440；`--interval-minutes` 可以覆蓋）。官方說多數
+# 批次 1 小時內做完、最長 24 小時；10 分鐘一次，一天最多 144 次查詢（Story 2.11、ADR-0043）。
+# worker 的 poll-batches 照 deploy/crontab（每 15 分鐘），不看這個值。
+poll_interval_minutes: 10
+# 同一批（同一個供應商 batch ID）連續幾次讀到的結果項數比供應商的計數（request_counts）少，就把批次
+# 標 needs_attention（batch_results_incomplete），交給 `radar batches resolve`（1～100）。被截短多半
+# 是偶發的斷線，重讀一兩次就補齊；一直對不上代表計數和結果檔本身不一致，再讀也一樣。取 3：給兩次
+# 重讀的機會，cron（每 15 分鐘）約 45 分鐘、`radar batches wait`（每 10 分鐘）約 30 分鐘後進
+# needs_attention；也和 wait「連續 3 次查詢都有錯誤就停」一致，wait 停下時印的是 resolve 的指令
+# （Story 2.11 確認審查 D2、ADR-0043）。
+incomplete_results_attention_after: 3
