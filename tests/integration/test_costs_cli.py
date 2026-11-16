@@ -151,7 +151,8 @@ def test_budget_config_error_exits_1_without_touching_the_database(
     result = _costs()
 
     assert result.exit_code == 1
-    assert "設定錯誤，沒有讀取費用" in result.stderr
+    # Story 2.9：CLI 啟動時（`_root`）就檢查 AI 設定（含 budget.yaml），在指令本身之前擋下。
+    assert "AI 設定錯誤，沒有執行" in result.stderr
     assert "budget.yaml：monthly_breaker_usd：" in result.stderr
     assert _stdout_lines(result.stdout) == []
     assert built == []

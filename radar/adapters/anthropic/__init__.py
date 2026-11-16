@@ -18,25 +18,60 @@
   - 401、403、404 → `LlmConfigurationError`；400、413、422 與其他 4xx → `LlmInvalidRequestError`；
   - 408 與讀寫逾時 → `LlmTimeoutError`；429 → `LlmRateLimitedError`；409、5xx（含 529）→
     `LlmServerError`；連不上 → `LlmConnectionError`。
+- 每次失敗的嘗試（含重試的每一次與 Batch 送出）記一筆警告日誌：只有錯誤類別、狀態碼、錯誤本文的
+  `error.type`（只收 `^[a-z_]{1,64}$`）與本文頂層鍵（只收英數底線），不記訊息與內容（Story 2.10）。
 - 重試：只重試 `LlmTransientError`，最多 `attempts` 次（含第一次）；帶 `Retry-After` 時不超過
   `retry_after_max` 秒就照它等，超過就不再重試、丟出最後一次的錯誤（不提早重送）。
   `deadline`（秒）是含所有重試的總時限（交給 stamina 的 `timeout`），預設 None 不限。
+  `attempts` 屬性讀得到這個次數（試跑的最壞花費＝單次上限 × attempts，Story 2.10）。
+- Batch（`submit_batch`，Story 2.9、ADR-0041）：`POST {base_url}/v1/messages/batches`，每筆
+  `{"custom_id", "params"}`，`params` 和 `complete` 送的一樣（同一份系統提示、訊息、思考與輸出
+  設定）。**只送一次、不重試**（建立批次沒有冪等鍵）；錯誤沿用 `to_llm_error`；回應用 Pydantic 驗
+  `id`（`^[A-Za-z0-9_-]{1,128}$`）與 `type`（`message_batch`），驗不過丟
+  `LlmMalformedResponseError`（id 的格式對時帶在 `response_id`，給人工確認用）。
+- Batch 結果匯入（Story 2.11、ADR-0043）：
+  - `retrieve_batch`：`GET {base_url}/v1/messages/batches/{id}`（`with_raw_response.retrieve`），
+    暫時性錯誤照 `complete` 的規則重試；回應用 Pydantic 驗（`processing_status` 只收
+    `in_progress`、`canceling`、`ended`，時間要帶時區，`request_counts` 五種計數都要有），驗不過丟
+    `LlmMalformedResponseError`。
+  - `batch_results`：`with_streaming_response.results`（SDK 先查一次批次、再下載 `results_url`），
+    `iter_lines()` 逐行自己解析，**不重試**；一行看不懂就回 `malformed`（讀得到 usage 時帶上），
+    不丟錯；下載途中的錯誤照 `to_llm_error` 換成 domain 的錯誤。
+  - 錯誤、日誌都不帶結果的內容（模型輸出、錯誤訊息）。
 """
 
 import json
+import re
+from collections.abc import Iterator, Mapping, Sequence
 from types import TracebackType
-from typing import Final, Self
+from typing import Final, Literal, Self
 
 import anthropic
 import httpx2
 import stamina
-from anthropic.types import OutputConfigParam, TextBlockParam
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+import structlog
+from anthropic.types import MessageParam, OutputConfigParam, TextBlockParam
+from anthropic.types.message_create_params import MessageCreateParamsNonStreaming
+from anthropic.types.messages.batch_create_params import Request as BatchRequestParam
+from pydantic import (
+    AwareDatetime,
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    model_validator,
+)
 
 from radar.adapters.heartbeat import parse_retry_after
 from radar.domain.llm import (
+    BatchProcessingStatus,
+    BatchRequestCounts,
     Completion,
     CompletionBlock,
+    LlmBatchRequest,
+    LlmBatchResult,
+    LlmBatchResultKind,
+    LlmBatchStatus,
     LlmConfigurationError,
     LlmConnectionError,
     LlmError,
@@ -50,14 +85,24 @@ from radar.domain.llm import (
     LlmTransientError,
     LlmUsage,
     interpret_completion,
+    snapshot_llm_batch_request,
     snapshot_llm_request,
     system_prompt,
 )
+from radar.domain.llm_batches import PROVIDER_BATCH_ID_PATTERN, PROVIDER_MAX_REQUESTS
 from radar.domain.policy import cloud_text
 
 ANTHROPIC_BASE_URL: Final = "https://api.anthropic.com"
 CONFIGURATION_STATUSES: Final = frozenset({401, 403, 404})
 SERVER_STATUSES: Final = frozenset({409})
+# 失敗嘗試的日誌只收這種名稱（錯誤本文的 `error.type` 與頂層鍵），其他寫 `<?>`。
+_ERROR_TYPE: Final = re.compile(r"[a-z_]{1,64}")
+_BODY_KEY: Final = re.compile(r"[A-Za-z0-9_]{1,64}")
+# 供應商的 batch ID 與 custom_id 的格式（custom_id 照官方「1～64 個英數字、`-`、`_`」）。
+_BATCH_ID: Final = re.compile(PROVIDER_BATCH_ID_PATTERN)
+_CUSTOM_ID: Final = re.compile(r"[A-Za-z0-9_-]{1,64}")
+
+log = structlog.get_logger(__name__)
 
 
 # --- 回應形狀（只取用得到的欄位，其餘忽略） ----------------------------------------------------
@@ -126,6 +171,15 @@ def to_completion(body: bytes, request_id: str | None) -> Completion:
         raise LlmMalformedResponseError("回應不是合法的 JSON", request_id=request_id) from None
     if not isinstance(data, dict):
         raise LlmMalformedResponseError("回應不是 JSON 物件", request_id=request_id)
+    return _completion_from_data(data, request_id)
+
+
+def _completion_from_data(data: Mapping[str, object], request_id: str | None) -> Completion:
+    """已經解析成 JSON 物件的訊息 → `Completion`（`to_completion` 與 Batch 結果的 succeeded 共用）。
+
+    Raises:
+        LlmMalformedResponseError: 缺必要欄位或型別不對（同 `to_completion`）。
+    """
     try:
         message = _Message.model_validate(data)
     except ValidationError as exc:
@@ -156,7 +210,7 @@ def to_completion(body: bytes, request_id: str | None) -> Completion:
         usage=message.usage.to_domain(),
         request_id=request_id,
         refusal_category=category,
-        raw=data,
+        raw=dict(data),
     )
 
 
@@ -165,6 +219,182 @@ def _best_effort_usage(value: object) -> LlmUsage | None:
         return _Usage.model_validate(value).to_domain()
     except ValidationError:
         return None
+
+
+class _MessageBatch(BaseModel):
+    """建立批次的回應：只取 `id` 與 `type`（其餘忽略）。"""
+
+    model_config = ConfigDict(extra="ignore", strict=True, frozen=True)
+
+    id: str = Field(pattern=PROVIDER_BATCH_ID_PATTERN)
+    type: Literal["message_batch"]
+
+
+def to_batch_id(body: bytes, request_id: str | None) -> str:
+    """把建立批次的 200 回應轉成供應商的 batch ID。
+
+    Raises:
+        LlmMalformedResponseError: 不是合法 JSON、不是物件、`id` 格式不對或 `type` 不是
+            `message_batch`。`id` 本身格式對時帶在 `response_id`（批次可能已經建好，給人工確認）。
+            訊息只有欄位路徑與錯誤種類，不含內容。
+    """
+    try:
+        data = json.loads(body)
+    except ValueError, RecursionError:
+        raise LlmMalformedResponseError("回應不是合法的 JSON", request_id=request_id) from None
+    if not isinstance(data, dict):
+        raise LlmMalformedResponseError("回應不是 JSON 物件", request_id=request_id)
+    try:
+        batch = _MessageBatch.model_validate(data)
+    except ValidationError as exc:
+        problems = "、".join(
+            f"{'.'.join(str(part) for part in error['loc']) or '（最上層）'}：{error['type']}"
+            for error in exc.errors(include_input=False, include_url=False, include_context=False)
+        )
+        candidate = data.get("id")
+        try:
+            response_id = _MessageBatch.model_validate(
+                {"id": candidate, "type": "message_batch"}
+            ).id
+        except ValidationError:
+            response_id = None
+        raise LlmMalformedResponseError(
+            f"建立批次的回應格式不對（{problems}）",
+            request_id=request_id,
+            response_id=response_id,
+        ) from None
+    return batch.id
+
+
+class _RequestCounts(BaseModel):
+    """查批次回應裡的 `request_counts`（五種都要有、不小於 0 的整數）。"""
+
+    model_config = ConfigDict(extra="ignore", strict=True, frozen=True)
+
+    processing: int = Field(ge=0)
+    succeeded: int = Field(ge=0)
+    errored: int = Field(ge=0)
+    canceled: int = Field(ge=0)
+    expired: int = Field(ge=0)
+
+
+class _BatchStatus(BaseModel):
+    """查批次的回應：只取用得到的欄位（其餘忽略）。不是真的錄的，形狀照官方文件。
+    `request_counts` 必填：匯入時拿它核對結果檔讀到的行數（截短的串流不判缺項）。"""
+
+    model_config = ConfigDict(extra="ignore", strict=True, frozen=True)
+
+    id: str = Field(pattern=PROVIDER_BATCH_ID_PATTERN)
+    type: Literal["message_batch"]
+    processing_status: Literal["in_progress", "canceling", "ended"]
+    request_counts: _RequestCounts
+    created_at: AwareDatetime
+    expires_at: AwareDatetime
+    ended_at: AwareDatetime | None = None
+    results_url: str | None = None
+
+
+def to_batch_status(body: bytes, request_id: str | None) -> LlmBatchStatus:
+    """把查批次的 200 回應轉成 `LlmBatchStatus`。
+
+    Raises:
+        LlmMalformedResponseError: 不是合法 JSON、不是物件、缺欄位、`processing_status` 不認得或時間
+            沒有時區。訊息只有欄位路徑與錯誤種類，不含內容。
+    """
+    try:
+        data = json.loads(body)
+    except ValueError, RecursionError:
+        raise LlmMalformedResponseError("回應不是合法的 JSON", request_id=request_id) from None
+    if not isinstance(data, dict):
+        raise LlmMalformedResponseError("回應不是 JSON 物件", request_id=request_id)
+    try:
+        # JSON 模式：時間字串照 ISO 8601 解析（strict 的 Python 模式不收字串）。
+        batch = _BatchStatus.model_validate_json(body)
+    except ValidationError as exc:
+        problems = "、".join(
+            f"{'.'.join(str(part) for part in error['loc']) or '（最上層）'}：{error['type']}"
+            for error in exc.errors(include_input=False, include_url=False, include_context=False)
+        )
+        raise LlmMalformedResponseError(
+            f"查批次的回應格式不對（{problems}）", request_id=request_id
+        ) from None
+    return LlmBatchStatus(
+        provider_batch_id=batch.id,
+        processing_status=BatchProcessingStatus(batch.processing_status),
+        created_at=batch.created_at,
+        expires_at=batch.expires_at,
+        ended_at=batch.ended_at,
+        results_available=bool(batch.results_url),
+        request_counts=BatchRequestCounts(
+            processing=batch.request_counts.processing,
+            succeeded=batch.request_counts.succeeded,
+            errored=batch.request_counts.errored,
+            canceled=batch.request_counts.canceled,
+            expired=batch.request_counts.expired,
+        ),
+    )
+
+
+def to_batch_result(line: str | bytes) -> LlmBatchResult:
+    """結果 JSONL 的一行 → `LlmBatchResult`。看不懂的不丟錯，回 `malformed`／`unreadable`。
+
+    - `custom_id` 不是字串或不符合官方格式時是 None（呼叫端只計數）。
+    - `succeeded`：`message` 照 `to_completion` 的規則驗；驗不過是 `malformed`（讀得到 usage 時
+      帶上，讓呼叫端照樣記帳）。
+    - `errored`：`error_type` 取 `result.error.error.type`（官方的標準錯誤形狀），沒有時取
+      `result.error.type`（不是 `error` 時）；不符合 `^[a-z_]{1,64}$` 的是 None。
+    - 不是 JSON 物件、其他 `type`（含沒有）：`unreadable`。
+    """
+    try:
+        data = json.loads(line)
+    except ValueError, RecursionError:
+        return LlmBatchResult(None, LlmBatchResultKind.UNREADABLE)
+    if not isinstance(data, dict):
+        return LlmBatchResult(None, LlmBatchResultKind.UNREADABLE)
+    raw_custom_id = data.get("custom_id")
+    custom_id = (
+        raw_custom_id
+        if isinstance(raw_custom_id, str) and _CUSTOM_ID.fullmatch(raw_custom_id)
+        else None
+    )
+    result = data.get("result")
+    kind = result.get("type") if isinstance(result, dict) else None
+    if not isinstance(result, dict) or kind not in ("succeeded", "errored", "canceled", "expired"):
+        return LlmBatchResult(custom_id, LlmBatchResultKind.UNREADABLE)
+    if kind == "succeeded":
+        message = result.get("message")
+        if not isinstance(message, dict):
+            return LlmBatchResult(custom_id, LlmBatchResultKind.MALFORMED)
+        try:
+            completion = _completion_from_data(message, None)
+        except LlmMalformedResponseError as exc:
+            return LlmBatchResult(custom_id, LlmBatchResultKind.MALFORMED, usage=exc.usage)
+        return LlmBatchResult(
+            custom_id, LlmBatchResultKind.SUCCEEDED, completion=completion, usage=completion.usage
+        )
+    if kind == "errored":
+        return LlmBatchResult(
+            custom_id, LlmBatchResultKind.ERRORED, error_type=_batch_error_type(result.get("error"))
+        )
+    if kind == "canceled":
+        return LlmBatchResult(custom_id, LlmBatchResultKind.CANCELED)
+    return LlmBatchResult(custom_id, LlmBatchResultKind.EXPIRED)
+
+
+def _batch_error_type(error: object) -> str | None:
+    if not isinstance(error, dict):
+        return None
+    inner = error.get("error")
+    value = inner.get("type") if isinstance(inner, dict) else error.get("type")
+    if value == "error":
+        return None
+    return value if isinstance(value, str) and _ERROR_TYPE.fullmatch(value) else None
+
+
+def _check_batch_id(provider_batch_id: object) -> str:
+    if not isinstance(provider_batch_id, str) or not _BATCH_ID.fullmatch(provider_batch_id):
+        raise ValueError("provider_batch_id 格式不對")
+    return provider_batch_id
 
 
 # --- SDK 例外 → domain 錯誤 ------------------------------------------------------------------
@@ -200,6 +430,43 @@ def to_llm_error(exc: anthropic.AnthropicError) -> LlmError:
         return LlmMalformedResponseError("回應格式不對（SDK 驗證）")
     # 例如讀不到憑證（CredentialsError）：不是重試能解決的，停下來讓人處理。
     return LlmConfigurationError(f"SDK 錯誤（{type(exc).__name__}）")
+
+
+# --- 失敗嘗試的日誌（Story 2.10、ADR-0042） ----------------------------------------------------
+
+
+def _api_error_type(body: object) -> str | None:
+    """錯誤本文的 `error.type`（例如 `rate_limit_error`）；不符合 `^[a-z_]{1,64}$` 的寫 `<?>`。"""
+    if not isinstance(body, dict):
+        return None
+    error = body.get("error")
+    if not isinstance(error, dict) or "type" not in error:
+        return None
+    value = error["type"]
+    return value if isinstance(value, str) and _ERROR_TYPE.fullmatch(value) else "<?>"
+
+
+def _body_keys(body: object) -> list[str] | None:
+    """錯誤本文的頂層鍵（排好序）；不符合 `^[A-Za-z0-9_]{1,64}$` 的寫 `<?>`。"""
+    if not isinstance(body, dict):
+        return None
+    return sorted(
+        key if isinstance(key, str) and _BODY_KEY.fullmatch(key) else "<?>" for key in body
+    )
+
+
+def _log_failed_attempt(operation: str, error: LlmError, exc: BaseException | None) -> None:
+    """每次失敗的嘗試記一筆警告：只有操作、錯誤類別、狀態碼、`error.type` 與本文的頂層鍵。
+    不記錯誤訊息、本文內容、金鑰與送出的文件（重試的每一次都記，`--verbose` 看得到發生過幾次）。"""
+    body = exc.body if isinstance(exc, anthropic.APIStatusError) else None
+    log.warning(
+        "Anthropic 請求失敗",
+        operation=operation,
+        error_class=type(error).__name__,
+        http_status=error.status,
+        api_error_type=_api_error_type(body),
+        body_keys=_body_keys(body),
+    )
 
 
 # --- adapter -------------------------------------------------------------------------------
@@ -246,6 +513,12 @@ class AnthropicLlmProvider:
             open_telemetry=False,
             http_client=http_client,
         )
+
+    @property
+    def attempts(self) -> int:
+        """`complete` 每個請求最多送幾次（含第一次；`submit_batch` 不重試）。試跑的最壞花費照它算
+        （Story 2.10）。"""
+        return self._attempts
 
     def __repr__(self) -> str:
         # 不印 key。
@@ -297,34 +570,163 @@ class AnthropicLlmProvider:
             return False
         return error.retry_after
 
+    def submit_batch(self, requests: Sequence[LlmBatchRequest]) -> str:
+        """建一個 Message Batch，回供應商的 batch ID（錯誤見
+        `radar.ports.LlmProvider.submit_batch`）。只送一次，不重試。"""
+        if isinstance(requests, (str, bytes, bytearray)) or not isinstance(requests, Sequence):
+            raise TypeError("submit_batch 收 LlmBatchRequest 的序列")
+        # 檢查後重建每一筆的副本，之後只讀副本（檢查與送出之間沒有時間差）。
+        checked = [snapshot_llm_batch_request(item) for item in requests]
+        if not checked:
+            raise ValueError("submit_batch 至少要有一筆請求")
+        if len(checked) > PROVIDER_MAX_REQUESTS:
+            raise ValueError(f"一批最多 {PROVIDER_MAX_REQUESTS} 個請求")
+        if len({item.custom_id for item in checked}) != len(checked):
+            raise ValueError("同一批的 custom_id 不能重複")
+        body: list[BatchRequestParam] = [
+            {"custom_id": item.custom_id, "params": _batch_params(item.request)} for item in checked
+        ]
+        try:
+            raw = self._client.messages.batches.with_raw_response.create(requests=body)
+            data = raw.read()
+        except anthropic.AnthropicError as exc:
+            error = to_llm_error(exc)
+            _log_failed_attempt("batches", error, exc)
+            raise error from None
+        except httpx2.TimeoutException:
+            error = LlmTimeoutError("讀取回應逾時")
+            _log_failed_attempt("batches", error, None)
+            raise error from None
+        except httpx2.HTTPError as exc:
+            error = LlmConnectionError(f"連線錯誤（{type(exc).__name__}）")
+            _log_failed_attempt("batches", error, None)
+            raise error from None
+        return to_batch_id(data, raw.request_id)
+
+    def retrieve_batch(self, provider_batch_id: str) -> LlmBatchStatus:
+        """查一個 Message Batch 的狀態（錯誤見 `radar.ports.LlmProvider.retrieve_batch`）。
+        暫時性錯誤照 `complete` 的規則重試。"""
+        batch_id = _check_batch_id(provider_batch_id)
+        for attempt in stamina.retry_context(
+            on=self._backoff,
+            attempts=self._attempts,
+            timeout=self._deadline,
+            wait_initial=self._retry_wait_initial,
+            wait_max=self._retry_wait_max,
+            wait_jitter=self._retry_wait_jitter,
+        ):
+            with attempt:
+                body, request_id = self._retrieve_once(batch_id)
+        return to_batch_status(body, request_id)
+
+    def batch_results(self, provider_batch_id: str) -> Iterator[LlmBatchResult]:
+        """逐行下載一個已結束批次的結果（錯誤見 `radar.ports.LlmProvider.batch_results`）。串流、
+        不重試；第一次取下一行時才送出請求。"""
+        return self._stream_results(_check_batch_id(provider_batch_id))
+
+    def _retrieve_once(self, batch_id: str) -> tuple[bytes, str | None]:
+        try:
+            raw = self._client.messages.batches.with_raw_response.retrieve(batch_id)
+            data = raw.read()
+        except anthropic.AnthropicError as exc:
+            error = to_llm_error(exc)
+            _log_failed_attempt("batches.retrieve", error, exc)
+            raise error from None
+        except httpx2.TimeoutException:
+            error = LlmTimeoutError("讀取回應逾時")
+            _log_failed_attempt("batches.retrieve", error, None)
+            raise error from None
+        except httpx2.HTTPError as exc:
+            error = LlmConnectionError(f"連線錯誤（{type(exc).__name__}）")
+            _log_failed_attempt("batches.retrieve", error, None)
+            raise error from None
+        return data, raw.request_id
+
+    def _stream_results(self, batch_id: str) -> Iterator[LlmBatchResult]:
+        try:
+            with self._client.messages.batches.with_streaming_response.results(
+                batch_id
+            ) as response:
+                for line in response.iter_lines():
+                    if line.strip():
+                        yield to_batch_result(line)
+        except anthropic.AnthropicError as exc:
+            error = to_llm_error(exc)
+            _log_failed_attempt("batches.results", error, exc)
+            raise error from None
+        except httpx2.TimeoutException:
+            error = LlmTimeoutError("下載結果逾時")
+            _log_failed_attempt("batches.results", error, None)
+            raise error from None
+        except httpx2.HTTPError as exc:
+            error = LlmConnectionError(f"連線錯誤（{type(exc).__name__}）")
+            _log_failed_attempt("batches.results", error, None)
+            raise error from None
+
     def _create_once(self, request: LlmRequest) -> Completion:
         """送一次請求並轉成 `Completion`；失敗時丟 domain 的錯誤。"""
-        output_config: OutputConfigParam = {}
-        if request.effort is not None:
-            output_config["effort"] = request.effort
-        schema = request.output_json_schema()
-        if schema is not None:
-            output_config["format"] = {"type": "json_schema", "schema": schema}
-        # 文字一律經 policy 的 cloud_text 拿：號碼不在放行登記裡（被硬改過）就丟錯、不送出。
-        content: list[TextBlockParam] = [
-            {"type": "text", "text": cloud_text(block)} for block in request.content
-        ]
+        output_config = _output_config(request)
         try:
             raw = self._client.messages.with_raw_response.create(
                 model=request.model,
                 max_tokens=request.max_tokens,
                 system=system_prompt(request),
-                messages=[{"role": "user", "content": content}],
+                messages=_messages(request),
                 output_config=output_config if output_config else anthropic.omit,
                 thinking={"type": "disabled"} if request.disable_thinking else anthropic.omit,
             )
             body = raw.read()
         except anthropic.AnthropicError as exc:
-            raise to_llm_error(exc) from None
+            error = to_llm_error(exc)
+            _log_failed_attempt("messages", error, exc)
+            raise error from None
         except httpx2.TimeoutException:
             # 讀本文時才逾時（SDK 沒有包起來的）。
-            raise LlmTimeoutError("讀取回應逾時") from None
+            error = LlmTimeoutError("讀取回應逾時")
+            _log_failed_attempt("messages", error, None)
+            raise error from None
         except httpx2.HTTPError as exc:
             # 讀本文時才斷線之類（SDK 沒有包起來的）：當成連線錯誤，可以重試。
-            raise LlmConnectionError(f"連線錯誤（{type(exc).__name__}）") from None
+            error = LlmConnectionError(f"連線錯誤（{type(exc).__name__}）")
+            _log_failed_attempt("messages", error, None)
+            raise error from None
         return to_completion(body, raw.request_id)
+
+
+# --- 請求本體（`complete` 與 `submit_batch` 共用） ---------------------------------------------
+
+
+def _output_config(request: LlmRequest) -> OutputConfigParam:
+    """effort 與結構化輸出（沒有就是空的）。"""
+    output_config: OutputConfigParam = {}
+    if request.effort is not None:
+        output_config["effort"] = request.effort
+    schema = request.output_json_schema()
+    if schema is not None:
+        output_config["format"] = {"type": "json_schema", "schema": schema}
+    return output_config
+
+
+def _messages(request: LlmRequest) -> list[MessageParam]:
+    """單一 user 訊息，每個 `CloudSafeText` 一個 text 區塊。"""
+    # 文字一律經 policy 的 cloud_text 拿：號碼不在放行登記裡（被硬改過）就丟錯、不送出。
+    content: list[TextBlockParam] = [
+        {"type": "text", "text": cloud_text(block)} for block in request.content
+    ]
+    return [{"role": "user", "content": content}]
+
+
+def _batch_params(request: LlmRequest) -> MessageCreateParamsNonStreaming:
+    """Batch 每一筆的 `params`：和 `complete` 送的一樣；沒有的設定不放鍵（不送 `stream`）。"""
+    params: MessageCreateParamsNonStreaming = {
+        "model": request.model,
+        "max_tokens": request.max_tokens,
+        "system": system_prompt(request),
+        "messages": _messages(request),
+    }
+    output_config = _output_config(request)
+    if output_config:
+        params["output_config"] = output_config
+    if request.disable_thinking:
+        params["thinking"] = {"type": "disabled"}
+    return params

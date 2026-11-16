@@ -20,8 +20,9 @@
 7. 樣本數、題數 < 1 或超過 2^31 - 1；α、CR、AVE、p 不在 0～1；β 不是有限數
    → `research_model_number_out_of_range`。
 8. 每個數字（樣本數、題數、α、CR、AVE、β、p）都要是輸入裡的數字（`structured_numbers`：只有完整
-   量級、科學記號算出完整的值、`= - 0.42` 是負數）；英文名的每個英文詞與數字、繁中標籤裡的英文詞
-   與數字都要在輸入出現（2.4 的編造判準）→ `research_model_unsupported_content`。
+   量級、`12M`／`10k` 這種字母縮寫的量級讀不懂不取、科學記號算出完整的值、`= - 0.42` 是
+   負數）；英文名的每個英文詞與數字、繁中標籤裡的英文詞與數字都要在輸入出現（2.4 的編造判準）
+   → `research_model_unsupported_content`。
 9. 同一句（來源句子的雜湊相同：完整版與片段算同一句）、同一條關係（因、果相同）出現兩次而模型
    給的值（證據類型、支持與否、統計數字；不是這裡改過的值）不同
    → `research_model_conflicting_hypothesis`。
@@ -33,7 +34,8 @@
   的 Republic of Korea）→ 空值，`unsupported_context_value_count`（FR-3 擷取規則 4：不推測）。
 - 證據類型不是實證檢定卻判了支持與否（含 `not_stated`）→ `not_determined`；實證檢定卻給
   `not_determined` → `not_stated`；判定了（supported 等）卻沒有可以採信的結果原文 `result_quote`
-  （有文字、在輸入裡、寫出了結果、提到這條關係的因或果）→ `not_stated`；
+  （有文字、在輸入裡、寫出了結果、對得上這條關係：提到因或果的名稱或縮寫，或寫了原句的假設代號，
+  或說全部假設都怎樣而原句是一個假設；見 `_result_quote`）→ `not_stated`；
   `corrected_support_count`（擷取規則 1、2）。只數存下來的假設。
 - p 值不是輸入寫出的確切值（只寫 `p < .01` 這種門檻）→ 空值；選填原文欄位只有標點（`-`）→ 空值；
   `cleared_value_count`。
@@ -42,6 +44,8 @@
 沒提到（null、空白）的欄位存空值。判準的細節與抓不到的情況寫在 ADR-0034。
 """
 
+import bisect
+import itertools
 import math
 import re
 import unicodedata
@@ -143,12 +147,12 @@ def quote_key(text: str) -> str:
     return check_copy(text).casefold().translate(_STRAIGHT_QUOTES)
 
 
-def _locate_quote(quote: str, segments: tuple[str, ...]) -> tuple[int, int, int] | None:
-    """`quote` 在 `segments`（標題、摘要各一段，已是 `quote_key` 的寫法）第一個對得上的位置
-    （第幾段, 開頭, 結尾）；開頭（結尾）是字母或數字時，前（後）一個字不能也是字母或數字
-    （`positive` 不算在 `positively` 裡）。找不到是 None。"""
+def _quote_locations(quote: str, segments: tuple[str, ...]) -> Iterator[tuple[int, int, int]]:
+    """`quote` 在 `segments`（標題、摘要各一段，已是 `quote_key` 的寫法）每個對得上的位置
+    （第幾段, 開頭, 結尾），照出現的順序；開頭（結尾）是字母或數字時，前（後）一個字不能也是字母
+    或數字（`positive` 不算在 `positively` 裡）。"""
     if not quote:
-        return None
+        return
     check_start = quote[0].isalnum()
     check_end = quote[-1].isalnum()
     for index, segment in enumerate(segments):
@@ -158,9 +162,13 @@ def _locate_quote(quote: str, segments: tuple[str, ...]) -> tuple[int, int, int]
             start_ok = not check_start or start == 0 or not segment[start - 1].isalnum()
             end_ok = not check_end or end == len(segment) or not segment[end].isalnum()
             if start_ok and end_ok:
-                return index, start, end
+                yield index, start, end
             start = segment.find(quote, start + 1)
-    return None
+
+
+def _locate_quote(quote: str, segments: tuple[str, ...]) -> tuple[int, int, int] | None:
+    """`quote` 在 `segments` 第一個對得上的位置（見 `_quote_locations`）；找不到是 None。"""
+    return next(_quote_locations(quote, segments), None)
 
 
 def _quote_found(quote: str, segments: tuple[str, ...]) -> bool:
@@ -186,12 +194,18 @@ def _source_sentence(quote: str, segments: tuple[str, ...]) -> str:
         return quote
     index, start, end = located
     segment = segments[index]
+    begin, finish = _sentence_bounds(segment, start, end)
+    return segment[begin:finish].strip(_SENTENCE_TRIM) or quote
+
+
+def _sentence_bounds(segment: str, start: int, end: int) -> tuple[int, int]:
+    """`segment[start:end]` 所在的來源句子的位置（開頭, 結尾）：從 `start` 往前到上一個句子結尾、
+    從 `end` 往後到下一個句子結尾（見 `_SENTENCE_END`）。"""
     begin = 0
     for match in _SENTENCE_END.finditer(segment, 0, start):
         begin = match.end()
     following = _SENTENCE_END.search(segment, end)
-    finish = following.end() if following is not None else len(segment)
-    return segment[begin:finish].strip(_SENTENCE_TRIM) or quote
+    return begin, (following.end() if following is not None else len(segment))
 
 
 # 寫出檢定結果的跡象（`result_quote` 要有其中一種）：統計量（β、p、t、r、F…接比較符號），或結果
@@ -206,23 +220,134 @@ _RESULT_WORD: Final = re.compile(
     r"|non-?significant|found|finds?|findings|show(?:s|ed|n)?|reveal(?:s|ed)?|indicate(?:s|d)?"
     r"|demonstrat(?:e|es|ed)|results?|rejected)(?![a-z])"
 )
-_HYPOTHESIS_ONLY: Final = re.compile(
+# 只提出假設的寫法分兩種（合起來就是 2.6 的判準，順序與內容沒變）：
+# - 假設句：we hypothesize／expect／predict／propose／posit、is expected／proposed… to、
+#   hypothesized that、H1 posits／predicts…、`H1:`（後面直接接判定的除外）。
+# - 研究問題：we test／examine／investigate／explore／ask whether。
+_HYPOTHESIS_STATEMENT: Final = re.compile(
     r"(?<![a-z])(?:"
     r"(?:we (?:hypothesi[sz]e|expect|predict|propose|posit)"
-    r"|we (?:test|examine|investigate|explore|ask) whether"
     r"|(?:is|are) (?:expected|predicted|hypothesi[sz]ed|proposed|posited) to"
     r"|(?:hypothesi[sz]ed|proposed|posited) that"
     r"|h[0-9]+[a-z]? (?:posits|proposes|predicts|states|suggests|argues|expects))(?![a-z])"
     r"|h[0-9]+[a-z]?\s?:(?!\s?(?:(?:is|was|were) )?(?:supported|not supported|partially supported"
     r"|rejected|confirmed)(?![a-z])))"
 )
+_RESEARCH_QUESTION: Final = re.compile(
+    r"(?<![a-z])we (?:test|examine|investigate|explore|ask) whether(?![a-z])"
+)
+# 2.6 決定 14 選 B（Kevin 2026-11-15）：研究問題後面才接結果的（`we examine whether X and find that
+# Y`）也算。研究問題本身常帶 significant、support、find 這類字（`we test whether trust
+# significantly increases loyalty`、`whether users find the app useful`、`whether H1 is
+# supported`），所以後面的結果要比結果用語更明確，而且要在另一個子句：
+# - 明確的結果寫法：find／show／reveal／indicate／demonstrate／confirm… that、was／were（not、
+#   partially…）supported／confirmed／rejected、find（no、strong…）support／evidence；
+# - 它和研究問題之間要有斷點（逗號、分號、冒號、` - `、句尾、and、but、then），而且最後一個斷點到
+#   結果寫法之間只能是空的或一個主詞（we、it、they、results、the findings、data、H1、this
+#   hypothesis…，可以再接 also）。
+_REPORTED_AFTER_QUESTION: Final = re.compile(
+    r"(?<![a-z])(?:"
+    r"(?:find|finds|found|show|shows|showed|shown|reveal|reveals|revealed|indicate"
+    r"|indicates|indicated|demonstrate|demonstrates|demonstrated|confirm|confirms|confirmed) that"
+    r"|(?:is|are|was|were|been) (?:(?:not|partially|fully|strongly|also) )?"
+    r"(?:supported|confirmed|rejected)"
+    r"|(?:find|finds|found) (?:(?:no|strong|partial|some|mixed|significant) )?(?:support|evidence)"
+    r")(?![a-z])"
+)
+_CLAUSE_BREAK: Final = re.compile(r"[,;:]|\s-\s|[.!?](?=\s|$)|(?<![a-z])(?:and|but|then)(?![a-z])")
+# `_REPORT_SUBJECT` 最長的寫法（`the findings also`、`these hypotheses also`）加上前後空白的上限。
+_MAX_SUBJECT_CHARS: Final = 40
+_REPORT_SUBJECT: Final = re.compile(
+    r"(?:(?:we|it|they|h[0-9]+[a-z]?|(?:the|this) hypothesis|(?:the|these|our) hypotheses"
+    r"|(?:the |our )?(?:results?|findings|data|analys[ie]s|evidence|estimates))(?: also)?)?"
+)
 
 
-def _reports_result(quote: str) -> bool:
-    """`quote`（`quote_key` 的寫法）寫出了檢定結果：有統計量；或有結果用語、而且不是只提出假設。"""
-    if _RESULT_STATISTIC.search(quote):
-        return True
-    return _RESULT_WORD.search(quote) is not None and _HYPOTHESIS_ONLY.search(quote) is None
+# 寫出結果的子句在結果寫法（或統計量）之後的下一個句點、分號、冒號（或 `!`、`?`）結束（Codex 複查
+# R1：一路取到結果原文結尾時，後面的無關敘述——`…, and we find that satisfaction affects loyalty;
+# the questionnaire measures PU and trust`——會替另一條關係背書）。後面直接接數字的點（`0.42`、
+# `p < .01`）不是句點；結果寫法後面直接接的冒號（`we find that: …`）也不算結束，冒號後面才是找到的
+# 內容。Opus 第三輪 M1：`,`、` - `、`(` 後面接連接詞（and、but、whereas、while、although）或新的
+# 主詞（the、this、these、those、we、it、they、our、their）也算結束（`…, and the questionnaire
+# measures PU and trust`、` (the questionnaire …)`），不接標點的 whereas、while、although 也算
+# （` while controlling for PU and trust`）。`(β = 0.30)`、`, p < .01` 不算。逗號後面直接接插入語
+# 的（`satisfaction, the key driver, affects loyalty`）會被截短，錯在少判。
+_RESULT_CLAUSE_END: Final = re.compile(
+    r"[;:]|[.!?](?=\s|$)"
+    r"|(?:,|\s-\s|\() ?(?:and|but|whereas|while|although|the|this|these|those|we|it|they|our"
+    r"|their)(?![a-z])"
+    r"|(?<![a-z])(?:whereas|while|although)(?![a-z])"
+)
+_LEADING_COLONS: Final = re.compile(r"[\s:]*")
+
+
+def _clause_end(quote: str, marker_end: int) -> int:
+    """結果寫法結束在 `marker_end` 的子句，結束的位置（見 `_RESULT_CLAUSE_END`；緊接在結果寫法後面的
+    冒號與空白先跳過）。"""
+    begin = _LEADING_COLONS.match(quote, marker_end)
+    found = _RESULT_CLAUSE_END.search(quote, begin.end() if begin else marker_end)
+    return found.start() if found else len(quote)
+
+
+def _result_after_question(
+    quote: str, question_end: int, *, by_words: bool
+) -> tuple[int, int] | None:
+    """研究問題（結束在 `question_end`）後面另一個子句寫出的結果：回（那個子句的開頭＝最後一個斷點
+    的結尾, 結果寫法或統計量的結尾），沒有就是 None。`by_words` 時先找明確的結果寫法（見
+    `_REPORTED_AFTER_QUESTION` 上面的說明）；再找研究問題後面的統計量，子句開頭是統計量前面最後一個
+    斷點（沒有斷點時是研究問題的結尾，例如 `we examine whether PU affects trust (β = 0.42)`）。斷點
+    只找一次，每個結果寫法用二分搜尋找它前面最後一個斷點。"""
+    break_ends = [match.end() for match in _CLAUSE_BREAK.finditer(quote, question_end)]
+    if by_words:
+        for marker in _REPORTED_AFTER_QUESTION.finditer(quote, question_end):
+            # 結束位置不超過結果寫法開頭的斷點裡，最後一個。
+            position = bisect.bisect_right(break_ends, marker.start())
+            # 斷點到結果寫法太遠就不可能只是主詞，不切出來看（Codex 主審查第 6 條：同一個斷點後面
+            # 接大量結果寫法時，每次都切一段越來越長的字串會變成平方時間）。
+            if position == 0 or marker.start() - break_ends[position - 1] > _MAX_SUBJECT_CHARS:
+                continue
+            subject = quote[break_ends[position - 1] : marker.start()].strip()
+            if _REPORT_SUBJECT.fullmatch(subject):
+                return break_ends[position - 1], marker.end()
+    statistic = _RESULT_STATISTIC.search(quote, question_end)
+    if statistic is None:
+        return None
+    position = bisect.bisect_right(break_ends, statistic.start())
+    return (break_ends[position - 1] if position else question_end), statistic.end()
+
+
+@dataclass(frozen=True, slots=True)
+class _ReportedPart:
+    """結果原文裡寫出檢定結果的那一段（`quote_key` 寫法裡的位置）。`question` 是那段前面的研究問題
+    的開頭（結果寫在研究問題後面時；否則 None）。"""
+
+    start: int
+    end: int
+    question: int | None = None
+
+
+def _reported_part(quote: str) -> _ReportedPart | None:
+    """`quote`（`quote_key` 的寫法）寫出檢定結果的那一段；沒寫出結果是 None。
+
+    - 沒有研究問題：有統計量，或有結果用語、而且沒有假設句寫法（同 2.6）→ 整段。
+    - 有研究問題（we examine whether…；Codex 主審查第 1 條）：最後一個研究問題後面另一個子句寫了
+      明確的結果（有假設句寫法時只看統計量）→ 從那個子句的開頭到結果寫法之後的下一個句點、分號、
+      冒號，或「逗號／` - `／括號＋連接詞或新主詞」（`_clause_end`；Codex 複查 R1、Opus 第三輪
+      M1），研究問題與後面的句子都不算在裡面，免得它們提到的構面替
+      另一條關係的結果背書；研究問題後面沒有、前面有統計量 → 研究問題前面那段。
+    """
+    questions = list(_RESEARCH_QUESTION.finditer(quote))
+    words = _RESULT_WORD.search(quote) is not None and _HYPOTHESIS_STATEMENT.search(quote) is None
+    if not questions:
+        return _ReportedPart(0, len(quote)) if words or _RESULT_STATISTIC.search(quote) else None
+    last = questions[-1]
+    found = _result_after_question(quote, last.end(), by_words=words)
+    if found is not None:
+        start, marker_end = found
+        return _ReportedPart(start, _clause_end(quote, marker_end), last.start())
+    if _RESULT_STATISTIC.search(quote, 0, last.start()):
+        return _ReportedPart(0, last.start())
+    return None
 
 
 # p 值的寫法：`p = .03`、`p < .001`、`p-value = 0.03`、`p ≤ .05`（在檢查用副本上找，不分大小寫）。
@@ -466,29 +591,561 @@ def _construct_content(construct: ConstructOutput) -> ConstructMentionContent:
     )
 
 
-def _mentions_relation(text: str, cause: str, effect: str) -> bool:
-    """`text` 提到這條關係的因或果（構面名稱 `normalize_name` 之後，整個詞對得上）。"""
+# --- 結果原文對得上這條關係（2.6 第 12 點；決定 14 選 B 放寬，Kevin 2026-11-15） ------------------
+
+# 首字母縮寫常跳過的虛詞（和 `normalize_name` 的同一組）。
+_SKIPPABLE: Final = frozenset({"a", "an", "and", "for", "in", "of", "on", "the", "to", "with"})
+# 縮寫的寫法：字母開頭、2～15 個字母或數字，至少兩個大寫字母（`PU`、`TR`、`eWOM`、`PEOU`）。
+# 要兩個大寫，所以 `It`、`Trust`、`H1` 都不是縮寫。
+_ABBREVIATION_TOKEN: Final = re.compile(r"(?<![0-9A-Za-z])[A-Za-z][A-Za-z0-9]{1,14}(?![0-9A-Za-z])")
+# 輸入裡「名稱 (縮寫)」的括號；名稱取括號前同一段最多 200 個字。
+_DEFINED_ABBREVIATION: Final = re.compile(r"\(([A-Za-z][A-Za-z0-9]{1,14})\)")
+_DEFINITION_WINDOW: Final = 200
+# 最多看輸入裡前 200 個縮寫括號（摘要通常只有幾個；擋住故意塞滿括號的輸入拖慢驗證，多的只是
+# 少認得幾個縮寫，錯在少判）。
+_MAX_DEFINITIONS: Final = 200
+# 假設代號：H1、H2a、H3b（`quote_key` 的寫法，已經 casefold）；H 後面最多兩位數字、最多一個字母。
+_HYPOTHESIS_LABEL: Final = re.compile(r"(?<![a-z0-9])h[0-9]{1,2}[a-z]?(?![a-z0-9])")
+# 代號與「全部假設」那兩條，結果原文要**直接陳述**結果（Codex 主審查第 2、3 條）：只在整段任何地方
+# 有判定字不夠（`H1 was tested to determine whether the effect was significant` 不是結果）。直接陳述
+# 是下面三種寫法之一，`{target}` 是代號清單（`H1`、`H1 and H2`、`H1, H2, and H3`）或「全部假設」：
+# - `{target}`（可以接一個括號，例如統計量）＋（`:`、is／was／are／were／has been…）＋（not、
+#   partially、fully…）＋ supported／confirmed／rejected／accepted／significant…，或
+#   `{target}` received／gained（no、strong…）support；
+# - 主詞（we、it、they、（the／our）results／findings／data／analysis／evidence／estimates…）＋
+#   （also、strongly…）＋ support(s)／supported／confirm…／reject… ＋ `{target}`，或主詞＋
+#   find／provide／offer／lend…（no、strong…）support for／to ＋ `{target}`；
+# - （strong、partial…）support is／was found／obtained／observed／provided for ＋ `{target}`。
+# 每一種都要在**子句開頭**（Codex 複查 R2）：前面只能是段落開頭、`,` `;` `:` `(`、句點，或這些
+# 標點後面的 and／but／thus；或在這樣的開頭先寫「本研究的主詞＋find／show／reveal／indicate／
+# demonstrate／confirm／suggest＋that」（`The results show that H1 was supported`）。其他外層的主詞
+# 或動詞一律不算：`We dispute that H1 was supported`、`Other researchers report that all
+# hypotheses were supported`、`It is not the case that H1 was supported`、`Prior studies support
+# H1`。另外（Opus 第三輪 M2）：沒有標點的 and／whereas／while 後面也算子句開頭，但同一句前面（從
+# 來源句子開頭起）要已經有判定字（supported、rejected、confirmed、accepted、significant…；`H1 was
+# supported and H2 was rejected`、`H1 was rejected whereas H2 was supported`），`… report that
+# loyalty and H1 were supported` 照樣不算。
+#
+# 子句開頭看的是結果原文在**輸入裡**的上下文（Opus 第三輪 H1，見 `_result_contexts`）：模型只抄
+# 外層說法裡面的一小段（輸入是 `We dispute that H1 was supported.`、結果原文只填 `H1 was
+# supported`）時，前面的 `We dispute that` 仍然算數。
+_TARGET_PARENTHETICAL: Final = r"(?: ?\([^()]{0,80}\))?"
+_TARGET_VERDICT: Final = (
+    r" ?(?:: ?|- )?(?:(?:is|was|are|were|has been|have been) )?"
+    r"(?:(?:not|partially|fully|strongly|also|largely) )?"
+    r"(?:supported|confirmed|rejected|accepted|significant|non-?significant|insignificant)(?![a-z])"
+)
+_SUPPORT_AMOUNT: Final = r"(?:(?:no|strong|partial|some|empirical|full|significant|mixed|clear) )?"
+_CLAUSE_START: Final = (
+    r"(?:^|(?<=[,;:(])|(?<=[,;:(.] )"
+    r"|(?<=^and )|(?<=^but )|(?<=^thus )"
+    r"|(?<=[,;:.] and )|(?<=[,;:.] but )|(?<=[,;:.] thus )"
+    r"|(?<=[,;:]and )|(?<=[,;:]but )|(?<=[,;:]thus ))"
+)
+# 沒有標點的 and／whereas／while 後面（要再核對同一句前面有判定字，見 `_directly_reported`）。
+_CONJUNCTION_START: Final = r"(?<= and )|(?<= whereas )|(?<= while )"
+_CLAUSE_START_AT: Final = re.compile(_CLAUSE_START)
+_VERDICT_WORD: Final = re.compile(
+    r"(?<![a-z])(?:supported|rejected|confirmed|accepted|significant|insignificant)(?![a-z])"
+)
+# 這篇研究自己的主詞（`Prior findings` 的 findings 不在子句開頭，所以不算）。Opus 第三輪 M2 補了
+# this／the／our／present study、hypothesis testing、前面沒有冠詞的 empirical results。
+_STUDY_SUBJECT: Final = (
+    r"(?:we|it|they|(?:this|the|our|present|the present) study|hypothesis testing"
+    r"|(?:(?:the|our|these) (?:(?:empirical|statistical|main|overall|structural) )?|empirical )?"
+    r"(?:results?|findings|data|analys[ie]s|evidence|estimates|tests?))"
+    r"(?: (?:also|strongly|fully|partially|largely|clearly))?"
+)
+_STUDY_REPORTS_THAT: Final = (
+    rf"{_STUDY_SUBJECT} (?:find|finds|found|show|shows|showed|reveal|reveals|revealed|indicate"
+    r"|indicates|indicated|demonstrate|demonstrates|demonstrated|confirm|confirms|confirmed"
+    r"|suggest|suggests|suggested) that "
+)
+_STATEMENT_START: Final = rf"(?:{_CLAUSE_START}|{_CONJUNCTION_START})(?:{_STUDY_REPORTS_THAT})?"
+_HYPOTHESES_WORD: Final = r"(?:(?:the )?hypothes[ie]s )?"
+
+
+def _direct_result(target: str) -> re.Pattern[str]:
+    """直接陳述 `target`（不能有捕捉組）結果的寫法（見上面的說明）；`target` 在每個寫法裡是唯一的
+    捕捉組。"""
+    return re.compile(
+        rf"{_STATEMENT_START}(?:"
+        rf"({target}){_TARGET_PARENTHETICAL}{_TARGET_VERDICT}"
+        rf"|({target}){_TARGET_PARENTHETICAL} (?:receive[sd]?|gain(?:s|ed)?) {_SUPPORT_AMOUNT}"
+        r"support(?![a-z])"
+        rf"|{_STUDY_SUBJECT} (?:supports?|supported|confirms?|confirmed|rejects?|rejected) "
+        rf"{_HYPOTHESES_WORD}({target})"
+        rf"|{_STUDY_SUBJECT} (?:find|finds|found|provides?|provided|offers?|offered|lends?|lent"
+        rf"|yields?|yielded|shows?|showed) {_SUPPORT_AMOUNT}support (?:for|to) {_HYPOTHESES_WORD}"
+        rf"({target})"
+        rf"|{_SUPPORT_AMOUNT}support (?:is|was) (?:also )?(?:found|obtained|observed|provided) for "
+        rf"{_HYPOTHESES_WORD}({target})"
+        r")"
+    )
+
+
+_LABEL_TEXT: Final = r"h[0-9]{1,2}[a-z]?"
+# 代號清單最多 30 個代號（不設上限時，`H1 and H1 and … tested` 每個開頭都吃到結尾再退回來，變成平方
+# 時間；超過 30 個的只是後面的代號認不到，錯在少判）。
+_LABEL_LIST: Final = (
+    rf"(?<![a-z0-9]){_LABEL_TEXT}(?:(?:, ?(?:and )?| and | ?& ?){_LABEL_TEXT}){{0,29}}(?![a-z0-9])"
+)
+_DIRECT_LABEL_RESULT: Final = _direct_result(_LABEL_LIST)
+# 「全部假設」：all hypotheses、all of the hypotheses、all the proposed hypotheses。
+_ALL_HYPOTHESES_TEXT: Final = r"(?<![a-z])all (?:of )?(?:the |our )?(?:[a-z]+ )?hypotheses(?![a-z])"
+_DIRECT_ALL_RESULT: Final = _direct_result(_ALL_HYPOTHESES_TEXT)
+# 代號清單的前後接範圍符號（`H1-H3`、`H1 to H3`、`H1 through H3`）：範圍不展開，兩端也不算。
+_RANGE_AFTER: Final = re.compile(r" ?(?:-|to |through ) ?h?[0-9]")
+_RANGE_BEFORE: Final = re.compile(r"h?[0-9]{1,2}[a-z]? ?(?:-|to|through) ?$")
+# 還沒有結果、或不是這篇研究的結果的敘述（Codex 主審查第 2、3 條）：寫出結果的那段有這些字時，代號
+# 與全部假設都不算（`… to determine whether …`、`… to see if …`、`Whether H1 was supported
+# remains unknown`、`Future studies will test …`、`In prior work, support was found for H1`）。
+# 寧可少判。
+_UNSETTLED: Final = re.compile(
+    r"(?<![a-z])(?:whether|if|unless|to (?:determine|test|examine|assess|evaluate|investigate"
+    r"|explore|see|check|verify|establish|ascertain|identify|confirm|validate)|remains?|remained"
+    r"|unclear|unknown|untested|unresolved|yet|future|will|would|could|might|may|should|can"
+    r"|prior|previous|previously|earlier|past|literature|extant)(?![a-z])"
+)
+# 有這些字就不套「全部假設」（`not all`、`all but H3`、`all hypotheses except H2 were supported`、
+# `all hypotheses were supported, but…`、`partially`…）：不確定是不是每一條都一樣，保守不判。
+_ALL_QUALIFIER: Final = re.compile(
+    r"(?<![a-z])(?:not|but|except|exception|excluding|other than|apart from|besides|however"
+    r"|although|though|whereas|while|partially|partly|mostly|most|some|only|few|several|none"
+    r"|neither|nor|mixed)(?![a-z])"
+)
+
+
+def _is_abbreviation(token: str) -> bool:
+    return sum(char.isupper() for char in token) >= 2
+
+
+def _initials(name_en: str) -> set[str]:
+    """英文名的首字母縮寫（casefold）：全部的詞、或跳過虛詞；括號裡的字不算詞；至少 2 個字母。
+    連字號也分詞（`Electronic Word-of-Mouth` → `ewom`）。"""
+    words = _WORD.findall(check_copy(re.sub(r"\([^()]*\)", " ", name_en)).casefold())
+    found = {
+        "".join(word[0] for word in pool)
+        for pool in (words, [word for word in words if word not in _SKIPPABLE])
+    }
+    return {initials for initials in found if len(initials) >= 2}
+
+
+def _without_parentheses(name_en: str) -> str:
+    """英文名拿掉括號（和裡面的字）之後的正規化名稱；剩下只有標點時是空字串。"""
+    try:
+        return normalize_name(re.sub(r"\([^()]*\)", " ", normalize_text(name_en)))
+    except ValueError:
+        return ""
+
+
+# 「名稱 (縮寫)」的名稱最多看括號前幾個詞。
+_MAX_DEFINED_WORDS: Final = 8
+
+
+def _abbreviates(abbreviation: str, words: list[str]) -> bool:
+    """`abbreviation`（casefold）是 `words`（正規化名稱的詞）的縮寫：第一個詞不是虛詞；每個不是虛詞
+    的詞依序用掉縮寫的下一個字（等於它的第一個字母），可以再用掉同一個詞後面照順序出現的字
+    （`trust` → `tr`、`loyalty` → `loy`、`electronic wordofmouth` → `ewom`）；虛詞可以用、可以
+    不用；縮寫的字剛好用完。"""
+    if not words or words[0] in _SKIPPABLE:
+        return False
+    seen: dict[tuple[int, int], bool] = {}
+
+    def fits(word_index: int, used: int) -> bool:
+        if word_index == len(words):
+            return used == len(abbreviation)
+        key = (word_index, used)
+        if key not in seen:
+            word = words[word_index]
+            reachable: list[int] = []
+            if used < len(abbreviation) and abbreviation[used] == word[0]:
+                reachable.append(used + 1)
+                position = 1
+                for char in abbreviation[used + 1 :]:
+                    position = word.find(char, position) + 1
+                    if position == 0:
+                        break
+                    reachable.append(reachable[-1] + 1)
+            if word in _SKIPPABLE:
+                reachable.append(used)
+            seen[key] = any(fits(word_index + 1, next_used) for next_used in reachable)
+        return seen[key]
+
+    return fits(0, 0)
+
+
+def _strict_initials(abbreviation: str, words: list[str]) -> bool:
+    """`abbreviation`（casefold）是 `words` 的**嚴格首字母**：第一個詞不是虛詞；每個不是虛詞的詞剛好
+    貢獻它的第一個字母，虛詞貢獻第一個字母或不貢獻（`system satisfaction` → `ss`、`perceived ease
+    of use` → `peou`、`trust in transactions` → `tt`）。"""
+    if not words or words[0] in _SKIPPABLE:
+        return False
+    reachable = {0}
+    for word in words:
+        following = {
+            used + 1
+            for used in reachable
+            if used < len(abbreviation) and abbreviation[used] == word[0]
+        }
+        reachable = following | reachable if word in _SKIPPABLE else following
+        if not reachable:
+            return False
+    return len(abbreviation) in reachable
+
+
+def _defined_name(abbreviation: str, before: str) -> str | None:
+    """輸入裡「名稱 (縮寫)」的名稱：括號前面（`before`）正規化後，最後 1～`_MAX_DEFINED_WORDS` 個詞
+    裡縮寫得出來的那一段。縮寫字尾多一個小寫 s 也可以（`ICTs`）。
+
+    - 有**嚴格首字母**對得上的（`_strict_initials`）→ 取最長的那一段：`system satisfaction (SS)`
+      是 system satisfaction，不是 satisfaction（Opus 確認審查 M2：只取最短的一段時，縮寫字母全部
+      落在最後一個詞裡就只剩那個詞，模型漏列較長的名稱時會錯綁）；
+    - 沒有嚴格的，只有一段用寬鬆的寫法（`_abbreviates`：同一個詞可以多貢獻後面的字）對得上 → 那
+      一段（`trust (TR)`、`loyalty (LOY)`、`electronic word-of-mouth (eWOM)`）；
+    - 兩段以上都只有寬鬆的寫法對得上（`sales satisfaction (SAS)`：satisfaction 與 sales
+      satisfaction 都對得上）→ 分不出名稱，None。找不到也是 None。"""
+    try:
+        words = normalize_name(before).split()
+    except ValueError:  # 前面只有標點
+        return None
+    candidates = [abbreviation.casefold()]
+    if len(abbreviation) > 2 and abbreviation.endswith("s"):
+        candidates.append(abbreviation[:-1].casefold())
+    strict: list[str] | None = None
+    loose: list[list[str]] = []
+    for count in range(1, min(len(words), _MAX_DEFINED_WORDS) + 1):
+        tail = words[-count:]
+        if any(_strict_initials(candidate, tail) for candidate in candidates):
+            strict = tail
+        elif any(_abbreviates(candidate, tail) for candidate in candidates):
+            loose.append(tail)
+    if strict is not None:
+        return " ".join(strict)
+    return " ".join(loose[0]) if len(loose) == 1 else None
+
+
+def _construct_abbreviations(
+    output: ResearchModelOutput, input_text: str
+) -> dict[str, frozenset[str]]:
+    """每個構面（正規化名稱）可以代表它的縮寫（casefold）：
+
+    - 英文名的首字母（`Perceived usefulness` → `pu`；`Trust` 只有一個字母，沒有）；但輸入已經把
+      這個縮寫定義成別的名稱（`price uncertainty (PU)`，而這個構面不叫 price uncertainty）時不給
+      （Opus 確認審查 L2）；
+    - 輸入裡寫了「名稱 (縮寫)」，而且那個名稱（`_defined_name`）和這個構面的名稱**完全一樣**
+      （正規化名稱，或英文名拿掉括號後的正規化名稱：`Trust (TR)` 也看 `trust`）。Codex 主審查
+      第 4 條：只看「括號前面以構面名稱結尾」時，模型漏列較長的名稱（`satisfaction with trust
+      (ST)` 而模型只列 Trust）就會把 ST 錯給 Trust；現在 ST 的名稱是 satisfaction with trust，
+      和 Trust 不一樣，不給。
+
+    縮寫一定要出現在輸入裡（首字母的縮寫也要結果原文或原句真的寫出來才用得上）；模型自己在英文名
+    括號裡寫的縮寫不算，免得模型改名字就能把別的句子算成這條關係的結果。
+    """
+    initials: dict[str, set[str]] = {}
+    spellings: dict[str, set[str]] = {}
+    owners: dict[str, set[str]] = {}
+    for construct in output.constructs:
+        name = normalize_name(normalize_text(construct.name_en))
+        initials.setdefault(name, set()).update(_initials(construct.name_en))
+        for spelled in (name, _without_parentheses(construct.name_en)):
+            if spelled:
+                spellings.setdefault(name, set()).add(spelled)
+                owners.setdefault(spelled, set()).add(name)
+    definitions = (
+        match for match in _DEFINED_ABBREVIATION.finditer(input_text) if _is_abbreviation(match[1])
+    )
+    # 縮寫（casefold）→ 輸入把它定義成的名稱。
+    defined_names: dict[str, set[str]] = {}
+    for match in itertools.islice(definitions, _MAX_DEFINITIONS):
+        line_start = input_text.rfind("\n", 0, match.start()) + 1
+        before = input_text[max(line_start, match.start() - _DEFINITION_WINDOW) : match.start()]
+        defined = _defined_name(match[1], before)
+        if defined is not None:
+            defined_names.setdefault(match[1].casefold(), set()).add(defined)
+    found: dict[str, set[str]] = {}
+    for name, own in initials.items():
+        # 輸入把這個首字母定義成別的名稱時，不從首字母給（Opus 確認審查 L2；輸入的定義優先）。
+        found[name] = {
+            abbreviation
+            for abbreviation in own
+            if not defined_names.get(abbreviation, set()) - spellings.get(name, set())
+        }
+    for abbreviation, names in defined_names.items():
+        for defined in names:
+            for name in owners.get(defined, ()):
+                found[name].add(abbreviation)
+    return {name: frozenset(abbreviations) for name, abbreviations in found.items()}
+
+
+def _mentions_construct(
+    text: str, construct: str, abbreviations: dict[str, frozenset[str]]
+) -> bool:
+    """`text` 提到這個構面（正規化名稱）：名稱 `normalize_name` 之後整個詞對得上，或用了它的縮寫
+    （`_construct_abbreviations`；`text` 裡要寫成至少兩個大寫字母的樣子）。"""
+    if not construct:
+        return False
     try:
         name = f" {normalize_name(text)} "
     except ValueError:  # 只有標點的字串；`_quote_text` 已擋下，保險起見
         return False
-    return any(f" {construct} " in name for construct in (cause, effect) if construct)
+    if f" {construct} " in name:
+        return True
+    known = abbreviations.get(construct, frozenset())
+    return any(
+        _is_abbreviation(token) and token.casefold() in known
+        for token in _ABBREVIATION_TOKEN.findall(check_copy(text))
+    )
+
+
+def _mentions_relation(
+    text: str, cause: str, effect: str, abbreviations: dict[str, frozenset[str]]
+) -> bool:
+    """`text` 提到這條關係的因或果（名稱或縮寫，見 `_mentions_construct`）。"""
+    return any(_mentions_construct(text, construct, abbreviations) for construct in (cause, effect))
+
+
+def _sentence_label(sentence: str) -> str | None:
+    """假設原句裡的代號：剛好只有一個（可以出現多次）時回它，沒有或有好幾個不同的回 None（好幾個
+    時分不出這條關係是哪一個，保守不判）。"""
+    labels = set(_HYPOTHESIS_LABEL.findall(quote_key(sentence)))
+    return labels.pop() if len(labels) == 1 else None
+
+
+@dataclass(frozen=True, slots=True)
+class _ResultContext:
+    """核對代號與全部假設用的上下文（`quote_key` 的寫法）：`text` 是結果原文在輸入裡所在的來源句子
+    （從句子的第一個字到句子結尾）；`start`、`end` 是寫出結果的那段在 `text` 裡的位置。"""
+
+    text: str
+    start: int
+    end: int
+
+
+# 結果原文在輸入裡出現好幾次時，最多看前 20 處（每處都要從句子開頭看起；不設上限時，同一句裡塞大量
+# 重複的結果原文會變成平方時間。多的只是少看幾處，錯在少判）。
+_MAX_QUOTE_OCCURRENCES: Final = 20
+
+
+# 研究問題前面的前置語（從來源句子開頭到第一個研究問題）：空的，或以 `,` `;` `:` 結尾、而且沒有外層
+# 說法的字（that、according、per、view、their、his、her、put(s)、report、claim、argue、say、
+# state、note、believe、assert、dispute、deny、suggest、contend、allege）也沒有還沒有結果的字
+# （`_UNSETTLED`）時，研究問題和後面的結果才算這篇研究自己說的（Codex 第四輪複查 X1：`Other
+# researchers report that we examine whether …, and we find that H1 was supported`、`According to
+# Smith (2020), we examine whether …`、`In their study, we examine whether …` 不算）。
+# `In this study, `、`Using survey data, ` 算；`Building on prior work, ` 因為有 prior 不算，錯在
+# 少判。清單外的轉述寫法擋不到（`In Smith's (2020) words, `；ADR-0039 取捨）。
+_LEAD_IN_CLAIM: Final = re.compile(
+    r"(?<![a-z])(?:that|according|per|view|their|his|her|puts?|claims?|claimed|reports?|reported"
+    r"|argues?|argued|says?|said|states?|stated|notes?|noted|believes?|believed|asserts?|asserted"
+    r"|disputes?|disputed|denies|denied|suggests?|suggested|contends?|contended|alleges?|alleged)"
+    r"(?![a-z])"
+)
+
+
+def _own_lead_in(lead_in: str) -> bool:
+    """研究問題前面的前置語沒有把研究問題變成別人的說法（見 `_LEAD_IN_CLAIM` 上面的說明）。"""
+    lead_in = lead_in.strip()
+    return not lead_in or (
+        lead_in[-1] in ",;:"
+        and _LEAD_IN_CLAIM.search(lead_in) is None
+        and _UNSETTLED.search(lead_in) is None
+    )
+
+
+def _result_contexts(
+    quote: str, reported: _ReportedPart, segments: tuple[str, ...]
+) -> list[_ResultContext]:
+    """寫出結果的那段（`reported`，`quote` 裡的位置）在輸入裡的上下文（Opus 第三輪 H1、Codex 第四輪
+    複查 X1）：看結果原文在**輸入裡**每一處（最多 `_MAX_QUOTE_OCCURRENCES` 處）所在的來源句子，任何
+    一處是直接陳述就算。上下文從「子句的開頭」到來源句子結尾：子句開頭、還沒有結果的字從子句開頭看到
+    那段結尾，範圍符號與全部假設的例外字看到句子結尾。子句的開頭：
+
+    - 來源句子在那段前面沒有研究問題：句子開頭。模型只抄外層說法裡面的一小段（`We dispute that H1
+      was supported.` 只抄 `H1 was supported`）時，外層說法仍然算數。
+    - 有研究問題（結果原文自己寫了研究問題，或結果原文只抄了研究問題後面那段）：研究問題前面的前置語
+      要是這篇研究自己的（`_own_lead_in`），不是的這一處不算；子句開頭是研究問題後面的斷點——結果
+      原文自己寫了研究問題時是 `reported.start`，否則是研究問題結尾到那段開頭之間最後一個斷點（沒有
+      斷點表示那段還在研究問題裡，這一處不算）。所以 `We examine whether …, and we find that H1 was
+      supported.` 抄整句、只抄 `we find that H1 was supported` 或 `H1 was supported` 都算，`Other
+      researchers report that we examine whether …` 不算；`… supported except H2.` 只抄到
+      `supported` 也看得到 except。"""
+    end_offset = len(quote[: reported.end].rstrip(_QUOTE_TRIM))
+    contexts: list[_ResultContext] = []
+    for index, start, end in itertools.islice(
+        _quote_locations(quote, segments), _MAX_QUOTE_OCCURRENCES
+    ):
+        segment = segments[index]
+        begin, finish = _sentence_bounds(segment, start, end)
+        reported_start = start + reported.start
+        questions = list(_RESEARCH_QUESTION.finditer(segment, begin, reported_start))
+        if questions:
+            if not _own_lead_in(segment[begin : questions[0].start()]):
+                continue
+            if reported.question is not None:
+                begin = reported_start
+            else:
+                breaks = [
+                    match.end()
+                    for match in _CLAUSE_BREAK.finditer(
+                        segment, questions[-1].end(), reported_start
+                    )
+                ]
+                if not breaks:
+                    continue
+                begin = breaks[-1]
+        # 子句開頭的空白不算（`reported.start` 是斷點的結尾，後面通常接一個空白）。
+        while begin < finish and segment[begin].isspace():
+            begin += 1
+        contexts.append(
+            _ResultContext(
+                segment[begin:finish],
+                max(reported_start - begin, 0),
+                start + end_offset - begin,
+            )
+        )
+    return contexts
+
+
+def _directly_reported(pattern: re.Pattern[str], context: _ResultContext) -> list[tuple[int, int]]:
+    """`context` 裡直接陳述結果、而且落在寫出結果的那段裡的目標（代號清單或「全部假設」）在
+    `context.text` 的位置；前後接範圍符號的代號清單不算（後面的範圍符號看到句子結尾）。從句子開頭到
+    那段結尾有還沒有結果的敘述（`_UNSETTLED`）時一個都不算。沒有標點的 and／whereas／while 開頭的，
+    同一句前面要已經有判定字（`_VERDICT_WORD`）。"""
+    text = context.text
+    if _UNSETTLED.search(text, 0, context.end):
+        return []
+    verdict = _VERDICT_WORD.search(text, 0, context.end)
+    found: list[tuple[int, int]] = []
+    for match in pattern.finditer(text, 0, context.end):
+        index = next(group for group in range(1, (pattern.groups or 0) + 1) if match[group])
+        start, end = match.span(index)
+        if end <= context.start:
+            continue
+        if not _CLAUSE_START_AT.match(text, match.start()) and (
+            verdict is None or verdict.end() > match.start()
+        ):
+            continue
+        if _RANGE_AFTER.match(text, end) or _RANGE_BEFORE.search(text[max(0, start - 12) : start]):
+            continue
+        found.append((start, end))
+    return found
+
+
+def _matches_label(contexts: list[_ResultContext], sentence: str) -> bool:
+    """寫出結果的那段直接陳述了這條關係的代號的結果：原句只有一個代號，而且它在直接陳述結果的代號
+    清單裡、位置落在結果原文裡（`H1 was supported`、`Results support H1 and H2`、`We find support
+    for H1`；見 `_direct_result`、`_result_contexts`）。代號要完全一樣（H1 不等於 H1a、H10）；
+    `H1-H3` 這種範圍不展開，兩端也不算。"""
+    label = _sentence_label(sentence)
+    if label is None:
+        return False
+    return any(
+        found[0] == label
+        for context in contexts
+        for start, end in _directly_reported(_DIRECT_LABEL_RESULT, context)
+        for found in _HYPOTHESIS_LABEL.finditer(context.text, max(start, context.start), end)
+    )
+
+
+def _matches_all_hypotheses(contexts: list[_ResultContext], sentence: str) -> bool:
+    """寫出結果的那段直接陳述「全部假設」的結果（`All hypotheses were supported`、`The results
+    support all hypotheses`；見 `_direct_result`、`_result_contexts`），而且這條關係的原句是一個
+    假設：原句有代號，或有假設句的寫法（we hypothesize、is expected to、H1 posits…；只寫 `we
+    examine whether` 的研究問題不算）。整句有 not、except、but、partially 這類字時不套（結果原文
+    只抄 `All hypotheses were supported`、輸入後面接 `except H2` 也一樣）。"""
+    if not any(
+        _ALL_QUALIFIER.search(context.text) is None
+        and _directly_reported(_DIRECT_ALL_RESULT, context)
+        for context in contexts
+    ):
+        return False
+    key = quote_key(sentence)
+    return bool(_HYPOTHESIS_LABEL.search(key) or _HYPOTHESIS_STATEMENT.search(key))
+
+
+# 研究問題後面寫出結果的子句只用這些字（代名詞、判定字、統計量，沒有任何構面名稱或代號）時，算是指回
+# 研究問題講的那條關係（`we examine whether X affects Y, and we find that it does`）；有別的字
+# （`… and we find that satisfaction affects loyalty`、`… and H2 was supported`）就不看研究問題。
+_REFERS_BACK: Final = frozenset(
+    {
+        "we", "it", "they", "this", "these", "that", "those", "the", "our", "a", "an", "also",
+        "so", "indeed", "then", "and", "does", "do", "did", "is", "are", "was", "were", "be",
+        "been", "has", "have", "had", "holds", "hold", "held", "true", "case", "not", "no",
+        "find", "finds", "found", "show", "shows", "showed", "shown", "reveal", "reveals",
+        "revealed", "indicate", "indicates", "indicated", "demonstrate", "demonstrates",
+        "demonstrated", "confirm", "confirms", "confirmed", "supported", "rejected", "support",
+        "evidence", "strong", "strongly", "partial", "partially", "fully", "some", "mixed",
+        "significant", "significantly", "statistically", "positive", "positively", "negative",
+        "negatively", "hypothesis", "relationship", "relation", "effect", "link", "association",
+        "result", "results", "findings", "data", "analysis", "analyses", "estimates", "for", "as",
+        "expected", "β", "beta", "b", "p", "r", "r2", "t", "f", "z",
+    }
+)  # fmt: skip
+
+
+_WHETHER: Final = re.compile(r"(?<![a-z])whether(?![a-z])")
+
+
+def _refers_back(clause: str) -> bool:
+    return all(word in _REFERS_BACK or word.isdigit() for word in _WORD.findall(clause))
 
 
 def _result_quote(
-    hypothesis: HypothesisOutput, quote_segments: tuple[str, ...], cause: str, effect: str
+    hypothesis: HypothesisOutput,
+    quote_segments: tuple[str, ...],
+    cause: str,
+    effect: str,
+    abbreviations: dict[str, frozenset[str]],
 ) -> str | None:
-    """可以採信的結果原文：有文字、正規化後在輸入裡、寫出了檢定結果（`_reports_result`），而且
-    提到這條關係的因或果（`cause`、`effect` 已正規化）。"""
+    """可以採信的結果原文：有文字、正規化後在輸入裡、寫出了檢定結果（`_reported_part`），而且寫出
+    結果的那段（有研究問題時不含研究問題）對得上這條關係（`cause`、`effect` 已正規化），下面任何
+    一種：
+
+    1. 提到這條關係的因或果：名稱或縮寫（`_mentions_relation`）；
+    2. 寫了這條關係的假設代號（`_matches_label`）；
+    3. 說全部假設都怎樣，而且這條關係是一個假設（`_matches_all_hypotheses`）。
+
+    2、3 另外要原句**同時**提到這條關係的因和果（名稱或縮寫），確定「這條關係就是那個假設」
+    （只提到其中一個時，可能是同一個構面的另一條假設）；2、3 的直接陳述看結果原文在輸入裡的上下文
+    （`_result_contexts`，Opus 第三輪 H1），不只看結果原文本身。
+    """
     text = _quote_text(hypothesis.result_quote)
     if text is None:
         return None
     quote = quote_key(text).strip(_QUOTE_TRIM)
-    if not _quote_found(quote, quote_segments) or not _reports_result(quote):
+    if not _quote_found(quote, quote_segments):
         return None
-    if not _mentions_relation(text, cause, effect):
+    reported = _reported_part(quote)
+    if reported is None:
         return None
-    return text
+    start, end = reported.start, reported.end
+    # 同樣位置、保留大小寫的寫法（認縮寫要看大寫）。casefold 改變長度時（少見的字）位置對不上，只用
+    # casefold 的寫法：縮寫認不出來，錯在少判。
+    cased = check_copy(text).translate(_STRAIGHT_QUOTES).strip(_QUOTE_TRIM)
+    if len(cased) != len(quote):
+        cased = quote
+    if _mentions_relation(cased[start:end], cause, effect, abbreviations):
+        return text
+    # 研究問題後面的結果只用代名詞指回去時（`_REFERS_BACK`），看那個研究問題提到的關係；研究問題裡
+    # 有第二個 whether（`… whether X affects Y and whether Z affects W, and find that it does`）時
+    # 分不出指的是哪一個，不看。
+    if (
+        reported.question is not None
+        and _refers_back(quote[start:end])
+        and len(_WHETHER.findall(quote, reported.question, start)) == 1
+        and _mentions_relation(cased[reported.question : start], cause, effect, abbreviations)
+    ):
+        return text
+    sentence = hypothesis.sentence
+    if not all(
+        _mentions_construct(sentence, construct, abbreviations) for construct in (cause, effect)
+    ):
+        return None
+    contexts = _result_contexts(quote, reported, quote_segments)
+    if _matches_label(contexts, sentence) or _matches_all_hypotheses(contexts, sentence):
+        return text
+    return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -521,6 +1178,7 @@ def _hypotheses_content(
     """
     kept: list[_KeptHypothesis] = []
     seen: dict[tuple[str, str, str], tuple[tuple[object, ...], int]] = {}
+    abbreviations = _construct_abbreviations(output, input_text)
     for index, hypothesis in enumerate(output.hypotheses):
         cause = normalize_name(hypothesis.cause)
         effect = normalize_name(hypothesis.effect)
@@ -528,7 +1186,7 @@ def _hypotheses_content(
         result_quote = None
         quote_downgraded = False
         if support in DECIDED_SUPPORT:
-            result_quote = _result_quote(hypothesis, quote_segments, cause, effect)
+            result_quote = _result_quote(hypothesis, quote_segments, cause, effect, abbreviations)
             if result_quote is None:
                 support, changed, quote_downgraded = SupportLevel.NOT_STATED, True, True
         statistics = hypothesis.statistics

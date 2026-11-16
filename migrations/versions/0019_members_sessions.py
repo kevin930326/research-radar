@@ -13,12 +13,11 @@
 和 `radar/repo/members.py`、`radar/repo/sessions.py` 的表定義一致（`alembic check` 比對）；CHECK
 約束 autogenerate 不比，這裡照抄同一份條件。可降版（降版會丟掉三張表與裡面的資料）。
 
-版本號 0015～0019 保留給另一條線（Story 2.8～2.13），所以這一版接在 0014 後面；兩條線合併後會有
-兩個頭，屆時由規劃端把 `down_revision` 改接到 0019，並刪掉 `tests/arch/test_migrations.py` 的
-保留空號那一項。
+原本寫成 0020 接 0014（0015～0019 保留給 Story 2.8～2.13）；兩條線合併後改號成 0019、接 0018
+（2026-11-16）。
 
-版本：0020
-上一版：0014（0015～0019 保留，合併後改接）
+版本：0019
+上一版：0018
 """
 
 from collections.abc import Sequence
@@ -29,8 +28,8 @@ from sqlalchemy.dialects.postgresql import BYTEA
 
 from radar.domain.database_requirements import APP_ROLE
 
-revision: str = "0020"
-down_revision: str | None = "0014"
+revision: str = "0019"
+down_revision: str | None = "0018"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

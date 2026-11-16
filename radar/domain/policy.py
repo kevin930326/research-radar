@@ -15,6 +15,7 @@
   - Semantic Scholar 的摘要：還沒取得書面授權，一律擋下（開關也不放行）。
   - 空字串或只有空白：一律擋下；編不成 UTF-8 的文字（例如單獨的代理字元）也擋下。
 - 新增來源時，`clear_for_cloud` 的 `match` 不寫規則就過不了 mypy（`assert_never`）。
+- `join_cloud_safe_texts`：把幾段各自放行過的文字用空白接成一段（向量化的「標題＋空行＋摘要」）。
 """
 
 import itertools
@@ -312,6 +313,34 @@ def clear_for_cloud(
         case _:
             assert_never(source)
     return CloudSafeText(text, source, clearance=_CLEARANCE)
+
+
+def join_cloud_safe_texts(parts: object, separator: str) -> CloudSafeText:
+    """把幾段已經放行的文字接成一段（向量化的「標題＋空行＋摘要」用，Story 2.8、ADR-0040）。
+
+    每一段都要是放行登記裡的 `CloudSafeText`（各自經過 `clear_for_cloud`）；`separator` 只能是空白
+    （空字串也可以），所以接起來的文字裡沒有任何沒放行的內容。接好的文字來源記最後一段的來源：
+    只給 `repr` 看，放行早在每一段各自做完了，之後不會再拿它判斷。
+
+    Raises:
+        NotCloudSafeError: `parts` 是 `str`、不是有順序的序列、是空的，或有一段不是有效的
+            `CloudSafeText`（被硬改過的丟子類別 `CloudSafeTextIntegrityError`）。
+        TypeError: `separator` 不是 `str`。
+        ValueError: `separator` 不是只有空白。
+    """
+    if type(separator) is not str:
+        raise TypeError(f"separator 必須是 str（收到 {type(separator).__name__}）")
+    if separator.strip():
+        raise ValueError("separator 只能是空白，不能夾帶沒放行的文字")
+    if isinstance(parts, (str, bytes, bytearray)) or not isinstance(parts, (list, tuple)):
+        raise NotCloudSafeError(
+            f"要接起來的文字必須是 CloudSafeText 的 list 或 tuple（收到 {type(parts).__name__}）"
+        )
+    if not parts:
+        raise NotCloudSafeError("要接起來的文字至少要有一段")
+    entries = [_registered(part) for part in parts]
+    text = separator.join(entry[0] for entry in entries)
+    return CloudSafeText(text, entries[-1][1], clearance=_CLEARANCE)
 
 
 def clear_prompt_file(task: str, version: int, content: bytes) -> CloudSafeText:

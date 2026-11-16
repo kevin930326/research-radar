@@ -1,6 +1,6 @@
-"""遷移 0020（成員、允許名單、session）對真的 PostgreSQL：降版、升版、權限、CHECK。
+"""遷移 0019（成員、允許名單、session）對真的 PostgreSQL：降版、升版、權限、CHECK。
 
-- 降到 0014 後三張表都不在，再升回來都在（空的）。
+- 降到 0018 後三張表都不在，再升回來都在（空的）。
 - 應用程式角色不能刪 `member`（成員被其他紀錄引用）；`allowed_email`、`session` 可以刪。
 - CHECK：顯示名稱非空白、最多 100 字元；`google_sub` 不能是空字串；email 小寫、像 email、最多
   254 字元；`token_sha256` 剛好 32 位元組；最後使用時間不早於建立時間。UNIQUE：email、
@@ -91,21 +91,21 @@ def _session(db: TestDatabase, member_id: uuid.UUID, **changes: object) -> None:
 # --- 降版、升版 ---------------------------------------------------------------------------------
 
 
-def test_downgrade_to_0014_drops_tables_and_upgrade_restores_them(db: TestDatabase) -> None:
+def test_downgrade_to_0018_drops_tables_and_upgrade_restores_them(db: TestDatabase) -> None:
     member_id = _member(db)
     _allowed(db, member_id, "member.one@example.com")
     _session(db, member_id)
 
-    down = _alembic(db, "downgrade", "0014")
+    down = _alembic(db, "downgrade", "0018")
 
     assert down.returncode == 0, down.stdout + down.stderr
-    assert db.revisions() == {"0014"}
+    assert db.revisions() == {"0018"}
     assert not set(TABLES) & _relations(db)
     assert db.has_table("judgment_event")
 
     migrate(db)
 
-    assert db.revisions() == {"0020"}
+    assert db.revisions() == {"0019"}
     assert _relations(db) >= set(TABLES)
     for table in TABLES:
         assert _app(db, f"SELECT count(*) FROM {table}") == [(0,)]

@@ -2,9 +2,19 @@
 
 值是小寫加底線的字串，會寫進資料庫（例如 2.2 的 `derivation_run`、`llm_call`）與日誌，
 寫出去之後不改名；新增代碼時加在這裡。
+
+另有 `LockWaitTimeoutError`：`repo/db.Database.transaction_with_lock_timeout` 等鎖逾時丟的例外
+（放在 domain，services 不必 import 資料庫套件就能攔）。
 """
 
 from enum import StrEnum, unique
+
+
+class LockWaitTimeoutError(Exception):
+    """交易裡等鎖超過 `lock_timeout`；丟出時交易已經退回。訊息固定，不帶連線資訊。"""
+
+    def __init__(self) -> None:
+        super().__init__("等鎖超過時限，這個交易已退回")
 
 
 @unique
@@ -77,6 +87,81 @@ class ErrorCode(StrEnum):
     RESEARCH_MODEL_UNSUPPORTED_CONTENT = "research_model_unsupported_content"
     # 同一句、同一條關係給了互相衝突的值（證據類型、支持與否或統計數字不同）
     RESEARCH_MODEL_CONFLICTING_HYPOTHESIS = "research_model_conflicting_hypothesis"
+
+    # 向量化（`radar/services/embeddings.py`、`radar/adapters/workers_ai/`，Story 2.8、ADR-0040）：
+    # 寫進 `derivation_run.failure_reason`（task＝embed）；向量化沒有「拒收」，都是 failed
+    EMBED_TRANSIENT = "embed_transient"  # 重試用完仍是逾時、限流、服務端錯誤或連線錯誤
+    EMBED_CONFIGURATION = "embed_configuration"  # 401、403、404：token、帳號或模型設定不對
+    EMBED_REQUEST_INVALID = "embed_request_invalid"  # 400、413、422 等：請求本身不合法
+    # 回應的信封、筆數、維度或數字不對（例如不是 1,024 維、有 NaN）：整批不寫；只有某一篇的向量轉成
+    # halfvec 後全是 0 時只有那一篇不寫
+    EMBED_RESPONSE_INVALID = "embed_response_invalid"
+    EMBED_INPUT_CHANGED = "embed_input_changed"  # 寫入前核對：送出後標題或摘要又變了，這篇不寫
+    EMBED_FAILED = "embed_failed"  # 向量化服務自己出錯（例如寫入的交易失敗），run 改 failed
+    # 重試途中今天的額度放不下下一次嘗試：這一批不寫、不算失敗，下一次續跑
+    EMBED_QUOTA_REACHED = "embed_quota_reached"
+    # 寫入前等論文那一列的鎖超過 lock_timeout：這篇不寫，下一次重算
+    EMBED_LOCK_TIMEOUT = "embed_lock_timeout"
+    # 占用額度時等額度鎖超過 lock_timeout：這一批不送（已取得資格的 run 改 failed），其他論文照做
+    EMBED_QUOTA_LOCK_TIMEOUT = "embed_quota_lock_timeout"
+
+    # Batch 送出（`radar/services/llm_batches.py`，Story 2.9、ADR-0041）
+    # 送出前重建請求，和規劃時記的 run 鍵對不上（摘要、prompt 版本、模型或設定版本變了，或論文
+    # 沒了）：那筆 run 改 failed、不送（`derivation_run.failure_reason`）；整批都對不上時批次
+    # 也記這個
+    BATCH_INPUT_CHANGED = "batch_input_changed"
+    # 寫入前在摘要來源鎖裡核對（Story 2.12 審查後、ADR-0044）：送出時用的摘要來源已經不是這篇
+    # 目前的摘要（被移除、換成別的來源）或不再放行：不建 run／不寫表頭，run 改 failed
+    # （`derivation_run.failure_reason`），不再接續
+    ABSTRACT_SOURCE_CHANGED = "abstract_source_changed"
+    # 送出時逾時、斷線、5xx、回應看不懂或非預期的例外（含一般的 TypeError、ValueError）：不知道
+    # 供應商有沒有建好批次，標 `needs_attention`、不自動重送（沒有冪等鍵）；停在 submitting 太久
+    # 也記這個。一定沒建立的另記：4xx 照狀態碼；送出前就丟的 `NotCloudSafeError` 記
+    # `cloud_text_not_registered`、沒有狀態碼的 `LlmConfigurationError` 記 `llm_configuration`
+    BATCH_SUBMIT_UNCERTAIN = "batch_submit_uncertain"
+    # 供應商明確回了 4xx（429、401、403、404 以外）：一定沒有建立，批次與 run 都改 failed
+    BATCH_SUBMIT_REJECTED = "batch_submit_rejected"
+    # 送出時在台北時間月初窗口裡：不動、不送，列維持 queued，sweep 之後補排
+    BATCH_MONTH_START_HOLD = "batch_month_start_hold"
+    # 送出時本月已熔斷：不動、不送，列維持 queued，sweep 之後補排
+    BATCH_BUDGET_TRIPPED = "batch_budget_tripped"
+    # 送出前最後確認（全域 Batch 預算鎖裡）：本月帳＋全部尚未結束的 Batch 預留超過熔斷線或這批工作的
+    # 功能預算（規劃之後互動又花了、或預算調低）：不動、不送，列維持 queued，sweep 之後補排
+    BATCH_BUDGET_EXCEEDED = "batch_budget_exceeded"
+    # 送出前最後確認：這批再等也放不下（熔斷線或功能預算調低後，這批自己的預留加上排在它前面、還在
+    # queued 的批次的預留就超過；`domain/llm_batches.batch_never_fits`）：同一個交易把批次從
+    # queued 改 failed、這批的 run 改 failed（釋放預留），下一次規劃依新預算重排
+    BATCH_BUDGET_CANNOT_FIT = "batch_budget_cannot_fit"
+    # 送出時等全域 Batch 預算鎖逾時（規劃的長交易拿著）：不動、不送，列維持 queued，sweep 之後補排
+    BATCH_BUDGET_LOCK_BUSY = "batch_budget_lock_busy"
+
+    # Batch 結果匯入（`radar/services/llm_batches.py`、`llm_gateway.import_llm_batch_result`，
+    # Story 2.11、ADR-0043）：寫進 `derivation_run.failure_reason` 或
+    # `batch_submission.failure_reason`。
+    # 結果裡這一筆是 `errored`、錯誤類型不是 `invalid_request_error`（供應商那邊出錯，沒有產生訊息、
+    # 不計費）：run 改 failed，下一次 `radar batches create` 會再送（`invalid_request_error` 沿用
+    # `llm_invalid_request` 寫成 rejected）
+    BATCH_ITEM_ERRORED = "batch_item_errored"
+    BATCH_ITEM_CANCELED = "batch_item_canceled"  # 這一筆在送進模型前被取消（不計費）：run 改 failed
+    BATCH_ITEM_EXPIRED = "batch_item_expired"  # 24 小時內沒送進模型（不計費）：run 改 failed
+    # 結果下載完，這一批還有項目沒出現在結果裡：那些 run 改 failed
+    BATCH_RESULT_MISSING = "batch_result_missing"
+    # 結果這一行看不懂（不是 JSON 物件，或 result 的 type 不認得）：run 改 failed
+    # （succeeded 但訊息形狀不對是 llm_malformed_response、寫拒收）
+    BATCH_RESULT_UNREADABLE = "batch_result_unreadable"
+    # 批次結束了但結果已經拿不到（建立超過 29 天，或供應商沒給 results_url）：還在跑的 run 改 failed
+    BATCH_RESULTS_UNAVAILABLE = "batch_results_unavailable"
+    # 查批次狀態時供應商回 404：批次 `submitted` → `needs_attention`，要人工確認（`radar batches
+    # resolve`）
+    BATCH_PROVIDER_NOT_FOUND = "batch_provider_not_found"
+    # 同一個供應商 batch ID 連續 `incomplete_results_attention_after` 次
+    # （`config/llm_batches.yaml`）讀到的結果項數比供應商的計數少：批次 `ended` →
+    # `needs_attention`，要人工確認（`radar batches resolve`：`--fail` 接受缺項、
+    # `--provider-batch-id` 再讀；Story 2.11 確認審查 D2）
+    BATCH_RESULTS_INCOMPLETE = "batch_results_incomplete"
+    # `radar batches resolve --fail`：人工把 `needs_attention` 的批次標失敗，還在跑的 run 一起改
+    # failed
+    BATCH_RESOLVED_FAILED = "batch_resolved_failed"
 
     # 登入與 session（Story 3.3、ADR-0008、ADR-0046）：api 回應的代碼
     NOT_AUTHENTICATED = "not_authenticated"  # 沒有有效的 session（401）

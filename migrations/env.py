@@ -14,8 +14,10 @@ from sqlalchemy import Connection
 import radar.repo.ai_outputs  # zh_summary、classification、research_model
 import radar.repo.api_calls  # api_call
 import radar.repo.audit  # audit_event
+import radar.repo.embeddings  # embedding_model、embedding
 import radar.repo.ingest_staging  # ingest_staging
 import radar.repo.judgments  # judgment_event
+import radar.repo.llm_batches  # batch_submission、batch_item
 import radar.repo.llm_ledger  # derivation_run、llm_call
 import radar.repo.members  # member、allowed_email
 import radar.repo.papers  # paper、external_id、paper_abstract、paper_keyword

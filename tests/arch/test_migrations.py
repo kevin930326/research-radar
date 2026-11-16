@@ -25,27 +25,15 @@ def test_exactly_one_head() -> None:
     assert len(MigrationScripts.load(MIGRATIONS_DIR).heads) == 1
 
 
-# 保留的空號：版本 → 准許的 down_revision（跳過中間的號碼）。
-# 0015～0019 保留給另一條線（Story 2.8～2.13），Story 3.3 的 0020 先接 0014；兩條線合併時由規劃端
-# 把 0020 改接 0019，並刪掉這一項。
-RESERVED_GAPS: dict[str, str] = {"0020": "0014"}
-
-
 def test_revisions_are_a_numbered_straight_line() -> None:
     revisions = _revisions()
     assert revisions, "至少要有 0001"
-    number = 0
-    previous: str | None = None
-    for revision in revisions:
-        if RESERVED_GAPS.get(revision.revision) == previous and previous is not None:
-            number = int(revision.revision)
-        else:
-            number += 1
+    for number, revision in enumerate(revisions, start=1):
         assert revision.revision == f"{number:04d}", revision.path
-        assert revision.down_revision == previous, revision.path
+        expected_down = None if number == 1 else f"{number - 1:04d}"
+        assert revision.down_revision == expected_down, revision.path
         assert not revision.branch_labels, revision.path
         assert not revision.dependencies, revision.path
-        previous = revision.revision
 
 
 def test_file_names_match_revision_ids() -> None:

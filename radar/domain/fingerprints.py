@@ -6,12 +6,23 @@
 - `prompt_sha256`／`schema_sha256`：prompt 檔與結構化輸出 schema 的雜湊，登記在
   `domain/prompt_hashes.py`，改了內容卻沒升版就對不上。
 - `run_lock_key`：取得執行資格時 advisory lock 的鍵（64 位元有號整數）。
+- `LLM_BATCH_BUDGET_LOCK_KEY`：Batch 規劃時計算預算預留的全域 advisory lock 鍵（固定名稱算出的
+  64 位元有號整數，Story 2.9、ADR-0041）。
+- `abstract_source_lock_key`：每個摘要來源一把的 advisory lock 鍵（依來源移除獨佔、AI 寫入共用，
+  Story 2.12、ADR-0044）。
 - `taxonomy_content_sha256`：分類表會進 prompt 的內容的雜湊，登記在 `domain/taxonomy_hashes.py`，
   內容改了卻沒升版就對不上（Story 2.5、ADR-0033）。
 - `context_values_content_sha256`：情境值清單會影響結果的內容的雜湊，登記在
   `domain/context_values_hashes.py`（Story 2.6、ADR-0034）。
 - `hypothesis_sentence_sha256`：假設原句（正規化後）的雜湊，存在 `hypothesis.sentence_sha256`，
   「不同原句」數得出來（FR-3 擷取規則 3、Story 2.6）。
+- `embedding_input_sha256`：送去向量化的文字的指紋，存在 `embedding.input_sha256` 與
+  `derivation_run.input_sha256`（task＝embed）；變了才重算（AD-12、Story 2.8）。
+- `eval_split_sha256`：調整組／測試組切分看的雜湊，只算正規化後的 DOI（`domain/eval_split.py`、
+  Story 2.10、ADR-0042）。
+- `trial_sample_sha256`：試跑抽樣的排序鍵（seed, 正規化後的 DOI）（`domain/trial_runs.py`）。
+- `annotation_sample_sha256`：標註試算表抽樣的排序鍵（seed, 用途, DOI 或分層）
+  （`domain/annotations.py`、Story 2.13、ADR-0045）。
 
 ## source_hash
 
@@ -28,6 +39,8 @@ import hashlib
 import json
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Final
+
+from radar.domain.identifiers import normalize_doi
 
 if TYPE_CHECKING:
     from radar.domain.ai_outputs import LlmInputBlock, LlmTask, RunKey
@@ -165,6 +178,38 @@ def run_lock_key(key: RunKey) -> int:
     return int.from_bytes(digest[:8], "big", signed=True)
 
 
+def named_lock_key(name: str) -> int:
+    """固定名稱的 advisory lock 鍵：`radar-lock:<名稱>` 的 SHA-256 前 8 個位元組，當成大端序的
+    64 位元有號整數。和 `run_lock_key`、`repo/db.py` 的固定鍵撞到的機率約 2^-64；撞到只是多等一下。
+
+    Raises:
+        ValueError: `name` 不是非空字串。
+    """
+    if not isinstance(name, str) or not name:
+        raise ValueError("鎖的名稱要是非空字串")
+    digest = hashlib.sha256(f"radar-lock:{name}".encode()).digest()
+    return int.from_bytes(digest[:8], "big", signed=True)
+
+
+# Batch 規劃（Story 2.9、ADR-0041）：每一批的交易一開始拿這把獨佔交易級鎖，鎖裡讀「本月帳＋尚未結束
+# 的 Batch 預留」再決定放得下哪些；兩個規劃不會同時用掉同一份剩餘預算。
+LLM_BATCH_BUDGET_LOCK_KEY: Final = named_lock_key("llm_batch_budget")
+
+
+def abstract_source_lock_key(source: str) -> int:
+    """一個摘要來源（`openalex` 等）的交易級 advisory lock 鍵（Story 2.12 審查後、ADR-0044）：
+    依來源移除拿獨佔（`pg_advisory_xact_lock`），所有寫入這個來源衍生產出的路徑（互動與 Batch
+    取得執行資格／接續、寫 AI 表頭、寫向量）拿共用（`pg_advisory_xact_lock_shared`），並在鎖內
+    重新核對「這篇的目前摘要仍是這個來源、仍放行」。
+
+    Raises:
+        ValueError: `source` 不是非空字串。
+    """
+    if not isinstance(source, str) or not source:
+        raise ValueError("摘要來源要是非空字串")
+    return named_lock_key(f"abstract_source:{source}")
+
+
 # --- 分類表（Story 2.5、ADR-0033） ----------------------------------------------------------
 
 # 算法版本：改了算進雜湊的欄位或序列化方式時加一（登記的雜湊要全部重算、重新登記）。
@@ -232,6 +277,111 @@ def hypothesis_sentence_sha256(normalized_sentence: str) -> str:
     if not isinstance(normalized_sentence, str) or not normalized_sentence:
         raise ValueError("hypothesis_sentence_sha256 要收正規化後、不是空的原句")
     return _canonical_sha256({"v": HYPOTHESIS_SENTENCE_VERSION, "sentence": normalized_sentence})
+
+
+# --- 向量化（Story 2.8、AD-12、ADR-0040） --------------------------------------------------------
+
+# 算法版本：改了算進指紋的欄位或序列化方式時加一（全部向量都會重算）。
+EMBEDDING_INPUT_VERSION: Final = 1
+
+
+def embedding_input_sha256(text: str, input_kind: str) -> str:
+    """送去向量化的文字的指紋（64 位小寫十六進位 SHA-256）。
+
+    算進：算法版本、工作代碼 `embed`、`input_kind`（`title`／`abstract`）與實際送出的文字
+    （「標題＋空行＋摘要」接好之後）。模型不算進來：`embedding` 的主鍵已經帶 `model_id`，
+    各模型各自比對。摘要的來源不算：同樣的文字得到同樣的向量。
+
+    Raises:
+        ValueError: `text` 是空的或只有空白。
+    """
+    if not isinstance(text, str) or not text.strip():
+        raise ValueError("embedding_input_sha256 要收不是空白的文字")
+    return _canonical_sha256(
+        {"v": EMBEDDING_INPUT_VERSION, "task": "embed", "input_kind": str(input_kind), "text": text}
+    )
+
+
+# --- 調整組／測試組與試跑抽樣（Story 2.10、ADR-0042） ------------------------------------------
+
+# 算法版本：改了算進雜湊的欄位或序列化方式時加一。**改了等於重新切分**：原本在測試組的論文可能跑到
+# 調整組，之前拿調整組調過的提示詞就碰過測試組了，所以不要隨便改（`tests/unit/test_eval_split.py`
+# 的黃金值守著）。
+EVAL_SPLIT_VERSION: Final = 1
+TRIAL_SAMPLE_VERSION: Final = 1
+
+
+def _check_normalized_doi(doi: str) -> None:
+    if not isinstance(doi, str) or normalize_doi(doi) != doi:
+        raise ValueError("要傳正規化後的 DOI（identifiers.normalize_doi 的結果）")
+
+
+def eval_split_sha256(doi: str) -> str:
+    """調整組／測試組切分用的雜湊（64 位小寫十六進位 SHA-256）：只算正規化後的 DOI（加算法版本與
+    用途），和 paper_id、資料庫、行程（`PYTHONHASHSEED`）無關。
+
+    Raises:
+        ValueError: `doi` 不是正規化後的 DOI。
+        InvalidIdentifierError: `doi` 根本不是 DOI。
+    """
+    _check_normalized_doi(doi)
+    return _canonical_sha256({"v": EVAL_SPLIT_VERSION, "purpose": "eval_split", "doi": doi})
+
+
+def trial_sample_sha256(seed: int, doi: str) -> str:
+    """試跑抽樣的排序鍵（64 位小寫十六進位 SHA-256）：（seed, 正規化後的 DOI）。和 paper_id 無關，
+    所以候選相同時，本機與試用主機用同一個 seed 抽到同樣的 DOI；新增論文不會打亂既有論文之間
+    的先後（但可能排進前 N、換掉名單，要固定名單用名單檔）。
+
+    Raises:
+        ValueError: `seed` 不是整數（`bool` 也不收），或 `doi` 不是正規化後的 DOI。
+        InvalidIdentifierError: `doi` 根本不是 DOI。
+    """
+    if type(seed) is not int:
+        raise ValueError("seed 要是整數")
+    _check_normalized_doi(doi)
+    return _canonical_sha256(
+        {"v": TRIAL_SAMPLE_VERSION, "purpose": "trial_sample", "seed": seed, "doi": doi}
+    )
+
+
+# --- 標註試算表的抽樣（Story 2.13、ADR-0045） ---------------------------------------------------
+
+# 算法版本：改了算進雜湊的欄位或序列化方式時加一（同一個 seed 會抽到不同的論文）。
+ANNOTATION_SAMPLE_VERSION: Final = 1
+# 用途 → 值要是什麼：`rank`（層內與新列的排序）與 `second_annotator`（標註者 B 的抽樣）收正規化後
+# 的 DOI；`stratum`（最大餘數法同分時的先後）收 `"<ISSN-L>:<出版年>"`。
+_ANNOTATION_DOI_PURPOSES: Final = frozenset({"rank", "second_annotator"})
+_ANNOTATION_STRATUM_PURPOSE: Final = "stratum"
+
+
+def annotation_sample_sha256(seed: int, purpose: str, value: str) -> str:
+    """標註試算表抽樣的排序鍵（64 位小寫十六進位 SHA-256）：（seed, 用途, 值）。和 paper_id、
+    候選的順序、資料庫無關（同 ADR-0042 的理由），不用 `random`、不用 `hash()`。
+
+    Raises:
+        ValueError: `seed` 不是整數（`bool` 也不收）、`purpose` 不是 `rank`／`stratum`／
+            `second_annotator`、`rank`／`second_annotator` 的值不是正規化後的 DOI、`stratum` 的值
+            不是字串。
+        InvalidIdentifierError: DOI 根本不是 DOI。
+    """
+    if type(seed) is not int:
+        raise ValueError("seed 要是整數")
+    if purpose in _ANNOTATION_DOI_PURPOSES:
+        _check_normalized_doi(value)
+    elif purpose == _ANNOTATION_STRATUM_PURPOSE:
+        if not isinstance(value, str):
+            raise ValueError("stratum 的值要是字串")
+    else:
+        raise ValueError("purpose 只能是 rank、stratum、second_annotator")
+    return _canonical_sha256(
+        {
+            "v": ANNOTATION_SAMPLE_VERSION,
+            "purpose": f"annotation_{purpose}",
+            "seed": seed,
+            "value": value,
+        }
+    )
 
 
 def session_token_sha256(token: str) -> bytes:

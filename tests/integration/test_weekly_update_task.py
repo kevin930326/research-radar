@@ -222,14 +222,19 @@ def test_finished_run_builds_no_adapter_and_applies(
         (1, run_id, "published")
     ]
     # 這一筆暫存是 0 列，所以有「沒有任何暫存論文」的警告（1.9 審查第 6 條）。
+    # Story 2.8：心跳之後排入向量化；這裡沒有開 Procrastinate 的 app，排入失敗只記警告、
+    # 快照照樣發佈（排入成功的情形見 tests/integration/test_embed_task.py）。
     assert [log["event"] for log in logs] == [
         "每週更新已經抓完，不再抓",
         "這個排程沒有設定心跳網址，不送",
+        "每週更新發佈後排入向量化失敗",
+        # Story 2.9：接著排入 Batch 規劃，一樣排不進去、只記警告。
+        "每週更新發佈後排入 Batch 規劃失敗",
         "這次每週更新沒有任何暫存論文",
         "每週更新已套用並發佈快照",
     ]
     assert logs[1]["check"] == "weekly-update"
-    assert logs[2]["log_level"] == "warning"
+    assert logs[4]["log_level"] == "warning"
 
 
 def test_broken_journals_yaml_after_fetch_fails_to_prepare_the_apply(

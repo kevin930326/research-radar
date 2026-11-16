@@ -1,0 +1,39 @@
+# Batch 送出的設定（AD-8、AD-14，ADR-0004 決定第 4 點、ADR-0031、ADR-0041；Story 2.9）。
+# Batch 規劃的工作（plan_llm_batches）讀這份（radar/config.py 驗證）；worker 與 CLI 啟動時也檢查。
+#
+# 數字的來源（2026-11-15 讀 Anthropic 官方文件，docs/runs/epic-2b/api-reference.md 第一節）：
+# - 一批最多 100,000 個請求或 256 MB（先到者為準）。
+
+# 每週更新發佈後要不要自動規劃 Batch（true／false）。全庫第一次 AI 要由 Kevin 先試 20 篇、
+# 再手動跑（epics Story 2.11），Batch 的結果匯入也在 2.11 才做，所以先關著；2.11 之後再打開
+# （ADR-0041，提議）。2.11：先維持 false（保守做法），待 Kevin 決定；全庫第一次用
+# `radar batches create` 手動送（ADR-0043）。
+weekly_planning_enabled: false
+# 一個 batch_submission 最多幾個請求（1～1,000；官方上限 100,000）。一批在一個資料庫交易裡建，
+# 一個交易最多嘗試 2 × 這個數字筆、每筆拿一把 advisory lock（PostgreSQL 共用鎖表預設約 6,400 格），
+# 所以上限 1,000、預設取小：500 筆約一兩秒、請求量約 10 MB，一批出事的範圍也小（ADR-0041）。
+max_requests_per_batch: 500
+# 台北時間每月 1 日 00:00 到這個鐘點以前，整次 Batch 規劃延後、不寫任何列（0～24；0＝不延後）。
+# 我們的帳用台北月份，Anthropic workspace 上限可能還在用 UTC 的上個月（台北 08:00＝UTC 00:00；
+# ADR-0031 取捨）。延後的那一次不會自己再排，等下一次每週更新（ADR-0041）。
+month_start_hold_hours: 8
+# `radar batches wait` 每隔幾分鐘查一次批次（1～1,440；`--interval-minutes` 可以覆蓋）。官方說多數
+# 批次 1 小時內做完、最長 24 小時；10 分鐘一次，一天最多 144 次查詢（Story 2.11、ADR-0043）。
+# worker 的 poll-batches 照 deploy/crontab（每 15 分鐘），不看這個值。
+poll_interval_minutes: 10
+# 分類表或情境值清單改版後，一次 Batch 規劃要重跑的（現行有效結果用的設定檔版本和現在不同的）
+# Batch 價保守上限合計最多多少美元（字串；0～50）。超過就整次不排、不寫任何列、記錯誤日誌
+# （`radar batches create` 印原因、退出碼 1）；第一次全庫沒有現行結果，不受影響。改設定檔前先用
+# `radar runs estimate-revision --taxonomy`／`--context-values` 看會重跑幾篇、花多少（Story 2.12、
+# ADR-0044）。
+# 預設 5：每月熔斷線 50 的 10%，留空間給每週新論文與問答。以 Batch 價保守上限粗估（不是實際值，以
+# 指令印的為準）：分類表改版約 3 美元會過，情境值清單改版約 6 美元會被擋——刻意的，第一次改情境值
+# 清單前要 Kevin 決定。數字待 Kevin 決定。
+revision_rerun_max_usd: "5"
+# 同一批（同一個供應商 batch ID）連續幾次讀到的結果項數比供應商的計數（request_counts）少，就把批次
+# 標 needs_attention（batch_results_incomplete），交給 `radar batches resolve`（1～100）。被截短多半
+# 是偶發的斷線，重讀一兩次就補齊；一直對不上代表計數和結果檔本身不一致，再讀也一樣。取 3：給兩次
+# 重讀的機會，cron（每 15 分鐘）約 45 分鐘、`radar batches wait`（每 10 分鐘）約 30 分鐘後進
+# needs_attention；也和 wait「連續 3 次查詢都有錯誤就停」一致，wait 停下時印的是 resolve 的指令
+# （Story 2.11 確認審查 D2、ADR-0043）。
+incomplete_results_attention_after: 3
