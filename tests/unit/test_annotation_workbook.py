@@ -20,6 +20,7 @@ from radar.domain.annotations import (
     CONSTRUCTS_SHEET,
     GUIDE_SHEET,
     HYPOTHESES_SHEET,
+    PAPER_MODEL_COLUMNS,
     PAPERS_SHEET,
     AnnotatedPaper,
     AnnotationLevel,
@@ -33,10 +34,12 @@ from radar.domain.annotations import (
     build_annotator_a_workbook,
     build_annotator_b_workbook,
     detail_row_count,
+    dropdown_problems,
     parse_annotation_workbook,
     read_sampled_papers,
     render_annotation_check,
 )
+from radar.domain.context_values import ContextValueItem, ContextValues
 from radar.domain.eval_split import EvalSplit, split_for_dois
 from radar.domain.llm_schemas import EvidenceType, SupportLevel
 from radar.domain.xlsx import column_letter, read_workbook
@@ -117,6 +120,14 @@ B_PAPERS = [
     "topic:e_commerce",
     "method:survey_sem",
     "method:experiment",
+    "is_review_or_meta_analysis",
+    "country",
+    "industry",
+    "research_design",
+    "unit_of_analysis",
+    "sample_size",
+    "limitations",
+    "future_research",
 ]
 B_CONSTRUCTS = ["paper_id", "name_en", "label_zh", "definition"]
 B_HYPOTHESES = [
@@ -168,18 +179,18 @@ def test_annotator_a_columns() -> None:
 
 
 def test_annotator_b_columns_have_no_answers_of_a_and_no_ai() -> None:
-    layout = annotator_b_columns(TEST_TAXONOMY)
+    layout = annotator_b_columns(TEST_TAXONOMY, TEST_CONTEXT)
     assert [column.name for column in layout.papers] == B_PAPERS
     assert [column.name for column in layout.constructs] == B_CONSTRUCTS
     assert [column.name for column in layout.hypotheses] == B_HYPOTHESES
     names = {column.name for _, columns in layout.sheets() for column in columns}
-    assert not names & {"split", "set", "full_text", "country", "beta", "in_abstract"}
+    assert not names & {"split", "set", "full_text", "beta", "in_abstract"}
     assert not any("ai" in name.split("_") or name.startswith("ai") for name in names)
 
 
 def test_options_come_from_the_given_taxonomy() -> None:
     other = TEST_TAXONOMY.model_copy(update={"topics": TEST_TAXONOMY.topics[:1]})
-    names = [column.name for column in annotator_b_columns(other).papers]
+    names = [column.name for column in annotator_b_columns(other, TEST_CONTEXT).papers]
     assert "topic:erp" in names
     assert "topic:supply_chain" not in names
 
@@ -275,9 +286,9 @@ def test_workbooks_are_deterministic() -> None:
     assert build_annotator_a_workbook(rows, TEST_TAXONOMY, TEST_CONTEXT) == (
         build_annotator_a_workbook(rows, TEST_TAXONOMY, TEST_CONTEXT)
     )
-    assert build_annotator_b_workbook(rows, TEST_TAXONOMY) == build_annotator_b_workbook(
-        rows, TEST_TAXONOMY
-    )
+    assert build_annotator_b_workbook(
+        rows, TEST_TAXONOMY, TEST_CONTEXT
+    ) == build_annotator_b_workbook(rows, TEST_TAXONOMY, TEST_CONTEXT)
 
 
 def test_generated_workbooks_parse_back() -> None:
@@ -289,14 +300,11 @@ def test_generated_workbooks_parse_back() -> None:
     assert [paper.paper_id for paper in parsed.papers] == [row.paper_id for row in rows]
     assert not any(paper.done for paper in parsed.papers)
 
-    b = parse_annotation_workbook(
-        build_annotator_b_workbook(rows[:2], TEST_TAXONOMY), TEST_TAXONOMY, TEST_CONTEXT
-    )
+    b_data = build_annotator_b_workbook(rows[:2], TEST_TAXONOMY, TEST_CONTEXT)
+    b = parse_annotation_workbook(b_data, TEST_TAXONOMY, TEST_CONTEXT)
     assert b.annotator is Annotator.B
     assert len(b.papers) == 2
-    assert read_workbook(build_annotator_b_workbook(rows[:2], TEST_TAXONOMY))[PAPERS_SHEET][0] == (
-        tuple(B_PAPERS)
-    )
+    assert read_workbook(b_data)[PAPERS_SHEET][0] == tuple(B_PAPERS)
 
 
 # --- read_sampled_papers ------------------------------------------------------------------
@@ -427,7 +435,8 @@ def test_parse_annotator_b_fixture() -> None:
     assert first.sample_set is SampleSet.ABSTRACT
     assert first.levels == (AnnotationLevel.ABSTRACT,)
     assert first.split is EvalSplit(split_for_dois(first.dois))
-    assert first.country is None
+    assert first.is_review_or_meta_analysis is False
+    assert (first.country, first.research_design, first.sample_size) == ("tw", "survey", 300)
     assert workbook.constructs[0].item_count is None
     assert workbook.hypotheses[0].beta is None
     assert workbook.hypotheses[0].in_abstract is None
@@ -729,3 +738,137 @@ def test_render_annotation_check_on_filled_example() -> None:
     abstract_line = next(line for line in lines if line.startswith("摘要層級"))
     assert "已標 0 篇" not in abstract_line
     assert any(line.startswith("全文層級") for line in lines)
+
+
+# --- Opus 審查後補的測試 ----------------------------------------------------------------------
+
+B = Annotator.B
+
+
+def _long_context() -> ContextValues:
+    """研究設計 18 個合理的 key，用逗號接起來超過 255 字元（其他欄照測試清單）。"""
+    designs = tuple(
+        ContextValueItem(key=key, name=key, definition=f"{key}（測試用）。")
+        for key in (
+            "survey",
+            "laboratory_experiment",
+            "field_experiment",
+            "natural_experiment",
+            "quasi_experiment",
+            "case_study",
+            "archival_secondary_data",
+            "panel_data_econometrics",
+            "analytical_modeling",
+            "simulation",
+            "design_science",
+            "qualitative_interview",
+            "ethnography",
+            "grounded_theory",
+            "meta_analysis",
+            "literature_review",
+            "mixed_methods",
+            "text_mining_machine_learning",
+        )
+    )
+    return TEST_CONTEXT.model_copy(update={"research_designs": designs})
+
+
+def test_dropdown_problems_name_the_column_and_length() -> None:
+    assert dropdown_problems(annotator_a_columns(TEST_TAXONOMY, TEST_CONTEXT)) == []
+    context = _long_context()
+    length = len(",".join(item.key for item in context.research_designs))
+    assert length > 255
+    expected = [
+        f"{PAPERS_SHEET}表的 research_design 欄：下拉選項合起來 {length} 個字元，超過 Excel 的上限"
+        " 255（請減少選項或縮短 key）"
+    ]
+    assert dropdown_problems(annotator_a_columns(TEST_TAXONOMY, context)) == expected
+    assert dropdown_problems(annotator_b_columns(TEST_TAXONOMY, context)) == expected
+
+
+def test_annotator_b_has_the_paper_level_research_model_columns_of_a() -> None:
+    a_papers = [column.name for column in annotator_a_columns(TEST_TAXONOMY, TEST_CONTEXT).papers]
+    b_layout = annotator_b_columns(TEST_TAXONOMY, TEST_CONTEXT)
+    b_papers = [column.name for column in b_layout.papers]
+    assert [name for name in a_papers if name in PAPER_MODEL_COLUMNS] == list(PAPER_MODEL_COLUMNS)
+    assert b_papers[-len(PAPER_MODEL_COLUMNS) :] == list(PAPER_MODEL_COLUMNS)
+    data = build_annotator_b_workbook(_rows(2), TEST_TAXONOMY, TEST_CONTEXT)
+    letter = {name: column_letter(index) for index, name in enumerate(b_papers)}
+    validations = _validations(data, 1)
+    assert validations[letter["country"]] == ("list", ['"tw,us"'])
+    assert validations[letter["is_review_or_meta_analysis"]] == ("list", ['"yes,no"'])
+    assert validations[letter["sample_size"]] == ("whole", ["1", "2147483647"])
+    first = dict(zip(b_papers, read_workbook(data)[PAPERS_SHEET][1], strict=True))
+    assert all(first[name] is None for name in PAPER_MODEL_COLUMNS)  # 空白，不放 A 的答案
+
+
+def test_annotator_b_research_model_columns_are_validated() -> None:
+    def change(sheets: dict[str, Rows]) -> None:
+        set_cell(sheets, PAPERS_SHEET, 2, "country", "narnia")
+        set_cell(sheets, PAPERS_SHEET, 2, "sample_size", Decimal("2.5"))
+        set_cell(sheets, PAPERS_SHEET, 3, "is_review_or_meta_analysis", None)  # done 的論文
+
+    problems = _problems(change, B)
+    assert _where(problems) == [
+        (PAPERS_SHEET, 2, _col(B, PAPERS_SHEET, "country")),
+        (PAPERS_SHEET, 2, _col(B, PAPERS_SHEET, "sample_size")),
+        (PAPERS_SHEET, 3, _col(B, PAPERS_SHEET, "is_review_or_meta_analysis")),
+    ]
+
+
+def test_value_without_header_does_not_hide_other_problems() -> None:
+    # 審查的實測：論文表第 2 列在表頭以外寫備註，同時有三個別的錯；四個都要報出來。
+    def change(sheets: dict[str, Rows]) -> None:
+        sheets[PAPERS_SHEET][1].extend([None] * (len(A_PAPERS) - len(sheets[PAPERS_SHEET][1])))
+        sheets[PAPERS_SHEET][1].append("a note")
+        set_cell(sheets, PAPERS_SHEET, 2, "country", "narnia")
+        set_cell(sheets, HYPOTHESES_SHEET, 2, "paper_id", str(paper_uuid(99)))
+        set_cell(sheets, CONSTRUCTS_SHEET, 2, "cronbach_alpha", Decimal("1.5"))
+
+    problems = _problems(change)
+    assert _where(problems) == [
+        (PAPERS_SHEET, 2, column_letter(len(A_PAPERS))),
+        (PAPERS_SHEET, 2, _col(A, PAPERS_SHEET, "country")),
+        (CONSTRUCTS_SHEET, 2, _col(A, CONSTRUCTS_SHEET, "cronbach_alpha")),
+        (HYPOTHESES_SHEET, 2, _col(A, HYPOTHESES_SHEET, "paper_id")),
+    ]
+    assert problems[0].reason == "這一欄沒有欄名卻有值"
+    assert problems[3].reason == "paper_id 不在論文表"
+
+
+@pytest.mark.parametrize("value", [Decimal("1E+999999"), Decimal("-1.000000000000001E+15"), "2E15"])
+def test_beta_out_of_range(value: Decimal | str) -> None:
+    problems = _problems(lambda s: set_cell(s, HYPOTHESES_SHEET, 2, "beta", value))
+    assert _where(problems) == [(HYPOTHESES_SHEET, 2, _col(A, HYPOTHESES_SHEET, "beta"))]
+    assert problems[0].reason == "要在 -1E15～1E15 之間"
+
+
+@pytest.mark.parametrize("value", [Decimal("1E+15"), Decimal("-1E+15"), Decimal("-12.5")])
+def test_beta_within_range_is_accepted(value: Decimal) -> None:
+    sheets = example_sheets(A)
+    set_cell(sheets, HYPOTHESES_SHEET, 2, "beta", value)
+    workbook = parse_annotation_workbook(
+        build_excel_style_workbook(sheets), TEST_TAXONOMY, TEST_CONTEXT
+    )
+    assert workbook.hypotheses[0].beta == value
+
+
+def test_is_review_required_for_done_abstract_papers() -> None:
+    def change(sheets: dict[str, Rows]) -> None:
+        set_cell(sheets, PAPERS_SHEET, 3, "is_review_or_meta_analysis", None)  # 摘要層級、done
+        set_cell(sheets, PAPERS_SHEET, 4, "status", None)  # 還沒標：不必填
+
+    problems = _problems(change)
+    assert _where(problems) == [
+        (PAPERS_SHEET, 3, _col(A, PAPERS_SHEET, "is_review_or_meta_analysis"))
+    ]
+    assert problems[0].reason == "摘要層級的論文標完（status=done）要填"
+    # 分類專用而且 done 的第 4 篇（第 5 列）本來就沒填，也沒有被報。
+
+
+def test_label_zh_is_required() -> None:
+    problems = _problems(lambda s: set_cell(s, CONSTRUCTS_SHEET, 3, "label_zh", None))
+    assert _where(problems) == [(CONSTRUCTS_SHEET, 3, _col(A, CONSTRUCTS_SHEET, "label_zh"))]
+    assert problems[0].reason == "必填"
+    problems_b = _problems(lambda s: set_cell(s, CONSTRUCTS_SHEET, 2, "label_zh", " "), B)
+    assert _where(problems_b) == [(CONSTRUCTS_SHEET, 2, _col(B, CONSTRUCTS_SHEET, "label_zh"))]

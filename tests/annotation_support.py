@@ -129,6 +129,14 @@ def _paper_rows(annotator: Annotator) -> list[dict[str, Value]]:
     for row in common:
         row["annotator"] = annotator.value
     if annotator is Annotator.B:
+        # B 也標論文層級的研究模型欄；標完的摘要層級論文要填 is_review_or_meta_analysis。
+        common[0] |= {
+            "is_review_or_meta_analysis": "no",
+            "country": "tw",
+            "research_design": "survey",
+            "sample_size": 300,
+        }
+        common[1] |= {"is_review_or_meta_analysis": "no"}
         return common
     common[0] |= {
         "split": _split(1),
@@ -237,7 +245,7 @@ def example_sheets(annotator: Annotator) -> dict[str, Rows]:
     layout = (
         annotator_a_columns(TEST_TAXONOMY, TEST_CONTEXT)
         if annotator is Annotator.A
-        else annotator_b_columns(TEST_TAXONOMY)
+        else annotator_b_columns(TEST_TAXONOMY, TEST_CONTEXT)
     )
     sources = {
         PAPERS_SHEET: _paper_rows(annotator),

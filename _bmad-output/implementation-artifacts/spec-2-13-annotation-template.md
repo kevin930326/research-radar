@@ -59,7 +59,7 @@ deferred: []
 | 補抽被擋 | `--extend` 的檔已有任何標註值（status、勾選、研究模型欄、構面或假設列） | 不寫檔，印「已經開始標註」與下一步 | 退出碼 1 |
 | 參數錯 | 沒 `--seed`、`--interest` 不是分類表的主題 key、數量是負數、補抽時兩個數量都是 0 | 不碰資料庫 | 退出碼 2 |
 | 輸出已存在 | `--out` 指到存在的檔 | 不寫、不覆蓋 | 退出碼 1 |
-| 產生 B | `template-b --from A.xlsx --seed 3 --out B.xlsx` | 從 A 的摘要層級列依雜湊取 15 篇（兩組都可能）；B 只有 paper_id、doi、title、abstract、annotator＝B、status、主題、方法、構面（name_en、label_zh、definition）、假設（paper_id、sentence、cause、effect、evidence_type、support、result_quote）欄；沒有 A 的任何答案；印 seed 與篇數 | 摘要層級不足 15 篇時全部放、印篇數 |
+| 產生 B | `template-b --from A.xlsx --seed 3 --out B.xlsx` | 從 A 的摘要層級列依雜湊取 15 篇（兩組都可能）；B 只有 paper_id、doi、title、abstract、annotator＝B、status、主題、方法、論文層級的研究模型欄（和 A 論文表一樣：is_review_or_meta_analysis、四個情境欄、sample_size、limitations、future_research，空白；Opus 審查後補）、構面（name_en、label_zh、definition）、假設（paper_id、sentence、cause、effect、evidence_type、support、result_quote）欄；沒有 A 的任何答案；印 seed 與篇數 | 摘要層級不足 15 篇時全部放、印篇數 |
 | 解析成功 | 填好的範例 A／B 試算表（`tests/fixtures/annotations/`） | 回傳型別化的論文、構面、假設；主題與方法是排序好的 key tuple；數字是 int／Decimal；`status` 空白的列算「還沒標」 | — |
 | 解析失敗 | 不在下拉清單的值、整數欄填小數或文字、0～1 欄超出範圍、假設的因果不是同一篇的構面、非實證檢定卻標支持與否、分類專用的列填了研究模型欄或有構面列、`in_abstract` 填在不是全文層級的論文、paper_id 重複或不在論文表、split 和 DOI 算出來的不同、annotator 和版面不符、欄名缺或多 | `AnnotationParseError`，列出每一個（工作表, 列號, 欄, 原因） | `check` 印問題、退出碼 1 |
 | 惡意檔 | 不是 zip、zip 炸彈、含 DOCTYPE／ENTITY、超過列數上限 | `AnnotationParseError`（或同一個錯誤類型），不展開 | 退出碼 1 |
@@ -84,13 +84,13 @@ deferred: []
 ## Tasks & Acceptance
 
 **Execution:**
-- `radar/domain/xlsx.py`（新）-- 最小的 xlsx 讀寫，只用標準函式庫，bytes 進出、不碰檔案系統。寫：`[Content_Types].xml`、`_rels/.rels`、`xl/workbook.xml`、`xl/_rels/workbook.xml.rels`、`xl/styles.xml`（預設＋粗體表頭＋自動換行）、每張表 `xl/worksheets/sheetN.xml`（字串用 `t="inlineStr"`、`xml:space="preserve"`；數字用 `<v>`；元素順序 sheetViews（凍結第一列）→ cols（欄寬）→ sheetData → dataValidations）；資料驗證支援三種：清單（項目合起來 ≤255 字元時寫成 `"a,b,c"`，否則丟錯）、清單來源是儲存格範圍（`'論文'!$A$2:$A$N`）、整數／小數範圍；zip 成員固定順序、固定時間戳（同輸入→同位元組）。XML 不允許的控制字元移除；超過 32,767 字元的儲存格截斷並回報截斷數。讀：依 `workbook.xml`＋rels 找工作表（Target 可相對可絕對）、`sharedStrings.xml`（含 rich text `<r><t>`）、`inlineStr`、`str`、`n`、`b`、`e`；沒有 `r` 屬性的列／格依位置；回傳每張表的二維值（`str | Decimal | bool | None`）。上限：檔案 20 MB、成員 ≤200、單一成員解壓 ≤50 MB、合計 ≤100 MB、每表 ≤20,000 列、≤200 欄；XML 有 `<!DOCTYPE`／`<!ENTITY` 拒收；錯了丟 `XlsxError`。
+- `radar/domain/xlsx.py`（新）-- 最小的 xlsx 讀寫，只用標準函式庫，bytes 進出、不碰檔案系統。寫：`[Content_Types].xml`、`_rels/.rels`、`xl/workbook.xml`、`xl/_rels/workbook.xml.rels`、`xl/styles.xml`（預設＋粗體表頭＋自動換行）、每張表 `xl/worksheets/sheetN.xml`（字串用 `t="inlineStr"`、`xml:space="preserve"`；數字用 `<v>`；元素順序 sheetViews（凍結第一列）→ cols（欄寬）→ sheetData → dataValidations）；資料驗證支援三種：清單（項目合起來 ≤255 字元時寫成 `"a,b,c"`，否則丟錯）、清單來源是儲存格範圍（`'論文'!$A$2:$A$N`）、整數／小數範圍；zip 成員固定順序、固定時間戳（同輸入→同位元組）。XML 不允許的控制字元移除；超過 32,767 字元的儲存格截斷並回報截斷數。讀：依 `workbook.xml`＋rels 找工作表（Target 可相對可絕對）、`sharedStrings.xml`（含 rich text `<r><t>`）、`inlineStr`、`str`、`n`、`b`、`e`；沒有 `r` 屬性的列／格依位置；回傳每張表的二維值（`str | Decimal | bool | None`）。上限：檔案 10 MB、成員 ≤200、單一成員解壓 ≤8 MB、合計 ≤16 MB、解析前數的 XML 元素 ≤400,000、展開後的儲存格（列數 × 欄數，全部表加總）≤300,000、每表 ≤20,000 列、≤200 欄（Opus 審查後收緊，原本 20／50／100 MB）；列號與同一列的欄號要嚴格遞增；讀寫都處理 `_xHHHH_` 跳脫；XML 有 `<!DOCTYPE`／`<!ENTITY` 拒收；錯了丟 `XlsxError`。
 - `radar/domain/fingerprints.py` -- 加 `ANNOTATION_SAMPLE_VERSION = 1` 與 `annotation_sample_sha256(seed: int, purpose: str, value: str) -> str`（purpose 只收固定集合：`rank`（DOI）、`stratum`（`"<issn>:<year>"`）、`second_annotator`（DOI）；`seed` 非 int 或是 bool 丟 `ValueError`）。
 - `radar/domain/annotations.py`（新）-- 純函式，不碰資料庫：
   - 常數：`DEFAULT_ABSTRACT_COUNT = 50`、`DEFAULT_CLASSIFICATION_COUNT = 100`、`DEFAULT_SECOND_ANNOTATOR_COUNT = 15`、工作表名 `論文`／`構面`／`假設`／`說明`、構面與假設表預留的驗證列數（論文數 × 20，至少 200）。
   - 抽樣：`AnnotationCandidate(paper_id, doi（最小的正規化 DOI）, dois, journal_issn_l, year, has_abstract, topics)`；`allocate_strata(sizes, total, seed)`（最大餘數法；total ≥ 總數時全拿；每層不超過該層數量）；`draw_annotation_sample(candidates, *, seed, interest, abstract_count, classification_count, exclude_ids, exclude_dois) -> AnnotationDraw`（先從有摘要的抽摘要層級，再從剩下的全部抽分類專用；回傳兩組的論文、各池候選數）。
-  - 版面：`annotator_a_columns(taxonomy, context_values)`、`annotator_b_columns(taxonomy)`（論文表、構面表、假設表的欄名與每欄的驗證）。A 論文表欄：`paper_id, doi, title, abstract, split, set, full_text, annotator, status, topic:<key>…, method:<key>…, is_review_or_meta_analysis, country, industry, research_design, unit_of_analysis, sample_size, limitations, future_research`；A 構面表：`paper_id, name_en, label_zh, definition, scale_source, item_location, item_count, cronbach_alpha, composite_reliability, ave`；A 假設表：`paper_id, sentence, cause, effect, evidence_type, support, result_quote, beta, p_value, sample_size, effect_type, in_abstract`。B 的欄見 I/O 矩陣。選項值：`status`＝`done`；勾選欄（`topic:*`、`method:*`）＝`yes`；`full_text`、`is_review_or_meta_analysis`、`in_abstract`＝`yes`／`no`；`set`＝`abstract`／`classification_only`；`split`＝`tuning`／`test`；`annotator`＝`A`／`B`；情境欄＝情境值清單的 key；`evidence_type`／`support`＝列舉值。數字：兩個 `sample_size`、`item_count` 是 ≥1 的整數；`cronbach_alpha`、`composite_reliability`、`ave`、`p_value` 是 0～1 的小數；`beta` 是任意小數。`說明` 表列每一欄的意思、可填的值（含 key 的顯示名稱與定義）、哪些欄只在全文層級填。
-  - 產生：`build_annotator_a_workbook(rows, taxonomy, context_values) -> bytes`、`build_annotator_b_workbook(rows, taxonomy) -> bytes`；`rows` 只有 paper_id、doi、title、abstract、split、set（A 才有 split／set），其他欄空白、annotator 預填。
+  - 版面：`annotator_a_columns(taxonomy, context_values)`、`annotator_b_columns(taxonomy, context_values)`（論文表、構面表、假設表的欄名與每欄的驗證）。A 論文表欄：`paper_id, doi, title, abstract, split, set, full_text, annotator, status, topic:<key>…, method:<key>…, is_review_or_meta_analysis, country, industry, research_design, unit_of_analysis, sample_size, limitations, future_research`；A 構面表：`paper_id, name_en, label_zh, definition, scale_source, item_location, item_count, cronbach_alpha, composite_reliability, ave`；A 假設表：`paper_id, sentence, cause, effect, evidence_type, support, result_quote, beta, p_value, sample_size, effect_type, in_abstract`。B 的欄見 I/O 矩陣。選項值：`status`＝`done`；勾選欄（`topic:*`、`method:*`）＝`yes`；`full_text`、`is_review_or_meta_analysis`、`in_abstract`＝`yes`／`no`；`set`＝`abstract`／`classification_only`；`split`＝`tuning`／`test`；`annotator`＝`A`／`B`；情境欄＝情境值清單的 key；`evidence_type`／`support`＝列舉值。數字：兩個 `sample_size`、`item_count` 是 ≥1 的整數；`cronbach_alpha`、`composite_reliability`、`ave`、`p_value` 是 0～1 的小數；`beta` 是任意小數。`說明` 表列每一欄的意思、可填的值（含 key 的顯示名稱與定義）、哪些欄只在全文層級填。
+  - 產生：`build_annotator_a_workbook(rows, taxonomy, context_values) -> bytes`、`build_annotator_b_workbook(rows, taxonomy, context_values) -> bytes`；`rows` 只有 paper_id、doi、title、abstract、split、set（A 才有 split／set），其他欄空白、annotator 預填。
   - 讀既有檔：`read_sampled_papers(data) -> SampledWorkbook`（只讀 A 論文表的 paper_id、doi、title、abstract、split、set 並驗證這幾欄；另回報「是否已有任何標註值」）；`select_second_annotator(rows, count, seed)`（只從 `set=abstract` 依 `annotation_sample_sha256(seed, "second_annotator", doi)` 排序取前 N）。
   - 解析：`parse_annotation_workbook(data, taxonomy, context_values) -> AnnotationWorkbook`，錯了丟 `AnnotationParseError(problems: tuple[AnnotationProblem, ...])`（`AnnotationProblem(sheet, row, column, reason)`；xlsx 本身讀不了也包成同一個錯誤、row／column 可為 None）。依欄名集合判斷是 A 或 B 版面（欄的順序不拘，缺欄或多欄就是錯）；全空白的列略過；字串去頭尾空白；整數欄收整數或整數值的小數，數字字串能完整轉成數字也收。回傳：`AnnotationWorkbook(annotator, papers, constructs, hypotheses)`；`AnnotatedPaper(paper_id, doi, split（一律由 DOI 算；A 另核對欄位）, sample_set, full_text, annotator, done, topics, methods, is_review_or_meta_analysis, country, industry, research_design, unit_of_analysis, sample_size, limitations, future_research)`、`AnnotatedConstruct(...)`、`AnnotatedHypothesis(...)`（欄位對應上面的欄名；數字 `int`／`Decimal`）；`AnnotatedPaper.levels`：分類專用→`classification_only`；摘要層級→`abstract`（`full_text` 為真時再加 `full_text`）。驗證規則照 I/O 矩陣「解析失敗」那一列逐條實作；同一篇構面 `name_en` 去空白、不分大小寫不得重複；假設的 `cause`／`effect` 要等於同一篇某個構面的 `name_en`（同樣比法）、兩者不同；`evidence_type` 不是 `empirical_test` 時 `support` 只能是 `not_determined`；`name_en`、`sentence`、`cause`、`effect`、`evidence_type`、`support` 必填。
   - 輸出文字：`render_annotation_sample(...)`（seed、興趣主題、兩組篇數與調整組／測試組、候選池數、沒 DOI 略過數、不足時的提示、截斷數）、`render_topic_counts(...)`（表格：每個主題 key＋名稱在兩組各幾篇；`unclassified`＝有有效分類但沒有主題；「還沒有分類結果」；一篇可算多個主題的說明一行）、`render_second_annotator(...)`、`render_annotation_check(...)`（標註者、各層級已標／還沒標篇數、構面與假設列數）、`render_annotation_problems(...)`（最多印 200 條，其餘印「還有 N 條」）。
@@ -112,6 +112,15 @@ deferred: []
 - Given 全部改動, then ruff、format、mypy（含 tests）、lint-imports、unit、arch、integration 全過，既有測試一個都沒改。
 
 ## Spec Change Log
+
+### 2026-11-16 — Opus 審查（8 條：中 3、低 5）後的修正
+- 讀檔上限收緊（檔案 10 MB、成員 8 MB、合計 16 MB），解析前先數 XML 元素（≤400,000），解析後限制展開後的儲存格總數（≤300,000）；超過丟「檔案太大」，不讓 api 容器（350m）被 OOM 砍掉。
+- `dropdown_problems`：`template`／`template-b` 在連資料庫之前先檢查下拉清單長度，訊息寫出哪一欄、幾個字元、上限 255；寫檔時的 `XlsxError` 照印訊息。
+- B 的論文表加上 A 論文表的研究模型欄（空白）；解析函式與 `check` 一樣驗這些欄。`annotator_b_columns`、`build_annotator_b_workbook` 多一個 `context_values` 參數。
+- 「沒有欄名卻有值」照樣回報，但不再讓那張表跳過逐列檢查（只有真的表頭問題才跳過）。
+- 讀寫處理 `_xHHHH_` 跳脫；列號或儲存格位置重複、倒退就拒收。
+- `beta` 解析時限 -1E15～1E15（和寫入的資料驗證一樣）；摘要層級而且 done 的論文 `is_review_or_meta_analysis` 必填；構面列 `label_zh` 必填。
+- 不抽沒 DOI 的論文、補抽只能用還沒開始標的檔：寫進 ADR-0045 取捨與「要 Kevin 決定」第 5、6 項（更正下面 intent 6 那一條的理由）。
 
 ## Review Triage Log
 
@@ -144,7 +153,7 @@ deferred: []
   - `[false]` `[reject]` （edge 9）資料庫裡的 DOI 看不懂會讓整次失敗 — `external_id.value_norm` 寫入時就是 `normalize_doi` 的結果，再正規化一次一定成功。
   - `[medium]` `[patch]` （edge 10）宣稱「讀不了都包成 XlsxError／AnnotationParseError」不成立 — 同 edge 2、3。
   - `[medium]` `[patch]` （edge 11）宣稱「上限守得住不信任的檔」被 Decimal 展開打破 — 同 edge 1。
-  - `[low]` `[reject]` （edge 12）表頭有問題時那張表的列不檢查 — 刻意的：欄對不上時逐列檢查會整片誤報；修好表頭再跑一次。
+  - `[low]` `[reject]` （edge 12）表頭有問題時那張表的列不檢查 — 刻意的：欄對不上時逐列檢查會整片誤報；修好表頭再跑一次。（Opus 審查後：只有缺欄、重複、不認得的欄名才算表頭問題；「沒有欄名卻有值」不再跳過逐列檢查。）
   - `[medium]` `[patch]` （verification-gap 1）產生端的多 DOI 論文沒有測試 — 補 integration（兩個 DOI、split 是 test）與 unit 來回測試。
   - `[low]` `[patch]` （verification-gap 2）寫到一半失敗刪檔沒有測試 — 補 `OSError`／`KeyboardInterrupt` 兩個 CLI 測試。
   - `[low]` `[patch]` （verification-gap 3）`render_annotation_check` 只測了全部沒標 — 補範例檔的 unit 測試。
@@ -156,7 +165,7 @@ deferred: []
   - `[low]` `[reject]` （intent 3）下拉清單只在 XML 層測、沒在試算表軟體裡測 — 同 blind 4。
   - `[low]` `[reject]` （intent 4）範例檔是手寫模仿 Excel，不是真的軟體存的 — 同 blind 4；`tests/fixtures/` 只准放自己產生的資料。
   - `[low]` `[reject]` （intent 5）沒有檢查「2.11 已經跑完」 — 2.11 的全庫 AI 要等 Kevin 跑；還沒有分類結果的另列「還沒有分類結果」篇數，Kevin 看得到。
-  - `[false]` `[reject]` （intent 6）補抽只限沒標的檔、不抽沒 DOI、B 沒有研究情境、不自動選全文 20 篇是自行縮小範圍 — 每一項都是條件沒寫死時採的保守讀法，ADR-0045 寫了理由並列入「要 Kevin 決定」。
+  - `[false]` `[reject]` （intent 6）補抽只限沒標的檔、不抽沒 DOI、B 沒有研究情境、不自動選全文 20 篇是自行縮小範圍 — 每一項都是條件沒寫死時採的保守讀法，ADR-0045 寫了理由並列入「要 Kevin 決定」。（Opus 審查更正：當時 ADR 並沒有列入；之後 B 已補上研究模型欄，不抽沒 DOI 與補抽限制列為「要 Kevin 決定」第 5、6 項，見 Spec Change Log。）
 
 ## Design Notes
 

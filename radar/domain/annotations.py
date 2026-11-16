@@ -9,7 +9,9 @@
   順序不洩漏 AI 主題）。不用 `random`、不用 `hash()`。
 - **版面**（`annotator_a_columns`、`annotator_b_columns`）：論文、構面、假設三張表的欄名與每欄能填
   什麼；選項值來自分類表、情境值清單與 FR-3 schema 的列舉，不寫死。多選的主題與方法每個 `key`
-  一欄、勾 `yes`。試算表裡沒有任何 AI 產出。
+  一欄、勾 `yes`。B 的論文表也有 A 論文表的研究模型欄（`PAPER_MODEL_COLUMNS`，空白），沒有
+  `split`、`set`、`full_text`。試算表裡沒有任何 AI 產出。`dropdown_problems` 在連資料庫之前先檢查
+  下拉清單寫不寫得進 Excel（合起來 ≤ 255 字元）。
 - **產生**（`build_annotator_a_workbook`、`build_annotator_b_workbook`）：xlsx（`domain/xlsx.py`），
   有選項的欄一律資料驗證（下拉清單、`errorStyle="stop"`），數字欄 whole／decimal 驗證；另附
   `說明` 表。
@@ -38,6 +40,8 @@ from radar.domain.llm_schemas import EvidenceType, SupportLevel
 from radar.domain.taxonomy import UNCLASSIFIED, Taxonomy, TaxonomyField
 from radar.domain.text_table import render_table
 from radar.domain.xlsx import (
+    MAX_LIST_CHARS,
+    UNBOUNDED_DECIMAL,
     CellValue,
     ColumnValidation,
     ListRule,
@@ -50,6 +54,7 @@ from radar.domain.xlsx import (
     XlsxError,
     clean_cell_text,
     column_letter,
+    list_formula_chars,
     read_workbook,
     write_workbook,
 )
@@ -112,7 +117,7 @@ P_VALUE: Final = "p_value"
 EFFECT_TYPE: Final = "effect_type"
 IN_ABSTRACT: Final = "in_abstract"
 
-# A 論文表的研究模型欄（分類專用的論文不能填）。
+# 論文表的研究模型欄（A 與 B 都有；A 的分類專用論文不能填）。
 PAPER_MODEL_COLUMNS: Final = (
     IS_REVIEW,
     *(field.value for field in ContextField),
@@ -130,6 +135,8 @@ _MAX_TEXT_EXPONENT: Final = 64
 # DOI 欄的切法：「分號後面接空白」或空白（DOI 本身可以含分號）。
 _DOI_SPLIT: Final = re.compile(r";\s+|\s+")
 _ONE: Final = Decimal(1)
+# 沒有上下限的數字欄（beta）解析時的範圍：和寫入的資料驗證同一個邊界（ADR-0045）。
+_UNBOUNDED_TEXT: Final = "1E15"
 
 
 class Annotator(StrEnum):
@@ -679,12 +686,16 @@ def _hypothesis_base() -> list[AnnotationColumn]:
     ]
 
 
-def annotator_a_columns(taxonomy: Taxonomy, context_values: ContextValues) -> AnnotationLayout:
-    """標註者 A 的版面（論文、構面、假設三張表的欄）。"""
-    papers = [
-        *_paper_base_columns(Annotator.A),
-        *_taxonomy_columns(taxonomy),
-        _choice(IS_REVIEW, "是不是文獻回顧或後設分析", _YES_NO, width=12.0),
+def _paper_model_columns(context_values: ContextValues) -> list[AnnotationColumn]:
+    """論文表的研究模型欄（FR-3 `ResearchModelOutput` 的論文層級欄位；A 與 B 一樣）。"""
+    return [
+        _choice(
+            IS_REVIEW,
+            "是不是文獻回顧或後設分析",
+            _YES_NO,
+            width=12.0,
+            when="摘要層級的論文標完（status=done）就要填",
+        ),
         _context_column(ContextField.COUNTRY, context_values, "國家"),
         _context_column(ContextField.INDUSTRY, context_values, "產業"),
         _context_column(ContextField.RESEARCH_DESIGN, context_values, "研究設計"),
@@ -692,6 +703,15 @@ def annotator_a_columns(taxonomy: Taxonomy, context_values: ContextValues) -> An
         _whole(SAMPLE_SIZE, "樣本數 N"),
         _text(LIMITATIONS, "研究限制（原文照抄）", width=30.0, wrap=True),
         _text(FUTURE_RESEARCH, "未來研究建議（原文照抄）", width=30.0, wrap=True),
+    ]
+
+
+def annotator_a_columns(taxonomy: Taxonomy, context_values: ContextValues) -> AnnotationLayout:
+    """標註者 A 的版面（論文、構面、假設三張表的欄）。"""
+    papers = [
+        *_paper_base_columns(Annotator.A),
+        *_taxonomy_columns(taxonomy),
+        *_paper_model_columns(context_values),
     ]
     constructs = [
         *_construct_base(),
@@ -718,9 +738,14 @@ def annotator_a_columns(taxonomy: Taxonomy, context_values: ContextValues) -> An
     return AnnotationLayout(Annotator.A, tuple(papers), tuple(constructs), tuple(hypotheses))
 
 
-def annotator_b_columns(taxonomy: Taxonomy) -> AnnotationLayout:
-    """標註者 B 的版面：只有主題、方法、構面與假設（沒有 A 的任何答案欄）。"""
-    papers = [*_paper_base_columns(Annotator.B), *_taxonomy_columns(taxonomy)]
+def annotator_b_columns(taxonomy: Taxonomy, context_values: ContextValues) -> AnnotationLayout:
+    """標註者 B 的版面：主題、方法、論文層級的研究模型欄（和 A 一樣，空白）、構面與假設；沒有
+    `split`、`set`、`full_text`，構面表沒有測量品質欄、假設表沒有 β 等數字欄。"""
+    papers = [
+        *_paper_base_columns(Annotator.B),
+        *_taxonomy_columns(taxonomy),
+        *_paper_model_columns(context_values),
+    ]
     return AnnotationLayout(
         Annotator.B,
         tuple(papers),
@@ -730,6 +755,24 @@ def annotator_b_columns(taxonomy: Taxonomy) -> AnnotationLayout:
 
 
 # --- 產生 ---------------------------------------------------------------------------------
+
+
+def dropdown_problems(layout: AnnotationLayout) -> list[str]:
+    """下拉清單寫不進 Excel 的欄（選項用逗號接起來超過 `MAX_LIST_CHARS` 字元）：每欄一句，寫出
+    工作表、欄名、合計字元數與上限。沒有問題是空的。產生試算表之前先跑（例如連資料庫之前），
+    不要等抽完樣才在寫檔時失敗。"""
+    problems: list[str] = []
+    for sheet_name, columns in layout.sheets():
+        for column in columns:
+            if column.kind is not ColumnKind.CHOICE:
+                continue
+            length = list_formula_chars(column.options)
+            if length > MAX_LIST_CHARS:
+                problems.append(
+                    f"{sheet_name}表的 {column.name} 欄：下拉選項合起來 {length} 個字元，超過 Excel"
+                    f" 的上限 {MAX_LIST_CHARS}（請減少選項或縮短 key）"
+                )
+    return problems
 
 
 def _column_index(columns: Sequence[AnnotationColumn], name: str) -> int:
@@ -804,7 +847,7 @@ def _options_text(column: AnnotationColumn) -> str:
             return "1 以上的整數"
         case ColumnKind.DECIMAL:
             if column.minimum is None:
-                return "數字"
+                return f"-{_UNBOUNDED_TEXT}～{_UNBOUNDED_TEXT} 的數字"
             return f"{column.minimum}～{column.maximum} 的數字"
         case ColumnKind.PAPER_REF:
             return "論文表的 paper_id"
@@ -880,14 +923,16 @@ def build_annotator_a_workbook(
     return _build(rows, annotator_a_columns(taxonomy, context_values))
 
 
-def build_annotator_b_workbook(rows: Sequence[AnnotationRow], taxonomy: Taxonomy) -> bytes:
+def build_annotator_b_workbook(
+    rows: Sequence[AnnotationRow], taxonomy: Taxonomy, context_values: ContextValues
+) -> bytes:
     """標註者 B 的空白試算表：只預填論文 ID、DOI、標題、摘要，annotator 填 B（沒有組別、沒有 A 的
     任何答案）。
 
     Raises:
         XlsxError: 選項寫不進下拉清單。
     """
-    return _build(rows, annotator_b_columns(taxonomy))
+    return _build(rows, annotator_b_columns(taxonomy, context_values))
 
 
 def annotation_truncated_cells(rows: Sequence[AnnotationRow]) -> int:
@@ -986,6 +1031,9 @@ class _Table:
         for column in columns:
             if column.name not in self.index:
                 problems.append(AnnotationProblem(sheet, 1, column.name, "缺少這一欄"))
+        # 只有表頭本身的問題（不認得、重複、缺欄）才不逐列驗證；「沒有欄名卻有值」照樣回報，但
+        # 其他列、其他欄的錯誤照查（標註者常在旁邊的欄寫備註，不能因此蓋掉別的錯）。
+        self.ok = len(problems) == before
         unnamed |= set(range(len(header), max((len(row) for row in values), default=0)))
         for offset, row in enumerate(values[1:], start=2):
             cells = tuple(_stripped(cell) for cell in row)
@@ -999,7 +1047,6 @@ class _Table:
                         )
                     )
             self.rows.append((offset, cells))
-        self.ok = len(problems) == before
 
 
 class _Row:
@@ -1090,6 +1137,10 @@ class _Row:
             return None
         if unit and not _ZERO <= number <= _ONE:
             self.problem(name, "要在 0～1 之間")
+            return None
+        if not unit and abs(number) > UNBOUNDED_DECIMAL:
+            # 和寫入的資料驗證一致；`1E+999999` 轉 float 會變 inf，存資料庫也會超出精度。
+            self.problem(name, f"要在 -{_UNBOUNDED_TEXT}～{_UNBOUNDED_TEXT} 之間")
             return None
         return number
 
@@ -1232,8 +1283,9 @@ def select_second_annotator(
 @dataclass(frozen=True, slots=True)
 class AnnotatedPaper:
     """論文表的一列。`split` 一律由 DOI 算；`done` 是 status 填了 done；`topics`／`methods` 是排序好
-    的 `key`（status=done 而 `topics` 是空的＝unclassified）。B 的版面沒有的欄是 None（`full_text`
-    是 False、`sample_set` 是摘要層級）。"""
+    的 `key`（status=done 而 `topics` 是空的＝unclassified）。B 的版面沒有 `split`／`set`／
+    `full_text`（`full_text` 是 False、`sample_set` 是摘要層級）。摘要層級而且 done 的論文
+    `is_review_or_meta_analysis` 一定有值。"""
 
     paper_id: uuid.UUID
     doi: str
@@ -1266,11 +1318,11 @@ class AnnotatedPaper:
 
 @dataclass(frozen=True, slots=True)
 class AnnotatedConstruct:
-    """構面表的一列（B 的版面沒有的欄是 None）。"""
+    """構面表的一列（`name_en`、`label_zh` 必填；B 的版面沒有的欄是 None）。"""
 
     paper_id: uuid.UUID
     name_en: str
-    label_zh: str | None
+    label_zh: str
     definition: str | None
     scale_source: str | None
     item_location: str | None
@@ -1316,7 +1368,7 @@ def _detect_layout(
     values: SheetValues | None, taxonomy: Taxonomy, context_values: ContextValues
 ) -> AnnotationLayout:
     layout_a = annotator_a_columns(taxonomy, context_values)
-    layout_b = annotator_b_columns(taxonomy)
+    layout_b = annotator_b_columns(taxonomy, context_values)
     header = {_stripped(cell) for cell in (values[0] if values else ())}
     names_a = {column.name for column in layout_a.papers}
     names_b = {column.name for column in layout_b.papers}
@@ -1372,16 +1424,21 @@ def _parse_paper(
         full_text = bool(row.flag(FULL_TEXT))
         if full_text and chosen_set == SampleSet.CLASSIFICATION_ONLY:
             row.problem(FULL_TEXT, "分類專用的論文不做全文層級")
-        model[IS_REVIEW] = row.flag(IS_REVIEW)
-        for field in ContextField:
-            model[field.value] = row.choice(field.value, context_values.keys(field))
-        model[SAMPLE_SIZE] = row.integer(SAMPLE_SIZE)
-        model[LIMITATIONS] = row.text(LIMITATIONS)
-        model[FUTURE_RESEARCH] = row.text(FUTURE_RESEARCH)
-        if chosen_set == SampleSet.CLASSIFICATION_ONLY:
-            for name in PAPER_MODEL_COLUMNS:
-                if row.has(name):
-                    row.problem(name, "分類專用的論文不填研究模型欄")
+    else:
+        chosen_set = SampleSet.ABSTRACT.value  # B 的論文都是摘要層級
+    model[IS_REVIEW] = row.flag(IS_REVIEW)
+    for field in ContextField:
+        model[field.value] = row.choice(field.value, context_values.keys(field))
+    model[SAMPLE_SIZE] = row.integer(SAMPLE_SIZE)
+    model[LIMITATIONS] = row.text(LIMITATIONS)
+    model[FUTURE_RESEARCH] = row.text(FUTURE_RESEARCH)
+    if chosen_set == SampleSet.CLASSIFICATION_ONLY:
+        for name in PAPER_MODEL_COLUMNS:
+            if row.has(name):
+                row.problem(name, "分類專用的論文不填研究模型欄")
+    elif chosen_set == SampleSet.ABSTRACT and done and not row.has(IS_REVIEW):
+        # FR-3 的 `is_review_or_meta_analysis` 是必填的 bool；空白會讓金標準悄悄少一個樣本。
+        row.problem(IS_REVIEW, "摘要層級的論文標完（status=done）要填")
     info = _PaperInfo(sample_set, full_text or row.failed, full_text and done, {})
     if row.failed or paper_id is None or dois is None:
         return paper_id, None, info
@@ -1480,7 +1537,8 @@ def parse_annotation_workbook(
             if info is not None and info.sample_set is SampleSet.CLASSIFICATION_ONLY:
                 row.problem(PAPER_ID, "分類專用的論文不能有構面列")
             name_en = row.text(NAME_EN, required=True)
-            label_zh = row.text(LABEL_ZH)
+            # FR-3 `ConstructOutput.label_zh` 是必填字串。
+            label_zh = row.text(LABEL_ZH, required=True)
             definition = row.text(DEFINITION)
             scale_source = row.text(SCALE_SOURCE) if is_a else None
             item_location = row.text(ITEM_LOCATION) if is_a else None
@@ -1496,7 +1554,7 @@ def parse_annotation_workbook(
                     )
                 else:
                     info.constructs[key] = (number, name_en)
-            if row.failed or paper_id is None or name_en is None:
+            if row.failed or paper_id is None or name_en is None or label_zh is None:
                 continue
             constructs.append(
                 AnnotatedConstruct(

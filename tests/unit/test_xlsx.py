@@ -6,6 +6,7 @@
 
 import io
 import re
+import tracemalloc
 import zipfile
 from decimal import Decimal
 from xml.etree import ElementTree
@@ -448,3 +449,125 @@ def test_error_value_cells_are_rejected_with_position_only() -> None:
     with pytest.raises(XlsxError, match="B5") as caught:
         read_workbook(data)
     assert "#DIV/0!" not in str(caught.value)
+
+
+# --- Opus 審查後補的測試 ----------------------------------------------------------------------
+
+
+def _dense_rows(rows: int, columns: int) -> str:
+    letters = [column_letter(index) for index in range(columns)]
+    return "".join(
+        f'<row r="{row}">'
+        + "".join(f'<c r="{letter}{row}"><v>1</v></c>' for letter in letters)
+        + "</row>"
+        for row in range(1, rows + 1)
+    )
+
+
+def test_too_many_xml_elements_is_rejected_before_parsing() -> None:
+    # 2,100 列 × 100 欄：列數、欄數、位元組都在上限內（zip 不到 1 MB），但元素約 42 萬個；建成樹要
+    # 約 150 MB。要在建樹之前就擋下，記憶體只多用幾 MB。
+    data = _workbook_with_sheet(_dense_rows(2100, 100))
+    assert len(data) < 1024 * 1024
+    tracemalloc.start()
+    try:
+        with pytest.raises(XlsxError, match="檔案太大：XML 元素超過"):
+            read_workbook(data)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert peak < 30 * 1024 * 1024
+
+
+def test_expanded_grid_is_limited() -> None:
+    # 只有兩格，但展開成 20,000 列 × 200 欄（每張表 3,200 萬個位元組的指標）。
+    sheet = (
+        '<row r="1"><c r="A1"><v>1</v></c></row><row r="20000"><c r="GR20000"><v>1</v></c></row>'
+    )
+    with pytest.raises(XlsxError, match="檔案太大：展開後的儲存格"):
+        read_workbook(_workbook_with_sheet(sheet))
+
+
+def test_largest_workbook_within_limits_stays_under_memory_budget() -> None:
+    # 上限內最多的小儲存格（1,980 × 100，約 39.8 萬個元素）：讀得完，而且讀的過程新配置的記憶體
+    # 低於 200 MB（CLI 本身約 110 MB，加起來在 api 容器的 350m 以內；ADR-0045）。
+    data = _workbook_with_sheet(_dense_rows(1980, 100))
+    tracemalloc.start()
+    try:
+        values = read_workbook(data)["s"]
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert (len(values), len(values[0])) == (1980, 100)
+    assert peak < 200 * 1024 * 1024
+
+
+@pytest.mark.parametrize(
+    ("sheet", "match"),
+    [
+        (
+            '<row r="2"><c r="A2"><v>1</v></c></row><row r="2"><c r="B2"><v>2</v></c></row>',
+            "第 2 列的列號重複或順序不對",
+        ),
+        (
+            '<row r="3"><c r="A3"><v>1</v></c></row><row r="2"><c r="A2"><v>2</v></c></row>',
+            "第 2 列的列號重複或順序不對",
+        ),
+        ('<row r="2"><c r="A2"><v>1</v></c><c r="A2"><v>2</v></c></row>', "A2 的儲存格位置重複"),
+        ('<row r="2"><c r="B2"><v>1</v></c><c r="A2"><v>2</v></c></row>', "A2 的儲存格位置重複"),
+        # 沒有 r 的格接在 B2 後面是 C2；接著寫 r="B2" 就是倒退。
+        ('<row r="2"><c r="B2"><v>1</v></c><c><v>2</v></c><c r="B2"><v>3</v></c></row>', "B2"),
+    ],
+    ids=[
+        "same-row-twice",
+        "row-goes-back",
+        "same-cell-twice",
+        "cell-goes-back",
+        "after-positional",
+    ],
+)
+def test_duplicate_or_backward_rows_and_cells_are_rejected(sheet: str, match: str) -> None:
+    with pytest.raises(XlsxError, match=match):
+        read_workbook(_workbook_with_sheet(sheet))
+
+
+def test_ooxml_escapes_are_decoded_when_reading() -> None:
+    shared = (
+        '<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+        "<si><t>line1_x000D_\nline2</t></si>"  # Excel 存歸位字元的寫法
+        "<si><t>a_x005F_x0041_b</t></si>"  # 字面上的 _x0041_
+        "<si><r><t>sm_xD83D_</t></r><r><t>_xDE00_ile</t></r></si>"  # 成對的代理字元
+        "<si><t>nul_x0000_end_xZZZZ_</t></si></sst>"  # 控制字元拿掉；不是十六進位的照留
+    )
+    data = _workbook_with_sheet(
+        '<row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1" t="s"><v>1</v></c>'
+        '<c r="C1" t="s"><v>2</v></c><c r="D1" t="s"><v>3</v></c>'
+        '<c r="E1" t="inlineStr"><is><t>tab_x0009_end</t></is></c>'
+        '<c r="F1" t="str"><v>x_x0041_y</v></c></row>',
+        {"xl/sharedStrings.xml": shared},
+    )
+    assert read_workbook(data)["s"] == (
+        ("line1\r\nline2", "a_x0041_b", "sm\U0001f600ile", "nulend_xZZZZ_", "tab\tend", "xAy"),
+    )
+
+
+def test_literal_escape_text_is_escaped_when_writing() -> None:
+    texts = ["title _x0041_ end", "_x0041_x0042_", "keep_x12_ and _X0041_"]
+    data = write_workbook([Sheet(name="s", rows=[texts])]).data
+    sheet = _members(data)["xl/worksheets/sheet1.xml"].decode()
+    assert "title _x005F_x0041_ end" in sheet
+    assert "_x005F_x0041_x005F_x0042_" in sheet
+    assert "keep_x12_ and _X0041_" in sheet  # 不是 _xHHHH_ 的寫法不動
+    assert read_workbook(data)["s"] == (tuple(texts),)
+
+
+def test_list_rule_error_says_how_long() -> None:
+    items = tuple(f"item_{index:02d}" for index in range(40))
+    with pytest.raises(XlsxError, match=f"合起來 {len(','.join(items))} 個字元，超過"):
+        write_workbook(
+            [
+                Sheet(
+                    name="s", rows=[["a"]], validations=[ColumnValidation(0, 2, 3, ListRule(items))]
+                )
+            ]
+        )

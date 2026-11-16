@@ -48,9 +48,12 @@ from radar.domain.annotations import (
     SampledWorkbook,
     SampleSet,
     annotation_truncated_cells,
+    annotator_a_columns,
+    annotator_b_columns,
     build_annotator_a_workbook,
     build_annotator_b_workbook,
     check_interest,
+    dropdown_problems,
     parse_annotation_workbook,
     read_sampled_papers,
     render_annotation_check,
@@ -1610,6 +1613,13 @@ def _read_sampled(path: Path, what: str) -> SampledWorkbook:
         _fail(f"{what}看不懂，沒有執行：", render_annotation_problems(exc.problems)[1:])
 
 
+def _check_dropdowns(problems: list[str]) -> None:
+    """下拉清單寫不進 Excel（合起來超過 255 字元）：連資料庫、抽樣之前就退出碼 1，寫出是哪一欄。"""
+    if problems:
+        log.error("下拉清單寫不進 Excel，沒有產生標註試算表", problems=problems)
+        _fail("下拉清單寫不進 Excel，沒有產生試算表（改分類表或情境值清單）：", problems)
+
+
 def _write_new_file(path: Path, data: bytes) -> None:
     """排他建立輸出檔（已存在就不寫、退出碼 1）；寫到一半失敗或中斷就刪掉寫了一半的檔。"""
     try:
@@ -1663,8 +1673,8 @@ def annotations_template(
     抽，分類專用從其餘的抽；印 seed、兩組篇數、候選數與各主題篇數（不印標題與摘要）。
 
     參數不對（數量是負數、補抽時兩個數量都是 0、興趣主題不是分類表的主題 key）：退出碼 2，不碰
-    資料庫。設定錯、讀不到資料庫、--extend 的檔讀不了或已經開始標、輸出檔已存在或資料夾不存在：
-    退出碼 1。
+    資料庫。設定錯（含下拉清單寫不進 Excel，連資料庫之前就擋下）、讀不到資料庫、--extend 的檔讀
+    不了或已經開始標、輸出檔已存在或資料夾不存在：退出碼 1。
     Ctrl-C：退出碼 130。
     """
     configure_logging()
@@ -1700,6 +1710,7 @@ def annotations_template(
     except ConfigError as exc:
         log.error("設定錯誤，無法產生標註試算表", problems=exc.problems)
         _fail("設定錯誤，沒有產生試算表：", exc.problems)
+    _check_dropdowns(dropdown_problems(annotator_a_columns(taxonomy, context_values)))
     try:
         database = build_database(settings, pool_size=database_pool_size(settings, "cli"))
         result = prepare_annotation_sample(
@@ -1719,6 +1730,10 @@ def annotations_template(
         raise typer.Exit(INTERRUPTED_EXIT_CODE) from None
     except typer.Exit:
         raise
+    except XlsxError as exc:
+        # XlsxError 的訊息照設計不帶儲存格內容，可以直接印。
+        log.error("產生標註試算表失敗", error_type=type(exc).__name__, reason=str(exc))
+        _fail(f"產生試算表失敗：{exc}", [])
     except Exception as exc:
         # 例外訊息可能含主機與帳號，只記類別名稱。
         log.error("產生標註試算表失敗", error_type=type(exc).__name__)
@@ -1741,31 +1756,33 @@ def annotations_template_b(
         int, typer.Option("--count", help="給標註者 B 幾篇（只從摘要層級抽）")
     ] = DEFAULT_SECOND_ANNOTATOR_COUNT,
 ) -> None:
-    """從 A 的試算表的摘要層級列依 seed 抽 N 篇，產生標註者 B 的空白試算表（只有主題、方法、構面與
-    假設欄，沒有 A 的任何答案）。不連資料庫。
+    """從 A 的試算表的摘要層級列依 seed 抽 N 篇，產生標註者 B 的空白試算表（主題、方法、論文層級的
+    研究模型欄、構面與假設欄，全部空白；沒有 A 的任何答案）。不連資料庫。
 
-    --count 不是 1 以上：退出碼 2。A 的試算表讀不了或沒有摘要層級的列、輸出檔已存在或資料夾不存在：
-    退出碼 1。Ctrl-C：退出碼 130。
+    --count 不是 1 以上：退出碼 2。設定錯（含下拉清單寫不進 Excel）、A 的試算表讀不了或沒有摘要
+    層級的列、輸出檔已存在或資料夾不存在：退出碼 1。Ctrl-C：退出碼 130。
     """
     configure_logging()
     if count < 1:
         _annotation_args_error("--count 要是 1 以上的整數")
     try:
         taxonomy = load_taxonomy()
+        context_values = load_context_values()
     except ConfigError as exc:
         _fail("設定錯誤，沒有產生試算表：", exc.problems)
+    _check_dropdowns(dropdown_problems(annotator_b_columns(taxonomy, context_values)))
     _check_output_free(out)
     try:
         sampled = _read_sampled(source, "--from 的試算表")
         selected = select_second_annotator(sampled.rows, count, seed)
         if not selected:
             _fail("A 的試算表沒有摘要層級的列，沒有產生標註者 B 的試算表", [])
-        _write_new_file(out, build_annotator_b_workbook(selected, taxonomy))
+        _write_new_file(out, build_annotator_b_workbook(selected, taxonomy, context_values))
     except KeyboardInterrupt:
         typer.echo("中斷了（沒有寫輸出檔）", err=True)
         raise typer.Exit(INTERRUPTED_EXIT_CODE) from None
     except XlsxError as exc:
-        _fail(f"產生試算表失敗（{type(exc).__name__}）", [])
+        _fail(f"產生試算表失敗：{exc}", [])
     available = sum(row.sample_set is SampleSet.ABSTRACT for row in sampled.rows)
     log.info("標註者 B 抽樣", seed=seed, requested=count, available=available, drawn=len(selected))
     for line in render_second_annotator(seed, selected, available, count):

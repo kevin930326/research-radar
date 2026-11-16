@@ -360,7 +360,8 @@ def test_template_b_from_a(env: Path, papers: list[uuid.UUID], tmp_path: Path) -
     abstract_ids = {row.paper_id for row in a_rows if row.sample_set is SampleSet.ABSTRACT}
     assert {paper.paper_id for paper in workbook.papers} == abstract_ids
     header = read_workbook(b_file.read_bytes())[PAPERS_SHEET][0]
-    assert not {"split", "set", "full_text", "country"} & set(header)
+    assert not {"split", "set", "full_text"} & set(header)
+    assert {"is_review_or_meta_analysis", "country", "limitations"} <= set(header)
     assert "Annotation study" not in result.output
 
     again = _run("template-b", "--from", str(a_file), "--seed", "3", "--out", str(b_file))
@@ -509,3 +510,40 @@ def test_template_default_counts(env: Path, papers: list[uuid.UUID], tmp_path: P
     lines = _stdout(result)
     assert any(line.startswith("摘要層級：") and "要 50 篇" in line for line in lines)
     assert any(line.startswith("分類專用：") and "要 100 篇" in line for line in lines)
+
+
+# --- Opus 審查後補的測試 ----------------------------------------------------------------------
+
+
+def test_too_long_dropdown_fails_before_database(
+    offline_env: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    environ = {"RADAR_CONFIG_DIR": str(offline_env)}
+    context = load_context_values(environ)
+    designs = tuple(
+        item.model_copy(update={"key": f"research_design_option_{index:02d}"})
+        for index, item in enumerate(context.research_designs * 2)
+    )
+    long_context = context.model_copy(update={"research_designs": designs})
+    length = len(",".join(item.key for item in designs))
+    assert length > 255
+    a_file = _a_file(tmp_path, offline_env, [SampleSet.ABSTRACT])  # 用原本的清單先產生 A
+
+    def must_not_run(*args: object, **kwargs: object) -> None:
+        raise AssertionError("不該抽樣或連資料庫")
+
+    monkeypatch.setattr(cli, "load_context_values", lambda *args: long_context)
+    monkeypatch.setattr(cli, "prepare_annotation_sample", must_not_run)
+    expected = f"論文表的 research_design 欄：下拉選項合起來 {length} 個字元，超過 Excel 的上限 255"
+
+    result = _template(tmp_path / "A.xlsx")
+    assert result.exit_code == 1, result.output
+    assert expected in result.output
+    assert not (tmp_path / "A.xlsx").exists()
+
+    b_result = _run(
+        "template-b", "--from", str(a_file), "--seed", "3", "--out", str(tmp_path / "B.xlsx")
+    )
+    assert b_result.exit_code == 1, b_result.output
+    assert expected in b_result.output
+    assert not (tmp_path / "B.xlsx").exists()

@@ -13,8 +13,13 @@ xlsx 是一個 zip，裡面是幾份 XML。這裡只做標註試算表需要的�
   讀 Excel、LibreOffice、Google 試算表常見的存法：`sharedStrings.xml`（含 rich text）、`inlineStr`、
   `str`、`n`、`b`（`e` 錯誤值拒收）；沒有 `r` 屬性的列與格依位置。回傳每張表的二維值
   （`str | Decimal | bool | None`）。
+- **`_xHHHH_` 跳脫**（OOXML 的字串寫法，例如 Excel 把歸位字元存成 `_x000D_`）：讀的時候解回字元
+  （`_x005F_` 是 `_`）；寫的時候字面上的 `_xHHHH_` 前面的 `_` 寫成 `_x005F_`，Excel 才會照原文顯示。
 
 讀的時候不信任檔案：檔案大小、成員數、每個成員與合計的解壓大小、每張表的列數與欄數都有上限；
+解析 XML **之前**先數元素數（所有 XML 加總），解析完再看展開後的儲存格總數（每張表列數 × 欄數，
+所有表加總），超過就丟「檔案太大」——`ElementTree` 建樹約是 XML 大小的 25 倍，只限位元組不夠
+（ADR-0045）。列號與同一列的欄號要嚴格遞增（重複或倒退就拒收，不默默合併或覆蓋）。
 任何 XML 含 `<!DOCTYPE` 或 `<!ENTITY` 直接拒收（不展開實體）；不是 UTF-8 的 XML 也拒收。錯了丟
 `XlsxError`，訊息不帶儲存格內容。
 """
@@ -36,13 +41,18 @@ MAX_CELL_CHARS: Final = 32_767
 # 清單驗證寫成 `"a,b,c"` 時，引號裡最多 255 個字元（Excel 的限制）。
 MAX_LIST_CHARS: Final = 255
 
-# 讀取的上限。
-MAX_FILE_BYTES: Final = 20 * 1024 * 1024
+# 讀取的上限。真的標註檔（150 篇含摘要、構面與假設各幾百列）解壓後約 0.2～1 MB、幾萬個元素；
+# 上限都留十倍以上的餘裕，同時讓最壞的檔在 api 容器（`mem_limit` 350m）裡讀得完（ADR-0045）。
+MAX_FILE_BYTES: Final = 10 * 1024 * 1024
 MAX_MEMBERS: Final = 200
-MAX_MEMBER_BYTES: Final = 50 * 1024 * 1024
-MAX_TOTAL_BYTES: Final = 100 * 1024 * 1024
+MAX_MEMBER_BYTES: Final = 8 * 1024 * 1024
+MAX_TOTAL_BYTES: Final = 16 * 1024 * 1024
 MAX_ROWS: Final = 20_000
 MAX_COLUMNS: Final = 200
+# 所有 XML 的元素（開始標籤）加總；解析前數。
+MAX_XML_ELEMENTS: Final = 400_000
+# 展開後的儲存格總數（每張表的列數 × 欄數，所有表加總）。
+MAX_GRID_CELLS: Final = 300_000
 
 _MAIN_NS: Final = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 _REL_NS: Final = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
@@ -60,11 +70,15 @@ _XML_INVALID: Final = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\ud800-\udfff￾￿
 _CELL_REF: Final = re.compile(r"([A-Z]{1,3})([0-9]{1,7})")
 _ENCODING_DECL: Final = re.compile(rb"""^\s*<\?xml[^>]*encoding\s*=\s*["']([^"']+)["']""")
 _FORBIDDEN_XML: Final = ("<!DOCTYPE", "<!ENTITY")
-# 沒有上下限的小數驗證用的邊界（寫成純數字，遠短於 Excel 公式 255 字元的限制）。
-_UNBOUNDED_DECIMAL: Final = Decimal(1_000_000_000_000_000)
+# 沒有上下限的小數驗證用的邊界（寫成純數字，遠短於 Excel 公式 255 字元的限制）；解析端也用同一個
+# 邊界（`domain/annotations.py`），兩邊才一致。
+UNBOUNDED_DECIMAL: Final = Decimal(1_000_000_000_000_000)
 # 列號最多 7 位數（`MAX_ROWS` 遠小於這個）。
 _MAX_ROW_DIGITS: Final = 7
 _SHEET_NAME_FORBIDDEN: Final = re.compile(r"[\\/?*\[\]:]")
+# OOXML 字串的跳脫（`_x000D_`）；寫的時候字面上的這種寫法前面的 `_` 要跳脫成 `_x005F_`。
+_ESCAPED_CHAR: Final = re.compile("_x([0-9A-Fa-f]{4})_")
+_LITERAL_ESCAPE: Final = re.compile("_(?=x[0-9A-Fa-f]{4}_)")
 
 type CellValue = str | Decimal | bool | None
 type WriteValue = str | int | Decimal | None
@@ -202,8 +216,15 @@ def _formula_list(items: tuple[str, ...]) -> str:
             raise XlsxError("下拉清單的選項不能是空的，也不能有逗號、雙引號或控制字元")
     joined = ",".join(items)
     if len(joined) > MAX_LIST_CHARS:
-        raise XlsxError(f"下拉清單的選項合起來超過 {MAX_LIST_CHARS} 個字元")
+        raise XlsxError(
+            f"下拉清單的選項合起來 {len(joined)} 個字元，超過 Excel 的上限 {MAX_LIST_CHARS}"
+        )
     return f'"{joined}"'
+
+
+def list_formula_chars(items: Sequence[str]) -> int:
+    """下拉清單寫成 `"a,b,c"` 時引號裡的字元數（要 ≤ `MAX_LIST_CHARS`）。"""
+    return len(",".join(items))
 
 
 def _validation_xml(validation: ColumnValidation, sheet_names: frozenset[str]) -> str:
@@ -250,7 +271,7 @@ def _validation_xml(validation: ColumnValidation, sheet_names: frozenset[str]) -
                 # 沒有上下限：只要求是數字（Excel 的 decimal 驗證一定要有範圍；公式最多 255 字元，
                 # 所以用短的邊界）。
                 operator = "between"
-                formulas = (-_UNBOUNDED_DECIMAL, _UNBOUNDED_DECIMAL)
+                formulas = (-UNBOUNDED_DECIMAL, UNBOUNDED_DECIMAL)
             body = "".join(
                 f"<formula{index}>{_number_text(value)}</formula{index}>"
                 for index, value in enumerate(formulas, start=1)
@@ -269,11 +290,16 @@ def _cell_xml(reference: str, value: WriteValue, style: int) -> tuple[str, bool]
         text, truncated = clean_cell_text(value)
         return (
             f'<c r="{reference}"{style_attr} t="inlineStr"><is>'
-            f'<t xml:space="preserve">{escape(text)}</t></is></c>'
+            f'<t xml:space="preserve">{escape(_escape_literal(text))}</t></is></c>'
         ), truncated
     if isinstance(value, (int, Decimal)) and not isinstance(value, bool):
         return f'<c r="{reference}"{style_attr}><v>{_number_text(value)}</v></c>', False
     raise XlsxError("儲存格只收 str、int、Decimal 或 None")
+
+
+def _escape_literal(text: str) -> str:
+    """字面上的 `_xHHHH_` 前面的 `_` 寫成 `_x005F_`（否則 Excel 會把它當跳脫解成別的字元）。"""
+    return _LITERAL_ESCAPE.sub("_x005F_", text) if "_x" in text else text
 
 
 def _sheet_xml(sheet: Sheet, sheet_names: frozenset[str]) -> tuple[str, int]:
@@ -452,7 +478,7 @@ class _Archive:
 
     def __init__(self, data: bytes) -> None:
         if len(data) > MAX_FILE_BYTES:
-            raise XlsxError(f"檔案超過 {MAX_FILE_BYTES // (1024 * 1024)} MB")
+            raise XlsxError(f"檔案太大：超過 {MAX_FILE_BYTES // (1024 * 1024)} MB")
         try:
             self._zip = zipfile.ZipFile(io.BytesIO(data))
             infos = self._zip.infolist()
@@ -462,8 +488,9 @@ class _Archive:
             raise XlsxError(f"zip 裡的檔案超過 {MAX_MEMBERS} 個")
         self._infos = {info.filename: info for info in infos}
         if sum(info.file_size for info in infos) > MAX_TOTAL_BYTES:
-            raise XlsxError("zip 解壓後太大")
+            raise XlsxError(_TOO_LARGE_TOTAL)
         self._read_total = 0
+        self._elements = 0
 
     def has(self, name: str) -> bool:
         return name in self._infos
@@ -473,7 +500,7 @@ class _Archive:
         if info is None:
             raise XlsxError(f"xlsx 裡缺少 {name}")
         if info.file_size > MAX_MEMBER_BYTES:
-            raise XlsxError("zip 裡有檔案解壓後太大")
+            raise XlsxError(_TOO_LARGE_MEMBER)
         try:
             with self._zip.open(info) as member:
                 content = member.read(MAX_MEMBER_BYTES + 1)
@@ -489,11 +516,27 @@ class _Archive:
         except RuntimeError:  # 加密的成員
             raise XlsxError(f"讀不出 {name}（加密）") from None
         if len(content) > MAX_MEMBER_BYTES:
-            raise XlsxError("zip 裡有檔案解壓後太大")
+            raise XlsxError(_TOO_LARGE_MEMBER)
         self._read_total += len(content)
         if self._read_total > MAX_TOTAL_BYTES:
-            raise XlsxError("zip 解壓後太大")
+            raise XlsxError(_TOO_LARGE_TOTAL)
+        # 建樹之前先數元素：樹的記憶體約和元素數成正比（每個幾百位元組），不能等建完才擋。
+        self._elements += _element_count(content)
+        if self._elements > MAX_XML_ELEMENTS:
+            raise XlsxError(f"檔案太大：XML 元素超過 {MAX_XML_ELEMENTS:,} 個")
         return _parse_xml(content, name)
+
+
+_MIB: Final = 1024 * 1024
+_TOO_LARGE_MEMBER: Final = f"檔案太大：zip 裡有檔案解壓後超過 {MAX_MEMBER_BYTES // _MIB} MB"
+_TOO_LARGE_TOTAL: Final = f"檔案太大：zip 解壓後合計超過 {MAX_TOTAL_BYTES // _MIB} MB"
+
+
+def _element_count(content: bytes) -> int:
+    """元素（開始標籤）數的上界：`<` 的個數扣掉結束標籤 `</`、處理指令 `<?`、`<!`。合法的 XML
+    文字裡的 `<` 一定寫成 `&lt;`，只有註解與 CDATA 裡的會多算（多算只會更早擋下）。用
+    `bytes.count`，不配置任何物件。"""
+    return content.count(b"<") - content.count(b"</") - content.count(b"<?") - content.count(b"<!")
 
 
 def _parse_xml(content: bytes, name: str) -> ElementTree.Element:
@@ -539,8 +582,19 @@ def _relationships(archive: _Archive, path: str) -> dict[str, tuple[str, str]]:
     return found
 
 
+def _unescape(text: str) -> str:
+    """解 OOXML 的 `_xHHHH_` 跳脫（`_x005F_` 是 `_`）。成對的代理字元（`_xD83D__xDE00_`）合成一個
+    字元；不成對的代理字元與 XML 不允許的控制字元拿掉（和寫的時候一樣）。"""
+    if "_x" not in text:
+        return text
+    decoded = _ESCAPED_CHAR.sub(lambda match: chr(int(match.group(1), 16)), text)
+    merged = decoded.encode("utf-16-le", "surrogatepass").decode("utf-16-le", "surrogatepass")
+    return _XML_INVALID.sub("", merged)
+
+
 def _text_of(element: ElementTree.Element) -> str:
-    """`<si>`／`<is>` 的文字：直接的 `<t>` 與 rich text 的 `<r><t>`（不含注音 `<rPh>`）。"""
+    """`<si>`／`<is>` 的文字：直接的 `<t>` 與 rich text 的 `<r><t>`（不含注音 `<rPh>`）；解
+    `_xHHHH_` 跳脫。"""
     parts: list[str] = []
     for child in element:
         tag = _local(child.tag)
@@ -548,7 +602,7 @@ def _text_of(element: ElementTree.Element) -> str:
             parts.append(child.text or "")
         elif tag == "r":
             parts.extend(t.text or "" for t in child if _local(t.tag) == "t")
-    return "".join(parts)
+    return _unescape("".join(parts))
 
 
 def _shared_strings(archive: _Archive, path: str | None) -> list[str]:
@@ -588,7 +642,9 @@ def _cell_value(cell: ElementTree.Element, shared: list[str], where: str) -> Cel
                 raise XlsxError(f"{where} 共用字串的索引不對") from None
         case "e":
             raise XlsxError(f"{where} 是錯誤值（例如 #N/A、#REF!），請改成實際的值")
-        case "str" | "d":
+        case "str":
+            return _unescape(raw)
+        case "d":
             return raw
         case "b":
             if raw.strip() not in ("0", "1"):
@@ -607,7 +663,8 @@ def _column_index(letters: str) -> int:
     return number - 1
 
 
-def _sheet_values(root: ElementTree.Element, shared: list[str]) -> SheetValues:
+def _sheet_values(root: ElementTree.Element, shared: list[str], max_cells: int) -> SheetValues:
+    """一張表的二維值；列數 × 欄數超過 `max_cells`（全活頁簿剩下的額度）就丟「檔案太大」。"""
     data = next((child for child in root if _local(child.tag) == "sheetData"), None)
     if data is None:
         return ()
@@ -626,8 +683,12 @@ def _sheet_values(root: ElementTree.Element, shared: list[str]) -> SheetValues:
             row_number = int(row_ref)
         if row_number < 1 or row_number > MAX_ROWS:
             raise XlsxError(f"一張表最多 {MAX_ROWS} 列")
+        if row_number < next_row:
+            # Excel、LibreOffice、Google 試算表都照順序存；重複或倒退只會是壞掉或被改過的檔。
+            raise XlsxError(f"第 {row_number} 列的列號重複或順序不對")
         next_row = row_number + 1
-        values = cells.setdefault(row_number, {})
+        values: dict[int, CellValue] = {}
+        cells[row_number] = values
         next_column = 0
         for cell in row:
             if _local(cell.tag) != "c":
@@ -644,12 +705,16 @@ def _sheet_values(root: ElementTree.Element, shared: list[str]) -> SheetValues:
                 column = _column_index(match.group(1))
             if column >= MAX_COLUMNS:
                 raise XlsxError(f"一張表最多 {MAX_COLUMNS} 欄")
+            if column < next_column:
+                raise XlsxError(f"{column_letter(column)}{row_number} 的儲存格位置重複或順序不對")
             next_column = column + 1
             value = _cell_value(cell, shared, f"{column_letter(column)}{row_number}")
             if value is not None:
                 values[column] = value
                 width = max(width, column + 1)
     height = max((number for number, values in cells.items() if values), default=0)
+    if height * width > max_cells:
+        raise XlsxError(f"檔案太大：展開後的儲存格（列數 × 欄數）超過 {MAX_GRID_CELLS:,} 格")
     return tuple(
         tuple(cells.get(number, {}).get(column) for column in range(width))
         for number in range(1, height + 1)
@@ -661,7 +726,8 @@ def read_workbook(data: bytes) -> Mapping[str, SheetValues]:
     的順序。
 
     Raises:
-        XlsxError: 不是 xlsx、超過上限、XML 含 DOCTYPE／ENTITY 或不是 UTF-8、結構看不懂。
+        XlsxError: 不是 xlsx、超過上限（「檔案太大」）、XML 含 DOCTYPE／ENTITY 或不是 UTF-8、結構
+            看不懂（含列號或儲存格位置重複、倒退）。
     """
     if not isinstance(data, bytes):
         raise XlsxError("要傳 bytes")
@@ -685,6 +751,7 @@ def read_workbook(data: bytes) -> Mapping[str, SheetValues]:
     if sheets_element is None:
         raise XlsxError("活頁簿裡沒有工作表")
     result: dict[str, SheetValues] = {}
+    grid_cells = 0
     for sheet in sheets_element:
         if _local(sheet.tag) != "sheet":
             continue
@@ -697,5 +764,7 @@ def read_workbook(data: bytes) -> Mapping[str, SheetValues]:
             continue  # 圖表頁等不是工作表的
         if name in result:
             raise XlsxError("工作表名稱重複")
-        result[name] = _sheet_values(archive.read_xml(target), shared)
+        values = _sheet_values(archive.read_xml(target), shared, MAX_GRID_CELLS - grid_cells)
+        grid_cells += len(values) * (len(values[0]) if values else 0)
+        result[name] = values
     return result
