@@ -37,7 +37,7 @@ from radar.domain.auth import (
 )
 from radar.repo.models import Base
 
-# --- 表的定義（`alembic check` 拿來和資料庫比對；遷移 0020 建表） -----------------------------
+# --- 表的定義（`alembic check` 拿來和資料庫比對；遷移 0019 建表） -----------------------------
 
 session_table = Table(
     "session",

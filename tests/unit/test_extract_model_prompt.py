@@ -1,4 +1,4 @@
-"""正式 prompt `prompts/extract_model/v1.md`（Story 2.6、ADR-0034）：
+"""正式 prompt `prompts/extract_model/v2.md`（Story 2.6、ADR-0034；v2 是 0-A、ADR-0039）：
 
 - 讀得過、雜湊對得上登記、schema 是 `ResearchModelOutput`、設定區照 spec（low、2560、不思考）。
 - 本文沒有變數，寫到原句逐字照抄、沒提到給 null、四條擷取規則、只能用清單裡的 key、文件是資料。
@@ -88,8 +88,8 @@ def _example_line(label: str) -> str:
 def test_real_prompt_loads_with_the_registered_hash_and_schema() -> None:
     prompt = load_prompt(PROMPTS, LlmTask.EXTRACT_MODEL)
 
-    assert prompt_hashes.CURRENT_PROMPT_VERSIONS["extract_model"] == 1
-    assert prompt.version == 1
+    assert prompt_hashes.CURRENT_PROMPT_VERSIONS["extract_model"] == 2
+    assert prompt.version == 2
     assert prompt.schema_class is ResearchModelOutput
     assert prompt.settings.effort == "low"
     assert prompt.settings.max_tokens == 2560
@@ -239,3 +239,25 @@ def test_example_answer_passes_validation_with_zero_counts() -> None:
     assert len(content.hypotheses) >= 2
     # 範例示範「同一句拆成多條關係」：兩條共用同一句原句。
     assert len({item.sentence_sha256 for item in content.hypotheses}) < len(content.hypotheses)
+
+
+def test_rule_5_asks_for_the_full_number_and_null_for_abbreviations() -> None:
+    # 0-A（2.6 決定 13 選 B）：和 `structured_numbers` 一致——英文單位詞要乘開、字母縮寫填 null。
+    (rule,) = [line for line in BODY.splitlines() if line.startswith("5. ")]
+    for required in ("完整的數", "12 million 寫 12000000", "12M", "10k", "填 null"):
+        assert required in rule, required
+    assert "不換算" not in rule
+
+
+def test_rule_7_explains_how_a_result_quote_matches_the_relation() -> None:
+    # 0-A（2.6 決定 14 選 B）：和驗證器一致——因或果（含縮寫）、原句的假設代號、全部假設。
+    for required in ("縮寫", "代號", "H1 was supported", "All hypotheses were supported"):
+        assert required in BODY, required
+
+
+def test_v1_is_kept_and_still_registered() -> None:
+    # 登記只增不改：v1 的檔與雜湊都留著（歷史結果的來歷要查得到）。
+    v1 = PROMPTS / "extract_model" / "v1.md"
+    assert v1.exists()
+    assert 1 in prompt_hashes.PROMPT_FILE_HASHES["extract_model"]
+    assert "照原本的值寫，不換算" in v1.read_text(encoding="utf-8")

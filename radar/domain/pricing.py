@@ -9,6 +9,8 @@
 - 快取讀取 = 輸入價 × `cache_read_multiplier`；快取寫入 = 輸入價 × `cache_write_multiplier`
   （回應不分 5 分鐘／1 小時，本專案不設快取，保守按 1 小時的 2 倍算）。
 - Batch：整次乘 `batch_multiplier`（五折）。
+- `max_call_cost`：還沒呼叫前的保守上限（估計輸入 token × 輸入價＋`max_tokens` × 輸出價），Batch
+  送出前預留預算用（Story 2.9、ADR-0041）；無條件進位到 6 位小數。
 
 輸入 token 估計是離線的保守估計（不呼叫 `count_tokens`）：UTF-8 位元組數 ÷ `bytes_per_token`
 ＋固定開銷，無條件進位。
@@ -17,7 +19,7 @@
 import math
 from collections.abc import Mapping, Sequence
 from datetime import date
-from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
+from decimal import ROUND_CEILING, ROUND_HALF_UP, Decimal, InvalidOperation
 from enum import StrEnum
 from typing import Annotated, Final, Self
 
@@ -177,6 +179,43 @@ def llm_call_cost(config: ModelsConfig, model: str, usage: LlmUsage, *, is_batch
     if is_batch:
         raw *= config.batch_multiplier
     return LlmCost(cost_usd=raw.quantize(COST_QUANTUM, rounding=ROUND_HALF_UP), price_tier=tier)
+
+
+def max_call_cost(
+    config: ModelsConfig,
+    model: str,
+    estimated_input_tokens: int,
+    max_tokens: int,
+    *,
+    is_batch: bool,
+) -> Decimal:
+    """一次呼叫最多花多少（美元，無條件進位到 6 位小數）：估計的輸入 token（`estimate_input_tokens`
+    的保守估計）× 輸入價＋`max_tokens`（輸出最多這麼多）× 輸出價；估計輸入超過
+    `long_context_threshold_tokens` 時兩邊都改用長上下文價；Batch 再乘 `batch_multiplier`。
+
+    不設快取（本專案不用 prompt 快取），所以沒有快取寫入的 2 倍。
+
+    Raises:
+        KeyError: `model` 不在價格表。
+        ValueError: `estimated_input_tokens` 不是 ≥ 0 的整數，或 `max_tokens` 不是 ≥ 1 的整數。
+    """
+    if type(estimated_input_tokens) is not int or estimated_input_tokens < 0:
+        raise ValueError("estimated_input_tokens 要是不小於 0 的整數")
+    if type(max_tokens) is not int or max_tokens < 1:
+        raise ValueError("max_tokens 要是不小於 1 的整數")
+    price = config.models[model]
+    if estimated_input_tokens > config.long_context_threshold_tokens:
+        input_price = price.long_context_input_usd_per_mtok
+        output_price = price.long_context_output_usd_per_mtok
+    else:
+        input_price = price.input_usd_per_mtok
+        output_price = price.output_usd_per_mtok
+    raw = (
+        Decimal(estimated_input_tokens) * input_price + Decimal(max_tokens) * output_price
+    ) / TOKENS_PER_PRICE_UNIT
+    if is_batch:
+        raw *= config.batch_multiplier
+    return raw.quantize(COST_QUANTUM, rounding=ROUND_CEILING)
 
 
 def estimate_input_tokens(texts: Sequence[str], estimate: TokenEstimate) -> int:

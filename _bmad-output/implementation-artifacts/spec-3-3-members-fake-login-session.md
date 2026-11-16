@@ -26,7 +26,7 @@ deferred:
     evidence: |-
       email 與 member 的對應只存在 allowed_email；這個 Story 沒有移出路徑，Story 7.2 做 revoke 時要決定軟刪除或保留對應。
     location: >-
-      radar/repo/members.py、migrations/versions/0020_members_sessions.py
+      radar/repo/members.py、migrations/versions/0019_members_sessions.py
     severity: medium
   - summary: >-
       Epic 7 前半段測試由測試自己呼叫 create_judgment_event，文獻庫那一半沒測。
@@ -50,13 +50,13 @@ deferred:
 
 **Problem:** 還沒有成員、允許名單與登入狀態，所以成員頁面（3.5 起）沒辦法開發，試用主機（3.19）也沒有安全的登入方式；Epic 7 的 Google 登入之前，需要一個只在開發與試用環境能開、正式環境一律拒絕的假登入。
 
-**Approach:** 遷移 0020 新增 `member`、`allowed_email`、`session` 三張表；`radar members allow`／`set-admin` 建立成員並寫稽核；session 照 ADR-0008（256 位元 token、只存 SHA-256、`__Host-radar_session`、閒置 14 天／最長 30 天）；api 加 `GET /api/v1/me`、`POST /api/v1/auth/logout`，假登入開著時才加 `GET`／`POST /api/v1/auth/fake-login`；開發環境選人登入，試用環境驗 `Cf-Access-Jwt-Assertion`（joserfc、只收 RS256、公鑰取得是注入的函式）後只登入管理者；設定組合不合法時 api 不啟動並印出原因。
+**Approach:** 遷移 0019（原本是 0020）新增 `member`、`allowed_email`、`session` 三張表；`radar members allow`／`set-admin` 建立成員並寫稽核；session 照 ADR-0008（256 位元 token、只存 SHA-256、`__Host-radar_session`、閒置 14 天／最長 30 天）；api 加 `GET /api/v1/me`、`POST /api/v1/auth/logout`，假登入開著時才加 `GET`／`POST /api/v1/auth/fake-login`；開發環境選人登入，試用環境驗 `Cf-Access-Jwt-Assertion`（joserfc、只收 RS256、公鑰取得是注入的函式）後只登入管理者；設定組合不合法時 api 不啟動並印出原因。
 
 ## Boundaries & Constraints
 
 **Always:**
 - 只在 worktree `/Users/kevin/Documents/research-radar/.claude/worktrees/epic3b` 做；本機 pytest 一律加 `RADAR_TEST_ADMIN_DATABASE_URL=postgresql://postgres@127.0.0.1:1/postgres`；需要資料庫的測試靠 CI。
-- 遷移 0020（`down_revision = "0014"`），只建新表，不改任何既有的表（含 `judgment_event.member_id`、`audit_event` 的結構）。ADR 從 0046 起，狀態「提議」。
+- 遷移 0020（`down_revision = "0014"`；2026-11-16 合併 Epic 2 後改號成 0019、`down_revision = "0018"`），只建新表，不改任何既有的表（含 `judgment_event.member_id`、`audit_event` 的結構）。ADR 從 0046 起，狀態「提議」。
 - 和另一條線共用的檔只加最少的行、盡量加在尾端：`radar/config.py`（尾端加 `load_auth_settings`）、`radar/entrypoints/cli/__init__.py`（一行 import＋一行 `add_typer`）、`radar/entrypoints/bootstrap.py`、`migrations/env.py`、`radar/domain/errors.py`、`.env.example`、`docs/adr/README.md`、`docs/glossary.md`、`sprint-status.yaml`。不改 `config/` 的 YAML、`radar/adapters/anthropic`、向量、Batch 相關的檔。
 - 管理者 email 只從 `RADAR_ADMIN_EMAIL` 讀（`SecretStr`）；日誌、CLI 輸出、API 回應都不出現任何 email，只記成員 ID。測試成員一律 `*@example.com`、假名字。
 - joserfc 只在 `radar/adapters/`；api 行程只有試用環境才 import 它（bootstrap 裡延後 import，`mem_limit` 緊）。
@@ -115,8 +115,8 @@ deferred:
 
 **Execution:**
 - `pyproject.toml`、`uv.lock` -- 加 `joserfc==1.8.0`（ADR-0008：不低於 1.7.7）。
-- `migrations/versions/0020_members_sessions.py` -- 建 `member`（`display_name` 非空白≤100、`is_admin`、`google_sub` 可空 UNIQUE、`first_login_at`、`created_at`）、`allowed_email`（`email` UNIQUE、小寫且像 email 的 CHECK、`member_id` UNIQUE 外鍵）、`session`（`member_id` 外鍵＋索引、`token_sha256` bytea 32 位元組 UNIQUE、`created_at`、`last_seen_at`）。可降版。docstring 寫明 0015～0019 保留、合併後改接。
-- `tests/arch/test_migrations.py` -- 只加一個「保留的空號」清單：0020 的 `down_revision` 准許是 0014（理由：0015～0019 保留給另一條線，合併時由規劃端改接 0019 並刪掉這一項）；其餘規則不動。（改既有測試，PR 說明列理由。）
+- `migrations/versions/0019_members_sessions.py`（原本是 0020）-- 建 `member`（`display_name` 非空白≤100、`is_admin`、`google_sub` 可空 UNIQUE、`first_login_at`、`created_at`）、`allowed_email`（`email` UNIQUE、小寫且像 email 的 CHECK、`member_id` UNIQUE 外鍵）、`session`（`member_id` 外鍵＋索引、`token_sha256` bytea 32 位元組 UNIQUE、`created_at`、`last_seen_at`）。可降版。docstring 寫明 0015～0019 保留、合併後改接。
+- `tests/arch/test_migrations.py` -- 只加一個「保留的空號」清單：0020 的 `down_revision` 准許是 0014（理由：0015～0019 保留給另一條線，合併時由規劃端改接 0019 並刪掉這一項）；其餘規則不動。（改既有測試，PR 說明列理由。2026-11-16 合併前改接時已刪掉，這個測試回到 main 的寫法。）
 - `radar/domain/auth_settings.py` -- `Environment`（development／trial／production，預設 production）、`AuthSettings`（假登入、Google 登入旗標、管理者 email、Access team 網域與 audience、站台來源、閒置與最長天數）、`auth_settings_problems(settings, env_name)`、`allowed_origins`、`session_policy`、`fake_login_mode`。
 - `radar/config.py` -- 尾端加 `load_auth_settings(environ)`：讀 `AuthSettings`、組合有問題就丟 `ConfigError`。
 - `radar/domain/auth.py` -- session token（`secrets.token_urlsafe(32)`、格式檢查、SHA-256）、`SessionPolicy`、`normalize_email`、`check_display_name`、`safe_next_path`、`FakeLoginRequest`、`ChosenMember`／`VerifiedEmail`、`LoginRejection`＋`LoginRejectedError`、`AdminMemberMissingError`（訊息是兩個指令，email 用佔位字）、`AuthenticatedMember`、`MemberSummary`、`NewSession`、`AllowedMember`。
@@ -213,7 +213,7 @@ deferred:
 
 ## Auto Run Result
 
-**做了什麼：** 遷移 0020（接 0014）建 `member`、`allowed_email`、`session`；`radar members allow／set-admin`（`SystemViewer`、每次真的變更寫一筆稽核、輸出只有成員 ID）；session 照 ADR-0008（只存 token 的 SHA-256、`__Host-radar_session`、閒置 14 天／最長 30 天、移出名單立刻失效）；`GET /api/v1/me`、`POST /api/v1/auth/logout`、只在開假登入時才有的 `GET／POST /api/v1/auth/fake-login`；會改資料的請求檢查 Origin；開發環境選人登入、試用環境驗 Cloudflare Access 的 JWT（joserfc 只驗簽，只收 RS256，claims 自己檢查）且只讓管理者登入；正式環境開假登入、假登入加 Google 登入時 api 不啟動。ADR-0046（提議）。
+**做了什麼：** 遷移 0019（原本是 0020 接 0014，合併前改號、接 0018）建 `member`、`allowed_email`、`session`；`radar members allow／set-admin`（`SystemViewer`、每次真的變更寫一筆稽核、輸出只有成員 ID）；session 照 ADR-0008（只存 token 的 SHA-256、`__Host-radar_session`、閒置 14 天／最長 30 天、移出名單立刻失效）；`GET /api/v1/me`、`POST /api/v1/auth/logout`、只在開假登入時才有的 `GET／POST /api/v1/auth/fake-login`；會改資料的請求檢查 Origin；開發環境選人登入、試用環境驗 Cloudflare Access 的 JWT（joserfc 只驗簽，只收 RS256，claims 自己檢查）且只讓管理者登入；正式環境開假登入、假登入加 Google 登入時 api 不啟動。ADR-0046（提議）。
 
 **改到的檔：** 見 PR 說明草稿的檔案清單（新檔 21 個、改既有檔 28 個，含 6 個整合測試的 HEAD 版本號與 3 個 arch 測試的例外）。
 
@@ -232,4 +232,4 @@ deferred:
 
 **驗證：** `ruff check`、`ruff format --check`（320 檔）、`mypy`（312 檔）、`lint-imports`（19 條）全過；`pytest -m unit` 2920 passed、1 xfailed；`pytest -m arch` 297 passed、9 errors（都是本機連不到資料庫）；整合測試以 CI 為準。
 
-**剩下的風險：** 本機 Safari 可能不收 http 底下的 Secure cookie（要 Kevin 用瀏覽器確認一次）；兩條線合併時 0020 要改接 0019 並刪掉保留空號；試用主機若能繞過 Access 直連，JWKS 抓取可能被濫用。
+**剩下的風險：** 本機 Safari 可能不收 http 底下的 Secure cookie（要 Kevin 用瀏覽器確認一次）；兩條線合併時 0020 要改接 0019 並刪掉保留空號（2026-11-16 已改成 0019 接 0018、保留空號已刪）；試用主機若能繞過 Access 直連，JWKS 抓取可能被濫用。

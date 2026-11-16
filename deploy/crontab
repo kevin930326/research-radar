@@ -12,3 +12,5 @@
 # 每週更新（weekly-update）：主機時區是 UTC 時＝台北時間每週一 03:00（UTC 週日 19:00）。
 # 主機時區在 Story 3.19 定案時確認；不是 UTC 就要跟著改這一行。時間與每週的行為由 Story 1.11 驗收。
 0 19 * * 0 docker compose --project-directory /opt/research-radar exec -T worker radar enqueue weekly-update
+# Batch 結果（poll-batches，Story 2.11）：每 15 分鐘查一次供應商的批次、匯入已結束的。
+*/15 * * * * docker compose --project-directory /opt/research-radar exec -T worker radar enqueue poll-batches

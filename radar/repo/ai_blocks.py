@@ -1,26 +1,28 @@
 """AI 區塊的判定：全專案只有 `find_ai_block` 一個函式（AD-30、ADR-0015、ADR-0035、Story 2.7）。
+另有 `list_effective_topic_keys`：標註抽樣讀有效主題（Story 2.13）；讀有效值 view 的 SQL 只准放在
+這個模組（`tests/arch/test_ai_table_reads.py` 的 `VIEW_READERS`）。
 
 判定順序固定（前面的條件成立就不往下看）：
 
 1. `plan_for` 說不做 → `not_applicable` 或 `no_input`。
 2. 有效值（人工值或 `active`，只讀 `effective_*` 三個 view）→ `ready`（帶值與來歷）或 `empty`
    （只帶來歷）。新的一次被拒收不影響舊的有效值（這一步在第 3 步前面）。
-3. 目前這組鍵有平常流程的 `rejected` → `failed`。
+3. 目前這組鍵有平常流程的 `rejected`，或有平常流程的 `running` run 屬於卡在 `needs_attention`
+   的批次（Story 2.11、ADR-0004 決定第 4 點）→ `failed`。
 4. 這個工作現在預算不准 → `deferred_budget`。
 5. 目前這組鍵有互動的 `running` → `pending_interactive`；其餘（什麼都沒有、Batch 的 `running`、
    暫時性失敗等下一次）→ `pending_batch`。
 
 「目前這組鍵」＝現在的 prompt 版本、模型（`AiBlockSettings`）與 `input_sha256`（輸入由
-`build_llm_input` 依 `plan_for` 的 `input_kind` 組，設定檔版本照工作帶）。批次卡在
-`needs_attention` 的 `failed` 等 Batch 的 Story（2.9）補。
+`build_llm_input` 依 `plan_for` 的 `input_kind` 組，設定檔版本照工作帶）。
 
 這個模組不直接讀 AI 表頭表與細項表（`tests/arch/test_ai_table_reads.py`）：有效值讀 view，拒收
-與執行中各自經 `repo/ai_outputs.py`、`repo/llm_ledger.py`。可見條件只從 `repo/visibility.py` 來；
-看不到或不存在回 None。
+與執行中各自經 `repo/ai_outputs.py`、`repo/llm_ledger.py`，批次卡住經 `repo/llm_batches.py`。
+可見條件只從 `repo/visibility.py` 來；看不到或不存在回 None。
 """
 
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from datetime import datetime
 from decimal import Decimal
 from typing import Any, assert_never
@@ -56,6 +58,7 @@ from radar.domain.processing import plan_for
 from radar.domain.taxonomy import TaxonomyField
 from radar.domain.viewer import Viewer
 from radar.repo.ai_outputs import find_rejected_ai_result_id
+from radar.repo.llm_batches import find_batch_attention_run
 from radar.repo.llm_ledger import find_running_call_mode
 from radar.repo.papers import find_paper_llm_source, find_paper_processing_facts
 from radar.repo.visibility import visible_papers
@@ -163,12 +166,36 @@ def find_ai_block(
     )
     if find_rejected_ai_result_id(viewer, connection, key) is not None:
         return AiBlock(product, AiBlockState.FAILED)
+    if find_batch_attention_run(viewer, connection, key):
+        return AiBlock(product, AiBlockState.FAILED)
     if not settings.budget_allows:
         return AiBlock(product, AiBlockState.DEFERRED_BUDGET)
     mode = find_running_call_mode(viewer, connection, key)
     if mode is CallMode.INTERACTIVE:
         return AiBlock(product, AiBlockState.PENDING_INTERACTIVE)
     return AiBlock(product, AiBlockState.PENDING_BATCH)
+
+
+def list_effective_topic_keys(
+    viewer: Viewer, connection: Connection, paper_ids: Iterable[uuid.UUID]
+) -> dict[uuid.UUID, tuple[str, ...]]:
+    """這些論文（`viewer` 看得到的）的有效主題 `key`（人工修正優先，否則 `active` 的 AI 分類；照
+    view 的排序，可能是 `unclassified`）。沒有有效分類的論文不在結果裡（＝還沒有分類結果）；只
+    修正了方法、沒有 AI 分類的論文也不在（主題沒有值）。標註抽樣用（Story 2.13）。"""
+    wanted = sorted(set(paper_ids))
+    if not wanted:
+        return {}
+    visible = visible_papers(viewer, alias="paper")
+    rows = connection.execute(
+        text(
+            "SELECT e.paper_id, e.keys"
+            " FROM effective_classification AS e JOIN paper ON paper.id = e.paper_id"
+            f" WHERE {visible} AND e.field = :field AND e.keys IS NOT NULL"
+            " AND e.paper_id = ANY(CAST(:ids AS uuid[]))"
+        ),
+        {"field": TaxonomyField.TOPIC.value, "ids": wanted},
+    )
+    return {uuid.UUID(str(paper_id)): tuple(keys) for paper_id, keys in rows}
 
 
 # --- 列 → 區塊 -------------------------------------------------------------------------------

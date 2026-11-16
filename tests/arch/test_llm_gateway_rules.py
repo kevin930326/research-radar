@@ -1,7 +1,9 @@
 """LLM 閘門的架構規則（AD-8、ADR-0009、ADR-0030）：
 
-- 模型只經閘門呼叫：`radar/` 裡 `.complete(...)` 的呼叫只准在 `radar/services/llm_gateway.py`。
-- 工作代碼固定六個（寫進 `derivation_run.task` 之後不改名），資料庫的 CHECK 列的是同一組。
+- 模型只經閘門呼叫：`radar/` 裡 `.complete(...)` 與 `.submit_batch(...)`（Batch 送出，Story 2.9）
+  的呼叫只准在 `radar/services/llm_gateway.py`。
+- 工作代碼固定六個（寫進 `derivation_run.task` 之後不改名），資料庫的 CHECK 列的是同一組，
+  外加不經閘門的向量化 `embed`（AD-12、Story 2.8：向量也記來歷，但不是 LLM 工作）。
 - `hashlib` 只准在算指紋與原始資料雜湊的模組 import（新的雜湊要集中到 `domain/fingerprints.py`）。
 - `input_sha256`、`prompt_sha256`、`schema_sha256`、`run_lock_key` 只在
   `domain/fingerprints.py` 定義。
@@ -15,6 +17,7 @@ from collections.abc import Mapping
 from pathlib import Path
 
 from radar.domain.ai_outputs import LlmTask
+from radar.domain.embeddings import EMBED_TASK
 from tests.database import OWNER_ROLE, TestDatabase
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -33,6 +36,8 @@ HASHLIB_ALLOWED = frozenset(
         "radar/adapters/fake/embedding.py",  # 假向量由文字雜湊決定（測試替身）
     }
 )
+# 呼叫模型的 provider 方法：互動與 Batch 送出（Story 2.9）。
+PROVIDER_CALLS = frozenset({"complete", "submit_batch", "retrieve_batch", "batch_results"})
 FINGERPRINT_FUNCTIONS = frozenset(
     {"input_sha256", "prompt_sha256", "schema_sha256", "run_lock_key"}
 )
@@ -55,10 +60,12 @@ def gateway_rule_problems(sources: Mapping[str, str]) -> list[str]:
             if (
                 isinstance(node, ast.Call)
                 and isinstance(node.func, ast.Attribute)
-                and node.func.attr == "complete"
+                and node.func.attr in PROVIDER_CALLS
                 and relative != GATEWAY
             ):
-                problems.append(f"{relative}:{node.lineno}：呼叫 .complete()，模型只准經閘門呼叫")
+                problems.append(
+                    f"{relative}:{node.lineno}：呼叫 .{node.func.attr}()，模型只准經閘門呼叫"
+                )
             if relative not in HASHLIB_ALLOWED:
                 names: list[str] = []
                 if isinstance(node, ast.Import):
@@ -85,12 +92,14 @@ def test_radar_follows_gateway_rules() -> None:
     assert gateway_rule_problems(sources) == []
     # 掃描真的看得到閘門的呼叫與指紋函式的定義。
     assert "provider.complete(request)" in sources[GATEWAY]
+    assert "provider.submit_batch(requests)" in sources[GATEWAY]
     assert "def input_sha256(" in sources[FINGERPRINTS]
 
 
 def test_scanner_catches_each_mistake() -> None:
     sources = {
         "radar/services/qa.py": "def f(provider, r):\n    return provider.complete(r)",
+        "radar/services/batches.py": "def f(provider, r):\n    return provider.submit_batch(r)",
         "radar/services/hash.py": "import hashlib\n",
         "radar/repo/hash2.py": "from hashlib import sha256\n",
         "radar/services/fp.py": "def input_sha256(blocks):\n    return ''\n",
@@ -106,6 +115,7 @@ def test_scanner_catches_each_mistake() -> None:
     assert sorted(problem.split(":")[0] for problem in problems) == [
         "radar/domain/fp2.py",
         "radar/repo/hash2.py",
+        "radar/services/batches.py",
         "radar/services/fp.py",
         "radar/services/hash.py",
         "radar/services/qa.py",
@@ -128,4 +138,5 @@ def test_database_task_check_lists_same_codes(migrated_database: TestDatabase) -
             if row[0].startswith("CHECK ((task = ANY")
         ]
     assert len(definitions) == 1, definitions
-    assert set(re.findall(r"'([a-z_]+)'", definitions[0])) == TASK_CODES
+    # Story 2.8：向量化（embed）也寫 derivation_run（AD-12），但不經閘門、不是 LlmTask。
+    assert set(re.findall(r"'([a-z_]+)'", definitions[0])) == TASK_CODES | {EMBED_TASK}

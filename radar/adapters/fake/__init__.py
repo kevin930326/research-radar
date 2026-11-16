@@ -3,7 +3,12 @@
 from radar.adapters.fake.embedding import FakeEmbeddingProvider
 from radar.adapters.fake.heartbeat import FakeHeartbeat
 from radar.adapters.fake.jobs import FakeJobQueue
-from radar.adapters.fake.llm import FakeLlmProvider, FakeRepliesExhaustedError, fake_completion
+from radar.adapters.fake.llm import (
+    FakeLlmProvider,
+    FakeRepliesExhaustedError,
+    fake_batch_status,
+    fake_completion,
+)
 from radar.adapters.fake.object_store import FakeObjectStore, FakePut
 from radar.adapters.fake.paper_source import FakePaperSource, FakeRequest
 
@@ -17,5 +22,6 @@ __all__ = [
     "FakePut",
     "FakeRepliesExhaustedError",
     "FakeRequest",
+    "fake_batch_status",
     "fake_completion",
 ]

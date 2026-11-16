@@ -521,3 +521,98 @@ def test_budget_denied_when_pending_run_is_gone_by_the_time_of_the_lock(
     assert result == GatewayResult(GatewayOutcome.DEFERRED_BUDGET)
     assert provider.requests == []
     assert table_counts(db) == before
+
+
+# --- Batch 預留（Codex 主審查第 1 條、ADR-0041） --------------------------------------------------
+
+
+def _reserve(db: TestDatabase, paper_id: uuid.UUID, task: LlmTask, cost: str) -> uuid.UUID:
+    """一筆還沒有結果的 Batch：`queued` 的批次＋`running` 的 batch run＋保守上限 `cost` 的 item。
+    回 run id。"""
+    [(submission_id,)] = execute(
+        db,
+        "INSERT INTO batch_submission (status, item_count, estimated_max_cost_usd)"
+        " VALUES ('queued', 1, %s) RETURNING id",
+        cost,
+    )
+    [(run_id,)] = execute(
+        db,
+        "INSERT INTO derivation_run (paper_id, task, prompt_version, prompt_sha256, model,"
+        " input_sha256, input_kind, params, code_version, call_mode, status)"
+        " VALUES (%s, %s, 1, %s, %s, %s, 'abstract', '{}'::jsonb, 'test', 'batch', 'running')"
+        " RETURNING id",
+        paper_id,
+        task.value,
+        "a" * 64,
+        MODEL,
+        uuid.uuid4().hex * 2,
+    )
+    execute(
+        db,
+        "INSERT INTO batch_item (batch_submission_id, run_id, estimated_max_cost_usd)"
+        " VALUES (%s, %s, %s)",
+        submission_id,
+        run_id,
+        cost,
+    )
+    return uuid.UUID(str(run_id))
+
+
+def test_interactive_call_counts_unfinished_batch_reservations(
+    db: TestDatabase, database: Database, config: GatewayConfig, paper_id: uuid.UUID
+) -> None:
+    # 已花 10、Batch 預留 30：互動還能花到 50 為止（再花 10），不是只看帳本的 40。
+    insert_ledger(db, paper_id, LlmTask.ZH_SUMMARY, "10", NOW)
+    _reserve(db, paper_id, LlmTask.CLASSIFY, "30")
+    guard = _guard(database)
+    assert guard(LlmTask.ZH_SUMMARY)
+    insert_ledger(db, paper_id, LlmTask.ZH_SUMMARY, "10", NOW)
+    provider = _provider()
+
+    with capture_logs() as logs:
+        result = _run(database, provider, config, _job(paper_id), guard)
+
+    assert result.outcome is GatewayOutcome.DEFERRED_BUDGET
+    assert provider.requests == []
+    status = get_budget_status(SYSTEM, database, budget_config(), now=NOW)
+    assert (status.total_usd, status.reserved_usd) == (Decimal(20), Decimal(30))
+    assert status.breaker_tripped
+    (entry,) = [log for log in logs if log["event"] == "預算不准，LLM 工作延後"]
+    assert (entry["total_usd"], entry["reserved_usd"]) == ("20.000000", "30.000000")
+    assert entry["breaker_tripped"] is True
+
+
+def test_interactive_call_counts_reservations_against_its_task_budget(
+    db: TestDatabase, database: Database, config: GatewayConfig, paper_id: uuid.UUID
+) -> None:
+    budget = budget_config(classify="1")
+    insert_ledger(db, paper_id, LlmTask.CLASSIFY, "0.3", NOW)
+    _reserve(db, paper_id, LlmTask.CLASSIFY, "0.7")
+    guard = _guard(database, budget)
+    classify_provider = _provider()
+
+    classify = _run(database, classify_provider, config, _job(paper_id, LlmTask.CLASSIFY), guard)
+
+    assert classify.outcome is GatewayOutcome.DEFERRED_BUDGET
+    assert classify_provider.requests == []
+    assert guard(LlmTask.ZH_SUMMARY)  # 其他工作只受熔斷線管
+
+
+def test_released_reservation_lets_interactive_calls_run_again(
+    db: TestDatabase, database: Database, config: GatewayConfig, paper_id: uuid.UUID
+) -> None:
+    insert_ledger(db, paper_id, LlmTask.ZH_SUMMARY, "20", NOW)
+    run_id = _reserve(db, paper_id, LlmTask.CLASSIFY, "30")
+    guard = _guard(database)
+    assert not guard(LlmTask.ZH_SUMMARY)
+    # 結果匯入（2.11）把 run 改掉就釋放預留；這裡直接改成 failed 模擬。
+    execute(
+        db,
+        "UPDATE derivation_run SET status = 'failed', failure_reason = 'llm_timeout',"
+        " finished_at = now() WHERE id = %s",
+        run_id,
+    )
+
+    assert _run(database, _provider(), config, _job(paper_id), guard).outcome is (
+        GatewayOutcome.ACTIVE
+    )

@@ -38,7 +38,9 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import ARRAY
 
 from radar.domain.ai_outputs import CurrentAbstract, PaperLlmSource
+from radar.domain.annotations import AnnotationPaperFacts, AnnotationPaperText
 from radar.domain.identifiers import ExternalId, IdentifierScheme
+from radar.domain.llm_batches import PaperAiSource
 from radar.domain.papers import (
     ABSTRACT_SOURCE_PRIORITY,
     AbstractSource,
@@ -53,10 +55,11 @@ from radar.domain.papers import (
 )
 from radar.domain.processing import ProcessingFacts
 from radar.domain.scope import ScopeSettings, is_in_scope
-from radar.domain.viewer import Viewer
+from radar.domain.trial_runs import TrialCandidate
+from radar.domain.viewer import SystemViewer, Viewer
 from radar.repo.db import Database
 from radar.repo.models import Base
-from radar.repo.visibility import visible_papers
+from radar.repo.visibility import visible_papers, visible_to_system_only
 
 log = structlog.get_logger(__name__)
 
@@ -301,6 +304,246 @@ def find_paper_processing_facts(
         excluded_reason=row["excluded_reason"],
         abstract=row["abstract_content"],
     )
+
+
+def list_paper_ai_sources(
+    viewer: SystemViewer, connection: Connection, *, after_id: uuid.UUID | None, limit: int
+) -> list[PaperAiSource]:
+    """依論文 id 順序讀一頁論文（`after_id` 之後、最多 `limit` 篇）：處理事實（`plan_for` 用）、
+    標題與目前的摘要（組 LLM 輸入用）。全部論文都讀（要不要做由 `plan_for` 判斷，這裡不篩）；
+    Batch 規劃用（Story 2.9）。
+
+    Raises:
+        TypeError: `viewer` 不是 `SystemViewer`。
+        ValueError: `limit` 不是正整數。
+    """
+    if type(limit) is not int or limit < 1:
+        raise ValueError("limit 要是正整數")
+    visible_to_system_only(viewer)
+    visible = visible_papers(viewer, alias="paper")
+    after = "" if after_id is None else " AND paper.id > :after_id"
+    rows = (
+        connection.execute(
+            text(
+                "SELECT paper.id, paper.title, paper.origin, paper.excluded_reason,"
+                " a.id AS abstract_id, a.source AS abstract_source,"
+                " a.content AS abstract_content"
+                " FROM paper LEFT JOIN paper_abstract AS a"
+                " ON a.paper_id = paper.id AND a.is_current"
+                f" WHERE {visible}{after} ORDER BY paper.id LIMIT :limit"
+            ),
+            {"after_id": after_id, "limit": limit},
+        )
+        .mappings()
+        .all()
+    )
+    sources: list[PaperAiSource] = []
+    for row in rows:
+        abstract = None
+        if row["abstract_id"] is not None:
+            abstract = CurrentAbstract(
+                id=row["abstract_id"],
+                source=AbstractSource(row["abstract_source"]),
+                content=row["abstract_content"],
+            )
+        sources.append(
+            PaperAiSource(
+                facts=ProcessingFacts(
+                    origin=PaperOrigin(row["origin"]),
+                    excluded_reason=row["excluded_reason"],
+                    abstract=row["abstract_content"],
+                ),
+                source=PaperLlmSource(paper_id=row["id"], title=row["title"], abstract=abstract),
+            )
+        )
+    return sources
+
+
+def find_paper_ids_by_dois(
+    viewer: Viewer, connection: Connection, dois: Iterable[str]
+) -> dict[str, uuid.UUID]:
+    """正規化後的 DOI → 掛著它的論文 id（`viewer` 看得到的）；找不到的不在結果裡。
+    `radar runs trial` 用 DOI 指定論文時用（Story 2.10）。"""
+    visible = visible_papers(viewer, alias="paper")
+    wanted = sorted(set(dois))
+    if not wanted:
+        return {}
+    rows = connection.execute(
+        text(
+            "SELECT external_id.value_norm, external_id.paper_id FROM external_id"
+            " JOIN paper ON paper.id = external_id.paper_id"
+            " WHERE external_id.scheme = :scheme"
+            " AND external_id.value_norm = ANY(CAST(:values AS text[]))"
+            f" AND {visible}"
+        ),
+        {"scheme": IdentifierScheme.DOI.value, "values": wanted},
+    )
+    return {value_norm: uuid.UUID(str(paper_id)) for value_norm, paper_id in rows}
+
+
+def list_paper_dois(
+    viewer: Viewer, connection: Connection, paper_ids: Iterable[uuid.UUID]
+) -> dict[uuid.UUID, tuple[str, ...]]:
+    """這些論文（`viewer` 看得到、存在的）各自的 DOI（正規化後、排好序；沒有 DOI 是空的）；
+    不存在的論文不在結果裡。調整組／測試組只看 DOI（Story 2.10）。"""
+    visible = visible_papers(viewer, alias="paper")
+    wanted = sorted(set(paper_ids))
+    if not wanted:
+        return {}
+    rows = connection.execute(
+        text(
+            "SELECT paper.id, COALESCE(array_agg(external_id.value_norm"
+            " ORDER BY external_id.value_norm)"
+            " FILTER (WHERE external_id.value_norm IS NOT NULL), '{}') AS dois"
+            " FROM paper LEFT JOIN external_id"
+            " ON external_id.paper_id = paper.id AND external_id.scheme = :scheme"
+            f" WHERE paper.id = ANY(CAST(:ids AS uuid[])) AND {visible}"
+            " GROUP BY paper.id"
+        ),
+        {"scheme": IdentifierScheme.DOI.value, "ids": wanted},
+    )
+    return {uuid.UUID(str(paper_id)): tuple(dois) for paper_id, dois in rows}
+
+
+def count_papers_with_current_abstract_source(
+    viewer: SystemViewer, connection: Connection, source: AbstractSource
+) -> int:
+    """目前的摘要（`is_current`）是 `source` 的論文有幾篇（每篇最多一筆 `is_current`，所以數摘要列
+    就是篇數；不接 `paper`，不是統計用的篇數）。`radar runs remove-by-source` 的擋下條件：這些論文
+    下次規劃會用同一份摘要重新產生（Story 2.12）。
+
+    Raises:
+        TypeError: `viewer` 不是 `SystemViewer`。
+    """
+    visible = visible_to_system_only(viewer)
+    value = connection.execute(
+        text(
+            f"SELECT count(*) FROM paper_abstract WHERE {visible}"
+            " AND is_current AND source = :source"
+        ),
+        {"source": AbstractSource(source).value},
+    ).scalar_one()
+    return int(value)
+
+
+def list_trial_candidates(
+    viewer: SystemViewer, connection: Connection, *, after_id: uuid.UUID | None, limit: int
+) -> list[TrialCandidate]:
+    """依論文 id 順序讀一頁抽樣候選（`after_id` 之後、最多 `limit` 篇）：id、DOI 與
+    `plan_for` 要看的處理事實（組成 `TrialCandidate` 後就不留摘要內容）。全部論文都讀，要不要抽由
+    domain 判斷；`radar runs trial --sample` 用（Story 2.10）。
+
+    Raises:
+        TypeError: `viewer` 不是 `SystemViewer`。
+        ValueError: `limit` 不是正整數。
+    """
+    if type(limit) is not int or limit < 1:
+        raise ValueError("limit 要是正整數")
+    visible_to_system_only(viewer)
+    visible = visible_papers(viewer, alias="paper")
+    after = "" if after_id is None else " AND paper.id > :after_id"
+    rows = (
+        connection.execute(
+            text(
+                "SELECT paper.id, paper.origin, paper.excluded_reason,"
+                " a.content AS abstract_content,"
+                " ARRAY(SELECT e.value_norm FROM external_id AS e"
+                " WHERE e.paper_id = paper.id AND e.scheme = :scheme"
+                " ORDER BY e.value_norm) AS dois"
+                " FROM paper LEFT JOIN paper_abstract AS a"
+                " ON a.paper_id = paper.id AND a.is_current"
+                f" WHERE {visible}{after} ORDER BY paper.id LIMIT :limit"
+            ),
+            {"scheme": IdentifierScheme.DOI.value, "after_id": after_id, "limit": limit},
+        )
+        .mappings()
+        .all()
+    )
+    return [
+        TrialCandidate.from_facts(
+            row["id"],
+            row["dois"],
+            ProcessingFacts(
+                origin=PaperOrigin(row["origin"]),
+                excluded_reason=row["excluded_reason"],
+                abstract=row["abstract_content"],
+            ),
+        )
+        for row in rows
+    ]
+
+
+def list_annotation_candidates(
+    viewer: SystemViewer, connection: Connection, *, after_id: uuid.UUID | None, limit: int
+) -> list[AnnotationPaperFacts]:
+    """依論文 id 順序讀一頁標註抽樣的候選（`after_id` 之後、最多 `limit` 篇）：只讀 view
+    `counted_paper` 裡的論文（追蹤範圍內、沒被排除、在已發佈的快照），每篇的 ISSN-L、出版年、
+    有沒有目前的摘要、DOI（正規化後、排好序）。不讀標題與摘要內容、不做彙總（篇數在 domain 算）；
+    `radar annotations template` 用（Story 2.13）。
+
+    Raises:
+        TypeError: `viewer` 不是 `SystemViewer`。
+        ValueError: `limit` 不是正整數。
+    """
+    if type(limit) is not int or limit < 1:
+        raise ValueError("limit 要是正整數")
+    visible_to_system_only(viewer)
+    visible = visible_papers(viewer, alias="c")
+    after = "" if after_id is None else " AND c.id > :after_id"
+    rows = connection.execute(
+        text(
+            "SELECT c.id, c.journal_issn_l, c.publication_year,"
+            " EXISTS (SELECT 1 FROM paper_abstract AS a"
+            " WHERE a.paper_id = c.id AND a.is_current) AS has_abstract,"
+            " ARRAY(SELECT e.value_norm FROM external_id AS e"
+            " WHERE e.paper_id = c.id AND e.scheme = :scheme"
+            " ORDER BY e.value_norm) AS dois"
+            f" FROM counted_paper AS c WHERE {visible}{after} ORDER BY c.id LIMIT :limit"
+        ),
+        {"scheme": IdentifierScheme.DOI.value, "after_id": after_id, "limit": limit},
+    )
+    return [
+        AnnotationPaperFacts(
+            paper_id=uuid.UUID(str(paper_id)),
+            journal_issn_l=issn_l,
+            publication_year=year,
+            has_abstract=bool(has_abstract),
+            dois=tuple(dois),
+        )
+        for paper_id, issn_l, year, has_abstract, dois in rows
+    ]
+
+
+def find_annotation_paper_texts(
+    viewer: SystemViewer, connection: Connection, paper_ids: Iterable[uuid.UUID]
+) -> dict[uuid.UUID, AnnotationPaperText]:
+    """這些論文的標題、目前的摘要（沒有是 None）與 DOI（正規化後、排好序）；不存在的論文不在結果
+    裡。產生標註試算表用（Story 2.13）。
+
+    Raises:
+        TypeError: `viewer` 不是 `SystemViewer`。
+    """
+    visible_to_system_only(viewer)
+    visible = visible_papers(viewer, alias="paper")
+    wanted = sorted(set(paper_ids))
+    if not wanted:
+        return {}
+    rows = connection.execute(
+        text(
+            "SELECT paper.id, paper.title, a.content,"
+            " ARRAY(SELECT e.value_norm FROM external_id AS e"
+            " WHERE e.paper_id = paper.id AND e.scheme = :scheme"
+            " ORDER BY e.value_norm) AS dois"
+            " FROM paper LEFT JOIN paper_abstract AS a"
+            " ON a.paper_id = paper.id AND a.is_current"
+            f" WHERE paper.id = ANY(CAST(:ids AS uuid[])) AND {visible}"
+        ),
+        {"scheme": IdentifierScheme.DOI.value, "ids": wanted},
+    )
+    return {
+        uuid.UUID(str(paper_id)): AnnotationPaperText(title, abstract, tuple(dois))
+        for paper_id, title, abstract, dois in rows
+    }
 
 
 def find_known_external_ids(

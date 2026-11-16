@@ -17,7 +17,8 @@ import re
 from dataclasses import dataclass
 from datetime import timedelta
 
-from radar.domain.jobs import RUN_WEEKLY_UPDATE, JobSpec
+from radar.domain.jobs import RUN_WEEKLY_UPDATE, SUBMIT_LLM_BATCH, JobSpec
+from radar.domain.llm_batches import QUEUED_STUCK_AFTER, SUBMITTING_STALE_AFTER
 
 # 表名與欄名直接組進 SQL，所以只收小寫識別字（PostgreSQL 的名稱上限 63 個字元）；
 # 開頭要是英文字母，`<表名>_id` 才會是合法的工作參數名稱。
@@ -73,5 +74,27 @@ SWEEP_REGISTRY: tuple[SweepEntry, ...] = (
     # （Story 1.11、ADR-0028）。額度停下不算失敗，仍是 `fetching`，每 2 小時補排一次接著抓。
     SweepEntry(
         "weekly_run", "status", "fetching", "updated_at", RUN_WEEKLY_UPDATE, timedelta(hours=2)
+    ),
+    # Batch 送出（Story 2.9、ADR-0041）。`queued`：429 退回、排入送出失敗、建 provider 時設定錯
+    # （`ConfigError`）留著的列，1 小時後補排送出。送出工作會先把列改走 `queued`（`submitting`），
+    # 工作還在跑時被再排一次也只會搶輸、不做事。
+    SweepEntry(
+        "batch_submission",
+        "status",
+        "queued",
+        "updated_at",
+        SUBMIT_LLM_BATCH,
+        QUEUED_STUCK_AFTER,
+    ),
+    # `submitting` 而且沒有 batch ID 超過 `SUBMITTING_STALE_AFTER`：送出的工作已經不在（送出不重試，
+    # 最久約一次 `RADAR_ANTHROPIC_TIMEOUT`）。補排的送出工作只把它標 `needs_attention`、不重送
+    # （移出 `submitting`，sweep 不再補排）。
+    SweepEntry(
+        "batch_submission",
+        "status",
+        "submitting",
+        "updated_at",
+        SUBMIT_LLM_BATCH,
+        SUBMITTING_STALE_AFTER,
     ),
 )

@@ -81,7 +81,35 @@ SWEEP = JobSpec("sweep", Queue.MAINTENANCE, schedule="sweep")
 WEEKLY_UPDATE = JobSpec("weekly_update", Queue.INGEST, schedule="weekly-update")
 RUN_WEEKLY_UPDATE = JobSpec("run_weekly_update", Queue.INGEST, lock="weekly_update")
 
-JOBS: tuple[JobSpec, ...] = (SWEEP, WEEKLY_UPDATE, RUN_WEEKLY_UPDATE)
+# 向量化（Story 2.8、AD-12、ADR-0040）：每週更新發佈快照、commit 之後排入（沒有參數、沒有排程）。
+# 工作本身照 `plan_for` 找出還沒有向量或輸入變了的論文，一批一批做到完或到今天的額度比例為止；
+# 帶 `embed_papers` 這把鎖，同時只跑一個（和 `radar embeddings backfill` 之間靠 `derivation_run`
+# 的 running 唯一索引避免重送同一篇）。
+EMBED_PAPERS = JobSpec("embed_papers", Queue.AI, lock="embed_papers")
+
+# Batch（Story 2.9、ADR-0041）：每週更新發佈快照、commit 之後，在向量化之後排入
+# `plan_llm_batches(weekly_run_id)`：照 `plan_for` 與 `should_run` 把 AI 工作排成一個個
+# `batch_submission`（帶 `plan_llm_batches` 這把鎖，同時只跑一個；兩個同時跑也靠資料層擋）。
+# 每建好一批排入 `submit_llm_batch(batch_submission_id)`（帶 `llm_batches` 這把鎖、不重試：
+# batch create 沒有冪等鍵）；停在 `queued`／`submitting` 的由 sweep 補排。
+PLAN_LLM_BATCHES = JobSpec("plan_llm_batches", Queue.AI, lock="plan_llm_batches")
+SUBMIT_LLM_BATCH = JobSpec("submit_llm_batch", Queue.AI, lock="llm_batches")
+
+# Batch 結果（Story 2.11、ADR-0043）：cron 每 15 分鐘排入 `poll_batches`，查 `submitted`／`ended`
+# 的批次、匯入已結束的（和 `radar batches poll`／`wait` 共用 `poll_llm_batches`）。帶
+# `poll_batches` 這把鎖，同時只跑一個；兩個同時匯入也靠資料層擋（唯一索引、條件式更新）。
+# 沒有錯誤、也沒有 `needs_attention` 的批次才送 `poll-batches` 心跳。
+POLL_BATCHES = JobSpec("poll_batches", Queue.AI, schedule="poll-batches", lock="poll_batches")
+
+JOBS: tuple[JobSpec, ...] = (
+    SWEEP,
+    WEEKLY_UPDATE,
+    RUN_WEEKLY_UPDATE,
+    EMBED_PAPERS,
+    PLAN_LLM_BATCHES,
+    SUBMIT_LLM_BATCH,
+    POLL_BATCHES,
+)
 
 # 排入一個工作：（工作, 參數）→ True＝新排入；False＝同一件事已經在排隊，沒有再排一筆。
 # 參數只有 ID（名稱 `*_id`、值是 UUID）。

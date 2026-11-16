@@ -16,7 +16,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 
-from radar.domain.ai_outputs import GatewayConfig, LlmTask, OutputLang
+from radar.domain.ai_outputs import GatewayConfig, LlmTask, OutputLang, RunKey
 from radar.domain.budget import BudgetConfig
 from radar.domain.permissions import Action, require
 from radar.domain.processing import ProcessingTask, TaskPlan, plan_for
@@ -48,8 +48,13 @@ def run_zh_summary(
     paper_id: uuid.UUID,
     *,
     clock: Callable[[], datetime],
+    confirmed_key: RunKey | None = None,
+    call_allowed: bool = True,
 ) -> ZhSummaryRun:
     """跑一篇論文的中文重點（見模組說明）。`clock` 給預算檢查算台北月份用。
+    `confirmed_key`：試跑確認過的鍵，原樣交給閘門核對（Story 2.10；見 `run_llm_job`）。
+    `call_allowed`：False 時閘門只接續或略過、不呼叫模型（Story 2.11 確認審查 D1；見
+    `run_llm_job`）。
 
     Raises:
         PermissionDeniedError: `actor` 不是系統工作（不碰資料庫）。
@@ -77,5 +82,7 @@ def run_zh_summary(
             validate_output=ZhSummaryValidator(rules),
         ),
         budget_allows=BudgetGuard(database, budget, clock),
+        confirmed_key=confirmed_key,
+        call_allowed=call_allowed,
     )
     return ZhSummaryRun(plan, result)

@@ -43,7 +43,7 @@ def test_unknown_job_exits_2_lists_jobs_and_does_not_connect(
 
     assert result.exit_code == 2
     assert "nope" in result.stderr
-    assert "可用的工作：sweep" in result.stderr
+    assert "可用的工作：poll-batches、sweep" in result.stderr
     assert calls == []
 
 
