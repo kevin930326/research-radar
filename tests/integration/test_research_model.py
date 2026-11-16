@@ -1,4 +1,4 @@
-"""研究模型擷取對真的 PostgreSQL（Story 2.6）：真的 prompt（`prompts/extract_model/v1.md`、正式
+"""研究模型擷取對真的 PostgreSQL（Story 2.6）：真的 prompt（`prompts/extract_model/v2.md`、正式
 登記）、真的情境值清單（`config/context_values.yaml`）＋模型替身，spec 2.6 的 I/O 表每一列。
 
 - 正常：表頭 `active`、`en`、`abstract`、計數 0；構面以正規化名稱為唯一鍵、新構面 canonical 指向
@@ -119,7 +119,7 @@ def database(db: TestDatabase) -> Database:
 
 @pytest.fixture
 def config() -> GatewayConfig:
-    # 真的 prompt 資料夾，登記表不換（正式的 extract_model v1）。
+    # 真的 prompt 資料夾，登記表不換（正式的 extract_model v2）。
     return gateway_config(ROOT / "prompts")
 
 
@@ -313,7 +313,7 @@ def test_good_reply_is_stored_as_active_en_with_constructs_and_hypotheses(
         db,
         "SELECT task, prompt_version, context_values_version, taxonomy_version,"
         " params->'extraction_schema_version' FROM derivation_run",
-    ) == [("extract_model", 1, "1", None, 1)]
+    ) == [("extract_model", 2, "1", None, 1)]
 
 
 # --- 不拒收：改值並計數 -------------------------------------------------------------------------

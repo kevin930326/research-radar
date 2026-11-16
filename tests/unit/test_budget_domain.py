@@ -221,3 +221,90 @@ def test_render_cost_report_when_tripped() -> None:
     assert "zh_summary     50.0000      未設  否" in lines
     assert "classify        0.0000      未設  否" in lines
     assert lines[-3:] == ["熔斷線：50.0000", "離熔斷線：0.0000", "只檢索：是"]
+
+
+# --- Batch 預留（Codex 主審查第 1 條、ADR-0041） --------------------------------------------------
+
+
+def _reserved_status(
+    costs: Mapping[LlmTask, str], reserved: Mapping[LlmTask, str], **budgets: str | None
+) -> BudgetStatus:
+    return build_budget_status(
+        _config(**budgets),
+        NOVEMBER,
+        {task: Decimal(value) for task, value in costs.items()},
+        {task: Decimal(value) for task, value in reserved.items()},
+    )
+
+
+def test_reservations_count_toward_the_breaker() -> None:
+    # 已花 10、Batch 預留 30：互動再花 10 就到 50，之後全部擋下（不是只看帳本的 20）。
+    before = _reserved_status({LlmTask.ZH_SUMMARY: "10"}, {LlmTask.CLASSIFY: "30"})
+    after = _reserved_status({LlmTask.ZH_SUMMARY: "20"}, {LlmTask.CLASSIFY: "30"})
+
+    assert before.allows(LlmTask.ZH_SUMMARY)
+    assert before.remaining_usd == Decimal(10)
+    assert (after.total_usd, after.reserved_usd, after.committed_usd) == (
+        Decimal(20),
+        Decimal(30),
+        Decimal(50),
+    )
+    assert not after.ledger_breaker_tripped
+    assert after.breaker_tripped
+    assert not any(after.allows(task) for task in LlmTask)
+    assert after.retrieval_only
+    assert after.remaining_usd == Decimal(0)
+
+
+def test_reservations_count_toward_their_task_budget_only() -> None:
+    status = _reserved_status(
+        {LlmTask.CLASSIFY: "0.3"}, {LlmTask.CLASSIFY: "0.7"}, classify="1", zh_summary="1"
+    )
+
+    assert status.task_committed(LlmTask.CLASSIFY) == Decimal(1)
+    assert status.task_exhausted(LlmTask.CLASSIFY)
+    assert not status.allows(LlmTask.CLASSIFY)
+    assert status.allows(LlmTask.ZH_SUMMARY)
+    assert not status.breaker_tripped
+
+
+def test_over_committed_only_when_strictly_above() -> None:
+    # Batch 送出前的最後確認：規劃剛好排滿（等於）不算超過，不會擋住自己。
+    exact = _reserved_status({LlmTask.QA_ANSWER: "20"}, {LlmTask.CLASSIFY: "30"}, classify="30")
+    over = _reserved_status({LlmTask.QA_ANSWER: "20.000001"}, {LlmTask.CLASSIFY: "30"})
+    task_over = _reserved_status(
+        {LlmTask.CLASSIFY: "0.000001"}, {LlmTask.CLASSIFY: "30"}, classify="30"
+    )
+
+    assert exact.breaker_tripped  # 到達即擋：互動已經不准
+    assert not exact.over_committed([LlmTask.CLASSIFY])
+    assert over.over_committed([LlmTask.CLASSIFY])
+    assert task_over.over_committed([LlmTask.CLASSIFY])
+    # 別的工作超過自己的功能預算，不算這批（這批只有 zh_summary）。
+    assert not task_over.over_committed([LlmTask.ZH_SUMMARY])
+
+
+def test_no_reservations_behaves_like_the_ledger_alone() -> None:
+    status = _status({LlmTask.ZH_SUMMARY: "49.999999"})
+
+    assert status.reserved_usd == Decimal(0)
+    assert set(status.reserved_by_task) == set(LlmTask)
+    assert status.committed_usd == status.total_usd
+    assert status.ledger_breaker_tripped is status.breaker_tripped is False
+
+
+@pytest.mark.parametrize("bad", [Decimal("-0.01"), Decimal("NaN"), 1])
+def test_bad_reservations_are_rejected(bad: object) -> None:
+    with pytest.raises(ValueError, match="classify 的預留"):
+        build_budget_status(_config(), NOVEMBER, {}, {LlmTask.CLASSIFY: bad})  # type: ignore[dict-item]
+
+
+def test_render_cost_report_shows_reservations() -> None:
+    status = _reserved_status({LlmTask.ZH_SUMMARY: "10"}, {LlmTask.CLASSIFY: "30.5"})
+
+    assert render_cost_report(status)[-4:] == [
+        "熔斷線：50.0000",
+        "Batch 預留：30.5000",
+        "離熔斷線：9.5000",
+        "只檢索：否",
+    ]

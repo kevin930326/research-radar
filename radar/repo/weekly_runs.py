@@ -15,6 +15,7 @@ ADR-0026）。
 import json
 import uuid
 from collections.abc import Mapping
+from datetime import datetime
 
 from sqlalchemy import (
     CheckConstraint,
@@ -440,3 +441,36 @@ def update_weekly_run_failed(
         },
     ).one_or_none()
     return None if row is None else int(row[0])
+
+
+def update_weekly_runs_ai_done(connection: Connection, cutoff: datetime) -> list[uuid.UUID]:
+    """`published` 的每週更新，這一週的 Batch 都結束了（有批次、全部 `imported`／`failed`），或
+    快照的發布時間（`snapshot.as_of`，不是開始建立的 `created_at`）早於 `cutoff`（呼叫端給
+    「現在 − 24 小時」）時改成 `ai_done`；回傳改到的 id（AD-14、Story 2.11）。
+
+    判斷和改寫在同一句：並行的第二個呼叫等第一個交易結束，再判斷時已經不是 `published`，不會再改。
+    在呼叫端開好的交易裡做，不 commit。
+
+    Raises:
+        ValueError: `cutoff` 沒有時區（不碰資料庫）。
+    """
+    if cutoff.tzinfo is None or cutoff.utcoffset() is None:
+        raise ValueError("cutoff 要帶時區")
+    rows = connection.execute(
+        text(
+            "UPDATE weekly_run SET status = :ai_done, updated_at = now()"
+            " WHERE status = :published AND ("
+            " (EXISTS (SELECT 1 FROM batch_submission AS b WHERE b.weekly_run_id = weekly_run.id)"
+            " AND NOT EXISTS (SELECT 1 FROM batch_submission AS b"
+            " WHERE b.weekly_run_id = weekly_run.id AND b.status NOT IN ('imported', 'failed')))"
+            " OR EXISTS (SELECT 1 FROM snapshot AS s"
+            " WHERE s.weekly_run_id = weekly_run.id AND s.as_of < :cutoff))"
+            " RETURNING id"
+        ),
+        {
+            "ai_done": WeeklyRunStatus.AI_DONE.value,
+            "published": WeeklyRunStatus.PUBLISHED.value,
+            "cutoff": cutoff,
+        },
+    )
+    return [row[0] for row in rows.all()]

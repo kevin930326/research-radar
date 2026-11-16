@@ -191,6 +191,9 @@ def test_superuser_cannot_run_migration(fresh_database: TestDatabase) -> None:
 
 
 def test_migrate_without_migrations_dir_explains(tmp_path: Path) -> None:
+    # Story 2.9：CLI 啟動時也檢查 prompt 登記（工作目錄下的 prompts/）；指回 repo 的 prompts/，
+    # 才測得到「找不到遷移檔」。
+    (tmp_path / "prompts").symlink_to(ROOT / "prompts", target_is_directory=True)
     result = _run(
         "radar",
         "migrate",

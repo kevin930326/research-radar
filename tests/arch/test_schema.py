@@ -22,6 +22,14 @@ PRIMARY_KEY_EXCEPTIONS: dict[str, str] = {
     "procrastinate_workers": PROCRASTINATE_REASON,
     "procrastinate_events": PROCRASTINATE_REASON,
     "procrastinate_periodic_defers": PROCRASTINATE_REASON,
+    "embedding": (
+        "AD-12：主鍵是（item_type, item_id, model_id），同一篇論文每個模型一筆，換模型時新舊並存"
+        "（Story 2.8、ADR-0040）"
+    ),
+    "embedding_model": (
+        "模型登錄：主鍵是模型 ID 字串（例如 @cf/qwen/qwen3-embedding-0.6b），embedding 以"
+        "（model_id, dimensions）外鍵指過來（Story 2.8、ADR-0040）"
+    ),
 }
 
 # 只有部分索引（或沒有索引）、但不能改的外鍵，寫明理由；清單裡的每一項都要真的是沒有完整索引的外鍵。

@@ -286,11 +286,37 @@ def _scientific_values(text: str) -> set[Number]:
     return found
 
 
+# 用字母縮寫寫量級的數字（2.6 決定 13 選 B，Kevin 2026-11-15）：`12M`、`10k`、`3.5K`、`2B`、
+# `1,200K`、`.5M`、`12 m`、`5bn`，以及常見的變體 `12MM`、`1.2 Mn`、`12 mln`、`12 mil`、`12 mio`、
+# `2 bln`、`2 bil`、`12-M`（Codex 主審查第 5 條；不分大小寫，數字和字母之間最多一個空白或一個
+# 連字號）。讀不出量級（M 是 million 還是別的單位、k 是 thousand 還是 kilo、mm 也可能是公釐），照
+# 科學記號的做法整段換成空白、不取數字：`12M` 不會變成 12，也不會變成 12000000。數字前面不能接著
+# 字母、數字、`.`、`,`（`H2b`、`B2B` 的 2 不算）。字母後面：
+# - 不能再接字母、數字、連字號、`&`、`/`，或「`.`＋字母」（`12 months`、`12-month`、`5 MB`、
+#   `5-MB`、`2 B2B`、`312 K-12 teachers`、`200 M-Turk`、`12 mmHg`，以及 Opus 確認審查 M4 的
+#   `412 M&A deals`、`120 M.B.A. students`、`20 M.D.`、`120 M/F` 不算）；句尾的 `12M.` 照樣算；
+# - 例外（Opus 確認審查 M3）：數字和字母**中間沒有空白也沒有連字號**時，後面接「連字號＋字母」的
+#   複合形容詞也算（`a 2M-user platform`、`a 10k-respondent panel`、`2B-dollar`），接「連字號＋
+#   數字」的範圍也算（Opus 第三輪 L2：`a 12M-15M user base` 的 12）；中間有空白或連字號的
+#   （`200 M-Turk`、`312 K-12`）照上一條不算。
+_MAGNITUDE_NUMBER: Final = r"(?:(?:[0-9]{1,3}(?:,[0-9]{3})+|[0-9]+)(?:\.[0-9]+)?|\.[0-9]+)"
+_MAGNITUDE_LETTERS: Final = r"(?i:bln|bil|bn|mln|mil|mio|mm|mn|[kmb])"
+_ABBREVIATED_MAGNITUDE: Final = re.compile(
+    rf"(?<![0-9A-Za-z.,]){_MAGNITUDE_NUMBER}"
+    rf"(?:(?:\s?|-){_MAGNITUDE_LETTERS}(?![0-9A-Za-z&/-]|\.[A-Za-z])"
+    rf"|{_MAGNITUDE_LETTERS}(?=-[A-Za-z0-9]))"
+)
+
+
 def structured_numbers(text: str) -> frozenset[Number]:
     """結構化數值（研究模型的樣本數、題數、α、β、p…）可以對照的輸入數字：只有**完整量級**
     （「12 million」只有 12000000，不留 12；資料庫的數字沒有單位欄位）、科學記號算出完整的值、
-    隔空白的負號讀成負數，加上英文數字詞（整個詞組的值）。`text` 是檢查用副本。"""
-    values, _ = numbers(text)
+    隔空白的負號讀成負數，加上英文數字詞（整個詞組的值）。`text` 是檢查用副本。
+
+    用字母縮寫寫量級的數字（`12M`、`10k`、`3.5K`、`2B`，`_ABBREVIATED_MAGNITUDE`）讀不懂，整段
+    不取（不留 12、也不猜成 12000000）：模型照縮寫填的數字對不上，整筆拒收（prompt v2 規則 5 要
+    模型這時填 null）。只影響結構化數值；英文名、繁中標籤與中文重點用的 `numbers` 不變。"""
+    values, _ = numbers(_ABBREVIATED_MAGNITUDE.sub(_blank, text))
     words = [word.lower() for word in ENGLISH_WORD.findall(text)]
     return frozenset(values | _scientific_values(text) | number_word_values(words))
 

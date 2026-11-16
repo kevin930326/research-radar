@@ -52,5 +52,9 @@
 ## 注意
 
 - 檔案內容不要改。設計改了，就從 Artifact 重新存一份，並在 PR 說明寫是哪一天的版本。
-- 三個論文頁的設計稿裡有兩篇論文的英文摘要（示意用）。這個 repo 公開之前（Story 13.6）要先換成自己寫的假摘要。
+- 三個論文頁的設計稿（`paper.html`、`paper-ai-failed.html`、`paper-my-pdf.html`）用了一篇論文的英文摘要原文當示意，`docs/ux/claude-design-brief.md` 也引了前三句。這篇是 CC BY 4.0 授權（2026-11-15 向 OpenAlex 用 DOI 查過：`license: cc-by`），可以照原文使用，條件是標明出處，所以不用換成假摘要：
+  - Florian Schneider, Pavel Dykmann, Timm Teubner (2025). Mixed Signals: The Effects of Online Rating Discrepancy on User Trust. *Journal of Management Information Systems*, 42(3), 894–925. https://doi.org/10.1080/07421222.2025.2520178 ，授權 CC BY 4.0（https://creativecommons.org/licenses/by/4.0/）。摘要原文沒有改動。
+  - 設計稿裡的中文重點、分類、研究模型是照這篇摘要手寫的示意，不是論文作者寫的。
+  - 另一篇（Understanding digital transformation）只用了標題，沒有摘要。
+  - 之後設計稿要放別篇論文的摘要時，先確認是開放授權並在這裡補出處；付費期刊的摘要不要放。
 - 這些檔案會連到 Google Fonts 載入 Instrument Serif 與 DM Mono；中文用系統字。沒有網路時英文數字會變成備用字體，比對時要有網路。
