@@ -20,6 +20,8 @@ uploads/
 data/
 **/uploads/
 **/data/
+# 標註試算表（真的標註檔不 commit；範例檔在 tests/fixtures/ 由下面的放行規則放行）
+*.xlsx
 # 測試用的假資料若需要進 repo，放在 tests/fixtures/ 並用下面這行放行
 !tests/fixtures/**
 
