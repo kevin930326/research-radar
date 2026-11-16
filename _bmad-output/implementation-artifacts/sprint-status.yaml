@@ -121,7 +121,7 @@ actual_hours:
   - {round: "epic-2b＋epic-3b", stories: "2.8～2.13、3.3～3.5", estimate_h: 21.5, elapsed_h: 21, kevin_h_low: 2, kevin_h_high: 3, rough: true}
 
 generated: 11-14-2026 03:46
-last_updated: 11-16-2026 18:51
+last_updated: 11-17-2026 01:35
 project: research-radar
 project_key: NOKEY
 tracking_system: file-system
@@ -151,8 +151,8 @@ development_status:
   2-7-人工判斷事件與有效值: done
   2-8-向量與全庫向量化: done  # 2026-11-16 Kevin 用真的 key 跑完全庫向量化：10,525 篇有向量、失敗 0、放行擋下 0
   2-9-batch-送出與每週更新的串接: done
-  2-10-只對指定的論文跑-ai: review  # 程式已合併；等真的 key 的 20 篇試跑確認
-  2-11-batch-結果匯入與第一次全庫-ai: review  # 程式已合併；等全庫 Batch、拒收報表與費用對帳
+  2-10-只對指定的論文跑-ai: done  # 2026-11-16 Kevin 用真的 key 試跑：1 篇＋20 篇（prompt v1、v2、v3 各一次），拒收報表見 PR 說明
+  2-11-batch-結果匯入與第一次全庫-ai: done  # 2026-11-16 Kevin 用真的 key 跑完全庫 Batch：52 批 25,881 筆全部匯入、needs_attention 0；本月費用 7.15 美元（PRD 估約 9）
   2-12-管理者的-ai-指令: done
   2-13-標註試算表範本: review  # 程式已合併；等分類表定版後產生正式範本、用試算表打開確認
   epic-2-retrospective: optional
