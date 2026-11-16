@@ -217,7 +217,7 @@ def test_not_mentioned_field_is_null_and_the_rest_is_stored(
     ("changes", "code"),
     [
         ({"method": "使用問卷，摘要未提及樣本數"}, ErrorCode.ZH_SUMMARY_PLACEHOLDER_TEXT),
-        ({"findings": "團" * 101}, ErrorCode.ZH_SUMMARY_FIELD_TOO_LONG),
+        ({"findings": "團" * 151}, ErrorCode.ZH_SUMMARY_FIELD_TOO_LONG),
         (
             {"research_question": "遠距團隊如何採用協作平台。這是研究目的。"},
             ErrorCode.ZH_SUMMARY_SENTENCE_TRANSLATION,
@@ -405,7 +405,7 @@ def test_rejected_input_is_not_retried_automatically(
     rules: ZhSummaryRules,
     paper_id: uuid.UUID,
 ) -> None:
-    provider = FakeLlmProvider([_reply(GOOD | {"findings": "團" * 101})])
+    provider = FakeLlmProvider([_reply(GOOD | {"findings": "團" * 151})])
     _run(database, config, rules, paper_id, provider)
     after_first = table_counts(db)
 
