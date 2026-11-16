@@ -21,6 +21,8 @@
 - `eval_split_sha256`：調整組／測試組切分看的雜湊，只算正規化後的 DOI（`domain/eval_split.py`、
   Story 2.10、ADR-0042）。
 - `trial_sample_sha256`：試跑抽樣的排序鍵（seed, 正規化後的 DOI）（`domain/trial_runs.py`）。
+- `annotation_sample_sha256`：標註試算表抽樣的排序鍵（seed, 用途, DOI 或分層）
+  （`domain/annotations.py`、Story 2.13、ADR-0045）。
 
 ## source_hash
 
@@ -340,4 +342,43 @@ def trial_sample_sha256(seed: int, doi: str) -> str:
     _check_normalized_doi(doi)
     return _canonical_sha256(
         {"v": TRIAL_SAMPLE_VERSION, "purpose": "trial_sample", "seed": seed, "doi": doi}
+    )
+
+
+# --- 標註試算表的抽樣（Story 2.13、ADR-0045） ---------------------------------------------------
+
+# 算法版本：改了算進雜湊的欄位或序列化方式時加一（同一個 seed 會抽到不同的論文）。
+ANNOTATION_SAMPLE_VERSION: Final = 1
+# 用途 → 值要是什麼：`rank`（層內與新列的排序）與 `second_annotator`（標註者 B 的抽樣）收正規化後
+# 的 DOI；`stratum`（最大餘數法同分時的先後）收 `"<ISSN-L>:<出版年>"`。
+_ANNOTATION_DOI_PURPOSES: Final = frozenset({"rank", "second_annotator"})
+_ANNOTATION_STRATUM_PURPOSE: Final = "stratum"
+
+
+def annotation_sample_sha256(seed: int, purpose: str, value: str) -> str:
+    """標註試算表抽樣的排序鍵（64 位小寫十六進位 SHA-256）：（seed, 用途, 值）。和 paper_id、
+    候選的順序、資料庫無關（同 ADR-0042 的理由），不用 `random`、不用 `hash()`。
+
+    Raises:
+        ValueError: `seed` 不是整數（`bool` 也不收）、`purpose` 不是 `rank`／`stratum`／
+            `second_annotator`、`rank`／`second_annotator` 的值不是正規化後的 DOI、`stratum` 的值
+            不是字串。
+        InvalidIdentifierError: DOI 根本不是 DOI。
+    """
+    if type(seed) is not int:
+        raise ValueError("seed 要是整數")
+    if purpose in _ANNOTATION_DOI_PURPOSES:
+        _check_normalized_doi(value)
+    elif purpose == _ANNOTATION_STRATUM_PURPOSE:
+        if not isinstance(value, str):
+            raise ValueError("stratum 的值要是字串")
+    else:
+        raise ValueError("purpose 只能是 rank、stratum、second_annotator")
+    return _canonical_sha256(
+        {
+            "v": ANNOTATION_SAMPLE_VERSION,
+            "purpose": f"annotation_{purpose}",
+            "seed": seed,
+            "value": value,
+        }
     )

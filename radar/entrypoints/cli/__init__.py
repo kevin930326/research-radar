@@ -40,6 +40,29 @@ from radar.domain.admin_runs import (
     render_source_removal_result,
 )
 from radar.domain.ai_outputs import CallMode, LlmTask
+from radar.domain.annotations import (
+    DEFAULT_ABSTRACT_COUNT,
+    DEFAULT_CLASSIFICATION_COUNT,
+    DEFAULT_SECOND_ANNOTATOR_COUNT,
+    AnnotationParseError,
+    SampledWorkbook,
+    SampleSet,
+    annotation_truncated_cells,
+    annotator_a_columns,
+    annotator_b_columns,
+    build_annotator_a_workbook,
+    build_annotator_b_workbook,
+    check_interest,
+    dropdown_problems,
+    parse_annotation_workbook,
+    read_sampled_papers,
+    render_annotation_check,
+    render_annotation_problems,
+    render_annotation_sample,
+    render_second_annotator,
+    render_topic_counts,
+    select_second_annotator,
+)
 from radar.domain.budget import format_usd, render_cost_report
 from radar.domain.coverage import render_coverage_report
 from radar.domain.cube import UnknownJournalError
@@ -88,6 +111,7 @@ from radar.domain.trial_runs import (
     render_trial_summary,
 )
 from radar.domain.viewer import SystemViewer
+from radar.domain.xlsx import MAX_FILE_BYTES, XlsxError
 from radar.entrypoints.bootstrap import (
     MigrationsNotFoundError,
     build_database,
@@ -107,6 +131,7 @@ from radar.services.admin_runs import (
     preview_source_removal,
     remove_source_ai_outputs,
 )
+from radar.services.annotations import prepare_annotation_sample
 from radar.services.budget import get_budget_status
 from radar.services.coverage import get_coverage
 from radar.services.embeddings import (
@@ -165,6 +190,8 @@ runs_app = typer.Typer(help="AI 工作的執行（derivation_run）。", no_args
 app.add_typer(runs_app, name="runs")
 batches_app = typer.Typer(help="AI 工作的 Batch（batch_submission）。", no_args_is_help=True)
 app.add_typer(batches_app, name="batches")
+annotations_app = typer.Typer(help="人工標註金標準的試算表。", no_args_is_help=True)
+app.add_typer(annotations_app, name="annotations")
 # Ctrl-C 中斷時的退出碼（128 + SIGINT）。
 INTERRUPTED_EXIT_CODE = 130
 
@@ -1551,6 +1578,245 @@ def runs_estimate_revision(
         typer.echo(line)
     if estimate.exceeds_cap:
         raise typer.Exit(1)
+
+
+# --- 標註試算表（Story 2.13） ---------------------------------------------------------------
+
+
+def _annotation_args_error(message: str) -> NoReturn:
+    typer.echo(f"參數不對，沒有執行：{message}", err=True)
+    raise typer.Exit(2)
+
+
+def _check_output_free(path: Path) -> None:
+    """輸出檔已存在就不寫（不覆蓋任何既有檔案）、上層資料夾不存在也先擋下：退出碼 1。"""
+    if path.exists() or path.is_symlink():
+        _fail(f"輸出檔已經存在，不覆蓋：{path}", [])
+    if not path.parent.is_dir():
+        _fail(f"輸出檔的資料夾不存在：{path.parent}", [])
+
+
+def _read_annotation_file(path: Path, what: str) -> bytes:
+    """讀試算表（最多讀到上限多一個位元組，太大由解析函式擋下）；讀不到：退出碼 1。"""
+    try:
+        with path.open("rb") as file:
+            return file.read(MAX_FILE_BYTES + 1)
+    except OSError as exc:
+        _fail(f"讀不到{what}（{type(exc).__name__}）", [])
+
+
+def _read_sampled(path: Path, what: str) -> SampledWorkbook:
+    data = _read_annotation_file(path, what)
+    try:
+        return read_sampled_papers(data)
+    except AnnotationParseError as exc:
+        _fail(f"{what}看不懂，沒有執行：", render_annotation_problems(exc.problems)[1:])
+
+
+def _check_dropdowns(problems: list[str]) -> None:
+    """下拉清單寫不進 Excel（合起來超過 255 字元）：連資料庫、抽樣之前就退出碼 1，寫出是哪一欄。"""
+    if problems:
+        log.error("下拉清單寫不進 Excel，沒有產生標註試算表", problems=problems)
+        _fail("下拉清單寫不進 Excel，沒有產生試算表（改分類表或情境值清單）：", problems)
+
+
+def _write_new_file(path: Path, data: bytes) -> None:
+    """排他建立輸出檔（已存在就不寫、退出碼 1）；寫到一半失敗或中斷就刪掉寫了一半的檔。"""
+    try:
+        file = path.open("xb")
+    except FileExistsError:
+        _fail(f"輸出檔已經存在，不覆蓋：{path}", [])
+    except OSError as exc:
+        _fail(f"寫不出輸出檔（{type(exc).__name__}）", [])
+    try:
+        with file:
+            file.write(data)
+    except BaseException as exc:
+        path.unlink(missing_ok=True)
+        if isinstance(exc, OSError):
+            _fail(f"寫不出輸出檔（{type(exc).__name__}）", [])
+        raise
+
+
+@annotations_app.command("template")
+def annotations_template(
+    seed: Annotated[
+        int, typer.Option("--seed", help="抽樣的 seed（同一份資料、同參數抽到同一批）")
+    ],
+    out: Annotated[Path, typer.Option("--out", help="輸出的 xlsx（已存在就不寫）")],
+    interest: Annotated[
+        list[str] | None,
+        typer.Option("--interest", help="興趣主題（分類表的主題 key），可以給多個；層內優先抽"),
+    ] = None,
+    abstract_count: Annotated[
+        int | None,
+        typer.Option(
+            "--abstract-count",
+            help=f"摘要層級幾篇（預設 {DEFAULT_ABSTRACT_COUNT}；補抽時預設 0）",
+            show_default=False,
+        ),
+    ] = None,
+    classification_count: Annotated[
+        int | None,
+        typer.Option(
+            "--classification-count",
+            help=f"分類專用幾篇（預設 {DEFAULT_CLASSIFICATION_COUNT}；補抽時預設 0）",
+            show_default=False,
+        ),
+    ] = None,
+    extend: Annotated[
+        Path | None,
+        typer.Option("--extend", help="補抽：既有的 A 試算表（還沒開始標的）；新檔包含它的全部列"),
+    ] = None,
+) -> None:
+    """產生標註者 A 的試算表：依期刊、年份分層抽樣算數論文（只抽有 DOI 的），摘要層級只從有摘要的
+    抽，分類專用從其餘的抽；印 seed、兩組篇數、候選數與各主題篇數（不印標題與摘要）。
+
+    參數不對（數量是負數、補抽時兩個數量都是 0、興趣主題不是分類表的主題 key）：退出碼 2，不碰
+    資料庫。設定錯（含下拉清單寫不進 Excel，連資料庫之前就擋下）、讀不到資料庫、--extend 的檔讀
+    不了或已經開始標、輸出檔已存在或資料夾不存在：退出碼 1。
+    Ctrl-C：退出碼 130。
+    """
+    configure_logging()
+    default = 0 if extend is not None else None
+    abstract = abstract_count if abstract_count is not None else default
+    classification = classification_count if classification_count is not None else default
+    abstract = DEFAULT_ABSTRACT_COUNT if abstract is None else abstract
+    classification = DEFAULT_CLASSIFICATION_COUNT if classification is None else classification
+    if abstract < 0 or classification < 0:
+        _annotation_args_error("--abstract-count、--classification-count 不能是負數")
+    if extend is not None and abstract == 0 and classification == 0:
+        _annotation_args_error("補抽時 --abstract-count、--classification-count 至少一個要大於 0")
+    try:
+        taxonomy = load_taxonomy()
+    except ConfigError as exc:
+        _fail("設定錯誤，沒有產生試算表：", exc.problems)
+    try:
+        wanted = check_interest(interest or [], taxonomy)
+    except ValueError as exc:
+        _annotation_args_error(str(exc))
+    _check_output_free(out)
+    existing: SampledWorkbook | None = None
+    if extend is not None:
+        existing = _read_sampled(extend, "--extend 的試算表")
+        if existing.annotated:
+            _fail(
+                "--extend 的試算表已經開始標註，沒有補抽：",
+                ["補抽只能用還沒標的試算表；已經開始標的，另外產生一份新的（換 seed 或 --out）"],
+            )
+    try:
+        settings = load_settings()
+        context_values = load_context_values()
+    except ConfigError as exc:
+        log.error("設定錯誤，無法產生標註試算表", problems=exc.problems)
+        _fail("設定錯誤，沒有產生試算表：", exc.problems)
+    _check_dropdowns(dropdown_problems(annotator_a_columns(taxonomy, context_values)))
+    try:
+        database = build_database(settings, pool_size=database_pool_size(settings, "cli"))
+        result = prepare_annotation_sample(
+            SystemViewer(),
+            database,
+            taxonomy,
+            seed=seed,
+            interest=wanted,
+            abstract_count=abstract,
+            classification_count=classification,
+            existing=existing,
+        )
+        data = build_annotator_a_workbook(result.rows, taxonomy, context_values)
+        _write_new_file(out, data)
+    except KeyboardInterrupt:
+        typer.echo("中斷了（沒有寫輸出檔）", err=True)
+        raise typer.Exit(INTERRUPTED_EXIT_CODE) from None
+    except typer.Exit:
+        raise
+    except XlsxError as exc:
+        # XlsxError 的訊息照設計不帶儲存格內容，可以直接印。
+        log.error("產生標註試算表失敗", error_type=type(exc).__name__, reason=str(exc))
+        _fail(f"產生試算表失敗：{exc}", [])
+    except Exception as exc:
+        # 例外訊息可能含主機與帳號，只記類別名稱。
+        log.error("產生標註試算表失敗", error_type=type(exc).__name__)
+        _fail(f"產生試算表失敗（{type(exc).__name__}）；細節見日誌", [])
+    for line in render_annotation_sample(
+        result, truncated_cells=annotation_truncated_cells(result.rows)
+    ):
+        typer.echo(line)
+    for line in render_topic_counts(result.topic_counts, taxonomy):
+        typer.echo(line)
+    typer.echo(f"已寫入 {out}")
+
+
+@annotations_app.command("template-b")
+def annotations_template_b(
+    source: Annotated[Path, typer.Option("--from", help="標註者 A 的試算表")],
+    seed: Annotated[int, typer.Option("--seed", help="抽樣的 seed")],
+    out: Annotated[Path, typer.Option("--out", help="輸出的 xlsx（已存在就不寫）")],
+    count: Annotated[
+        int, typer.Option("--count", help="給標註者 B 幾篇（只從摘要層級抽）")
+    ] = DEFAULT_SECOND_ANNOTATOR_COUNT,
+) -> None:
+    """從 A 的試算表的摘要層級列依 seed 抽 N 篇，產生標註者 B 的空白試算表（主題、方法、論文層級的
+    研究模型欄、構面與假設欄，全部空白；沒有 A 的任何答案）。不連資料庫。
+
+    --count 不是 1 以上：退出碼 2。設定錯（含下拉清單寫不進 Excel）、A 的試算表讀不了或沒有摘要
+    層級的列、輸出檔已存在或資料夾不存在：退出碼 1。Ctrl-C：退出碼 130。
+    """
+    configure_logging()
+    if count < 1:
+        _annotation_args_error("--count 要是 1 以上的整數")
+    try:
+        taxonomy = load_taxonomy()
+        context_values = load_context_values()
+    except ConfigError as exc:
+        _fail("設定錯誤，沒有產生試算表：", exc.problems)
+    _check_dropdowns(dropdown_problems(annotator_b_columns(taxonomy, context_values)))
+    _check_output_free(out)
+    try:
+        sampled = _read_sampled(source, "--from 的試算表")
+        selected = select_second_annotator(sampled.rows, count, seed)
+        if not selected:
+            _fail("A 的試算表沒有摘要層級的列，沒有產生標註者 B 的試算表", [])
+        _write_new_file(out, build_annotator_b_workbook(selected, taxonomy, context_values))
+    except KeyboardInterrupt:
+        typer.echo("中斷了（沒有寫輸出檔）", err=True)
+        raise typer.Exit(INTERRUPTED_EXIT_CODE) from None
+    except XlsxError as exc:
+        _fail(f"產生試算表失敗：{exc}", [])
+    available = sum(row.sample_set is SampleSet.ABSTRACT for row in sampled.rows)
+    log.info("標註者 B 抽樣", seed=seed, requested=count, available=available, drawn=len(selected))
+    for line in render_second_annotator(seed, selected, available, count):
+        typer.echo(line)
+    typer.echo(f"已寫入 {out}")
+
+
+@annotations_app.command("check")
+def annotations_check(
+    path: Annotated[Path, typer.Argument(help="填好的標註試算表（A 或 B）", show_default=False)],
+) -> None:
+    """用 Epic 8 匯入會用的解析函式檢查填好的試算表：沒問題就印各層級已標／還沒標篇數與構面、假設
+    列數；有問題就列出每一個（工作表、列號、欄、原因；不印儲存格內容）。不連資料庫。
+
+    檔案讀不了、不合法或有任何問題：退出碼 1。Ctrl-C：退出碼 130。
+    """
+    configure_logging()
+    try:
+        taxonomy = load_taxonomy()
+        context_values = load_context_values()
+    except ConfigError as exc:
+        _fail("設定錯誤，沒有檢查：", exc.problems)
+    try:
+        data = _read_annotation_file(path, "試算表")
+        workbook = parse_annotation_workbook(data, taxonomy, context_values)
+    except KeyboardInterrupt:
+        typer.echo("中斷了", err=True)
+        raise typer.Exit(INTERRUPTED_EXIT_CODE) from None
+    except AnnotationParseError as exc:
+        for line in render_annotation_problems(exc.problems):
+            typer.echo(line)
+        raise typer.Exit(1) from None
+    for line in render_annotation_check(workbook):
+        typer.echo(line)
 
 
 def _fail(headline: str, problems: list[str]) -> NoReturn:

@@ -1,4 +1,6 @@
 """AI 區塊的判定：全專案只有 `find_ai_block` 一個函式（AD-30、ADR-0015、ADR-0035、Story 2.7）。
+另有 `list_effective_topic_keys`：標註抽樣讀有效主題（Story 2.13）；讀有效值 view 的 SQL 只准放在
+這個模組（`tests/arch/test_ai_table_reads.py` 的 `VIEW_READERS`）。
 
 判定順序固定（前面的條件成立就不往下看）：
 
@@ -20,7 +22,7 @@
 """
 
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from datetime import datetime
 from decimal import Decimal
 from typing import Any, assert_never
@@ -172,6 +174,28 @@ def find_ai_block(
     if mode is CallMode.INTERACTIVE:
         return AiBlock(product, AiBlockState.PENDING_INTERACTIVE)
     return AiBlock(product, AiBlockState.PENDING_BATCH)
+
+
+def list_effective_topic_keys(
+    viewer: Viewer, connection: Connection, paper_ids: Iterable[uuid.UUID]
+) -> dict[uuid.UUID, tuple[str, ...]]:
+    """這些論文（`viewer` 看得到的）的有效主題 `key`（人工修正優先，否則 `active` 的 AI 分類；照
+    view 的排序，可能是 `unclassified`）。沒有有效分類的論文不在結果裡（＝還沒有分類結果）；只
+    修正了方法、沒有 AI 分類的論文也不在（主題沒有值）。標註抽樣用（Story 2.13）。"""
+    wanted = sorted(set(paper_ids))
+    if not wanted:
+        return {}
+    visible = visible_papers(viewer, alias="paper")
+    rows = connection.execute(
+        text(
+            "SELECT e.paper_id, e.keys"
+            " FROM effective_classification AS e JOIN paper ON paper.id = e.paper_id"
+            f" WHERE {visible} AND e.field = :field AND e.keys IS NOT NULL"
+            " AND e.paper_id = ANY(CAST(:ids AS uuid[]))"
+        ),
+        {"field": TaxonomyField.TOPIC.value, "ids": wanted},
+    )
+    return {uuid.UUID(str(paper_id)): tuple(keys) for paper_id, keys in rows}
 
 
 # --- 列 → 區塊 -------------------------------------------------------------------------------
