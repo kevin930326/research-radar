@@ -258,7 +258,7 @@ def _report(history: tuple[AiHistoryRow, ...]) -> PaperAiReport:
             AiProduct.CLASSIFICATION: AiBlock(
                 AiProduct.CLASSIFICATION,
                 AiBlockState.READY,
-                ClassificationValue(field, None),
+                ClassificationValue(field, None, 1),
                 human,
             ),
             AiProduct.RESEARCH_MODEL: AiBlock(AiProduct.RESEARCH_MODEL, AiBlockState.FAILED),

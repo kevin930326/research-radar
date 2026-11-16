@@ -52,7 +52,7 @@ from radar.domain.ai_outputs import (
     build_llm_input,
 )
 from radar.domain.fingerprints import input_sha256
-from radar.domain.judgments import SummaryField
+from radar.domain.judgments import JudgmentKind, JudgmentTarget, SummaryField
 from radar.domain.llm_schemas import EvidenceType, SupportLevel
 from radar.domain.processing import plan_for
 from radar.domain.taxonomy import TaxonomyField
@@ -107,15 +107,26 @@ def find_ai_block(
             )
             effective = None if row is None else _zh_summary_block(row)
         case AiProduct.CLASSIFICATION:
+            # 整篇去重的修正人數（論文頁「有 N 位成員修正過」，Story 3.8）：view 只有每一欄各自的
+            # 人數，這裡另外列出這篇所有分類修正事件的不同成員（在 Python 數人數；SQL 不寫 count，
+            # 免得被當成數篇數，tests/arch/test_stats_queries.py 第 3 條）。只讀；每一列都一樣，和
+            # view 的列同一個可見條件。
             rows = (
                 connection.execute(
                     text(
                         "SELECT e.field, e.keys, e.human_verified, e.fix_member_count,"
-                        " e.members_disagree, e.model, e.input_kind, e.generated_at, e.fixed_at"
+                        " e.members_disagree, e.model, e.input_kind, e.generated_at, e.fixed_at,"
+                        " ARRAY(SELECT DISTINCT j.member_id FROM judgment_event AS j"
+                        " WHERE j.kind = :fix_kind AND j.target_type = :fix_target"
+                        " AND j.target_id = e.paper_id) AS paper_fix_member_ids"
                         " FROM effective_classification AS e JOIN paper ON paper.id = e.paper_id"
                         f" WHERE {visible} AND e.paper_id = :paper_id"
                     ),
-                    {"paper_id": paper_id},
+                    {
+                        "paper_id": paper_id,
+                        "fix_kind": JudgmentKind.CLASSIFICATION_FIX.value,
+                        "fix_target": JudgmentTarget.PAPER.value,
+                    },
                 )
                 .mappings()
                 .all()
@@ -255,7 +266,10 @@ def _classification_block(rows: Sequence[RowMapping]) -> AiBlock:
             model=None, generated_at=max(fixed_at), input_kind=None, human_verified=verified
         )
     value = ClassificationValue(
-        topic=fields.get(TaxonomyField.TOPIC), method=fields.get(TaxonomyField.METHOD)
+        topic=fields.get(TaxonomyField.TOPIC),
+        method=fields.get(TaxonomyField.METHOD),
+        # 成員 ID 只在這裡數人數，不放進回應。
+        fix_member_count=len(rows[0]["paper_fix_member_ids"]),
     )
     return AiBlock(AiProduct.CLASSIFICATION, AiBlockState.READY, value, provenance)
 

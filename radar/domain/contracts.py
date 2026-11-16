@@ -279,12 +279,17 @@ class ClassificationField(BaseModel):
 
 
 class ClassificationContent(BaseModel):
-    """有效的分類：主題與方法兩欄；沒有值的那一欄是 null（只有人工修正、沒有 AI 值時才會發生）。"""
+    """有效的分類：主題與方法兩欄；沒有值的那一欄是 null（只有人工修正、沒有 AI 值時才會發生）。
+
+    - `fix_member_count`：修正過這篇分類（主題或方法）的成員人數，整篇去重
+      （「有 N 位成員修正過」）。
+    """
 
     model_config = _FROZEN
 
     topic: ClassificationField | None
     method: ClassificationField | None
+    fix_member_count: int = Field(ge=0, strict=True)
 
     @model_validator(mode="after")
     def _check(self) -> Self:
@@ -295,6 +300,7 @@ class ClassificationContent(BaseModel):
         return ai_blocks.ClassificationValue(
             topic=None if self.topic is None else self.topic.to_domain(),
             method=None if self.method is None else self.method.to_domain(),
+            fix_member_count=self.fix_member_count,
         )
 
     @classmethod
@@ -302,6 +308,7 @@ class ClassificationContent(BaseModel):
         return cls(
             topic=None if value.topic is None else ClassificationField.from_domain(value.topic),
             method=None if value.method is None else ClassificationField.from_domain(value.method),
+            fix_member_count=value.fix_member_count,
         )
 
 

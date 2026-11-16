@@ -8,8 +8,13 @@ import type { ClassificationField } from './classificationField.ts';
 
 /**
  * 有效的分類：主題與方法兩欄；沒有值的那一欄是 null（只有人工修正、沒有 AI 值時才會發生）。
+ *
+ * - `fix_member_count`：修正過這篇分類（主題或方法）的成員人數，整篇去重
+ *   （「有 N 位成員修正過」）。
  */
 export interface ClassificationContent {
   topic: ClassificationField | null;
   method: ClassificationField | null;
+  /** @minimum 0 */
+  fix_member_count: number;
 }

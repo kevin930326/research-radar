@@ -43,7 +43,7 @@ ZH = ZhSummaryValue(
 TOPIC = ClassificationFieldValue(
     keys=("erp",), human_verified=False, fix_member_count=0, members_disagree=False
 )
-CLASSIFICATION = ClassificationValue(topic=TOPIC, method=None)
+CLASSIFICATION = ClassificationValue(topic=TOPIC, method=None, fix_member_count=0)
 TRUST = uuid.uuid4()
 LOYALTY = uuid.uuid4()
 RESEARCH_MODEL = ResearchModelValue(
@@ -235,9 +235,24 @@ def test_zh_summary_value_rules() -> None:
     assert reported.reported_fields == (SummaryField.METHOD, SummaryField.THEORY)
 
 
+def test_classification_paper_fix_member_count_is_between_the_max_and_the_sum() -> None:
+    # 整篇去重的修正人數（Story 3.8）：A 修主題、B 修方法是 2；同一人修兩欄是 1。
+    topic = dataclasses.replace(TOPIC, human_verified=True, fix_member_count=1)
+    method = dataclasses.replace(TOPIC, human_verified=True, fix_member_count=1)
+    for count in (1, 2):
+        value = ClassificationValue(topic=topic, method=method, fix_member_count=count)
+        assert value.fix_member_count == count
+    for count in (0, 3):
+        with pytest.raises(ValueError, match="整篇"):
+            ClassificationValue(topic=topic, method=method, fix_member_count=count)
+    for bad in (-1, True):
+        with pytest.raises(ValueError, match="fix_member_count"):
+            ClassificationValue(topic=topic, method=None, fix_member_count=bad)
+
+
 def test_classification_value_rules() -> None:
     with pytest.raises(ValueError, match="至少要有一欄"):
-        ClassificationValue(topic=None, method=None)
+        ClassificationValue(topic=None, method=None, fix_member_count=0)
     with pytest.raises(ValueError, match="排序"):
         dataclasses.replace(TOPIC, keys=("supply_chain", "erp"))
     with pytest.raises(ValueError, match="兩位"):
