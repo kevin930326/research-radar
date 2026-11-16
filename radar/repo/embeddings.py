@@ -309,8 +309,8 @@ def find_paper_embedding(
 # --- 寫入 ---------------------------------------------------------------------------------
 
 
-# 依來源移除要刪的向量（`e`）：記的來源是 `:source`，或看摘要卻沒記來源（遷移 0018 證明不了
-# 來源的舊向量，可能就是用這個來源算的：保守一起刪，Story 2.12 審查後第二輪 R2）。
+# 依來源移除要刪的向量（`e`）：記的來源是 `:source`，或看摘要卻沒記來源（遷移 0018 前就有的
+# 舊向量一律不回填來源，可能就是用這個來源算的：保守一起刪，Story 2.12 審查後第二輪 R2、第三輪）。
 _REMOVABLE_EMBEDDING: Final = (
     "(e.abstract_source = :source OR (e.abstract_source IS NULL AND EXISTS ("
     "SELECT 1 FROM derivation_run AS r WHERE r.id = e.run_id AND r.input_kind = 'abstract')))"

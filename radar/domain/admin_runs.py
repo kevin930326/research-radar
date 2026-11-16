@@ -486,7 +486,7 @@ class SourceAiCounts:
     - `constructs`：刪完這些表頭之後沒有其他人用的構面數（只被這個來源的結果用到、沒有其他來源
       的結果、代表或人工合併判斷用到；審查後第 2 點）。
     - `embeddings`：用這個來源的摘要算的向量數（`embedding.abstract_source`），加上看摘要卻沒記
-      來源的向量（遷移 0018 證明不了來源的，保守一起刪；審查後第二輪 R2）。
+      來源的向量（遷移 0018 前就有的，一律沒記來源，保守一起刪；審查後第二輪 R2、第三輪）。
     """
 
     headers: Mapping[LlmTask, Mapping[ResultStatus, int]]

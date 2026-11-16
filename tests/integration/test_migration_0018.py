@@ -20,6 +20,10 @@ from radar.domain.fingerprints import embedding_input_sha256, input_sha256
 from radar.domain.papers import AbstractSource
 from radar.domain.viewer import SystemViewer
 from radar.repo.db import Database
+from radar.repo.embeddings import (
+    count_embeddings_by_abstract_source,
+    delete_embeddings_by_abstract_source,
+)
 from radar.repo.papers import find_paper_llm_source
 from tests.database import TestDatabase, migrate
 from tests.integration.test_migration_0016 import _alembic, _submission
@@ -330,44 +334,66 @@ def _embedding_sha(db: TestDatabase, paper_id: uuid.UUID) -> str:
     return embedding_input_sha256(embedding_input.text, InputKind.ABSTRACT.value)
 
 
-def test_embedding_source_is_backfilled_only_when_proven(db: TestDatabase) -> None:
-    # 審查後第二輪 R2：目前摘要從向量化之前就沒改過、指紋也對得上才補；其他一律 NULL。
+def test_existing_embeddings_are_never_backfilled(db: TestDatabase) -> None:
+    # 審查後第三輪：遷移前就有的向量一律不回填來源（連目前摘要沒換過、指紋也對得上的都留 NULL），
+    # 現在的狀態證明不了向量化當時讀的是哪個來源；依來源移除會保守刪掉（見下一個測試）。
     down = _alembic(db, "downgrade", "0017")
     assert down.returncode == 0, down.stdout + down.stderr
     assert "abstract_source" not in _embedding_columns(db)
-    proven, _ = _paper(db, 1)
+    matching, _ = _paper(db, 1)
     titled, _ = _paper(db, 2)
     gone, _ = _paper(db, 3)
     changed_text, _ = _paper(db, 4)
-    _vector(db, proven, "abstract", _embedding_sha(db, proven))
+    _vector(db, matching, "abstract", _embedding_sha(db, matching))
     _vector(db, titled, "title")
     _vector(db, gone, "abstract", _embedding_sha(db, gone))
     execute(db, "DELETE FROM paper_abstract WHERE paper_id = %s", gone)
-    # 文字不同：向量是用舊的摘要算的，之後摘要改了（這裡刻意不動 updated_at，只靠指紋擋）。
     _vector(db, changed_text, "abstract", _embedding_sha(db, changed_text))
     execute(
         db,
         "UPDATE paper_abstract SET content = 'A different abstract.' WHERE paper_id = %s",
         changed_text,
     )
-    # 標題改了（摘要列沒動，時間條件成立）：指紋對不上。
-    retitled, _ = _paper(db, 5)
-    _vector(db, retitled, "abstract", _embedding_sha(db, retitled))
-    execute(db, "UPDATE paper SET title = 'Another title' WHERE id = %s", retitled)
 
     migrate(db)
 
     assert "abstract_source" in _embedding_columns(db)
-    assert _vector_source(db, proven) == "openalex"
+    assert _vector_source(db, matching) is None  # 指紋對得上也不補
     assert _vector_source(db, titled) is None
-    assert _vector_source(db, gone) is None  # 已經沒有目前的摘要：證明不了
-    assert _vector_source(db, changed_text) is None  # 文字不同：證明不了（照指紋規則會重算）
-    assert _vector_source(db, retitled) is None
+    assert _vector_source(db, gone) is None
+    assert _vector_source(db, changed_text) is None
     with pytest.raises(psycopg.errors.CheckViolation):
         execute(db, "UPDATE embedding SET abstract_source = 'crossref'")
     down_again = _alembic(db, "downgrade", "0017")
     assert down_again.returncode == 0, down_again.stdout + down_again.stderr
     assert "abstract_source" not in _embedding_columns(db)
+
+
+@pytest.mark.parametrize("source", list(AbstractSource))
+def test_removal_after_upgrade_deletes_old_abstract_vectors_by_any_source(
+    db: TestDatabase, source: AbstractSource
+) -> None:
+    # 審查後第三輪：遷移前的看摘要向量（來源 NULL）在移除任何一個來源時都會被刪（之後照 2.8
+    # 重算並記來源）；只看標題的向量不動。
+    down = _alembic(db, "downgrade", "0017")
+    assert down.returncode == 0, down.stdout + down.stderr
+    matching, _ = _paper(db, 1)
+    other_text, _ = _paper(db, 2)
+    titled, _ = _paper(db, 3)
+    _vector(db, matching, "abstract", _embedding_sha(db, matching))
+    _vector(db, other_text, "abstract")
+    _vector(db, titled, "title")
+
+    migrate(db)
+
+    database = Database(db.app_url, connect_timeout=5, pool_size=1)
+    with database.transaction() as connection:
+        preview = count_embeddings_by_abstract_source(SystemViewer(), connection, source)
+        deleted = delete_embeddings_by_abstract_source(connection, source)
+    assert preview == 2
+    assert deleted == 2
+    left = {uuid.UUID(str(row[0])) for row in execute(db, "SELECT item_id FROM embedding")}
+    assert left == {titled}
 
 
 def test_embedding_source_is_not_guessed_when_the_source_switched_with_the_same_text(
