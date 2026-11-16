@@ -484,17 +484,15 @@ def test_saved_output_is_resumed_without_paying_again(
 # --- 閘門鎖內的 retry_of ----------------------------------------------------------------------
 
 
-def test_retry_of_with_no_blocking_result_runs_normally(
+def test_retry_of_with_no_header_is_skipped(
     db: TestDatabase, database: Database, paper_id: uuid.UUID
 ) -> None:
-    result = _gateway(
-        database,
-        SchemaReplyProvider(good_replies()),
-        paper_id,
-        LlmTask.CLASSIFY,
-        retry_of=uuid.uuid4(),
-    )
-    assert result.outcome is GatewayOutcome.ACTIVE
+    # 審查後第 3 點：帶了 retry_of 就一定核對；這組鍵查不到任何表頭（確認過的拒收列被移除、或亂給
+    # 的 id）時略過、不呼叫（原本預期照常付費執行，和需求相反）。
+    provider = SchemaReplyProvider(good_replies())
+    result = _gateway(database, provider, paper_id, LlmTask.CLASSIFY, retry_of=uuid.uuid4())
+    assert result.outcome is GatewayOutcome.SKIPPED
+    assert provider.total_calls == 0
 
 
 def test_retry_of_does_not_override_an_active_result(
@@ -540,6 +538,26 @@ def test_retry_of_must_be_the_latest_rejected_header(
     result = _gateway(database, provider, paper_id, LlmTask.CLASSIFY, retry_of=latest)
     assert result.outcome is GatewayOutcome.ACTIVE
     assert provider.total_calls == 1
+
+
+def test_retry_of_whose_header_is_no_longer_rejected_is_skipped(
+    db: TestDatabase, database: Database, paper_id: uuid.UUID
+) -> None:
+    # 審查後第 3 點：確認時那一列 rejected 之後被改成別的狀態（這裡直接改成 superseded 模擬）：
+    # 它已經不擋平常流程，但 retry_of 照樣要核對「仍是 rejected」，略過、不呼叫。
+    _reject(database, paper_id, LlmTask.CLASSIFY)
+    [(rejected_id, _)] = _headers(db, LlmTask.CLASSIFY)
+    execute(
+        db,
+        "UPDATE classification SET status = 'superseded', reject_reason = NULL WHERE id = %s",
+        rejected_id,
+    )
+    provider = SchemaReplyProvider(good_replies())
+
+    result = _gateway(database, provider, paper_id, LlmTask.CLASSIFY, retry_of=rejected_id)
+
+    assert result.outcome is GatewayOutcome.SKIPPED
+    assert provider.total_calls == 0
 
 
 def test_eval_run_cannot_carry_retry_of(

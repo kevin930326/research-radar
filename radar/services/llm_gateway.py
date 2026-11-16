@@ -16,20 +16,24 @@
    鍵是從這次真的要送的內容算的，所以核對過就保證送出的就是確認時的那份。呼叫端帶
    `call_allowed=False`（試跑確認時這一項是接續或略過，Story 2.11 確認審查 D1）時，第 5 步只接續、
    不新增 run（沒有可接續的就 `SKIPPED`），一定不呼叫模型。
-5. 取得執行資格的短交易：advisory lock → 再問一次 `should_run`（有 `active`、平常流程的
-   `rejected` 或 `running` 就 `SKIPPED`）→ 有 `llm_result_pending` 的 run 就改回 `running` 接續，
-   否則新增 `running` 的 `derivation_run`（部分唯一索引兜底），立刻 commit。評估（帶
-   `eval_run_id`）不問 `should_run`、不受 running 索引限制；同一個 `eval_run_id` 已經有 `running`
-   時 `SKIPPED`，也只接續同一個 `eval_run_id` 的 run。管理者確認過的重跑（`retry_of`，只准
-   `services/run_retry.py` 傳，Story 2.12）：平常流程的 `rejected` 只在「這組鍵最新的一列平常流程
-   表頭就是 `retry_of`」時放行，`active` 照樣 `SKIPPED`；新增的 run 記下送出時用的摘要來源。
+5. 取得執行資格的短交易：（看摘要時先拿摘要來源的共用鎖，Story 2.12 審查後）advisory lock
+   →（看摘要時重讀論文，目前摘要已經不是這個來源或不再放行就 `INPUT_CHANGED`）→ 再問一次
+   `should_run`（有 `active`、平常流程的 `rejected` 或 `running` 就 `SKIPPED`）→ 有
+   `llm_result_pending` 的 run 就改回 `running` 接續，否則新增 `running` 的 `derivation_run`
+   （部分唯一索引兜底），立刻 commit。評估（帶 `eval_run_id`）不問 `should_run`、不受 running
+   索引限制；同一個 `eval_run_id` 已經有 `running` 時 `SKIPPED`，也只接續同一個 `eval_run_id`
+   的 run。管理者確認過的重跑（`retry_of`，只准 `services/run_retry.py` 傳，Story 2.12）：只在
+   「這組鍵最新的一列平常流程表頭就是 `retry_of`、而且仍是 `rejected`」時放行（查不到任何表頭也
+   略過），`active` 照樣 `SKIPPED`；新增的 run 記下送出時用的摘要來源，接續遷移前沒記來源的 run
+   時同一句補上。
 6. 呼叫模型（不開著交易；接續時跳過 6、7）。暫時性錯誤 → run `failed`、`TRANSIENT_FAILURE`；
    設定錯 → run `failed` 後原樣丟出。
 7. 自己的短交易記 `llm_call`（有 usage 才記；費用由 `domain/pricing.py` 算），連同模型回的文字
    或呼叫當下的拒收原因（`SavedLlmOutput`）一起存。
 8. Pydantic 驗格式 → domain 驗證（工作的驗證函式）→ 確認輸出存得進資料庫；任何一步不過都是
    拒收（`rejected`＋原因代碼），不重試。
-9. `services/ai_results.py` 鎖論文列、核對後寫入（另一個短交易）。
+9. `services/ai_results.py` 鎖摘要來源（共用）與論文列、核對後寫入（另一個短交易）；摘要來源已經
+   不是這篇的目前摘要時不寫表頭、回 `INPUT_CHANGED`（帳照記，run 改 failed）。
 
 記帳之後（8、9）出非預期的錯（驗證函式丟了 `OutputRejectedError` 以外的例外、寫入的交易失敗）
 時，帳照記，run 改成 `failed`（`llm_result_pending`），例外原樣丟出；下一次同一組鍵從存下的輸出
@@ -98,13 +102,14 @@ from radar.domain.ai_outputs import (
     RunKey,
     RunStatus,
     SavedLlmOutput,
+    abstract_source_usable,
     build_llm_input,
     check_output_storable,
     is_storable_json,
 )
 from radar.domain.context_values import ContextValues
 from radar.domain.errors import ErrorCode
-from radar.domain.fingerprints import input_sha256, run_lock_key
+from radar.domain.fingerprints import abstract_source_lock_key, input_sha256, run_lock_key
 from radar.domain.llm import (
     LlmBatchRequest,
     LlmBatchResult,
@@ -146,6 +151,8 @@ from radar.repo.llm_ledger import (
 )
 from radar.repo.papers import find_paper_llm_source
 from radar.services.ai_results import (
+    AbstractSourceChangedError,
+    NotRecorded,
     ResultTargetNotFoundError,
     record_batch_llm_result,
     record_llm_result,
@@ -193,6 +200,10 @@ class GatewayOutcome(StrEnum):
     DEFERRED_BUDGET = "deferred_budget"  # 預算不准
     TOO_LARGE = "too_large"  # 預估輸入超過上限
     TRANSIENT_FAILURE = "transient_failure"  # 逾時、限流、服務端錯誤、連線錯誤：下一次可以再跑
+    # 摘要來源鎖裡核對：送出時用的摘要已經不是這篇的目前摘要（被移除、換成別的來源）或不再放行
+    # （Story 2.12 審查後）。取得資格時發現就不建 run、不呼叫；寫表頭前發現就不寫表頭、run 改
+    # failed（`abstract_source_changed`），帳照記。
+    INPUT_CHANGED = "input_changed"
 
 
 class ConfirmedRequestChangedError(Exception):
@@ -325,6 +336,8 @@ class BatchClaimOutcome(StrEnum):
     CLAIMED = "claimed"  # 新增了 call_mode='batch' 的 running run
     SKIPPED = "skipped"  # should_run 說不用跑（已有 running、active 或平常流程的 rejected）
     RESUMABLE = "resumable"  # 有可接續的 llm_result_pending：留給互動接續，不新增
+    # 摘要來源鎖裡核對：這篇的目前摘要已經不是送出要用的來源、或不再放行（不新增、不接續）
+    INPUT_CHANGED = "input_changed"
 
 
 @dataclass(frozen=True)
@@ -421,7 +434,11 @@ def run_llm_job(
         resume_only=resume_only or not call_allowed,
         retry_of=retry_of,
     )
-    if claim is None:
+    if claim is BatchClaimOutcome.INPUT_CHANGED:
+        # 讀摘要之後、取得資格之前，這個來源的摘要被移除或換掉（Story 2.12 審查後）：不建 run。
+        log.info("取得執行資格時摘要來源已經變了，沒有呼叫模型", task=task.value)
+        return GatewayResult(GatewayOutcome.INPUT_CHANGED, reason=ErrorCode.ABSTRACT_SOURCE_CHANGED)
+    if not isinstance(claim, _Claim):
         # 預算不准而且鎖裡已經沒有可接續的 run（別人接續完、或已經有結果）：照預算不准回報。
         return GatewayResult(
             GatewayOutcome.DEFERRED_BUDGET if resume_only else GatewayOutcome.SKIPPED
@@ -855,8 +872,11 @@ def _record_batch_result(
             error_type=type(exc).__name__,
         )
         raise
-    if status is None:
+    if status is NotRecorded.ALREADY_DONE:
         return BatchItemOutcome.ALREADY_DONE
+    if status is NotRecorded.SOURCE_CHANGED:
+        # 寫表頭前核對到這個來源的摘要已經被移除或換掉：run 已改 failed，表頭不寫。
+        return BatchItemOutcome.INPUT_CHANGED
     return _ITEM_OUTCOME[status]
 
 
@@ -965,10 +985,10 @@ def _acquire(
     *,
     resume_only: bool = False,
     retry_of: uuid.UUID | None = None,
-) -> _Claim | None:
-    """取得執行資格（互動）：一個短交易裡呼叫 `_claim_locked`，立刻 commit。不用跑回 None。
-    `resume_only`（預算不准）時只接續、不新增，沒有可接續的就回 None，所以預算不准時一定不會呼叫
-    模型。"""
+) -> _Claim | BatchClaimOutcome:
+    """取得執行資格（互動）：一個短交易裡呼叫 `_claim_locked`，立刻 commit。不用跑回
+    `BatchClaimOutcome.SKIPPED`，摘要來源變了回 `INPUT_CHANGED`。`resume_only`（預算不准）時只
+    接續、不新增，沒有可接續的就回 `SKIPPED`，所以預算不准時一定不會呼叫模型。"""
     with database.transaction() as connection:
         claim = _claim_locked(
             connection,
@@ -979,7 +999,7 @@ def _acquire(
             batch=False,
             retry_of=retry_of,
         )
-    return claim if isinstance(claim, _Claim) else None
+    return claim
 
 
 def _claim_locked(
@@ -995,22 +1015,33 @@ def _claim_locked(
     """在呼叫端開好的交易裡上鎖、重問 `should_run`，再接續或新增 `running` 的 run（AD-8）。
 
     - 有 `running`、或（不是評估時）有 `active`／平常流程的 `rejected` → `SKIPPED`。
-    - 管理者確認過的重跑（`retry_of` 有值，Story 2.12）：`active` 照樣 `SKIPPED`；平常流程的
-      `rejected` 只在這組鍵最新的一列平常流程表頭（`created_at, id`）就是 `retry_of` 時往下（照常先
-      接續、再新增），否則 `SKIPPED`。看「最新一列表頭」不是「最新一筆 run」：重跑被中斷只留下
-      沒有表頭的 failed run，下一次照樣能重跑；同一個確認過的 id 重跑完已經有更新的表頭，不會再
-      付錢。
+    - 管理者確認過的重跑（`retry_of` 有值，Story 2.12）：`active` 照樣 `SKIPPED`；只在這組鍵最新的
+      一列平常流程表頭（`created_at, id`）就是 `retry_of`、而且仍是 `rejected` 時往下（照常先接續、
+      再新增），否則（含查不到任何表頭）`SKIPPED`。看「最新一列表頭」不是「最新一筆 run」：重跑
+      被中斷只留下沒有表頭的 failed run，下一次照樣能重跑；同一個確認過的 id 重跑完已經有更新的
+      表頭，不會再付錢。
     - 互動：有 `llm_result_pending` 的 run 就改回 `running` 接續（回帶存下輸出的 `_Claim`）；
       `resume_only` 時沒有可接續的就 `SKIPPED`。
     - Batch（`batch=True`）：有可接續的 `llm_result_pending` 就 `RESUMABLE`（留給互動接續，不改、
       不新增，不重付）。
     - 否則新增 `call_mode=config.call_mode` 的 `running` run；部分唯一索引擋下時 `SKIPPED`。
+    - 看摘要的（Story 2.12 審查後第 1 點）：最先拿這個摘要來源的**共用**鎖（依來源移除拿獨佔），
+      拿到 run 鍵的鎖之後重讀論文，目前摘要已經不是這個來源或不再放行 → `INPUT_CHANGED`（不接續、
+      不新增）。鎖順序：來源（共用）→ run 鍵；Batch 規劃在這之前已經拿了全域預算鎖。
     鎖是交易級的，交易結束（commit 或退回）時自動放掉。
     """
     viewer = SystemViewer()
     key = prepared.key
+    abstract_source = prepared.llm_input.abstract_source
+    if abstract_source is not None:
+        # 依來源移除拿獨佔：移除進行中就等它結束，結束後下面的核對看得到摘要已經不在。
+        Database.transaction_lock_shared(connection, abstract_source_lock_key(abstract_source))
     # 阻塞的交易級鎖：交易結束（commit 或退回）時自動放掉。
     Database.transaction_lock(connection, run_lock_key(key))
+    if abstract_source is not None:
+        paper = find_paper_llm_source(viewer, connection, key.paper_id, for_update=False)
+        if not abstract_source_usable(paper, abstract_source, config.cloud_policy):
+            return BatchClaimOutcome.INPUT_CHANGED
     # 先查 running 再查表頭：READ COMMITTED 下兩句各自取快照，別人的表頭與 run 改 succeeded
     # 在同一個交易 commit。先查表頭再查 running 的話，對方剛好在兩句之間 commit 時兩句都查不到，
     # 就會再付一次錢；這個順序下一定看得到其中一個。
@@ -1022,17 +1053,25 @@ def _claim_locked(
         blocking = find_blocking_ai_result(viewer, connection, key)
         if blocking is ResultStatus.ACTIVE:
             return BatchClaimOutcome.SKIPPED
-        if blocking is ResultStatus.REJECTED:
-            latest = None if retry_of is None else find_latest_ai_result(viewer, connection, key)
-            if latest is None or latest.id != retry_of:
+        if retry_of is not None:
+            # 帶了 retry_of 就一定要核對（Story 2.12 審查後第 3 點）：這組鍵最新的平常流程表頭仍是
+            # 確認時那一列 rejected 才往下；不存在（被移除）、換了一列或狀態變了都略過、不呼叫。
+            latest = find_latest_ai_result(viewer, connection, key)
+            if (
+                latest is None
+                or latest.id != retry_of
+                or latest.status is not ResultStatus.REJECTED
+            ):
                 return BatchClaimOutcome.SKIPPED
+        elif blocking is ResultStatus.REJECTED:
+            return BatchClaimOutcome.SKIPPED
     if batch:
         # 已經付過錢、只差寫結果的 run：留給互動接續（不重付），Batch 不新增。
         if find_resumable_derivation_run_id(viewer, connection, key, eval_run_id) is not None:
             return BatchClaimOutcome.RESUMABLE
     else:
         # 已經付過錢、只差寫結果的 run：改回 running，從存下的輸出接續（不再呼叫模型）。
-        resumed = update_derivation_run_resumed(connection, key, eval_run_id)
+        resumed = update_derivation_run_resumed(connection, key, eval_run_id, abstract_source)
         if resumed is not None:
             saved = find_llm_call_output(viewer, connection, resumed)
             if saved is None:  # 改回 running 的條件已經要求有存下的輸出
@@ -1227,6 +1266,15 @@ def _write_result(
             taxonomy=job.taxonomy,
             context_values=job.context_values,
             llm_input=llm_input,
+        )
+    except AbstractSourceChangedError:
+        # 呼叫之後、寫表頭之前這個來源的摘要被移除或換掉：帳照記、表頭不寫（run 已改 failed）。
+        return GatewayResult(
+            GatewayOutcome.INPUT_CHANGED,
+            run_id=run_id,
+            reason=ErrorCode.ABSTRACT_SOURCE_CHANGED,
+            cost_usd=cost,
+            resumed=resumed,
         )
     except BaseException as exc:
         _try_fail_run(database, run_id)

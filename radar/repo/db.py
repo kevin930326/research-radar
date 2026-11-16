@@ -45,6 +45,9 @@ EMBEDDING_QUOTA_LOCK_KEY: Final = 0x5252_454D
 # 等鎖逾時的 SQLSTATE：55P03 lock_not_available（`lock_timeout`）；57014 query_canceled
 # （`statement_timeout` 比 `lock_timeout` 先到時，等鎖的那一句被取消）。
 _LOCK_TIMEOUT_SQLSTATES: Final = frozenset({"55P03", "57014"})
+# `local_lock_timeout` 另外把 40P01 deadlock_detected（被 PostgreSQL 選中退回的那一方）也當成
+# 等不到鎖。
+_LOCK_WAIT_FAILED_SQLSTATES: Final = _LOCK_TIMEOUT_SQLSTATES | {"40P01"}
 
 # 這條連線（`pg_backend_pid()`）是不是還持有 bigint 鍵的獨佔 session 級 advisory lock。
 # pg_locks 把 bigint 鍵拆成高 32 位元（classid）與低 32 位元（objid），objsubid = 1。
@@ -178,6 +181,38 @@ class Database:
 
     @staticmethod
     @contextmanager
+    def local_lock_timeout(connection: Connection, lock_timeout_ms: int) -> Iterator[None]:
+        """在呼叫端開好的交易裡，只讓區塊內的語句等列鎖最多 `lock_timeout_ms` 毫秒
+        （`set_config('lock_timeout', …, true)`），區塊正常結束後還原成原本的值。
+
+        區塊內等鎖逾時、`statement_timeout` 先到、或在死結裡被選中退回，丟 `LockWaitTimeoutError`：
+        這時交易已經不能再用，呼叫端讓例外往外丟、整個交易退回（`transaction()` 會退回）。其他錯誤
+        原樣往上丟。不開新交易、不 commit。
+
+        Raises:
+            ValueError: `lock_timeout_ms` 不是正整數。
+            LockWaitTimeoutError: 區塊內等不到鎖。
+        """
+        if type(lock_timeout_ms) is not int or lock_timeout_ms < 1:
+            raise ValueError("lock_timeout_ms 要是正整數")
+        previous = connection.execute(text("SELECT current_setting('lock_timeout')")).scalar_one()
+        connection.execute(
+            text("SELECT set_config('lock_timeout', :value, true)"),
+            {"value": f"{lock_timeout_ms}ms"},
+        )
+        try:
+            yield
+        except DBAPIError as exc:
+            if getattr(exc.orig, "sqlstate", None) not in _LOCK_WAIT_FAILED_SQLSTATES:
+                raise
+            # 例外訊息可能含主機與帳號，不串原例外。
+            raise LockWaitTimeoutError() from None
+        connection.execute(
+            text("SELECT set_config('lock_timeout', :value, true)"), {"value": str(previous)}
+        )
+
+    @staticmethod
+    @contextmanager
     def savepoint(connection: Connection) -> Iterator[None]:
         """在呼叫端開好的交易裡開一個保存點（`SAVEPOINT`）。
 
@@ -243,6 +278,16 @@ class Database:
         限制（預設 `connect_timeout` 秒），所以持有這把鎖的交易要很短。不開新交易、不 commit。
         """
         connection.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": key})
+
+    @staticmethod
+    def transaction_lock_shared(connection: Connection, key: int) -> None:
+        """在呼叫端開好的交易裡拿 `key` 的**共用**交易級 advisory lock
+        （`pg_advisory_xact_lock_shared`，會等）：共用彼此不擋，只和同一個鍵的獨佔鎖互斥。
+
+        交易結束時自動放掉；等待也受 `statement_timeout`（與 `lock_timeout`，有設時）限制。不開新
+        交易、不 commit。
+        """
+        connection.execute(text("SELECT pg_advisory_xact_lock_shared(:key)"), {"key": key})
 
     def ping(self) -> bool:
         """連得上並能執行 `SELECT 1` 回 True；連不上或查詢逾時回 False，不丟例外。

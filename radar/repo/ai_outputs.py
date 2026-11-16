@@ -68,7 +68,8 @@ from radar.domain.llm_batches import BATCH_TASKS
 from radar.domain.papers import AbstractSource
 from radar.domain.run_reports import RunOutcomeRow, RunScope, run_outcome
 from radar.domain.viewer import SystemViewer, Viewer
-from radar.repo.constructs import upsert_constructs
+from radar.repo.constructs import delete_constructs, upsert_constructs
+from radar.repo.db import Database
 from radar.repo.models import Base
 from radar.repo.visibility import visible_papers, visible_to_system_only
 
@@ -718,6 +719,16 @@ def count_ai_results_by_abstract_source(
         params,
     ).one()
     labels, mentions, hypotheses, unknown = (int(value) for value in detail_row)
+    # 刪完這些表頭之後沒有其他人用的構面（「其他」＝這個來源以外的表頭的提及與假設）。
+    unused = _construct_unused("m.research_model_id NOT IN (SELECT id FROM targets)")
+    constructs = connection.execute(
+        text(
+            f"WITH {_SOURCE_RESEARCH_MODELS}, {_SOURCE_CONSTRUCTS}"
+            " SELECT count(*) FROM construct AS c WHERE c.id IN (SELECT id FROM cand)"
+            f" AND {unused}"
+        ),
+        params,
+    ).scalar_one()
     return SourceAiCounts(
         headers=headers,
         details={
@@ -726,7 +737,41 @@ def count_ai_results_by_abstract_source(
             "hypothesis": hypotheses,
         },
         unknown_source=unknown,
+        constructs=int(constructs),
     )
+
+
+def _construct_unused(other: str) -> str:
+    """構面 `c` 沒有其他人用的條件（`other` 篩出「其他」的構面、假設：預覽時是這個來源以外的表頭，
+    刪完細項後是全部）：沒有其他構面提及、假設，沒有別的構面以它為代表（`canonical_id`），也沒有
+    人工的合併判斷（`judgment_event` 的 `construct_pair`）提到它。"""
+    hypothesis_other = other.replace("m.", "h.")
+    return (
+        "NOT EXISTS (SELECT 1 FROM construct_mention AS m"
+        f" WHERE m.construct_id = c.id AND {other})"
+        " AND NOT EXISTS (SELECT 1 FROM hypothesis AS h"
+        " WHERE (h.cause_construct_id = c.id OR h.effect_construct_id = c.id)"
+        f" AND {hypothesis_other})"
+        " AND NOT EXISTS (SELECT 1 FROM construct AS o"
+        " WHERE o.canonical_id = c.id AND o.id <> c.id)"
+        " AND NOT EXISTS (SELECT 1 FROM judgment_event AS j WHERE j.target_type = 'construct_pair'"
+        " AND (j.target_id = c.id OR j.related_id = c.id))"
+    )
+
+
+# 這個來源衍生的研究模型表頭（`targets`）與它們的構面、假設用到的構面（`cand`）。
+_SOURCE_RESEARCH_MODELS: Final = (
+    "targets AS (SELECT h.id FROM research_model AS h JOIN derivation_run AS r ON r.id = h.run_id"
+    " WHERE r.abstract_source = :source)"
+)
+_SOURCE_CONSTRUCTS: Final = (
+    "cand AS (SELECT construct_id AS id FROM construct_mention"
+    " WHERE research_model_id IN (SELECT id FROM targets)"
+    " UNION SELECT cause_construct_id FROM hypothesis"
+    " WHERE research_model_id IN (SELECT id FROM targets)"
+    " UNION SELECT effect_construct_id FROM hypothesis"
+    " WHERE research_model_id IN (SELECT id FROM targets))"
+)
 
 
 def find_active_config_versions(
@@ -901,16 +946,56 @@ def update_ai_results_superseded(
     return int(result.rowcount)
 
 
+# 依來源移除鎖構面候選時最多等多久（毫秒）：比連線的 statement_timeout（`connect_timeout` 秒，至少
+# 3 秒）短，等不到就整次移除退回、請管理者重跑（Story 2.12 審查後第二輪 R3）。
+CONSTRUCT_LOCK_TIMEOUT_MS: Final = 2000
+
+
 def delete_ai_results_by_abstract_source(
-    connection: Connection, source: AbstractSource
+    connection: Connection,
+    source: AbstractSource,
+    *,
+    construct_lock_timeout_ms: int = CONSTRUCT_LOCK_TIMEOUT_MS,
 ) -> dict[str, int]:
     """刪掉送出時用了 `source` 的摘要（`derivation_run.abstract_source`）的表頭（四種狀態）與底下的
-    細項，回各表刪了幾列（`REMOVAL_TABLES` 的順序）。先刪細項再刪表頭（外鍵沒有 ON DELETE）。
-    `derivation_run`、`llm_call`、構面、人工判斷事件都不動；不複製被刪的內容。`radar runs
+    細項、只被它們用到的構面，回各表刪了幾列（`REMOVAL_TABLES` 的順序，不含 `embedding`：向量由
+    `repo/embeddings.delete_embeddings_by_abstract_source` 刪）。先刪細項再刪表頭（外鍵沒有
+    ON DELETE）。
+
+    構面（審查後第 2 點）：只刪這些表頭的構面提及、假設用到，而且刪完之後沒有其他構面提及、假設、
+    代表（`canonical_id`）或人工合併判斷用到的（交給 `repo/constructs.delete_constructs`）。候選在
+    刪任何提及、假設之前先全部 `FOR UPDATE` 鎖住（不跳過、最多等 `construct_lock_timeout_ms`；審查後
+    第二輪 R3）：別的交易正在新增引用它的列（外鍵檢查會拿 `FOR KEY SHARE`）時等它結束，拿到鎖之後
+    再判斷有沒有人用，不會因為跳過而永遠失去清理線索。等不到就丟 `LockWaitTimeoutError`，呼叫端
+    讓整個交易退回（一列都沒少），請管理者重跑。
+
+    `derivation_run`、`llm_call`、人工判斷事件都不動；不複製被刪的內容。`radar runs
     remove-by-source --execute` 用（Story 2.12、FR-11、AD-26）。在呼叫端開好的交易裡做，不 commit。
+
+    Raises:
+        LockWaitTimeoutError: 構面候選等不到鎖（交易已經不能用，要整個退回）。
     """
     params = {"source": AbstractSource(source).value}
     deleted: dict[str, int] = {}
+    candidates = sorted(
+        {
+            str(row[0])
+            for row in connection.execute(
+                text(f"WITH {_SOURCE_RESEARCH_MODELS}, {_SOURCE_CONSTRUCTS} SELECT id FROM cand"),
+                params,
+            ).all()
+        }
+    )
+    if candidates:
+        # 先鎖住全部候選（照 id 排序），才刪提及與假設：等不到就整次退回，候選線索不會遺失。
+        with Database.local_lock_timeout(connection, construct_lock_timeout_ms):
+            connection.execute(
+                text(
+                    "SELECT id FROM construct WHERE id = ANY(CAST(:ids AS uuid[]))"
+                    " ORDER BY id FOR UPDATE"
+                ),
+                {"ids": candidates},
+            ).all()
     deleted["classification_label"] = connection.execute(
         text(
             "DELETE FROM classification_label WHERE classification_id IN ("
@@ -956,4 +1041,19 @@ def delete_ai_results_by_abstract_source(
         ),
         params,
     ).rowcount
-    return {table: int(deleted[table]) for table in REMOVAL_TABLES}
+    # 刪完提及與假設之後沒有任何人用的構面（候選已經鎖住，別的交易不能再新增引用它們的列），
+    # 交給構面表的寫入者刪。
+    unused: list[uuid.UUID] = []
+    if candidates:
+        unused = [
+            uuid.UUID(str(row[0]))
+            for row in connection.execute(
+                text(
+                    "SELECT c.id FROM construct AS c WHERE c.id = ANY(CAST(:ids AS uuid[]))"
+                    f" AND {_construct_unused('TRUE')} ORDER BY c.id"
+                ),
+                {"ids": candidates},
+            ).all()
+        ]
+    deleted["construct"] = delete_constructs(connection, unused)
+    return {table: int(deleted[table]) for table in REMOVAL_TABLES if table in deleted}

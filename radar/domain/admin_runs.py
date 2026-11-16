@@ -52,7 +52,8 @@ _ZERO: Final = Decimal(0)
 
 # 重跑、查詢的三個工作（有表頭、`plan_for` 會回答的 LLM 工作），照這個順序印。
 ADMIN_TASKS: Final = (LlmTask.ZH_SUMMARY, LlmTask.CLASSIFY, LlmTask.EXTRACT_MODEL)
-# 依來源移除會刪的表，照刪除前印的順序（細項接在表頭後面；實際刪除先細項後表頭）。
+# 依來源移除會刪的表，照刪除前印的順序（細項接在表頭後面；實際刪除先細項後表頭）。構面只刪
+# 沒有其他人用的；向量是用這個來源的摘要算的（Story 2.12 審查後第 2 點）。
 DETAIL_TABLES: Final = ("classification_label", "construct_mention", "hypothesis")
 REMOVAL_TABLES: Final = (
     "zh_summary",
@@ -61,6 +62,8 @@ REMOVAL_TABLES: Final = (
     "research_model",
     "construct_mention",
     "hypothesis",
+    "construct",
+    "embedding",
 )
 # 稽核事件的動作與對象種類（`audit_event.action`／`target_type`）。
 SOURCE_REMOVAL_ACTION: Final = "remove_source_ai_outputs"
@@ -480,11 +483,17 @@ class SourceAiCounts:
     - `details`：掛在那些表頭底下的細項數（`DETAIL_TABLES` 三張）。
     - `unknown_source`：看摘要（`input_kind='abstract'`）、但 run 沒記來源的表頭數（遷移 0018 前、
       摘要列已刪的）：不會被刪。
+    - `constructs`：刪完這些表頭之後沒有其他人用的構面數（只被這個來源的結果用到、沒有其他來源
+      的結果、代表或人工合併判斷用到；審查後第 2 點）。
+    - `embeddings`：用這個來源的摘要算的向量數（`embedding.abstract_source`），加上看摘要卻沒記
+      來源的向量（遷移 0018 證明不了來源的，保守一起刪；審查後第二輪 R2）。
     """
 
     headers: Mapping[LlmTask, Mapping[ResultStatus, int]]
     details: Mapping[str, int]
     unknown_source: int
+    constructs: int = 0
+    embeddings: int = 0
 
     @property
     def total_headers(self) -> int:
@@ -496,6 +505,8 @@ class SourceAiCounts:
             HEADER_TABLES[task]: sum(by_status.values()) for task, by_status in self.headers.items()
         }
         counts.update(self.details)
+        counts["construct"] = self.constructs
+        counts["embedding"] = self.embeddings
         return {table: counts.get(table, 0) for table in REMOVAL_TABLES}
 
 
@@ -567,6 +578,8 @@ def render_source_removal_preview(preview: SourceRemovalPreview) -> list[str]:
     lines += [
         "",
         f"會刪：表頭 {preview.counts.total_headers:,} 列；細項 {details}",
+        f"另外會刪：只被這個來源用到的構面 {preview.counts.constructs:,}、"
+        f"用這個來源（或來源不明）的摘要算的向量 {preview.counts.embeddings:,}（之後重算）",
         f"還在跑、用這個來源的 run：{preview.running_runs:,}",
         f"目前摘要仍是這個來源的論文：{preview.current_papers:,}",
         f"來源不明的表頭（遷移前或摘要列已刪，不會刪）：{preview.counts.unknown_source:,}",
@@ -644,6 +657,9 @@ class RevisionEstimate:
     tasks: tuple[LlmTask, ...]
     cap_usd: Decimal
     by_task: dict[LlmTask, RevisionTaskEstimate] = field(default_factory=dict)
+    # 算進「會重跑」的每一筆（這次的鍵 → Batch 價保守上限）。Batch 規劃只能排這份清單裡的改版
+    # 重跑（Story 2.12 審查後第 4 點）。
+    approved: dict[RunKey, Decimal] = field(default_factory=dict)
 
     def for_task(self, task: LlmTask) -> RevisionTaskEstimate:
         return self.by_task.setdefault(LlmTask(task), RevisionTaskEstimate())

@@ -218,7 +218,7 @@ _HAS_SAVED_OUTPUT = (
 
 _RUN_COLUMNS = (
     "id, paper_id, task, prompt_version, model, input_sha256, input_kind, taxonomy_version,"
-    " context_values_version, call_mode, eval_run_id, status, failure_reason"
+    " context_values_version, call_mode, eval_run_id, status, failure_reason, abstract_source"
 )
 
 
@@ -239,6 +239,9 @@ def _derivation_run(row: RowMapping) -> DerivationRun:
         eval_run_id=row["eval_run_id"],
         status=RunStatus(row["status"]),
         failure_reason=row["failure_reason"],
+        abstract_source=(
+            None if row["abstract_source"] is None else AbstractSource(row["abstract_source"])
+        ),
     )
 
 
@@ -568,10 +571,17 @@ def update_derivation_run_failed_or_pending(
 
 
 def update_derivation_run_resumed(
-    connection: Connection, key: RunKey, eval_run_id: uuid.UUID | None
+    connection: Connection,
+    key: RunKey,
+    eval_run_id: uuid.UUID | None,
+    abstract_source: AbstractSource | None = None,
 ) -> uuid.UUID | None:
     """把這組鍵（評估時還要同一個 `eval_run_id`）最早一筆 `llm_result_pending` 而且有存下輸出的
     run 改回 `running`（重設 `updated_at`，sweep 從現在起算），回它的 id；沒有就回 None。
+
+    `abstract_source` 是這次（現在的輸入）用的摘要來源（只看標題是 None）：鍵含輸入指紋，指紋又
+    算進每段的來源，所以鍵相同就辨識得出 run 當時用的來源。run 還沒記來源（遷移 0018 前的）時
+    同一句補上；已經記了而且不一樣的不接續（Story 2.12 審查後第 5 點、ADR-0044）。
 
     呼叫端要先持有這組鍵的 advisory lock，並確認沒有平常流程的 `running`（部分唯一索引）。
     在呼叫端開好的交易裡做，不 commit。
@@ -579,7 +589,8 @@ def update_derivation_run_resumed(
     value = connection.execute(
         text(
             "UPDATE derivation_run SET status = 'running', failure_reason = NULL,"
-            " finished_at = NULL, updated_at = clock_timestamp()"
+            " finished_at = NULL, updated_at = clock_timestamp(),"
+            " abstract_source = COALESCE(abstract_source, CAST(:abstract_source AS text))"
             " WHERE status = 'failed' AND id = ("
             " SELECT r.id FROM derivation_run AS r"
             " WHERE r.paper_id = :paper_id AND r.task = :task"
@@ -587,6 +598,8 @@ def update_derivation_run_resumed(
             " AND r.input_sha256 = :input_sha256"
             " AND r.status = 'failed' AND r.failure_reason = :pending"
             " AND r.eval_run_id IS NOT DISTINCT FROM CAST(:eval_run_id AS uuid)"
+            " AND (r.abstract_source IS NULL"
+            " OR r.abstract_source = CAST(:abstract_source AS text))"
             " AND EXISTS (SELECT 1 FROM llm_call AS c WHERE c.run_id = r.id"
             " AND (c.output_text IS NOT NULL OR c.output_reject_reason IS NOT NULL))"
             " ORDER BY r.created_at, r.id LIMIT 1)"
@@ -596,9 +609,50 @@ def update_derivation_run_resumed(
             **_key_params(key),
             "pending": ErrorCode.LLM_RESULT_PENDING.value,
             "eval_run_id": eval_run_id,
+            "abstract_source": (
+                None if abstract_source is None else AbstractSource(abstract_source).value
+            ),
         },
     ).scalar_one_or_none()
     return None if value is None else uuid.UUID(str(value))
+
+
+def update_derivation_run_abstract_source(
+    connection: Connection, run_id: uuid.UUID, abstract_source: AbstractSource
+) -> bool:
+    """還沒記摘要來源（遷移 0018 前建的）的 run 補上辨識出的來源，回有沒有改（已經有值就不改）。
+    寫 AI 表頭前在摘要來源鎖與 run 鎖裡用（Story 2.12 審查後第 5 點）。在呼叫端開好的交易裡做，
+    不 commit。"""
+    result = connection.execute(
+        text(
+            "UPDATE derivation_run SET abstract_source = :abstract_source,"
+            " updated_at = clock_timestamp()"
+            " WHERE id = :id AND abstract_source IS NULL AND task <> 'embed'"
+        ),
+        {"id": run_id, "abstract_source": AbstractSource(abstract_source).value},
+    )
+    return result.rowcount == 1
+
+
+def update_derivation_run_source_changed(connection: Connection, run_id: uuid.UUID) -> bool:
+    """寫表頭前核對到摘要來源已經不是這篇的目前摘要（或不再放行）：`running` 或
+    `llm_result_pending` 的 run 改成 `failed`（`abstract_source_changed`），不寫表頭、不再接續
+    （Story 2.12 審查後第 1 點）。其他狀態不改、回 False。在呼叫端開好的交易裡做，不 commit。"""
+    result = connection.execute(
+        text(
+            "UPDATE derivation_run SET status = 'failed', failure_reason = :reason,"
+            " finished_at = COALESCE(finished_at, clock_timestamp()),"
+            " updated_at = clock_timestamp()"
+            " WHERE id = :id AND (status = 'running'"
+            " OR (status = 'failed' AND failure_reason = :pending))"
+        ),
+        {
+            "id": run_id,
+            "reason": ErrorCode.ABSTRACT_SOURCE_CHANGED.value,
+            "pending": ErrorCode.LLM_RESULT_PENDING.value,
+        },
+    )
+    return result.rowcount == 1
 
 
 def update_derivation_run_pending_settled(connection: Connection, run_id: uuid.UUID) -> bool:

@@ -5,8 +5,9 @@
   rejected）；找不到回 None。
 - 預覽：各表各狀態與細項的計數、還在跑的 run、目前摘要仍是這個來源的論文、來源不明的表頭；前後
   全部相關表的 `count(*)` 一樣。
-- 執行：只刪指定來源的表頭與細項；標題輸入、其他來源、來源不明、run、帳、構面、摘要、人工判斷
-  事件都不動，`effective_classification` 仍是人工值；稽核只記來源與計數。
+- 執行：只刪指定來源的表頭與細項（審查後：連同只被它們用到的構面、用這個來源算的向量）；標題
+  輸入、其他來源、來源不明、run、帳、摘要、人工判斷事件都不動，`effective_classification` 仍是
+  人工值；稽核只記來源與計數。
 - 擋下（還在跑、目前摘要仍是這個來源）什麼都不刪、不寫稽核；刪完再跑刪 0 列、不寫稽核；兩個同時
   執行只有一筆稽核；稽核寫入前出錯整個交易退回。
 
@@ -58,12 +59,11 @@ SYSTEM = SystemViewer()
 MEMBER = uuid.UUID("00000000-0000-7000-8000-00000000000a")
 # 不是 JSON：拒收（llm_malformed_response）。假回覆，不是真的錄的。
 BAD = reply("研究問題：行動銀行的採用")
-# 依來源移除前後要比的表（被刪的六張以外都不能少一列）。
+# 依來源移除前後要比的表（`REMOVAL_TABLES` 以外都不能少一列）。
 RELATED = (
     *REMOVAL_TABLES,
     "derivation_run",
     "llm_call",
-    "construct",
     "paper",
     "paper_abstract",
     "judgment_event",
@@ -324,7 +324,6 @@ def test_execute_removes_only_the_target_source(db: TestDatabase, database: Data
     for table in (
         "derivation_run",
         "llm_call",
-        "construct",
         "paper",
         "paper_abstract",
         "judgment_event",

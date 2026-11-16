@@ -11,10 +11,12 @@ Story 2.12、ADR-0044）對真的 PostgreSQL：
 import dataclasses
 import uuid
 from decimal import Decimal
+from typing import Any
 
 import pytest
 from structlog.testing import capture_logs
 
+import radar.services.llm_batches as llm_batches
 from radar.adapters.fake.jobs import FakeJobQueue
 from radar.domain.ai_outputs import InputKind, LlmTask
 from radar.domain.eval_split import EvalSplit
@@ -29,8 +31,9 @@ from radar.services.llm_batches import (
     plan_llm_batches,
 )
 from radar.services.llm_gateway import GatewayOutcome, run_llm_job
-from tests.batch_support import NOW, batch_setup
+from tests.batch_support import NOW, batch_setup, insert_pending_run
 from tests.database import TestDatabase, migrate
+from tests.integration.test_source_removal_locks import _current_key
 from tests.llm_support import execute
 from tests.trial_support import (
     SchemaReplyProvider,
@@ -233,3 +236,117 @@ def test_first_full_run_is_not_affected_by_the_cap(db: TestDatabase, database: D
 
     assert result.stop is PlanStop.COMPLETED
     assert result.planned == 6
+
+
+# --- 審查後第 4 點：規劃只排估過的改版重跑 ---------------------------------------------------
+
+
+def _fail_running_batch_runs_after_the_estimate(
+    db: TestDatabase, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """上限檢查估完之後，那個在跑的改版工作（Batch run）失敗、沒有產生新結果。"""
+    real = llm_batches.estimate_revision_reruns
+
+    def then_failed(*args: Any, **kwargs: Any) -> Any:
+        estimate = real(*args, **kwargs)
+        execute(
+            db,
+            "UPDATE derivation_run SET status = 'failed', failure_reason = 'batch_item_errored',"
+            " finished_at = now() WHERE status = 'running' AND call_mode = 'batch'",
+        )
+        return estimate
+
+    monkeypatch.setattr(llm_batches, "estimate_revision_reruns", then_failed)
+
+
+def test_rerun_that_fails_after_the_estimate_is_not_planned(
+    db: TestDatabase, database: Database, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paper_id = banking_paper(database, doi_in(EvalSplit.TUNING, "1"), 1)
+    _done(database, paper_id)
+    _old_taxonomy(db)
+    assert _plan(database, _setup("5")).planned == 1  # 改版重跑已經排進 Batch、還在跑
+    _fail_running_batch_runs_after_the_estimate(db, monkeypatch)
+    before = _rows(db)
+
+    result = _plan(database, _setup("5"))
+
+    # 估的時候它還在跑（不算進上限），估完才失敗：不在清單裡，這次不排。
+    assert result.stop is PlanStop.COMPLETED
+    assert (result.planned, result.rerun_unestimated) == (0, 1)
+    assert _rows(db) == before
+
+
+def test_zero_cap_plans_no_rerun_even_if_state_changes_after_the_estimate(
+    db: TestDatabase, database: Database, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    done = banking_paper(database, doi_in(EvalSplit.TUNING, "1"), 1)
+    _done(database, done)
+    _old_taxonomy(db)
+    assert _plan(database, _setup("5")).planned == 1
+    banking_paper(database, doi_in(EvalSplit.TUNING, "2"), 2)  # 還沒有結果：照常排
+    _fail_running_batch_runs_after_the_estimate(db, monkeypatch)
+
+    result = _plan(database, _setup("0"))
+
+    assert result.stop is PlanStop.COMPLETED
+    assert result.rerun_unestimated == 1
+    assert result.planned == 3  # 只有第二篇的三個工作，改版重跑一筆都沒排
+    planned_tasks = execute(
+        db,
+        "SELECT r.paper_id, r.task FROM batch_item AS i JOIN derivation_run AS r"
+        " ON r.id = i.run_id WHERE r.status = 'running'",
+    )
+    assert {row[0] for row in planned_tasks} == {
+        uuid.UUID(str(row[0])) for row in execute(db, "SELECT id FROM paper WHERE id <> %s", done)
+    }
+
+
+# --- 審查後第二輪 O2：規劃本來就不排的改版重跑不算 rerun_unestimated -------------------------
+
+
+@pytest.mark.parametrize("new_key_state", ["rejected", "running_batch"])
+def test_reruns_planning_skips_anyway_are_not_counted_as_unestimated(
+    db: TestDatabase, database: Database, new_key_state: str
+) -> None:
+    # 改版後新鍵已經被拒收、或已經排進 Batch 還在跑：估算不算它（不在清單裡），取得資格也會略過；
+    # 照原本算 skipped，不印「下一次規劃會重新估」（下一次估算還是會略過它）。
+    paper_id = banking_paper(database, doi_in(EvalSplit.TUNING, "1"), 1)
+    _done(database, paper_id)
+    _old_taxonomy(db)
+    if new_key_state == "rejected":
+        setup = trial_setup()
+        rejected = run_llm_job(
+            SYSTEM,
+            database,
+            SchemaReplyProvider({LlmTask.CLASSIFY: reply("不是 JSON")}),
+            setup.gateway,
+            llm_job(setup, paper_id, LlmTask.CLASSIFY, InputKind.ABSTRACT),
+            budget_allows=lambda _task: True,
+        )
+        assert rejected.outcome is GatewayOutcome.REJECTED
+    else:
+        assert _plan(database, _setup("5")).planned == 1
+    before = _rows(db)
+
+    for _ in range(2):
+        result = _plan(database, _setup("5"))
+
+        assert result.stop is PlanStop.COMPLETED
+        assert (result.planned, result.skipped, result.rerun_unestimated) == (0, 3, 0)
+    assert _rows(db) == before
+
+
+def test_resumable_rerun_not_in_the_estimate_counts_as_resumable(
+    db: TestDatabase, database: Database
+) -> None:
+    # 改版後新鍵有可接續的 llm_result_pending：估算不算它，規劃照原本算 resumable。
+    paper_id = banking_paper(database, doi_in(EvalSplit.TUNING, "1"), 1)
+    _done(database, paper_id)
+    _old_taxonomy(db)
+    insert_pending_run(db, _current_key(database, paper_id, LlmTask.CLASSIFY))
+
+    result = _plan(database, _setup("5"))
+
+    assert result.stop is PlanStop.COMPLETED
+    assert (result.planned, result.resumable, result.rerun_unestimated) == (0, 1, 0)

@@ -34,7 +34,7 @@ from radar.domain.embeddings import (
     estimate_embedding_tokens,
 )
 from radar.domain.errors import ErrorCode
-from radar.domain.fingerprints import embedding_input_sha256
+from radar.domain.fingerprints import abstract_source_lock_key, embedding_input_sha256
 from radar.domain.permissions import PermissionDeniedError
 from radar.domain.policy import CloudPolicy, CloudSafeText, cloud_text
 from radar.domain.viewer import MemberViewer, SystemViewer
@@ -46,7 +46,7 @@ from radar.services.embeddings import (
     embed_papers,
     estimate_embedding_backlog,
 )
-from tests.database import TestDatabase, migrate
+from tests.database import APP_ROLE, TestDatabase, migrate
 from tests.llm_support import CODE_VERSION, create_paper, execute, set_abstract
 
 SYSTEM = SystemViewer()
@@ -818,3 +818,75 @@ def test_excluded_papers_are_left_out_of_vector_queries(
 def test_vector_query_requires_model_id(database: Database) -> None:
     with database.transaction() as connection, pytest.raises(TypeError, match="model_id"):
         search_paper_vectors(SYSTEM, connection, model_id="", vector=[0.1] * 8, limit=1)
+
+
+# --- 向量記下摘要來源（Story 2.12 審查後第 2 點）---------------------------------------------
+
+
+def _vector_sources(db: TestDatabase) -> dict[uuid.UUID, object]:
+    rows = execute(db, "SELECT item_id, abstract_source FROM embedding WHERE model_id = %s", MODEL)
+    return {row[0]: row[1] for row in rows}
+
+
+def test_vector_records_the_abstract_source_it_used(db: TestDatabase, database: Database) -> None:
+    with_abstract = _paper(database, 1)
+    title_only = _paper(database, 2, abstract=None)
+
+    _run(database)
+
+    assert _vector_sources(db) == {with_abstract: "openalex", title_only: None}
+
+
+class _SwitchesAbstractSourceWhileCalling(FakeEmbeddingProvider):
+    """送出後、寫入前把目前的摘要換成另一個來源的同一段文字（文字指紋不變，只有來源變了）。"""
+
+    def __init__(self, db: TestDatabase, paper_id: uuid.UUID) -> None:
+        super().__init__(DIMENSIONS)
+        self.db = db
+        self.paper_id = paper_id
+
+    def embed_documents(self, texts: Sequence[CloudSafeText]) -> list[list[float]]:
+        vectors = super().embed_documents(texts)
+        if len(self.document_calls) == 1:
+            execute(
+                self.db,
+                "UPDATE paper_abstract SET is_current = false WHERE paper_id = %s",
+                self.paper_id,
+            )
+            execute(
+                self.db,
+                "INSERT INTO paper_abstract (paper_id, source, content, is_current)"
+                " SELECT paper_id, 'semantic_scholar', content, true FROM paper_abstract"
+                " WHERE paper_id = %s AND source = 'openalex'",
+                self.paper_id,
+            )
+        return vectors
+
+
+def test_abstract_source_switched_during_the_call_is_not_written(
+    db: TestDatabase, database: Database
+) -> None:
+    switched = _paper(database, 1)
+
+    result = _run(database, _SwitchesAbstractSourceWhileCalling(db, switched))
+
+    assert result.embedded == 0
+    assert result.input_changed == 1
+    assert _embeddings(db) == {}
+    assert [(row[1], row[2]) for row in _runs(db)] == [("failed", "embed_input_changed")]
+
+
+def test_write_waits_for_the_abstract_source_lock(db: TestDatabase, database: Database) -> None:
+    # 依來源移除拿著獨佔鎖時，寫向量的共用鎖等不到 → 照等鎖逾時處理、不寫。
+    _paper(database, 1)
+    holder = db.connect(APP_ROLE, autocommit=False)
+    holder.execute("SELECT pg_advisory_xact_lock(%s)", (abstract_source_lock_key("openalex"),))
+    try:
+        result = _run(database, config=_config(lock_timeout_seconds=0.2))
+    finally:
+        holder.rollback()
+        holder.close()
+
+    assert result.embedded == 0
+    assert _embeddings(db) == {}
+    assert [(row[1], row[2]) for row in _runs(db)] == [("failed", "embed_lock_timeout")]

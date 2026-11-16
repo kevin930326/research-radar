@@ -28,7 +28,11 @@ from radar.domain.viewer import MemberViewer, SystemViewer
 from radar.repo.db import Database
 from radar.repo.llm_ledger import create_derivation_run, update_derivation_run_failed
 from radar.repo.papers import find_paper_llm_source
-from radar.services.ai_results import ResultTargetNotFoundError, record_llm_result
+from radar.services.ai_results import (
+    AbstractSourceChangedError,
+    ResultTargetNotFoundError,
+    record_llm_result,
+)
 from tests.database import TestDatabase, migrate
 from tests.llm_support import (
     create_paper,
@@ -100,6 +104,8 @@ def _new_run(
                 code_version="test-0.0.0",
                 call_mode=CallMode.INTERACTIVE,
                 eval_run_id=eval_run_id,
+                # 和閘門一樣記下送出時用的摘要來源（遷移 0018 之後每筆看摘要的 run 都有）。
+                abstract_source=llm_input.abstract_source,
             ),
         )
     assert run_id is not None
@@ -235,15 +241,18 @@ def test_changed_abstract_is_superseded(
     assert _run_status(db, run_id) == ("succeeded", None)
 
 
-def test_abstract_gone_is_superseded(
+def test_abstract_gone_writes_no_header(
     db: TestDatabase, database: Database, config: GatewayConfig, paper_id: uuid.UUID
 ) -> None:
+    # Story 2.12 審查後（ADR-0044 補充第 1 點）：摘要被拿掉（例如來源授權改變、依來源移除前的
+    # 一步）之後才回來的結果不寫表頭，run 以 abstract_source_changed 結束。
     run_id, abstract_id = _new_run(database, paper_id)
     execute(db, "DELETE FROM paper_abstract WHERE paper_id = %s", paper_id)
 
-    # abstract_id 沒有外鍵：摘要被刪了，表頭照樣寫得進去。
-    assert _record(database, config, paper_id, run_id, abstract_id) is ResultStatus.SUPERSEDED
-    assert _header(db, run_id)[3] == abstract_id
+    with pytest.raises(AbstractSourceChangedError):
+        _record(database, config, paper_id, run_id, abstract_id)
+    assert execute(db, "SELECT count(*) FROM zh_summary WHERE run_id = %s", run_id) == [(0,)]
+    assert _run_status(db, run_id) == ("failed", "abstract_source_changed")
 
 
 def test_prompt_moved_to_new_version_is_superseded(
