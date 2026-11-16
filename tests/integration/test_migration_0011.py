@@ -95,7 +95,7 @@ def test_downgrade_to_0010_drops_the_columns_and_upgrade_restores_them(db: TestD
 
     migrate(db)
 
-    assert db.revisions() == {"0018"}
+    assert db.revisions() == {"0019"}
     assert set(CONTENT_COLUMNS) <= _columns(db)
     # 降版丟掉的內容不會回來；舊列四欄都是 NULL，兩個 CHECK 都成立。
     assert execute(db, "SELECT research_question, method, theory, findings FROM zh_summary") == [

@@ -123,6 +123,7 @@ from radar.entrypoints.bootstrap import (
     build_object_store,
     code_version,
 )
+from radar.entrypoints.cli.members import members_app
 from radar.entrypoints.logging_config import configure_logging
 from radar.entrypoints.startup import check_ai_config
 from radar.ports import LlmProvider
@@ -184,6 +185,7 @@ log = structlog.get_logger(__name__)
 # 資源指令：`radar weekly-run <動詞>`（Conventions「CLI」：`radar <名詞> <動詞>`）。
 weekly_run_app = typer.Typer(help="每週更新（weekly_run）。", no_args_is_help=True)
 app.add_typer(weekly_run_app, name="weekly-run")
+app.add_typer(members_app, name="members")
 embeddings_app = typer.Typer(help="向量（embedding）。", no_args_is_help=True)
 app.add_typer(embeddings_app, name="embeddings")
 runs_app = typer.Typer(help="AI 工作的執行（derivation_run）。", no_args_is_help=True)

@@ -4,7 +4,7 @@
 - `actor_member_id` 空的＝系統做的（`actor_role` 是 `system`），兩者由 CHECK 綁在一起；`action`
   是小寫識別字；`detail` 是 jsonb 物件。
 - 寫入是 `create_audit_event`（AD-26 寫的 `record()` 不符合 repo 的前綴規則，Story 2.12 定成這個
-  名字）；形狀在 `domain/audit.NewAuditEvent` 建構時就驗過。
+  名字；Story 3.3 的成員指令也用它）；形狀在 `domain/audit.NewAuditEvent` 建構時就驗過。
 """
 
 import uuid

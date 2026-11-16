@@ -40,6 +40,9 @@ VIEWER_TYPES = frozenset({MemberViewer, PublicViewer, SystemViewer})
 _MIGRATIONS_REASON = (
     "Alembic 遷移的基礎設施（radar migrate、env.py、/readyz），只碰遷移版本與資料庫功能"
 )
+_LOGIN_LOOKUP_REASON = (
+    "登入流程用 email 或成員 ID 查允許名單：登入之前沒有 viewer（ADR-0002 的列名例外）"
+)
 INFRASTRUCTURE_EXCEPTIONS: dict[str, str] = {
     "radar.repo.db.Database": "連線池與交易函式本身，不讀業務資料",
     "radar.repo.db.SessionLock": "持有 advisory lock 的連線與它的交易函式，不讀業務資料",
@@ -52,6 +55,21 @@ INFRASTRUCTURE_EXCEPTIONS: dict[str, str] = {
     "radar.repo.migrations.upgrade_to_head": _MIGRATIONS_REASON,
     "radar.repo.migrations.MigrationScripts": _MIGRATIONS_REASON,
     "radar.repo.migrations.MigrationsNotFoundError": _MIGRATIONS_REASON,
+    # 登入流程的查找（ADR-0002「不帶 viewer 的讀取只有列名的例外」、AD-3）：要先查允許名單或
+    # session 才知道是誰，沒有 viewer 可帶。只回成員 ID、顯示名稱、是否管理者，不回 email。
+    "radar.repo.members.find_allowed_member_by_email": _LOGIN_LOOKUP_REASON,
+    "radar.repo.members.find_allowed_member_by_id": _LOGIN_LOOKUP_REASON,
+    "radar.repo.members.list_allowed_members": (
+        "開發環境假登入的選人清單：還沒登入、沒有 viewer 可帶（ADR-0002 的列名例外）；"
+        "只回成員 ID 與顯示名稱，試用與正式環境不會呼叫"
+    ),
+    "radar.repo.sessions.find_active_session": (
+        "由 cookie 的 token 雜湊認出是誰：查到之前沒有 viewer（ADR-0002 的列名例外）"
+    ),
+    "radar.repo.sessions.find_session_owner": (
+        "登出時由 cookie 的 token 雜湊找 session 的擁有者（過期的也要刪）：查到之前沒有 viewer"
+        "（ADR-0002 的列名例外）；只回 session ID、成員 ID、是否管理者"
+    ),
 }
 
 

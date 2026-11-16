@@ -9,6 +9,7 @@ dependencies = [
     "boto3==1.44.1",
     "fastapi==0.162.5",
     "httpx2==2.16.0",
+    "joserfc==1.8.0",
     "procrastinate==3.11.0",
     "psycopg[binary,pool]==3.3.9",
     "pydantic==2.14.3",

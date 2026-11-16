@@ -293,7 +293,7 @@
 - **custom_id**：送 Batch 時替每一筆工作取的代號，結果回來時靠它對回是哪一筆。
 - **nonce**：登入時隨機產生、只用一次的字串，用來確認回來的登入結果是自己剛才發起的那一次。
 - **JWKS**：登入服務公開的一組公鑰，用來驗證它簽發的登入憑證是真的。
-- **RS256**：一種簽章演算法（RSA 加 SHA-256）；本專案驗證 Google 的登入憑證時只接受這一種。
+- **RS256**：一種簽章演算法（RSA 加 SHA-256）；本專案驗證 Google 的登入憑證與 Cloudflare Access 的 JWT 時都只接受這一種。
 - **joserfc**：驗證登入憑證（JWT）簽章的 Python 函式庫。
 - **Authlib**：功能比較完整的 Python 登入函式庫；本專案考慮過，只用了它底層的 joserfc。
 - **mypy**：Python 的型別檢查工具，不用執行程式就能找出「把錯的型別傳進去」。
@@ -899,3 +899,14 @@
 - **展開後的儲存格總數**：一張表「列數 × 欄數」的格子數（空的格也算），全部表加總；壓縮檔很小也可能展開成幾千萬格，所以讀標註檔時設上限（ADR-0045）。
 - **tracemalloc**：Python 內建、記錄程式配置了多少記憶體的工具；測試用它確認「讀上限內最大的檔」新用的記憶體不超過預算（ADR-0045）。
 - **OOM（記憶體用完被砍）**：程式用的記憶體超過容器的 `mem_limit`，系統直接把它關掉（退出碼 137），程式來不及印任何錯誤訊息。
+- **假登入**：Google 登入做好之前的替代登入。開發環境直接選一位測試成員；試用環境先驗 Cloudflare Access 的憑證，只讓管理者進來。正式環境不能開。
+- **Cloudflare Access 的 JWT（`Cf-Access-Jwt-Assertion`）**：站台放在 Cloudflare Access 後面時，Access 確認過你的 email 後，在每個請求上加的一張簽過名的憑證；站台驗過簽章才相信裡面的 email。
+- **team 網域（Access）**：Cloudflare Access 替你的組織開的網址（例如 `myteam.cloudflareaccess.com`）；憑證的發行者（`iss`）和公鑰清單都在這個網址底下。
+- **站台來源（`RADAR_SITE_ORIGIN`）**：本站的「協定＋網址＋埠」（例如 `https://radar.example.com`）；會改資料的請求，瀏覽器送來的 `Origin` 一定要等於它。
+- **Origin 檢查**：瀏覽器送請求時會附上「這個請求是從哪個網站發出的」（`Origin` 標頭）；不是本站發的、或沒寫的，就不准改資料，用來擋 CSRF。
+- **`__Host-` cookie**：名稱以 `__Host-` 開頭的 cookie，瀏覽器規定它只能透過 https 設定、不能指定網域、路徑一定是 `/`，別的子網域沒辦法蓋掉它。
+- **HttpOnly、Secure、SameSite=Lax（cookie 屬性）**：HttpOnly 是網頁上的 JavaScript 讀不到；Secure 是只在 https 送出；SameSite=Lax 是從別的網站發出的表單 POST 不會帶上這個 cookie。
+- **閒置期限與最長期限（session）**：閒置期限是「多久沒用就失效」（14 天）；最長期限是「不管有沒有在用，登入後多久一定要重新登入」（30 天）。
+- **維運身分（`SystemViewer`）**：不是任何一位成員、代表「系統管理工作」的身分；Kevin 在主機上跑 `radar members` 時就是用它，稽核事件記成 `system`。
+- **環境（`RADAR_ENVIRONMENT`）**：這個程式跑在開發、試用還是正式環境；沒設就當正式，正式環境不能開假登入。
+- **`kid`（金鑰編號）**：JWT 標頭裡的欄位，寫明是公鑰清單（JWKS）裡的哪一把鑰匙簽的，驗證時用它挑出對應的公鑰。

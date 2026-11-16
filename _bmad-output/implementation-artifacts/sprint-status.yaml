@@ -154,7 +154,7 @@ development_status:
   epic-3: in-progress
   3-1-前端骨架與使用須知: done
   3-2-設計代幣-無障礙底線與減少動態: done
-  3-3-假登入與-session: backlog
+  3-3-假登入與-session: review
   3-4-權限測試的框架: backlog
   3-5-導覽列與帳號選單: backlog
   3-6-論文頁的-api: backlog

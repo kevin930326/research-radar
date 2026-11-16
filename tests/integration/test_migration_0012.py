@@ -123,7 +123,7 @@ def test_downgrade_to_0011_drops_labels_and_upgrade_restores_them(db: TestDataba
 
     migrate(db)
 
-    assert db.revisions() == {"0018"}
+    assert db.revisions() == {"0019"}
     assert "classification_label" in _tables(db)
     # 降版丟掉的標籤與計數不會回來；舊列的計數是 NULL，兩個 CHECK 都成立。
     assert execute(db, "SELECT dropped_label_count FROM classification") == [(None,)]

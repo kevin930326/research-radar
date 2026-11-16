@@ -162,3 +162,9 @@ class ErrorCode(StrEnum):
     # `radar batches resolve --fail`：人工把 `needs_attention` 的批次標失敗，還在跑的 run 一起改
     # failed
     BATCH_RESOLVED_FAILED = "batch_resolved_failed"
+
+    # 登入與 session（Story 3.3、ADR-0008、ADR-0046）：api 回應的代碼
+    NOT_AUTHENTICATED = "not_authenticated"  # 沒有有效的 session（401）
+    ORIGIN_REJECTED = "origin_rejected"  # 會改資料的請求，Origin 缺少或不是本站（403）
+    LOGIN_REJECTED = "login_rejected"  # 假登入被拒（不說是哪一關，403）
+    ADMIN_MEMBER_MISSING = "admin_member_missing"  # 試用：管理者成員還沒建立（403）

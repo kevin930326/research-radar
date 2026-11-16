@@ -45,6 +45,9 @@ NETWORK_ALLOWED: dict[str, str] = {
     "radar.adapters.object_store": "自己的物件儲存（R2／RustFS，存原始資料）",
     "radar.adapters.anthropic": "Anthropic Messages API（只送已放行的 CloudSafeText）",
     "radar.adapters.workers_ai": "Cloudflare Workers AI 向量化（只送已放行的 CloudSafeText）",
+    "radar.adapters.cloudflare_access": (
+        "試用環境的假登入：GET Cloudflare Access 的公鑰清單（/cdn-cgi/access/certs）"
+    ),
 }
 # 會送出請求的 HTTP client 方法。
 REQUEST_METHODS = frozenset(

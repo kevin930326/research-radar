@@ -135,7 +135,7 @@ def test_downgrade_to_0013_drops_tables_and_views_and_upgrade_restores_them(
 
     migrate(db)
 
-    assert db.revisions() == {"0018"}
+    assert db.revisions() == {"0019"}
     assert _relations(db) >= {*EVENT_TABLES, *VIEWS}
     for table in EVENT_TABLES:
         assert _app(db, f"SELECT count(*) FROM {table}") == [(0,)]

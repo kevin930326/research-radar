@@ -382,3 +382,11 @@ def annotation_sample_sha256(seed: int, purpose: str, value: str) -> str:
             "value": value,
         }
     )
+
+
+def session_token_sha256(token: str) -> bytes:
+    """session token 的 SHA-256（32 位元組，ADR-0008 第 2 項）：資料庫只存這個，不存 token。
+
+    格式由呼叫端（`domain/auth.token_sha256`）先驗；這裡只算雜湊。
+    """
+    return hashlib.sha256(token.encode("ascii")).digest()
