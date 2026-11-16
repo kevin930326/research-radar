@@ -69,6 +69,7 @@ from radar.domain.papers import AbstractSource
 from radar.domain.run_reports import RunOutcomeRow, RunScope, run_outcome
 from radar.domain.viewer import SystemViewer, Viewer
 from radar.repo.constructs import delete_constructs, upsert_constructs
+from radar.repo.db import Database
 from radar.repo.models import Base
 from radar.repo.visibility import visible_papers, visible_to_system_only
 
@@ -945,8 +946,16 @@ def update_ai_results_superseded(
     return int(result.rowcount)
 
 
+# 依來源移除鎖構面候選時最多等多久（毫秒）：比連線的 statement_timeout（`connect_timeout` 秒，至少
+# 3 秒）短，等不到就整次移除退回、請管理者重跑（Story 2.12 審查後第二輪 R3）。
+CONSTRUCT_LOCK_TIMEOUT_MS: Final = 2000
+
+
 def delete_ai_results_by_abstract_source(
-    connection: Connection, source: AbstractSource
+    connection: Connection,
+    source: AbstractSource,
+    *,
+    construct_lock_timeout_ms: int = CONSTRUCT_LOCK_TIMEOUT_MS,
 ) -> dict[str, int]:
     """刪掉送出時用了 `source` 的摘要（`derivation_run.abstract_source`）的表頭（四種狀態）與底下的
     細項、只被它們用到的構面，回各表刪了幾列（`REMOVAL_TABLES` 的順序，不含 `embedding`：向量由
@@ -954,20 +963,39 @@ def delete_ai_results_by_abstract_source(
     ON DELETE）。
 
     構面（審查後第 2 點）：只刪這些表頭的構面提及、假設用到，而且刪完之後沒有其他構面提及、假設、
-    代表（`canonical_id`）或人工合併判斷用到的（鎖住後交給 `repo/constructs.delete_constructs`）。
+    代表（`canonical_id`）或人工合併判斷用到的（交給 `repo/constructs.delete_constructs`）。候選在
+    刪任何提及、假設之前先全部 `FOR UPDATE` 鎖住（不跳過、最多等 `construct_lock_timeout_ms`；審查後
+    第二輪 R3）：別的交易正在新增引用它的列（外鍵檢查會拿 `FOR KEY SHARE`）時等它結束，拿到鎖之後
+    再判斷有沒有人用，不會因為跳過而永遠失去清理線索。等不到就丟 `LockWaitTimeoutError`，呼叫端
+    讓整個交易退回（一列都沒少），請管理者重跑。
 
     `derivation_run`、`llm_call`、人工判斷事件都不動；不複製被刪的內容。`radar runs
     remove-by-source --execute` 用（Story 2.12、FR-11、AD-26）。在呼叫端開好的交易裡做，不 commit。
+
+    Raises:
+        LockWaitTimeoutError: 構面候選等不到鎖（交易已經不能用，要整個退回）。
     """
     params = {"source": AbstractSource(source).value}
     deleted: dict[str, int] = {}
-    construct_ids = [
-        uuid.UUID(str(row[0]))
-        for row in connection.execute(
-            text(f"WITH {_SOURCE_RESEARCH_MODELS}, {_SOURCE_CONSTRUCTS} SELECT id FROM cand"),
-            params,
-        ).all()
-    ]
+    candidates = sorted(
+        {
+            str(row[0])
+            for row in connection.execute(
+                text(f"WITH {_SOURCE_RESEARCH_MODELS}, {_SOURCE_CONSTRUCTS} SELECT id FROM cand"),
+                params,
+            ).all()
+        }
+    )
+    if candidates:
+        # 先鎖住全部候選（照 id 排序），才刪提及與假設：等不到就整次退回，候選線索不會遺失。
+        with Database.local_lock_timeout(connection, construct_lock_timeout_ms):
+            connection.execute(
+                text(
+                    "SELECT id FROM construct WHERE id = ANY(CAST(:ids AS uuid[]))"
+                    " ORDER BY id FOR UPDATE"
+                ),
+                {"ids": candidates},
+            ).all()
     deleted["classification_label"] = connection.execute(
         text(
             "DELETE FROM classification_label WHERE classification_id IN ("
@@ -1013,18 +1041,18 @@ def delete_ai_results_by_abstract_source(
         ),
         params,
     ).rowcount
-    # 刪完提及與假設之後沒有任何人用的構面：先鎖住（別的交易正在寫入、已經鎖住的跳過，留著不刪，
-    # 不讓移除因外鍵失敗整個退回），再交給構面表的寫入者刪。
+    # 刪完提及與假設之後沒有任何人用的構面（候選已經鎖住，別的交易不能再新增引用它們的列），
+    # 交給構面表的寫入者刪。
     unused: list[uuid.UUID] = []
-    if construct_ids:
+    if candidates:
         unused = [
             uuid.UUID(str(row[0]))
             for row in connection.execute(
                 text(
                     "SELECT c.id FROM construct AS c WHERE c.id = ANY(CAST(:ids AS uuid[]))"
-                    f" AND {_construct_unused('TRUE')} ORDER BY c.id FOR UPDATE SKIP LOCKED"
+                    f" AND {_construct_unused('TRUE')} ORDER BY c.id"
                 ),
-                {"ids": sorted({str(construct_id) for construct_id in construct_ids})},
+                {"ids": candidates},
             ).all()
         ]
     deleted["construct"] = delete_constructs(connection, unused)

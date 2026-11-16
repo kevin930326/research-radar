@@ -45,6 +45,9 @@ EMBEDDING_QUOTA_LOCK_KEY: Final = 0x5252_454D
 # 等鎖逾時的 SQLSTATE：55P03 lock_not_available（`lock_timeout`）；57014 query_canceled
 # （`statement_timeout` 比 `lock_timeout` 先到時，等鎖的那一句被取消）。
 _LOCK_TIMEOUT_SQLSTATES: Final = frozenset({"55P03", "57014"})
+# `local_lock_timeout` 另外把 40P01 deadlock_detected（被 PostgreSQL 選中退回的那一方）也當成
+# 等不到鎖。
+_LOCK_WAIT_FAILED_SQLSTATES: Final = _LOCK_TIMEOUT_SQLSTATES | {"40P01"}
 
 # 這條連線（`pg_backend_pid()`）是不是還持有 bigint 鍵的獨佔 session 級 advisory lock。
 # pg_locks 把 bigint 鍵拆成高 32 位元（classid）與低 32 位元（objid），objsubid = 1。
@@ -175,6 +178,38 @@ class Database:
                 raise
             # 例外訊息可能含主機與帳號，不串原例外。
             raise LockWaitTimeoutError() from None
+
+    @staticmethod
+    @contextmanager
+    def local_lock_timeout(connection: Connection, lock_timeout_ms: int) -> Iterator[None]:
+        """在呼叫端開好的交易裡，只讓區塊內的語句等列鎖最多 `lock_timeout_ms` 毫秒
+        （`set_config('lock_timeout', …, true)`），區塊正常結束後還原成原本的值。
+
+        區塊內等鎖逾時、`statement_timeout` 先到、或在死結裡被選中退回，丟 `LockWaitTimeoutError`：
+        這時交易已經不能再用，呼叫端讓例外往外丟、整個交易退回（`transaction()` 會退回）。其他錯誤
+        原樣往上丟。不開新交易、不 commit。
+
+        Raises:
+            ValueError: `lock_timeout_ms` 不是正整數。
+            LockWaitTimeoutError: 區塊內等不到鎖。
+        """
+        if type(lock_timeout_ms) is not int or lock_timeout_ms < 1:
+            raise ValueError("lock_timeout_ms 要是正整數")
+        previous = connection.execute(text("SELECT current_setting('lock_timeout')")).scalar_one()
+        connection.execute(
+            text("SELECT set_config('lock_timeout', :value, true)"),
+            {"value": f"{lock_timeout_ms}ms"},
+        )
+        try:
+            yield
+        except DBAPIError as exc:
+            if getattr(exc.orig, "sqlstate", None) not in _LOCK_WAIT_FAILED_SQLSTATES:
+                raise
+            # 例外訊息可能含主機與帳號，不串原例外。
+            raise LockWaitTimeoutError() from None
+        connection.execute(
+            text("SELECT set_config('lock_timeout', :value, true)"), {"value": str(previous)}
+        )
 
     @staticmethod
     @contextmanager

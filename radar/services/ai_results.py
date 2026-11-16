@@ -42,8 +42,10 @@ advisory lock（依來源移除拿獨佔），鎖住 run 之後重新核對「�
   （`abstract_source_changed`）並 commit；互動入口丟 `AbstractSourceChangedError`、Batch 入口回
   `NotRecorded.SOURCE_CHANGED`。依來源移除做完之後，就不會再冒出這個來源的表頭。
 - run 還沒記來源（遷移 0018 前建的）：用現在的論文內容重算指紋，和 run 的一樣就辨識出來源（指紋
-  算進每段的來源），同一個交易補上再照上面核對；辨識不出（輸入已經變了）照舊寫（一定是
-  `superseded`，表頭的來源不明，`remove-by-source` 只印計數）並記警告。
+  算進每段的來源），同一個交易補上再照上面核對。鎖內辨識不出（輸入已經變了、摘要剛好被拿掉），
+  或和拿鎖時辨識的不是同一個來源（沒拿到它的鎖）：一律當成來源變了，不寫表頭（審查後第二輪
+  R1、O1）；辨識得出的來源（優先用拿鎖時的）照樣補記到 run 上。所以不會再寫出「來源不明」的
+  新表頭。
 
 鎖的順序：批次（`FOR SHARE`）→ 摘要來源（共用）→ 論文 → run。
 """
@@ -280,6 +282,20 @@ def _record(
         if batch is not None and not importing:
             # 批次被別的 poll 標成 needs_attention、或人工確認換了 ID：這次的結果不寫。
             raise BatchImportStoppedError(batch[0])
+        task = run.key.task
+        if task not in HEADER_TABLES:
+            raise ValueError(f"{task.value} 沒有表頭表")
+        if taxonomy is not None and task is not LlmTask.CLASSIFY:
+            raise ValueError("只有 classify 能給分類表")
+        if context_values is not None and task is not LlmTask.EXTRACT_MODEL:
+            raise ValueError("只有 extract_model 能給情境值清單")
+        # 先做出內容（不碰資料庫）：做不出來（呼叫端的錯）就整個交易退回、不切換 active。放在摘要
+        # 來源核對之前：程式的錯不管資料怎麼變都要丟出來，不被「來源變了」蓋掉。
+        zh_summary = _zh_summary_content(task, reject_reason, output)
+        classification = _classification_content(task, reject_reason, output, taxonomy)
+        research_model = _research_model_content(
+            task, reject_reason, output, context_values, llm_input
+        )
         if run.input_kind is InputKind.ABSTRACT and not _abstract_source_confirmed(
             connection, config, run, source, held
         ):
@@ -291,19 +307,6 @@ def _record(
                 run_id=str(run.id),
             )
             return NotRecorded.SOURCE_CHANGED
-        task = run.key.task
-        if task not in HEADER_TABLES:
-            raise ValueError(f"{task.value} 沒有表頭表")
-        if taxonomy is not None and task is not LlmTask.CLASSIFY:
-            raise ValueError("只有 classify 能給分類表")
-        if context_values is not None and task is not LlmTask.EXTRACT_MODEL:
-            raise ValueError("只有 extract_model 能給情境值清單")
-        # 先做出內容（不碰資料庫）：做不出來就整個交易退回、不切換 active。
-        zh_summary = _zh_summary_content(task, reject_reason, output)
-        classification = _classification_content(task, reject_reason, output, taxonomy)
-        research_model = _research_model_content(
-            task, reject_reason, output, context_values, llm_input
-        )
 
         if reject_reason is not None:
             status = ResultStatus.REJECTED
@@ -444,20 +447,25 @@ def _abstract_source_confirmed(
     """（摘要來源鎖、論文鎖、run 鎖裡）這筆看摘要的 run 可不可以寫表頭：
 
     - run 記了來源：要等於拿鎖的來源，而且這篇的目前摘要仍是它、仍放行。
-    - 沒記來源：鎖內再辨識一次，和拿鎖的一樣就補記到 run 上，再照上面核對；辨識不出（輸入已經
-      變了）照舊放行（表頭會是 `superseded`、來源不明），記警告。
+    - 沒記來源：鎖內再辨識一次，和拿鎖的一樣就補記到 run 上，再照上面核對。鎖內辨識不出，或和
+      拿鎖的不一樣（包括拿鎖時辨識不出、沒拿任何來源的鎖）：不放行（審查後第二輪 R1、O1）。
+      辨識得出的來源（優先用拿鎖時的 `held`）照樣補記：指紋已經證明 run 用的是它（沒有表頭，
+      補記不影響移除）。
     """
     source = run.abstract_source
     if source is None:
         identified = _identify_abstract_source(run, paper)
+        known = held if held is not None else identified
+        if known is not None:
+            update_derivation_run_abstract_source(connection, run.id, known)
         if identified is None or identified is not held:
             log.warning(
-                "遷移前的 run 辨識不出摘要來源，表頭的來源不明",
+                "遷移前的 run 在鎖內辨識不出摘要來源，不寫表頭",
                 task=run.key.task.value,
                 run_id=str(run.id),
+                held=None if held is None else held.value,
             )
-            return True
-        update_derivation_run_abstract_source(connection, run.id, identified)
+            return False
         source = identified
     return source is held and abstract_source_usable(paper, source, config.cloud_policy)
 

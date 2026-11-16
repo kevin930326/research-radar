@@ -19,7 +19,9 @@ from typer.testing import CliRunner, Result
 
 import radar.entrypoints.cli as cli
 from radar.domain.ai_outputs import InputKind, LlmTask
+from radar.domain.errors import LockWaitTimeoutError
 from radar.domain.eval_split import EvalSplit
+from radar.domain.llm_batches import LlmBatchPlanResult
 from radar.domain.viewer import SystemViewer
 from radar.repo.db import Database
 from radar.services.llm_batches import llm_job
@@ -366,6 +368,27 @@ def test_remove_by_source_ctrl_c_at_the_prompt_exits_130(
     assert _all_rows(db) == before
 
 
+def test_remove_by_source_construct_lock_timeout_exits_1(
+    db: TestDatabase, database: Database, env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 審查後第二輪 R3：構面候選等不到鎖 → 整個交易退回、印「未完成、請稍後重跑」。
+    _rejected_paper(database)
+    execute(db, "DELETE FROM paper_abstract WHERE source = 'openalex'")
+    before = _all_rows(db)
+
+    def locked(*_args: object, **_kwargs: object) -> Any:
+        raise LockWaitTimeoutError()
+
+    monkeypatch.setattr(cli, "remove_source_ai_outputs", locked)
+
+    result = _invoke("runs", "remove-by-source", "openalex", "--execute", "--yes")
+
+    assert result.exit_code == 1
+    assert "未完成" in result.stderr
+    assert "一筆都沒有刪。請稍後重跑" in result.stderr
+    assert _all_rows(db) == before
+
+
 # --- estimate-revision 與規劃上限 -------------------------------------------------------------
 
 
@@ -475,3 +498,26 @@ def test_batches_create_stops_over_the_rerun_cap(
     assert "radar runs estimate-revision" in _stdout(result)
     assert _all_rows(db) == before
     assert built == []
+
+
+def test_batches_create_prints_reruns_left_for_the_next_plan(
+    db: TestDatabase, env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 審查後第二輪 O4：`rerun_unestimated` 那一行（估完之後才變成要重跑、這次不排的改版重跑），
+    # 沒有時不印。
+    results = [LlmBatchPlanResult(rerun_unestimated=1234), LlmBatchPlanResult()]
+
+    def plan(*_args: object, **_kwargs: object) -> LlmBatchPlanResult:
+        return results.pop(0)
+
+    monkeypatch.setattr(cli, "plan_llm_batches", plan)
+
+    result = _invoke("batches", "create", "--yes")
+    quiet = _invoke("batches", "create", "--yes")
+
+    assert result.exit_code == 0, result.output
+    assert "改版重跑不在這次估過的清單裡、這次不排：1,234 筆（下一次規劃會重新估）" in _stdout(
+        result
+    )
+    assert quiet.exit_code == 0, quiet.output
+    assert "估過的清單" not in _stdout(quiet)

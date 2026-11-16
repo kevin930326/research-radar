@@ -537,6 +537,8 @@ def _new_run(
                 code_version="test-0.0.0",
                 call_mode=CallMode.INTERACTIVE,
                 eval_run_id=eval_run_id,
+                # 和閘門一樣記下送出時用的摘要來源（遷移 0018 之後每筆看摘要的 run 都有）。
+                abstract_source=llm_input.abstract_source,
             ),
         )
     assert run_id is not None

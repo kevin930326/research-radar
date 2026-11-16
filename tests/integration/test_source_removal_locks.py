@@ -8,22 +8,29 @@ PostgreSQL：
 - 第 2 點：只被這個來源用到的構面才刪（其他來源的結果、人工合併判斷用到的留著）；用這個來源算的
   向量一併刪掉。
 - 第 5 點：接續遷移前沒記來源的 run 時補上來源；寫表頭時辨識出遷移前 run 的來源並補上。
+- 第二輪 R1、O1：遷移前的 run 在鎖內辨識不出來源（輸入已經變了、移除做完之後才回來、拿鎖之後
+  摘要剛好被拿掉）→ 不寫表頭、run 改 `abstract_source_changed`；拿鎖時辨識出的來源照樣補記。
+- 第二輪 R2：看摘要卻沒記來源的向量，移除任何來源時保守一起刪；只看標題的不動。
+- 第二輪 R3：構面候選被別的交易鎖住 → 移除整次退回、一列都沒少；鎖放開後重跑清乾淨。
 
 模型一律用依 schema 回覆的替身（假回覆不是真的錄的），不連網路；論文與回覆都是自己編的。
 """
 
+import functools
 import threading
 import uuid
 from collections.abc import Mapping
 from typing import Any
 
+import psycopg
 import pytest
 
 import radar.services.admin_runs as admin_runs
+import radar.services.ai_results as ai_results
 import radar.services.llm_gateway as llm_gateway
 from radar.domain.admin_runs import RemovalBlock
 from radar.domain.ai_outputs import InputKind, LlmTask, OutputLang, RunKey
-from radar.domain.errors import ErrorCode
+from radar.domain.errors import ErrorCode, LockWaitTimeoutError
 from radar.domain.eval_split import EvalSplit
 from radar.domain.judgments import ActorRole, EvidenceLevel, MergeDecisionValue, merge_decision
 from radar.domain.llm import LlmRequest, LlmResult
@@ -34,7 +41,7 @@ from radar.repo.ai_outputs import delete_ai_results_by_abstract_source
 from radar.repo.db import Database
 from radar.repo.judgments import create_judgment_event
 from radar.repo.papers import find_paper_llm_source
-from radar.services.ai_results import record_llm_result
+from radar.services.ai_results import AbstractSourceChangedError, record_llm_result
 from radar.services.llm_batches import llm_job
 from radar.services.llm_gateway import (
     GatewayOutcome,
@@ -376,9 +383,12 @@ def test_removal_deletes_only_constructs_no_one_else_uses(
     assert {*shared, judged} <= remaining
 
 
-def _embedding(db: TestDatabase, paper_id: uuid.UUID, source: str | None) -> None:
-    """一筆 qwen3（遷移 0015 登記的 1,024 維）向量，記的摘要來源是 `source`。"""
-    input_kind = "title" if source is None else "abstract"
+def _embedding(
+    db: TestDatabase, paper_id: uuid.UUID, source: str | None, *, input_kind: str | None = None
+) -> None:
+    """一筆 qwen3（遷移 0015 登記的 1,024 維）向量，記的摘要來源是 `source`（沒給 `input_kind`
+    時：沒有來源的是只看標題）。"""
+    input_kind = input_kind or ("title" if source is None else "abstract")
     [(run_id,)] = execute(
         db,
         "INSERT INTO derivation_run (paper_id, task, model, input_sha256, input_kind, params,"
@@ -419,6 +429,120 @@ def test_removal_deletes_vectors_computed_from_the_source(
     assert left == {other, titled}
     [(detail,)] = execute(db, "SELECT detail FROM audit_event")
     assert detail["counts"]["embedding"] == 1
+
+
+def test_removal_also_deletes_abstract_vectors_without_a_source(
+    db: TestDatabase, database: Database
+) -> None:
+    # 第二輪 R2：遷移 0018 證明不了來源的看摘要向量（NULL），可能就是用這個來源算的：保守一起刪
+    # （之後照指紋規則重算）；只看標題的向量、其他來源的向量不動。
+    unknown = _paper(database, 1)
+    other = _paper(database, 2)
+    titled = _paper(database, 3)
+    _embedding(db, unknown, None, input_kind="abstract")
+    _embedding(db, other, "semantic_scholar")
+    _embedding(db, titled, None)
+    _drop_openalex(db)
+    assert admin_runs.preview_source_removal(SYSTEM, database, OPENALEX).counts.embeddings == 1
+
+    result = admin_runs.remove_source_ai_outputs(SYSTEM, database, OPENALEX)
+
+    assert result.deleted["embedding"] == 1
+    left = {uuid.UUID(str(row[0])) for row in execute(db, "SELECT item_id FROM embedding")}
+    assert left == {other, titled}
+
+
+def _two_research_models(db: TestDatabase, database: Database) -> tuple[uuid.UUID, uuid.UUID]:
+    """兩篇論文各跑完研究模型；第二篇的當成 Semantic Scholar 來源的。回（OpenAlex 的表頭,
+    Semantic Scholar 的表頭）。"""
+    provider = SchemaReplyProvider(good_replies())
+    mine = _paper(database, 1)
+    other = _paper(database, 2)
+    for paper_id in (mine, other):
+        result = _gateway(database, provider, paper_id, LlmTask.EXTRACT_MODEL)
+        assert result.outcome is GatewayOutcome.ACTIVE
+    execute(
+        db,
+        "UPDATE derivation_run SET abstract_source = 'semantic_scholar' WHERE paper_id = %s",
+        other,
+    )
+    return _research_model_header(db, mine), _research_model_header(db, other)
+
+
+def test_removal_rolls_back_when_a_construct_is_locked_then_succeeds_on_rerun(
+    db: TestDatabase, database: Database, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 第二輪 R3：別的交易正在新增引用候選構面的提及（還沒 commit）。移除等不到鎖 → 整次退回、
+    # 一列都沒少（候選線索還在）；那個交易退回之後重跑，構面照樣清掉。
+    header, other_header = _two_research_models(db, database)
+    only_mine = _extra_mention(db, header, "only openalex construct")
+    _drop_openalex(db)
+    before = {
+        table: _count(db, table)
+        for table in ("research_model", "construct_mention", "hypothesis", "construct")
+    }
+    real = delete_ai_results_by_abstract_source
+    monkeypatch.setattr(
+        admin_runs,
+        "delete_ai_results_by_abstract_source",
+        functools.partial(real, construct_lock_timeout_ms=200),
+    )
+    writer = psycopg.connect(db.admin_url, autocommit=False, connect_timeout=5)
+    try:
+        writer.execute(
+            "INSERT INTO construct_mention (research_model_id, construct_id, name_en, label_zh)"
+            " VALUES (%s, %s, 'in flight', 'in flight')",
+            (other_header, only_mine),
+        )
+        with pytest.raises(LockWaitTimeoutError):
+            admin_runs.remove_source_ai_outputs(SYSTEM, database, OPENALEX)
+        after = {table: _count(db, table) for table in before}
+        assert after == before
+        assert _count(db, "audit_event") == 0
+    finally:
+        writer.rollback()
+        writer.close()
+
+    removal = admin_runs.remove_source_ai_outputs(SYSTEM, database, OPENALEX)
+
+    assert removal.blocks == ()
+    assert removal.deleted["construct"] == 1
+    remaining = {uuid.UUID(str(row[0])) for row in execute(db, "SELECT id FROM construct")}
+    assert only_mine not in remaining
+    assert _source_headers(db) == 0
+
+
+def test_construct_used_by_a_committed_writer_is_kept(
+    db: TestDatabase, database: Database, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 第二輪 R3：移除等鎖的期間，持鎖的交易 commit 了引用 → 拿到鎖之後看得到它，構面留著。
+    header, other_header = _two_research_models(db, database)
+    only_mine = _extra_mention(db, header, "only openalex construct")
+    _drop_openalex(db)
+    writer = psycopg.connect(db.admin_url, autocommit=False, connect_timeout=5)
+    results: list[Any] = []
+    try:
+        writer.execute(
+            "INSERT INTO construct_mention (research_model_id, construct_id, name_en, label_zh)"
+            " VALUES (%s, %s, 'in flight', 'in flight')",
+            (other_header, only_mine),
+        )
+        removal = threading.Thread(
+            target=lambda: results.append(
+                admin_runs.remove_source_ai_outputs(SYSTEM, database, OPENALEX)
+            )
+        )
+        removal.start()
+        removal.join(0.5)
+        assert removal.is_alive()  # 等候選構面的鎖
+        writer.commit()
+        removal.join(WAIT)
+    finally:
+        writer.close()
+
+    assert results[0].deleted["construct"] == 0
+    remaining = {uuid.UUID(str(row[0])) for row in execute(db, "SELECT id FROM construct")}
+    assert only_mine in remaining
 
 
 # --- 第 5 點：遷移前沒記來源的 run --------------------------------------------------------------
@@ -464,3 +588,81 @@ def test_writing_a_header_identifies_the_source_of_an_old_run(
 
     assert _run_source(db, run_id) == "openalex"
     assert _source_headers(db) == 1
+
+
+# --- 第二輪 R1、O1：遷移前的 run 鎖內辨識不出來源就不寫 ---------------------------------------
+
+
+def _record_rejected(database: Database, paper_id: uuid.UUID, run_id: uuid.UUID) -> None:
+    record_llm_result(
+        SYSTEM,
+        database,
+        trial_setup().gateway,
+        paper_id=paper_id,
+        run_id=run_id,
+        lang=OutputLang.ZH_HANT,
+        abstract_id=None,
+        reject_reason=ErrorCode.LLM_OUTPUT_INVALID,
+    )
+
+
+def _run_state(db: TestDatabase, run_id: uuid.UUID) -> tuple[Any, ...]:
+    return execute(db, "SELECT status, failure_reason FROM derivation_run WHERE id = %s", run_id)[0]
+
+
+def test_old_run_whose_input_changed_writes_no_header(db: TestDatabase, database: Database) -> None:
+    paper_id = _paper(database, 1)
+    key = _current_key(database, paper_id, LlmTask.ZH_SUMMARY)
+    stale = RunKey(key.paper_id, key.task, key.prompt_version, key.model, "c" * 64)
+    run_id = insert_run(db, stale, status="running")  # 遷移前的 run，輸入已經變了
+
+    with pytest.raises(AbstractSourceChangedError):
+        _record_rejected(database, paper_id, run_id)
+
+    assert _count(db, "zh_summary") == 0
+    assert _run_state(db, run_id) == ("failed", "abstract_source_changed")
+    assert _run_source(db, run_id) is None
+
+
+def test_old_run_coming_back_after_the_removal_writes_no_header(
+    db: TestDatabase, database: Database
+) -> None:
+    paper_id = _paper(database, 1)
+    run_id = insert_run(db, _current_key(database, paper_id, LlmTask.ZH_SUMMARY), status="running")
+    _drop_openalex(db)
+    removal = admin_runs.remove_source_ai_outputs(SYSTEM, database, OPENALEX)
+    assert removal.blocks == ()  # 來源 NULL 的 run 不算「還在跑、用這個來源的 run」
+
+    with pytest.raises(AbstractSourceChangedError):
+        _record_rejected(database, paper_id, run_id)
+
+    assert _count(db, "zh_summary") == 0
+    assert _run_state(db, run_id) == ("failed", "abstract_source_changed")
+    after = admin_runs.remove_source_ai_outputs(SYSTEM, database, OPENALEX)
+    assert (after.blocks, after.total_deleted) == ((), 0)
+
+
+def test_old_run_identified_before_the_lock_is_recorded_but_not_written(
+    db: TestDatabase, database: Database, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # O1：拿鎖前用指紋辨識出 OpenAlex、拿了它的共用鎖；鎖住論文之前摘要被拿掉（另一條連線
+    # commit）。鎖內辨識不出 → 不寫表頭，但 run 補記 OpenAlex（指紋已經證明用的是它）。
+    paper_id = _paper(database, 1)
+    run_id = insert_run(db, _current_key(database, paper_id, LlmTask.ZH_SUMMARY), status="running")
+    real = ai_results._hold_abstract_source
+    held: list[Any] = []
+
+    def then_removed(connection: Any, rid: uuid.UUID) -> Any:
+        held.append(real(connection, rid))
+        _drop_openalex(db)
+        return held[-1]
+
+    monkeypatch.setattr(ai_results, "_hold_abstract_source", then_removed)
+
+    with pytest.raises(AbstractSourceChangedError):
+        _record_rejected(database, paper_id, run_id)
+
+    assert held == [OPENALEX]
+    assert _count(db, "zh_summary") == 0
+    assert _run_state(db, run_id) == ("failed", "abstract_source_changed")
+    assert _run_source(db, run_id) == "openalex"

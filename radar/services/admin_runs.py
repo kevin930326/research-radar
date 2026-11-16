@@ -14,7 +14,9 @@ FR-11、AD-26、ADR-0044）。重跑在 `services/run_retry.py`；改版預估�
   `audit_event`（系統身分，`detail` 只有來源與各表計數）。中途丟例外整個交易退回。刪完再跑
   一次刪 0 列、不寫稽核。
 
-另外刪只被這些表頭用到的構面、用這個來源的摘要算的向量（審查後第 2 點）。`derivation_run`、
+另外刪只被這些表頭用到的構面、用這個來源的摘要算的向量與看摘要卻沒記來源的向量（審查後第 2 點、
+第二輪 R2）。構面候選在刪細項之前先鎖住，等不到就丟 `LockWaitTimeoutError`、整個交易退回
+（一列都沒少），請管理者稍後重跑（第二輪 R3）。`derivation_run`、
 `llm_call`（含模型輸出原文，見 ADR-0044「要 Kevin 決定」）、`batch_item`、`paper_abstract`、人工
 判斷事件與稽核都不動；標題輸入與其他來源的表頭也不動。日誌只記來源與計數。
 
@@ -133,6 +135,8 @@ def remove_source_ai_outputs(
     Raises:
         PermissionDeniedError: `actor` 不是系統工作（不碰資料庫）。
         ValueError: `source` 不是摘要來源（不碰資料庫）。
+        LockWaitTimeoutError: 要刪的構面正被別的工作鎖住、等不到（整個交易退回，一列都沒少；
+            稍後重跑）。
         Exception: 資料庫錯誤原樣丟出（整個交易退回，一列都沒少）。
     """
     require(actor, Action.RUN_AI_JOBS, None)

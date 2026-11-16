@@ -13,7 +13,9 @@ ADR-0041、ADR-0043、Story 2.9、2.11）。`batch_submission` 的狀態只在�
    Story 2.12、ADR-0044）。第一次全庫沒有 `active`，不受影響。沒超過時，這次估過的改版重跑
    （鍵與保守上限）就是這次規劃唯一能排的改版重跑：第 4 步在預算鎖裡再查一次這篇的 `active`
    版本，是改版重跑卻不在清單裡（或費用不同，例如估完後一個在跑的改版工作失敗了）就不排、計
-   `rerun_unestimated`，留給下一次規劃重新估（Story 2.12 審查後第 4 點）。
+   `rerun_unestimated`，留給下一次規劃重新估（Story 2.12 審查後第 4 點）；估算本來就不算、取得
+   資格也會略過的（新鍵已經有 running、擋下的結果或可接續的 run）照原本算 skipped／resumable
+   （第二輪 O2）。
 3. 每個工作讀一次 prompt；依論文 id 分頁讀論文，每篇照 `plan_for` 要做的工作組 `LlmJob`，經閘門的
    `prepare_llm_request` 放行、算指紋、組請求、檢查大小（`NO_INPUT`／`BLOCKED`／`TOO_LARGE`
    計數略過）。
@@ -568,8 +570,9 @@ def _plan_one_batch(
     submission id）；拿到鎖時已在月初窗口（等鎖跨過台北午夜）就什麼都不寫、回 (None, None)。
 
     `approved_reruns` 是規劃開頭重跑上限檢查估過的改版重跑（鍵 → 保守上限）：鎖裡再查一次這幾篇的
-    `active` 設定檔版本，是改版重跑卻不在清單裡、或費用不同的不排（`rerun_unestimated`），這次排的
-    改版重跑合計一定不超過估過、也檢查過上限的金額。
+    `active` 設定檔版本，是改版重跑卻不在清單裡、或費用不同的不排（`rerun_unestimated`；估算本來
+    就不算的照 `_claim_would_not_plan` 算 skipped／resumable），這次排的改版重跑合計一定不超過
+    估過、也檢查過上限的金額。
 
     計數在交易 commit 之後才併進 `result`（交易退回時不算）。
     """
@@ -604,8 +607,16 @@ def _plan_one_batch(
                 _is_revision_rerun(prepared, active_versions, current_versions)
                 and approved_reruns.get(prepared.key) != cost
             ):
-                # 改版重跑卻不在這次估過的清單裡（估完之後狀態變了）：不排，下一次規劃重新估。
-                tally.rerun_unestimated += 1
+                # 改版重跑卻不在這次估過的清單裡。估算本來就不算、取得資格也會略過的（新鍵已經有
+                # running、擋下的結果或可接續的 run）照原本算 skipped／resumable（審查後第二輪
+                # O2）；其餘是估完之後狀態變了：不排，下一次規劃重新估。
+                would = _claim_would_not_plan(connection, prepared.key)
+                if would is BatchClaimOutcome.RESUMABLE:
+                    tally.resumable += 1
+                elif would is BatchClaimOutcome.SKIPPED:
+                    tally.skipped += 1
+                else:
+                    tally.rerun_unestimated += 1
                 continue
             if not remaining.fits(task, cost):
                 tally.deferred_budget += 1
@@ -648,6 +659,21 @@ def _plan_one_batch(
             estimated_max_cost_usd=str(tally.estimated_max_cost_usd),
         )
     return used, submission_id
+
+
+def _claim_would_not_plan(connection: DbConnection, key: RunKey) -> BatchClaimOutcome | None:
+    """取得資格不會排這組鍵的原因（順序和 `_estimate_chunk` 一樣）：已經有 running 或擋下的結果
+    → `SKIPPED`；有可接續的 `llm_result_pending` → `RESUMABLE`；都沒有回 None。改版預估與規劃
+    判斷「估算本來就不算的改版重跑」共用（Story 2.12 審查後第二輪 O2）。"""
+    viewer = SystemViewer()
+    if (
+        find_running_derivation_run_id(viewer, connection, key, None) is not None
+        or find_blocking_ai_result(viewer, connection, key) is not None
+    ):
+        return BatchClaimOutcome.SKIPPED
+    if find_resumable_derivation_run_id(viewer, connection, key, None) is not None:
+        return BatchClaimOutcome.RESUMABLE
+    return None
 
 
 def _active_revision_versions(
@@ -1754,12 +1780,7 @@ def _estimate_revision_chunk(
             versions[task] = find_active_config_versions(viewer, connection, task, paper_ids)
         if not assume_changed:
             for index, prepared in enumerate(chunk):
-                key = prepared.key
-                if (
-                    find_running_derivation_run_id(viewer, connection, key, None) is not None
-                    or find_blocking_ai_result(viewer, connection, key) is not None
-                    or find_resumable_derivation_run_id(viewer, connection, key, None) is not None
-                ):
+                if _claim_would_not_plan(connection, prepared.key) is not None:
                     will_skip.add(index)
     for index, prepared in enumerate(chunk):
         if index in will_skip:

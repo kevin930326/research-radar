@@ -14,7 +14,7 @@ ADR-0040，Story 2.8）。
 
 import uuid
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, Final
 
 from sqlalchemy import (
     CheckConstraint,
@@ -309,29 +309,39 @@ def find_paper_embedding(
 # --- 寫入 ---------------------------------------------------------------------------------
 
 
+# 依來源移除要刪的向量（`e`）：記的來源是 `:source`，或看摘要卻沒記來源（遷移 0018 證明不了
+# 來源的舊向量，可能就是用這個來源算的：保守一起刪，Story 2.12 審查後第二輪 R2）。
+_REMOVABLE_EMBEDDING: Final = (
+    "(e.abstract_source = :source OR (e.abstract_source IS NULL AND EXISTS ("
+    "SELECT 1 FROM derivation_run AS r WHERE r.id = e.run_id AND r.input_kind = 'abstract')))"
+)
+
+
 def count_embeddings_by_abstract_source(
     viewer: SystemViewer, connection: Connection, source: AbstractSource
 ) -> int:
-    """用 `source` 的摘要算的向量有幾列（`embedding.abstract_source`；`radar runs remove-by-source`
-    的預覽，Story 2.12 審查後）。
+    """依來源移除 `source` 會刪的向量有幾列：用它的摘要算的（`embedding.abstract_source`），加上看
+    摘要卻沒記來源的（見 `_REMOVABLE_EMBEDDING`）。`radar runs remove-by-source` 的預覽（Story 2.12
+    審查後）。
 
     Raises:
         TypeError: `viewer` 不是 `SystemViewer`。
     """
     visible = visible_to_system_only(viewer)
     value = connection.execute(
-        text(f"SELECT count(*) FROM embedding WHERE {visible} AND abstract_source = :source"),
+        text(f"SELECT count(*) FROM embedding AS e WHERE {visible} AND {_REMOVABLE_EMBEDDING}"),
         {"source": AbstractSource(source).value},
     ).scalar_one()
     return int(value)
 
 
 def delete_embeddings_by_abstract_source(connection: Connection, source: AbstractSource) -> int:
-    """刪掉用 `source` 的摘要算的向量，回刪了幾列（`radar runs remove-by-source --execute`，
-    Story 2.12 審查後、ADR-0044）。之後的向量化看不到現有向量，照指紋規則用現在的輸入重算。
+    """刪掉用 `source` 的摘要算的向量，以及看摘要卻沒記來源的向量（保守一起刪，見
+    `_REMOVABLE_EMBEDDING`），回刪了幾列（`radar runs remove-by-source --execute`，Story 2.12
+    審查後、ADR-0044）。之後的向量化看不到現有向量，照指紋規則用現在的輸入重算並記下來源。
     在呼叫端開好的交易裡做，不 commit。"""
     result = connection.execute(
-        text("DELETE FROM embedding WHERE abstract_source = :source"),
+        text(f"DELETE FROM embedding AS e WHERE {_REMOVABLE_EMBEDDING}"),
         {"source": AbstractSource(source).value},
     )
     return int(result.rowcount)

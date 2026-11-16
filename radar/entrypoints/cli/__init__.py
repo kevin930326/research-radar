@@ -49,6 +49,7 @@ from radar.domain.embeddings import (
     render_backfill_report,
     render_backlog_estimate,
 )
+from radar.domain.errors import LockWaitTimeoutError
 from radar.domain.import_report import render_import_report
 from radar.domain.jobs import UnknownJobError, find_scheduled_job
 from radar.domain.llm_batches import (
@@ -1450,7 +1451,8 @@ def runs_remove_by_source(
     直接刪掉送出時用了這個來源摘要的表頭與細項（不複製），寫一筆稽核（只記來源與計數）。還有這個
     來源的 run 在跑、或有論文的目前摘要仍是這個來源時不刪：先停用來源、移除摘要，再跑這個指令。
 
-    來源看不懂：退出碼 2。設定錯、讀不到資料庫、被擋下、沒有確認：退出碼 1。Ctrl-C：退出碼 130。
+    來源看不懂：退出碼 2。設定錯、讀不到資料庫、被擋下、沒有確認、構面等不到鎖（未完成、整個交易
+    退回，稍後重跑）：退出碼 1。Ctrl-C：退出碼 130。
     """
     configure_logging()
     try:
@@ -1485,6 +1487,13 @@ def runs_remove_by_source(
     except KeyboardInterrupt:
         typer.echo("中斷了：整個交易退回，一筆都沒有刪", err=True)
         raise typer.Exit(INTERRUPTED_EXIT_CODE) from None
+    except LockWaitTimeoutError:
+        log.warning("依來源移除未完成：構面等不到鎖", source=source.value)
+        typer.echo(
+            "未完成：要刪的構面正被別的工作使用、等不到；整個交易退回，一筆都沒有刪。請稍後重跑",
+            err=True,
+        )
+        raise typer.Exit(1) from None
     except Exception as exc:
         log.error("依來源移除失敗", error_type=type(exc).__name__)
         _fail(f"移除失敗（{type(exc).__name__}），整個交易退回；細節見日誌", [])

@@ -260,7 +260,8 @@ class LlmBatchPlanResult:
     - `resumable`：有 `llm_result_pending` 可接續（留給互動接續，不重付）。
     - `deferred_budget`：保守上限放不下剩餘預算或功能預算。
     - `rerun_unestimated`：分類表或情境值清單改版後的重跑，卻不在規劃開頭估過的清單裡（估完之後
-      狀態變了，例如在跑的改版工作失敗）：這次不排，下一次規劃重新估（Story 2.12 審查後）。
+      狀態變了，例如在跑的改版工作失敗）：這次不排，下一次規劃重新估（Story 2.12 審查後）。新鍵
+      已經有 running、擋下的結果或可接續的 run 的不算在這裡（照原本算 skipped／resumable）。
     - `no_input`／`blocked`／`too_large`：組請求時擋下。
     - `submission_ids`：這次建的 `batch_submission`。
     - `enqueue_failed`：建好了但排入送出失敗的批次數（sweep 之後補排）。

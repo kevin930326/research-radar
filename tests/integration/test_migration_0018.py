@@ -8,8 +8,16 @@ import uuid
 import psycopg
 import pytest
 
-from radar.domain.ai_outputs import InputKind, LlmTask, build_llm_input
-from radar.domain.fingerprints import input_sha256
+from radar.domain.ai_outputs import (
+    CurrentAbstract,
+    InputKind,
+    LlmTask,
+    PaperLlmSource,
+    build_llm_input,
+)
+from radar.domain.embeddings import build_embedding_input
+from radar.domain.fingerprints import embedding_input_sha256, input_sha256
+from radar.domain.papers import AbstractSource
 from radar.domain.viewer import SystemViewer
 from radar.repo.db import Database
 from radar.repo.papers import find_paper_llm_source
@@ -274,8 +282,11 @@ def _embedding_columns(db: TestDatabase) -> set[str]:
     }
 
 
-def _vector(db: TestDatabase, paper_id: uuid.UUID, input_kind: str) -> None:
-    """一筆 qwen3（遷移 0015 登記的 1,024 維）向量與它的向量化 run。"""
+def _vector(
+    db: TestDatabase, paper_id: uuid.UUID, input_kind: str, sha256: str | None = None
+) -> None:
+    """一筆 qwen3（遷移 0015 登記的 1,024 維）向量與它的向量化 run（`sha256` 沒給時是隨機的指紋，
+    對不上任何輸入）。"""
     [(run_id,)] = execute(
         db,
         "INSERT INTO derivation_run (paper_id, task, model, input_sha256, input_kind, params,"
@@ -283,7 +294,7 @@ def _vector(db: TestDatabase, paper_id: uuid.UUID, input_kind: str) -> None:
         " '@cf/qwen/qwen3-embedding-0.6b', %s, %s, '{}'::jsonb, 'test', 'interactive',"
         " 'succeeded', now()) RETURNING id",
         paper_id,
-        uuid.uuid4().hex * 2,
+        sha256 or uuid.uuid4().hex * 2,
         input_kind,
     )
     execute(
@@ -300,26 +311,110 @@ def _vector_source(db: TestDatabase, paper_id: uuid.UUID) -> object:
     return execute(db, "SELECT abstract_source FROM embedding WHERE item_id = %s", paper_id)[0][0]
 
 
-def test_embedding_source_is_backfilled_from_the_current_abstract(db: TestDatabase) -> None:
+def _embedding_sha(db: TestDatabase, paper_id: uuid.UUID) -> str:
+    """這篇論文現在的標題＋目前摘要送去向量化的指紋（和向量化服務算的一樣）。"""
+    [(title, abstract_id, source, content)] = execute(
+        db,
+        "SELECT p.title, a.id, a.source, a.content FROM paper AS p JOIN paper_abstract AS a"
+        " ON a.paper_id = p.id AND a.is_current WHERE p.id = %s",
+        paper_id,
+    )
+    paper = PaperLlmSource(
+        paper_id=paper_id,
+        title=title,
+        abstract=CurrentAbstract(
+            id=uuid.UUID(str(abstract_id)), source=AbstractSource(source), content=content
+        ),
+    )
+    embedding_input = build_embedding_input(paper, InputKind.ABSTRACT)
+    return embedding_input_sha256(embedding_input.text, InputKind.ABSTRACT.value)
+
+
+def test_embedding_source_is_backfilled_only_when_proven(db: TestDatabase) -> None:
+    # 審查後第二輪 R2：目前摘要從向量化之前就沒改過、指紋也對得上才補；其他一律 NULL。
     down = _alembic(db, "downgrade", "0017")
     assert down.returncode == 0, down.stdout + down.stderr
     assert "abstract_source" not in _embedding_columns(db)
-    with_abstract, _ = _paper(db, 1)
+    proven, _ = _paper(db, 1)
     titled, _ = _paper(db, 2)
     gone, _ = _paper(db, 3)
-    _vector(db, with_abstract, "abstract")
+    changed_text, _ = _paper(db, 4)
+    _vector(db, proven, "abstract", _embedding_sha(db, proven))
     _vector(db, titled, "title")
-    _vector(db, gone, "abstract")
+    _vector(db, gone, "abstract", _embedding_sha(db, gone))
     execute(db, "DELETE FROM paper_abstract WHERE paper_id = %s", gone)
+    # 文字不同：向量是用舊的摘要算的，之後摘要改了（這裡刻意不動 updated_at，只靠指紋擋）。
+    _vector(db, changed_text, "abstract", _embedding_sha(db, changed_text))
+    execute(
+        db,
+        "UPDATE paper_abstract SET content = 'A different abstract.' WHERE paper_id = %s",
+        changed_text,
+    )
+    # 標題改了（摘要列沒動，時間條件成立）：指紋對不上。
+    retitled, _ = _paper(db, 5)
+    _vector(db, retitled, "abstract", _embedding_sha(db, retitled))
+    execute(db, "UPDATE paper SET title = 'Another title' WHERE id = %s", retitled)
 
     migrate(db)
 
     assert "abstract_source" in _embedding_columns(db)
-    assert _vector_source(db, with_abstract) == "openalex"
+    assert _vector_source(db, proven) == "openalex"
     assert _vector_source(db, titled) is None
-    assert _vector_source(db, gone) is None  # 已經沒有目前的摘要：來源不明
+    assert _vector_source(db, gone) is None  # 已經沒有目前的摘要：證明不了
+    assert _vector_source(db, changed_text) is None  # 文字不同：證明不了（照指紋規則會重算）
+    assert _vector_source(db, retitled) is None
     with pytest.raises(psycopg.errors.CheckViolation):
         execute(db, "UPDATE embedding SET abstract_source = 'crossref'")
     down_again = _alembic(db, "downgrade", "0017")
     assert down_again.returncode == 0, down_again.stdout + down_again.stderr
     assert "abstract_source" not in _embedding_columns(db)
+
+
+def test_embedding_source_is_not_guessed_when_the_source_switched_with_the_same_text(
+    db: TestDatabase,
+) -> None:
+    # 向量是用 OpenAlex 的摘要算的；之後目前摘要換成文字完全相同的 Semantic Scholar。指紋對得上
+    # 目前的輸入，但目前摘要那一列在向量之後才改過：不能拿目前來源當歷史來源，留 NULL。
+    down = _alembic(db, "downgrade", "0017")
+    assert down.returncode == 0, down.stdout + down.stderr
+    switched, _ = _paper(db, 1)
+    sha = _embedding_sha(db, switched)
+    _vector(db, switched, "abstract", sha)
+    execute(
+        db,
+        "UPDATE paper_abstract SET is_current = false, updated_at = clock_timestamp()"
+        " WHERE paper_id = %s",
+        switched,
+    )
+    execute(
+        db,
+        "INSERT INTO paper_abstract (paper_id, source, content, is_current, created_at,"
+        " updated_at) SELECT paper_id, 'semantic_scholar', content, true, clock_timestamp(),"
+        " clock_timestamp() FROM paper_abstract WHERE paper_id = %s AND source = 'openalex'",
+        switched,
+    )
+    assert _embedding_sha(db, switched) == sha  # 文字一樣，指紋規則不會挑到它
+
+    migrate(db)
+
+    assert _vector_source(db, switched) is None
+
+
+def test_embedding_source_is_not_guessed_when_the_abstract_changed_back(
+    db: TestDatabase,
+) -> None:
+    # 向量之後目前摘要改過（又改回同樣的文字）：向量化當時讀到的是不是這一列證明不了，留 NULL。
+    down = _alembic(db, "downgrade", "0017")
+    assert down.returncode == 0, down.stdout + down.stderr
+    touched, _ = _paper(db, 1)
+    _vector(db, touched, "abstract", _embedding_sha(db, touched))
+    execute(
+        db,
+        "UPDATE paper_abstract SET updated_at = clock_timestamp() + interval '1 second'"
+        " WHERE paper_id = %s",
+        touched,
+    )
+
+    migrate(db)
+
+    assert _vector_source(db, touched) is None

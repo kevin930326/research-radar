@@ -13,9 +13,19 @@
   輸入指紋（`domain/fingerprints.input_sha256`，指紋算進每段的來源），和 run 的一樣就補上目前摘要
   的來源；不一樣（輸入已經變了，這些 run 也不會再被接續）留 NULL。
 - `embedding.abstract_source text NULL`（審查後第 2 點）：向量化當時用的摘要來源（只看標題的是
-  NULL），`remove-by-source` 照它刪向量。CHECK 同上三個值。回填：run 看摘要的向量，補上論文
-  **現在**的目前摘要的來源；限制：向量之後摘要換過來源的話會記成現在的來源（現在只有 OpenAlex
-  會寫入，ADR-0022），論文已經沒有目前摘要的留 NULL（不會被依來源刪掉，下一次向量化會重算）。
+  NULL），`remove-by-source` 照它刪向量。CHECK 同上三個值。回填（審查後第二輪 R2）：只在**能
+  證明**時補，證明要同時成立：
+  1. 論文現在的目前摘要那一列，`updated_at` 不晚於向量化 run 的 `created_at`（取得資格的交易）：
+     那一列的內容與「是目前的」狀態一改就會更新 `updated_at`，所以向量化當時讀到的目前摘要就是
+     它、內容也一樣；
+  2. 用現在的標題與這一列算出的向量輸入指紋（`embedding_input_sha256`）等於向量記的。
+  其他（目前摘要在向量之後換過來源或改過內容、文字不同、論文已經沒有目前摘要）一律留 NULL，
+  不拿目前來源去猜。NULL 的看摘要向量：文字變了的照 2.8 的指紋規則在下一次 `embed_papers`
+  （每週更新後排入，或 `radar embeddings backfill`）重算；文字沒變的不會被指紋規則挑到，改由
+  `remove-by-source` 保守處理：移除任何一個來源時，連同 NULL 的看摘要向量一起刪掉，下一次
+  `embed_papers` 照現在的輸入重算並記下來源。限制：時間戳記是交易開始的時間，極端的長交易交錯
+  （更新摘要的交易比向量化的交易早開始、晚改目前摘要，而且換成文字完全相同的另一個來源）不在
+  證明範圍內；遷移前只有 OpenAlex 會寫摘要（ADR-0022），實際上不會發生。
 
 和 `radar/repo/llm_ledger.py`、`radar/repo/embeddings.py` 的表定義一致（`alembic check` 比對；
 CHECK 約束 autogenerate 不比，這裡照抄同一份條件）。可降版：降版刪掉這兩欄（連同記下的來源）。
@@ -37,7 +47,8 @@ from radar.domain.ai_outputs import (
     PaperLlmSource,
     build_llm_input,
 )
-from radar.domain.fingerprints import input_sha256
+from radar.domain.embeddings import NoEmbeddingInputError, build_embedding_input
+from radar.domain.fingerprints import embedding_input_sha256, input_sha256
 from radar.domain.papers import AbstractSource
 
 revision: str = "0018"
@@ -74,12 +85,15 @@ IN_FLIGHT = (
     " AND NOT EXISTS (SELECT 1 FROM batch_item AS b WHERE b.run_id = r.id)"
 )
 
-# 向量：run 看摘要的，補上論文現在的目前摘要的來源（只補 NULL 的列）。
-EMBEDDING_BACKFILL = (
-    "UPDATE embedding AS e SET abstract_source = a.source"
-    " FROM derivation_run AS r, paper_abstract AS a"
-    " WHERE r.id = e.run_id AND r.input_kind = 'abstract' AND e.item_type = 'paper'"
-    " AND a.paper_id = e.item_id AND a.is_current AND e.abstract_source IS NULL"
+# 向量：run 看摘要、還沒記來源，而且論文現在的目前摘要從向量化之前就沒改過（見模組說明）。
+EMBEDDINGS_TO_PROVE = (
+    "SELECT e.item_type, e.item_id, e.model_id, e.input_sha256, p.title, a.id AS abstract_id,"
+    " a.source, a.content"
+    " FROM embedding AS e JOIN derivation_run AS r ON r.id = e.run_id"
+    " JOIN paper AS p ON p.id = e.item_id"
+    " JOIN paper_abstract AS a ON a.paper_id = e.item_id AND a.is_current"
+    " WHERE e.item_type = 'paper' AND r.input_kind = 'abstract' AND e.abstract_source IS NULL"
+    " AND a.updated_at <= r.created_at"
 )
 
 
@@ -115,6 +129,39 @@ def backfill_in_flight(connection: sa.Connection) -> int:
     return filled
 
 
+def backfill_embeddings(connection: sa.Connection) -> int:
+    """能證明來源的看摘要向量補上來源（見模組說明），回補了幾筆。只補還是 NULL 的列。"""
+    filled = 0
+    for row in connection.execute(sa.text(EMBEDDINGS_TO_PROVE)).mappings().all():
+        source = AbstractSource(row["source"])
+        paper = PaperLlmSource(
+            paper_id=row["item_id"],
+            title=row["title"],
+            abstract=CurrentAbstract(id=row["abstract_id"], source=source, content=row["content"]),
+        )
+        try:
+            current = build_embedding_input(paper, InputKind.ABSTRACT)
+            fingerprint = embedding_input_sha256(current.text, InputKind.ABSTRACT.value)
+        except NoEmbeddingInputError, ValueError:
+            continue
+        if fingerprint != row["input_sha256"]:
+            continue
+        filled += connection.execute(
+            sa.text(
+                "UPDATE embedding SET abstract_source = :source"
+                " WHERE item_type = :item_type AND item_id = :item_id AND model_id = :model_id"
+                " AND abstract_source IS NULL"
+            ),
+            {
+                "source": source.value,
+                "item_type": row["item_type"],
+                "item_id": row["item_id"],
+                "model_id": row["model_id"],
+            },
+        ).rowcount
+    return filled
+
+
 def upgrade() -> None:
     op.add_column("derivation_run", sa.Column("abstract_source", sa.Text(), nullable=True))
     op.create_check_constraint(
@@ -137,7 +184,7 @@ def upgrade() -> None:
         "abstract_source IS NULL"
         " OR abstract_source IN ('openalex', 'semantic_scholar', 'uploaded_pdf')",
     )
-    op.execute(EMBEDDING_BACKFILL)
+    backfill_embeddings(op.get_bind())
 
 
 def downgrade() -> None:

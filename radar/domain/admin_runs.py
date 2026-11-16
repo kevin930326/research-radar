@@ -485,7 +485,8 @@ class SourceAiCounts:
       摘要列已刪的）：不會被刪。
     - `constructs`：刪完這些表頭之後沒有其他人用的構面數（只被這個來源的結果用到、沒有其他來源
       的結果、代表或人工合併判斷用到；審查後第 2 點）。
-    - `embeddings`：用這個來源的摘要算的向量數（`embedding.abstract_source`）。
+    - `embeddings`：用這個來源的摘要算的向量數（`embedding.abstract_source`），加上看摘要卻沒記
+      來源的向量（遷移 0018 證明不了來源的，保守一起刪；審查後第二輪 R2）。
     """
 
     headers: Mapping[LlmTask, Mapping[ResultStatus, int]]
@@ -578,7 +579,7 @@ def render_source_removal_preview(preview: SourceRemovalPreview) -> list[str]:
         "",
         f"會刪：表頭 {preview.counts.total_headers:,} 列；細項 {details}",
         f"另外會刪：只被這個來源用到的構面 {preview.counts.constructs:,}、"
-        f"用這個來源的摘要算的向量 {preview.counts.embeddings:,}（之後重算）",
+        f"用這個來源（或來源不明）的摘要算的向量 {preview.counts.embeddings:,}（之後重算）",
         f"還在跑、用這個來源的 run：{preview.running_runs:,}",
         f"目前摘要仍是這個來源的論文：{preview.current_papers:,}",
         f"來源不明的表頭（遷移前或摘要列已刪，不會刪）：{preview.counts.unknown_source:,}",
