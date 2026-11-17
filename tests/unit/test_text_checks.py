@@ -107,7 +107,8 @@ def test_input_vocabulary_of_zh_summary_still_keeps_unscaled_numbers() -> None:
 @pytest.mark.parametrize(
     ("method", "abstract"),
     [
-        ("效果為 0.42", "The effect was β = - 0.42."),
+        # 2026-11-18（A4）：輸出 0.42 對輸入 `= - 0.42` 改成放行（輸出的正數可以對輸入同值的負數），
+        # 移到 test_zh_summary_input_reading.py；科學記號的碎片照樣擋。
         ("效果為 4.2", "The effect was β = 4.2 × 10^-2."),
         ("效果為 10", "The effect was β = 4.2 × 10^-2."),
     ],

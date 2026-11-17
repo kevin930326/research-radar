@@ -14,11 +14,14 @@
 3. 夾「摘要未提及…」這類講摘要本身的句子 → `zh_summary_placeholder_text`。
 4. 任一欄正規化後的字元數超過 `max_chars_per_field` → `zh_summary_field_too_long`。
 5. 不是繁中：沒有漢字、漢字比例低於 `min_cjk_percent`、或含簡體專用字 → `zh_summary_not_zh_hant`。
+   漢字比例不算「中文名稱（英文）」括號裡的英文（緊接在漢字後面、有閉合、不巢狀、8 個詞以內）。
 6. 逐句翻譯：摘要句數 ≥ `translation_min_abstract_sentences`，而且輸出句數 ≥ 摘要句數
    → `zh_summary_sentence_translation`。
-7. 編造：有輸入（標題＋摘要）沒有的數字（含正負號、指數、萬／億等單位、百分比）或英文詞，或用了
-   不支援的數字寫法（數字後面的上標、分數字元、`^`、`×10`、`፱` 這類數字字元）
-   → `zh_summary_unsupported_content`。
+7. 編造：有輸入（標題＋摘要）沒有的數字（含正負號、指數、萬／億等單位、百分比）、英數混寫的詞
+   （`B2B`、`N120`）或英文詞，或用了不支援的數字寫法（數字後面的上標、分數字元、`^`、`×10`、`፱`
+   這類數字字元）→ `zh_summary_unsupported_content`。輸入用 `ExtendedVocabulary` 讀（2026-11-18）：
+   空白千分位、月份英文名（只對「9 月」這種接「月」的數字）、年代（只對接「年代」的數字）、
+   `10-40%`、`10% points`、輸出正數對輸入同值負數、英文詞的詞形變化、黏字、`vs`。
 
 第 2～7 條都在「檢查用副本」（`_check_copy`）上做：HTML 實體解碼、拿掉零寬等格式字元、NFKC、
 各種文字的十進位數字換成 0～9、破折號類換成 `-`、空白縮成一個。存進資料庫的仍是
@@ -45,14 +48,15 @@ from radar.domain.ai_outputs import (
 from radar.domain.errors import ErrorCode
 from radar.domain.llm_schemas import ZhSummaryOutput
 
-# 共用的文字檢查在 `text_checks.py`（2.6 搬過去共用）；這裡照原本的名字用，行為不變。
+# 共用的文字檢查在 `text_checks.py`（2.6 搬過去共用）；這裡照原本的名字用。編造判準用的是中文重點
+# 專用的 `ExtendedVocabulary`（2026-11-18 把輸入讀得更完整），研究模型照舊用 `InputVocabulary`。
 # `SIMPLIFIED_ONLY`、`normalize_text` 是公開名稱，從這個模組也拿得到。
 from radar.domain.validators.text_checks import BIDI_OR_TAG as _BIDI_OR_TAG
 from radar.domain.validators.text_checks import ENGLISH_TOKEN as _ENGLISH_TOKEN
 from radar.domain.validators.text_checks import ENGLISH_WORD as _ENGLISH_WORD
 from radar.domain.validators.text_checks import HTML_ENTITY as _HTML_ENTITY
 from radar.domain.validators.text_checks import SIMPLIFIED_ONLY as SIMPLIFIED_ONLY
-from radar.domain.validators.text_checks import InputVocabulary as _InputVocabulary
+from radar.domain.validators.text_checks import ExtendedVocabulary as _ExtendedVocabulary
 from radar.domain.validators.text_checks import check_copy as _check_copy
 from radar.domain.validators.text_checks import has_markup as _has_markup
 from radar.domain.validators.text_checks import has_unsupported_number as _has_unsupported_number
@@ -175,6 +179,15 @@ _EMBEDDED_PLACEHOLDER: Final = re.compile(
 # 句點後面沒有空白時只掃一次（原本的 `[.!?]+\s+` 會平方級回溯）。
 _ABSTRACT_SENTENCE_END: Final = re.compile(r"(?<![.!?])[.!?]++\s+")
 _OUTPUT_SENTENCE_END: Final = re.compile(r"[。！？!?]+")
+# 「中文名稱（英文）」：漢字（範圍同 `is_han`）或漢字＋一個空白後面的括號（全形括號在檢查用副本裡
+# 已經是半形）。括號裡不能再有括號；佔有式量詞，一長串沒閉合的括號只掃一次。
+_HAN_PARENTHESIS: Final = re.compile(
+    "[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\U00020000-\U000323af] ?"
+    r"\((?P<inside>[^()]*+)\)"
+)
+# 括號裡的英文最多幾個詞還算「名稱」（「整合型科技接受模型（unified theory of acceptance and use of
+# technology）」是 8 個）；更多的當成整句英文，照算。
+_MAX_PARENTHESIZED_WORDS: Final = 8
 _HAS_WORD: Final = re.compile(r"\w")
 
 
@@ -196,15 +209,28 @@ def _reject(code: ErrorCode, detail: str) -> OutputRejectedError:
 
 
 def _check_not_zh_hant(name: str, text: str, rules: ZhSummaryRules) -> None:
-    """`text` 是檢查用副本。"""
+    """`text` 是檢查用副本。漢字比例不算「中文名稱（英文）」括號裡的英文
+    （`_english_word_count`）。"""
     han = sum(1 for char in text if _is_han(char))
-    words = len(_ENGLISH_WORD.findall(text))
+    words = _english_word_count(text)
     if han == 0:
         raise _reject(ErrorCode.ZH_SUMMARY_NOT_ZH_HANT, f"{name} 沒有漢字")
     if han * 100 < rules.min_cjk_percent * (han + words):
         raise _reject(ErrorCode.ZH_SUMMARY_NOT_ZH_HANT, f"{name} 的漢字比例太低")
     if any(char in SIMPLIFIED_ONLY for char in text):
         raise _reject(ErrorCode.ZH_SUMMARY_NOT_ZH_HANT, f"{name} 有簡體專用字")
+
+
+def _english_word_count(text: str) -> int:
+    """算漢字比例用的英文詞數：緊接在漢字（或漢字＋一個空白）後面、有閉合、裡面沒有別的括號、
+    英文詞不超過 `_MAX_PARENTHESIZED_WORDS` 個的括號（prompt 規則 3 的「中文名稱（英文）」）裡的
+    英文不算。其他括號（沒閉合、巢狀、前面不是漢字、整句英文塞進括號）裡的英文照算。"""
+    words = len(_ENGLISH_WORD.findall(text))
+    for match in _HAN_PARENTHESIS.finditer(text):
+        inside = len(_ENGLISH_WORD.findall(match["inside"]))
+        if inside <= _MAX_PARENTHESIZED_WORDS:
+            words -= inside
+    return words
 
 
 def count_abstract_sentences(abstract: str) -> int:
@@ -271,12 +297,15 @@ def validate_zh_summary(
                 f"摘要 {abstract_sentences} 句，輸出句數不少於摘要",
             )
 
-    vocabulary = _InputVocabulary.build(input_text)
+    vocabulary = _ExtendedVocabulary.build(input_text)
     for name, text in checked.items():
         if _has_unsupported_number(present[name], text):
             raise _reject(ErrorCode.ZH_SUMMARY_UNSUPPORTED_CONTENT, f"{name} 有不支援的數字寫法")
-        numbers, unreadable = _numbers(text)
-        if unreadable or not numbers <= vocabulary.numbers:
+        number_text, unknown_alnum = vocabulary.number_text(text)
+        if unknown_alnum is not None:
+            raise _reject(ErrorCode.ZH_SUMMARY_UNSUPPORTED_CONTENT, f"{name} 有輸入沒有的英數詞")
+        numbers, unreadable = _numbers(number_text)
+        if unreadable or not all(vocabulary.knows_number(number) for number in numbers):
             raise _reject(ErrorCode.ZH_SUMMARY_UNSUPPORTED_CONTENT, f"{name} 有輸入沒有的數字")
         for match in _ENGLISH_TOKEN.finditer(text):
             if not vocabulary.knows_token(match.group(0)):
