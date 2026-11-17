@@ -19,7 +19,10 @@ export default defineConfig({
   testDir: "e2e",
   fullyParallel: true,
   forbidOnly: isCI,
-  retries: 0,
+  // CI 上失敗時自動再試一次；本機不重試。原因：GitHub 的機器上 Firefox 跑 axe 掃描時偶爾整頁當掉
+  //（frame.evaluate: Page crashed），每次當在不同頁面，不是程式的問題（ADR-0010 的 2026-11-17 更新）。
+  // 重試才過的測試在報告裡會標成 flaky，看得到。
+  retries: isCI ? 1 : 0,
   workers: isCI ? 2 : undefined,
   reporter: isCI ? [["list"], ["html", { open: "never" }]] : "list",
   use: {
