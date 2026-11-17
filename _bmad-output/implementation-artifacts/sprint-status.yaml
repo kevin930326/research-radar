@@ -113,15 +113,20 @@
 #   Kevin 2026-11-16 兩輪合起來回報「21 小時」「大概 2～3 小時」，所以記成一筆，沒有拆開。
 #   Kevin 動手的時間含看報告、回決定、看 3.5 的畫面、聽 VoiceOver，也含同一晚處理 repo 公開的時間。
 #   算 Epic 1、2 的倍率時，這一筆含 Epic 3 的 6.5 h 估計，要一起算或由 Kevin 另外拆。
+# epic-3c＋真 key 全庫 那一筆：前端第三輪（3.6、3.8，估計各 3 h；3.7 因為缺示範站的定義沒做）和 Kevin 用真的 key
+#   試跑、全庫 Batch、重跑拒收同一晚進行。Kevin 當天人在外面沒記時間，時間是從對話紀錄查出來的
+#   （2026-11-16 19:31 到 2026-11-17 01:24 之間，Kevin 有訊息的時段加起來約 2～3 小時），Kevin 2026-11-17 確認
+#   「就這樣記」。真 key 那部分不是 Story、沒有估計；算倍率時這一筆的動手時間偏高估。
 # 重估的倍率只用 kevin_h_low、kevin_h_high（見上面「怎麼重估」第 1 點），elapsed_h 只留著對照。
 # 這個區塊要留在 generated 上面，重跑 skill 才不會洗掉註解（2026-11-14 測過）。
 actual_hours:
   - {round: epic-1, stories: "1.1～1.11", estimate_h: 29, elapsed_h: 20, kevin_h_low: 3, kevin_h_high: 4, rough: true}
   - {round: "epic-2a＋epic-3a", stories: "2.1～2.7、3.1～3.2", estimate_h: 28.5, elapsed_h: 13, kevin_h_low: 1, kevin_h_high: 2, rough: true}
   - {round: "epic-2b＋epic-3b", stories: "2.8～2.13、3.3～3.5", estimate_h: 21.5, elapsed_h: 21, kevin_h_low: 2, kevin_h_high: 3, rough: true}
+  - {round: "epic-3c＋真 key 全庫", stories: "3.6、3.8", estimate_h: 6, elapsed_h: 6, kevin_h_low: 2, kevin_h_high: 3, rough: true}
 
 generated: 11-14-2026 03:46
-last_updated: 11-16-2026 18:51
+last_updated: 11-17-2026 03:10
 project: research-radar
 project_key: NOKEY
 tracking_system: file-system
@@ -151,8 +156,8 @@ development_status:
   2-7-人工判斷事件與有效值: done
   2-8-向量與全庫向量化: done  # 2026-11-16 Kevin 用真的 key 跑完全庫向量化：10,525 篇有向量、失敗 0、放行擋下 0
   2-9-batch-送出與每週更新的串接: done
-  2-10-只對指定的論文跑-ai: review  # 程式已合併；等真的 key 的 20 篇試跑確認
-  2-11-batch-結果匯入與第一次全庫-ai: review  # 程式已合併；等全庫 Batch、拒收報表與費用對帳
+  2-10-只對指定的論文跑-ai: done  # 2026-11-16 Kevin 用真的 key 試跑：1 篇＋20 篇（prompt v1、v2、v3 各一次），拒收報表見 PR 說明
+  2-11-batch-結果匯入與第一次全庫-ai: done  # 2026-11-16 Kevin 用真的 key 跑完全庫 Batch：52 批 25,881 筆全部匯入、needs_attention 0；本月費用 7.15 美元（PRD 估約 9）
   2-12-管理者的-ai-指令: done
   2-13-標註試算表範本: review  # 程式已合併；等分類表定版後產生正式範本、用試算表打開確認
   epic-2-retrospective: optional
@@ -163,9 +168,9 @@ development_status:
   3-3-假登入與-session: done
   3-4-權限測試的框架: done
   3-5-導覽列與帳號選單: done
-  3-6-論文頁的-api: review
+  3-6-論文頁的-api: done  # PR 88 已合併
   3-7-示範站匯出的骨架: backlog
-  3-8-論文頁成員版: review
+  3-8-論文頁成員版: done  # PR 90 已合併
   3-9-論文頁示範站版: backlog
   3-10-引用匯出: backlog
   3-11-修正分類: backlog
