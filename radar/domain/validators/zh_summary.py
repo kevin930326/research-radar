@@ -22,7 +22,9 @@
    （`B2B`、`N120`）或英文詞，或用了不支援的數字寫法（數字後面的上標、分數字元、`^`、`×10`、`፱`
    這類數字字元）→ `zh_summary_unsupported_content`。輸入用 `ExtendedVocabulary` 讀（2026-11-18）：
    空白千分位、月份英文名（只對「9 月」這種接「月」的數字）、年代（只對接「年代」的數字）、
-   `10-40%`、`10% points`、輸出正數對輸入同值負數、英文詞的詞形變化、黏字、`vs`。
+   `10-40%`、`10% points`、輸出正數對輸入同值負數、英文詞的詞形變化、黏字、`vs`。數字的新規則一律
+   以既有讀法讀到的「完整數字」為單位，不會從科學記號、指數、千分位、帶量詞或百分比的數字中間讀出
+   片段；輸出裡英數詞、月份、年代的數字只能整個換掉，換完讀到的數字只會變少。
 
 第 2～7 條都在「檢查用副本」（`_check_copy`）上做：HTML 實體解碼、拿掉零寬等格式字元、NFKC、
 各種文字的十進位數字換成 0～9、破折號類換成 `-`、空白縮成一個。存進資料庫的仍是
@@ -324,6 +326,8 @@ def validate_zh_summary(
         if unknown_alnum is not None:
             raise _reject(ErrorCode.ZH_SUMMARY_UNSUPPORTED_CONTENT, f"{name} 有輸入沒有的英數詞")
         numbers, unreadable = _numbers(number_text)
+        # 「讀不懂」（科學記號、`^`）看替換前與替換後兩份取聯集：替換不能把讀不懂變成讀得懂。
+        unreadable = unreadable or _numbers(text)[1]
         if unreadable or not all(vocabulary.knows_number(number) for number in numbers):
             raise _reject(ErrorCode.ZH_SUMMARY_UNSUPPORTED_CONTENT, f"{name} 有輸入沒有的數字")
         for match in _ENGLISH_TOKEN.finditer(text):

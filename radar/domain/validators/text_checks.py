@@ -12,7 +12,8 @@
 - `is_han`、`SIMPLIFIED_ONLY`：漢字與簡體專用字。
 - `ExtendedVocabulary`（2026-11-18，只有中文重點用）：`InputVocabulary` 加上把輸入讀得更完整的部分
   ——空白千分位、月份英文名、`10-40%`、`10% points`、年代、英數詞（`B2B`）、輸出正數對輸入
-  負數、英文詞的詞形變化與黏字、`vs`。研究模型不用它。
+  負數、英文詞的詞形變化與黏字、`vs`。數字的新規則一律以 `numbers` 讀到的「完整數字」為單位
+  （`_whole_numbers`），不另外用正規式找數字。研究模型不用它。
 
 都是純函式；上面幾項的行為和 2.4 原本在 `zh_summary.py` 的一樣（只改成公開名稱），加
 `ExtendedVocabulary` 時也沒改。判準的細節與抓不到的情況寫在 ADR-0032。
@@ -20,10 +21,13 @@
 
 import html
 import re
+import string
 import unicodedata
+from bisect import bisect_left
 from collections.abc import Mapping
 from dataclasses import dataclass
 from decimal import MAX_EMAX, MIN_EMIN, Context, Decimal, DecimalException
+from itertools import pairwise
 from typing import Final
 
 _WHITESPACE: Final = re.compile(r"\s+")
@@ -457,37 +461,106 @@ class InputVocabulary:
 # 輸出的數字與英文詞都要在標題或摘要裡有依據；這裡只是把輸入讀得更完整，每一項放行都有「仍然擋得住
 # 編造」的反例測試。
 
-# 「完整、獨立的數字」的開頭（2026-11-18 審查 C2～C4）：不能接在字母、數字、`.`、`,`、`^` 後面，
-# 也不能接在「英數字、`.` 或 `^`＋正負號」後面——後者是指數的尾段（`1e-3`、`1e+3`、`10^-3`）、範圍
-# 的後半（`10-40`）或 `COVID-19` 這種詞的一部分，從那裡開始讀會造出輸入沒有的值。
-_WHOLE_NUMBER_START: Final = r"(?<![0-9A-Za-z.,^])(?<![0-9A-Za-z.^][-+])"
+
+# 完整數字（2026-11-18 審查 R1～R3，第二輪改成結構性的做法）：下面的數字規則一律以「既有讀法讀到的
+# 完整數字」為單位——`_prepared_for_numbers` 之後（科學記號與含 `^` 的整段換成空白、隔空白的負號併上
+# 去）`_NUMBER` 的每一個匹配，連同它的正負號、千分位、小數、指數、量詞、百分比。規則只看這些完整數字
+# 與它們之間的文字，不另外用正規式找數字：
+# - 輸入這一側只從完整數字取值，而且只取沒有指數、沒有量詞的（`_WholeNumber.simple`）。科學記號
+#   （`1.2 × 10-3`、`10 ^ - 10`）根本不在序列裡，`3e-10` 是一個帶指數的完整數字，所以讀不到其中的
+#   片段。
+# - 輸出這一側的 `Q` 替換只能把完整數字整個換掉（`_covers_whole_numbers`、`_exact_integer`），換完
+#   再用 `numbers` 核對讀到的數字只會變少（`_reads_no_new_numbers`）。
+@dataclass(frozen=True, slots=True)
+class _WholeNumber:
+    """一個完整數字：位置（在原文裡的位置；`_prepared_in_place` 不改長度）與 `_NUMBER` 的各部分。"""
+
+    start: int
+    end: int
+    sign: str
+    mantissa: str
+    exponent: str
+    scale: str
+    percent: str
+    # 碰到既有讀法沒認出整段的科學記號（`_SCIENTIFIC_PIECE`）。
+    in_scientific: bool = False
+
+    @property
+    def simple(self) -> bool:
+        """沒有指數、沒有量詞（萬、million…），也不是科學記號的一部分。"""
+        return not self.exponent and not self.scale and not self.in_scientific
+
+    def value(self, *, signed: bool = True) -> Decimal | None:
+        """不含量詞、指數的值（`simple` 的數字就是它的值）；讀不懂是 None。"""
+        return decimal_of((self.sign if signed else "") + self.mantissa.replace(",", ""))
+
+
+def _prepared_in_place(text: str) -> str:
+    """和 `_prepared_for_numbers` 一樣，但長度不變：隔空白的負號（`= - 0.42`）換成 `=  -0.42`（不是
+    `= -0.42`），所以完整數字在這裡的位置就是它在原文的位置。讀到的數字和 `_prepared_for_numbers`
+    一樣（單元測試核對）。"""
+    text = _SCIENTIFIC.sub(_blank, text)
+    if "^" in text:
+        text = _CARET_TOKEN.sub(_blank, text)
+    return _SPACED_MINUS.sub(lambda match: match.group(1) + " -", text)
+
+
+# 既有讀法沒認出整段的科學記號：`_SCIENTIFIC` 要求整段前面不接英數字，`_CARET_TOKEN` 只蓋到空白
+# 為止，所以 `K10^ -3`（`-3` 照樣讀得到）、`K1.2 × 10-3`（10、3 照樣讀得到）裡的次方與 10 仍是
+# 既有讀法的完整數字。這些完整數字照樣在序列裡（`numbers` 讀得到的不變），但標成 `in_scientific`，
+# 新規則不用：`×`／`x`／`*`／`·` 後面的「10＋次方」，與 `^` 後面（可隔空白、正負號）的次方——和
+# `_SCIENTIFIC` 的 power 同樣的寫法（`x` 前面不能是字母：`max 10-20%` 不算）。只從 `×`、`x`、`*`、
+# `·`、`^` 開始試，線性時間。
+_SCIENTIFIC_PIECE: Final = re.compile(
+    r"(?:[×*·]|(?<![A-Za-z])[xX])\s?10\s?(?:\^\s?[-+]?\s?[0-9]+|[-+]\s?[0-9]+)"
+    r"|\^\s?[-+]?\s?[0-9]+"
+)
+
+
+def _whole_numbers(text: str) -> tuple[str, list[_WholeNumber]]:
+    """（長度不變的讀數字用文字, 依序的完整數字）。`text` 是檢查用副本；掃一次，線性時間。"""
+    prepared = _prepared_in_place(text)
+    pieces = bytearray(len(text))
+    for match in _SCIENTIFIC_PIECE.finditer(text):
+        pieces[match.start() : match.end()] = b"\x01" * (match.end() - match.start())
+    found: list[_WholeNumber] = []
+    for match in _NUMBER.finditer(prepared):
+        start, end = match.span()
+        # `_NUMBER` 的五個群組依序是 sign、mantissa、exponent、scale、percent。
+        sign, mantissa, exponent, scale, percent = match.groups("")
+        in_scientific = pieces.find(1, start, end) != -1
+        found.append(
+            _WholeNumber(start, end, sign, mantissa, exponent, scale, percent, in_scientific)
+        )
+    return prepared, found
+
+
+# 完整數字前面緊接這些字元時，它是一個詞或別的數字寫法的一部分（`K12`、`v1.2.3` 的 3、`1,20` 的
+# 20），輸入這一側的新規則不用它。
+_ATTACHED_BEFORE: Final = frozenset(string.ascii_letters + string.digits + ".,^")
+
+
+def _standalone(text: str, number: _WholeNumber) -> bool:
+    """獨立的完整數字：前面不是英數字、`.`、`,`、`^`；沒有正負號時前面也不是 `-`、`+`——既有讀法沒把
+    那個 `-` 當成負號，就是連字號或範圍（`COVID-19`、`K-12`、`10-40` 的 40）。"""
+    before = text[number.start - 1 : number.start] if number.start else ""
+    if before in _ATTACHED_BEFORE:
+        return False
+    return bool(number.sign) or before not in {"-", "+"}
+
+
 # A1 空白當千分位（`131 978`、`387, 000`、LaTeX 的 `150$\,$000`；不換行空白、窄空白在檢查用副本裡
-# 已經是一般空白）：1～3 位數字後面接一組以上「分隔＋剛好 3 位數字」才合併。開頭是完整的數字
-# （`_WHOLE_NUMBER_START`：`in 2019 300 firms` 的 2019 是 4 位，不合併；`COVID-19 300`、`1e+3 100`、
-# `1e-3 100` 不合併）。每一組後面都不能再接數字或指數（`1 000e3` 只合併到 `1 000` 前面那段為止），
-# 量詞用佔有式（不退回重試，不會平方級回溯）。
-_SPACE_GROUPED: Final = re.compile(
-    rf"{_WHOLE_NUMBER_START}[0-9]{{1,3}}"
-    r"(?:(?: |, |\$\\,\$)[0-9]{3}(?![0-9]|[eE][-+]?[0-9]))++"
-)
-_NOT_DIGIT: Final = re.compile(r"[^0-9]")
-# A3 `2.84%-38.94%`：`%` 後面的 `-` 是範圍，不是負號；另讀一次時換成空白。
-_PERCENT_DASH: Final = re.compile(r"%-(?=[0-9.])")
-# 範圍、百分點開頭的數字：完整的數字，可以帶負號（`-10-40%` 的 -10；負號本身也要是完整數字的開頭，
-# 所以 `1e-10-40%` 的 `-10`、`1.2e-3% points` 的 `-3` 都不算）。
-_SIGNED_WHOLE_NUMBER: Final = (
-    r"(?:(?<![0-9A-Za-z.,^)\]])-|" + _WHOLE_NUMBER_START + r")[0-9]++(?:\.[0-9]++)?+"
-)
-# A3 `10-40%` 的前半也是百分比（只認 `-`，`10 to 40%` 不算）。
-_PERCENT_RANGE: Final = re.compile(
-    rf"(?P<low>{_SIGNED_WHOLE_NUMBER})\s?-\s?[0-9]++(?:\.[0-9]++)?+\s?%"
-)
-# A3 `10% points`、`10 percent points`：讀成不是百分比的 10，對得上輸出的「10 個百分點」。
-# （`10 percentage points` 本來就讀成不是百分比的 10。）
-_PERCENT_POINTS: Final = re.compile(
-    rf"(?P<value>{_SIGNED_WHOLE_NUMBER})\s?(?:%|(?i:percent|per cent))\s?"
-    r"(?i:points?)(?![A-Za-z])"
-)
+# 已經是一般空白）：一個獨立、1～3 位的整數（可以帶正負號），後面接一組以上「分隔＋剛好 3 位、沒有
+# 正負號與指數的整數」才合併；只有最後一組可以帶量詞或百分比（併到合併的值上，和上一版一樣）。整串
+# 後面如果還接著「分隔＋沒有正負號的數字」卻不是 3 位整數（`1 234 5678`、`1 234 567.89`、
+# `1 000 000e3`），整串不合併（比上一版保守）。
+_THOUSANDS_GAPS: Final = frozenset({" ", ", ", "$\\,$"})
+_THOUSANDS_HEAD: Final = re.compile(r"[0-9]{1,3}")
+_THOUSANDS_GROUP: Final = re.compile(r"[0-9]{3}")
+# A3 `10-40%`：前一個數字和帶百分比的數字之間（連同後者的負號）只有 `-` 與最多各一個空白。
+_RANGE_DASH: Final = re.compile(r"\s?-\s?")
+# A3 `10% points`、`10 percent points`：帶百分比的完整數字後面接 points。
+_POINTS_AFTER: Final = re.compile(r"\s?(?i:points?)(?![A-Za-z])")
 # A2 月份英文名：全名與常見縮寫。全名首字大寫（其餘小寫）或全大寫才算；三、四個字母的縮寫
 # （`_MONTH_ABBREVIATIONS`）只認首字大寫（`Mar`、`Sept.`），全大寫的 `MAR`（missing at random）、
 # `APR`（年利率）不算（審查 A-5）。`May` 也是助動詞，另外要緊鄰數字（`May 2019`、`May 5`、`5 May`）
@@ -522,18 +595,21 @@ _MONTH_ABBREVIATIONS: Final = frozenset(
     {"jan", "feb", "mar", "apr", "jun", "jul", "aug", "sep", "sept", "oct", "nov", "dec"}
 )
 _MAY_THEN_NUMBER: Final = re.compile(r"\.? ?[0-9]")
-# A5 年代：`1960s`、`1960's`、`60s`、`'60s`（最後一位是 0）。四位數的另外留後兩位（60）。
-# 開頭不能接在字母、數字、`.`、`,`、`^` 後面，也不能是指數的尾段（`3e-10s`、`2E+10s` 的 10
-# 不算）；範圍的後半（`1950s-60s`、`1950-60s`）照樣算。
-_DECADE: Final = re.compile(
-    r"(?<![0-9A-Za-z.,^])(?<![eE^][-+])'?(?P<year>[0-9]{3}0|[0-9]0)'?s(?![A-Za-z])"
-)
+# A5 年代：完整數字是 2 位或 4 位、最後一位是 0、沒有正負號的整數，後面緊接 `s` 或 `'s`
+# （`1960s`、`1960's`、`60s`、`'60s`）。四位數的另外留後兩位（60）。前面不能是英數字、`.`、`,`、
+# `^`；前面是連字號照樣算（`pre-1960s`、`mid-1960s`、範圍的後半 `1950s-1960s`、`1950-60s`）。
+# `3e-10s`、`2E+10s` 是一個帶指數的完整數字，`1.2 × 10-10s`、`10 ^ - 10s` 整段是科學記號，都不算。
+_DECADE_YEAR: Final = re.compile(r"[0-9]{3}0|[0-9]0")
+_DECADE_SUFFIX: Final = re.compile(r"'?s(?![A-Za-z])")
 # 輸出裡後面接「月」「年代」的數字（含範圍：`7-8月`、`7 至 8 月`、`9、10 月`）：只有這種位置的數字
-# 才拿月份、年代比對；其他位置的 9 不因為輸入有 September 而放行。第一個數字必須是完整、獨立的整數
-# （審查 C2）：不能接在字母、數字、`.`、`,`、`^` 後面，也不能接在正負號後面（`3e-1 月`、`3e+1 月`
-# 的 1 是指數，`-3 月` 是負數）；後面只能接範圍或「月」「年代」，所以也不會是小數或指數的開頭。
+# 才拿月份、年代比對；其他位置的 9 不因為輸入有 September 而放行。每個數字都必須剛好是一個完整
+# 數字、沒有正負號的整數（`_exact_integer`；`3e-1 月`、`-3 月`、`1.5 月` 不算），有一個不算時整段
+# 不換。
+# 正規式前面的條件只處理「完整數字黏在詞上」的情況（完整與否由 `_exact_integer` 判斷）：前面不能是
+# 字母（`K3 月`）、`,`（`1,5 月` 可能是小數逗號）、沒被當成正負號的 `-`／`+`（連字號：`2014-9 月`、
+# `K-3 月`），也不能是 `±`、`∓`（審查 F4：既有讀法把 `±3` 讀成 3）。
 _RANGE_JOIN: Final = r"\s?(?:-|至|到|~|、)\s?"
-_CONTEXT_START: Final = r"(?<![0-9A-Za-z.,^+\-])"
+_CONTEXT_START: Final = r"(?<![A-Za-z,+\-±∓])"
 _MONTH_CONTEXT: Final = re.compile(
     rf"{_CONTEXT_START}(?P<a>[0-9]{{1,2}})(?:{_RANGE_JOIN}(?P<b>[0-9]{{1,2}}))?\s?月"
 )
@@ -550,11 +626,6 @@ _HAS_DIGIT: Final = re.compile(r"[0-9]")
 # （`H1`、`R2`、`T2`）。其他的（`B2B`、`P2P`、`EC2`、`H2b`、`N120`、`COVID19`）拒收。數字開頭的
 # 英數詞（`3D`、`12M`、`2x2`、`2020Q1`、`1e5`）一律照原本的方式讀，不在這裡判斷。
 _OLD_READING_TOKEN: Final = re.compile(r"[A-Za-z][0-9]")
-# 字母開頭、輸入有的英數詞後面（可隔一個空白）接百分比、量詞，或「`,`＋數字」時不換成 `Q`、照原本的
-# 方式讀（審查 C1、A-6）：`Top10%`、`K12 萬`、`Web2.0%`、`K12,000` 裡的數字照樣要對得上輸入。
-_AFTER_ALNUM_NUMBER: Final = re.compile(
-    r"\s?(?:%|[萬億兆千百]|(?i:percent|per cent|thousand|million|billion)(?![A-Za-z]))|,[0-9]"
-)
 # B1 詞形變化（ADR-0032 2026-11-18 更新）：把一個詞拆成「字根＋字尾」，兩個詞的字根相同、而且字尾的
 # 組合是下面幾種之一才算同一個詞：
 # 1. 一邊是原形（沒有字尾，或只去掉結尾的 e、y），另一邊是原形加一個字尾：字根至少 5 個字母
@@ -656,22 +727,46 @@ def _same_root(root: str, first: str, second: str) -> bool:
     return len(root) >= 6
 
 
-def _consume_context(text: str, pattern: re.Pattern[str], allowed: frozenset[int]) -> str:
-    """`pattern` 的 a、b 兩組數字在 `allowed` 裡時換成同樣長度的 `Q`（不再當成數字讀；換成字母，
-    範圍的 `-` 才不會變成負號）。"""
-    if not allowed:
+def _covers_whole_numbers(
+    prepared: str, text: str, wholes: list[_WholeNumber], starts: list[int], start: int, end: int
+) -> bool:
+    """`text[start:end]` 換成 `Q` 不會切開完整數字：碰到的每一個完整數字都整個在裡面（含它的正負號、
+    指數、量詞、百分比、千分位）、不是科學記號的一部分，而且這段不在既有讀法換成空白的科學記號或
+    含 `^` 的整段裡。`starts` 是 `wholes` 的開頭位置（依序）。"""
+    if prepared[start:end] != text[start:end]:
+        return False
+    index = bisect_left(starts, end) - 1
+    while index >= 0 and wholes[index].end > start:
+        number = wholes[index]
+        if number.start < start or number.end > end or number.in_scientific:
+            return False
+        index -= 1
+    return True
+
+
+def _exact_integer(by_start: Mapping[int, _WholeNumber], start: int, end: int) -> bool:
+    """`[start, end)` 剛好是一個完整數字（所以沒有正負號、小數、指數、量詞、百分比），而且不是科學
+    記號的一部分。"""
+    number = by_start.get(start)
+    return number is not None and number.end == end and not number.in_scientific
+
+
+def _with_q(text: str, spans: list[tuple[int, int]]) -> str:
+    """把每一段換成同樣長度的 `Q`（不再當成數字讀；換成字母，範圍的 `-` 才不會變成負號）。"""
+    if not spans:
         return text
+    chars = list(text)
+    for start, end in spans:
+        chars[start:end] = "Q" * (end - start)
+    return "".join(chars)
 
-    def replace(match: re.Match[str]) -> str:
-        chars = list(match.group(0))
-        for group in ("a", "b"):
-            digits = match[group]
-            if digits is not None and int(digits) in allowed:
-                start = match.start(group) - match.start()
-                chars[start : start + len(digits)] = "Q" * len(digits)
-        return "".join(chars)
 
-    return pattern.sub(replace, text)
+def _reads_no_new_numbers(before: str, after: str) -> bool:
+    """保險：`after`（替換後）讀到的數字都是 `before` 讀得到的，而且 `before` 讀不懂時 `after` 也讀
+    不懂。替換只能讓數字變少，不能讀出新的值，也不能把讀不懂變成讀得懂。"""
+    old, old_unreadable = numbers(before)
+    new, new_unreadable = numbers(after)
+    return new <= old and (new_unreadable or not old_unreadable)
 
 
 def _month_numbers(text: str) -> frozenset[int]:
@@ -696,10 +791,16 @@ def _may_next_to_number(text: str, start: int, end: int) -> bool:
     return before[-1:].isdigit() or (before[-1:] == " " and before[:1].isdigit())
 
 
-def _decade_numbers(text: str) -> frozenset[int]:
+def _decade_numbers(prepared: str, wholes: list[_WholeNumber]) -> frozenset[int]:
+    """輸入裡的年代（規則見 `_DECADE_YEAR` 上面的註解）；只從完整數字取值。"""
     found: set[int] = set()
-    for match in _DECADE.finditer(text):
-        year = match["year"]
+    for number in wholes:
+        year = number.mantissa
+        if number.sign or not number.simple or number.percent or not _DECADE_YEAR.fullmatch(year):
+            continue
+        before = prepared[number.start - 1 : number.start] if number.start else ""
+        if before in _ATTACHED_BEFORE or not _DECADE_SUFFIX.match(prepared, number.end):
+            continue
         found.add(int(year))
         if len(year) == 4:
             found.add(int(year[2:]))
@@ -734,31 +835,95 @@ def _alnum_tokens(text: str) -> frozenset[str]:
     return frozenset(found)
 
 
-def _extra_input_numbers(text: str) -> set[Number]:
-    """`InputVocabulary` 之外多認得的輸入數字：空白千分位合併、`%-` 後面不是負號（另讀一次，原本的
-    讀法照樣留著）、`10-40%` 的 10%、`10% points` 的 10。"""
-    reread = _PERCENT_DASH.sub("% ", _SPACE_GROUPED.sub(lambda m: _NOT_DIGIT.sub("", m[0]), text))
-    found, _ = numbers(reread, keep_unscaled=True)
-    for pattern, group, percent in (
-        (_PERCENT_RANGE, "low", True),
-        (_PERCENT_POINTS, "value", False),
-    ):
-        for match in pattern.finditer(reread):
-            value = decimal_of(match[group])
-            if value is not None:
-                found.add((value, percent))
+def _thousands_follows(prepared: str, wholes: list[_WholeNumber], index: int) -> bool:
+    """`wholes[index]` 後面接著「千分位的分隔＋沒有正負號的完整數字」（自己沒有量詞、百分比）。"""
+    if index + 1 >= len(wholes):
+        return False
+    current, following = wholes[index], wholes[index + 1]
+    return (
+        not current.scale
+        and not current.percent
+        and not following.sign
+        and prepared[current.end : following.start] in _THOUSANDS_GAPS
+    )
+
+
+def _thousands_group(number: _WholeNumber) -> bool:
+    """千分位的一組：剛好 3 位整數、沒有指數、不在科學記號裡（量詞、百分比只有最後一組能帶，由
+    `_thousands_follows` 管）。"""
+    return (
+        not number.exponent
+        and not number.in_scientific
+        and _THOUSANDS_GROUP.fullmatch(number.mantissa) is not None
+    )
+
+
+def _space_thousands(prepared: str, wholes: list[_WholeNumber]) -> set[Number]:
+    """A1 空白千分位合併後的值（規則見 `_THOUSANDS_GAPS` 上面的註解）。每個完整數字只看一次。"""
+    found: set[Number] = set()
+    index = 0
+    while index < len(wholes):
+        head = wholes[index]
+        if not (
+            head.simple
+            and not head.percent
+            and _THOUSANDS_HEAD.fullmatch(head.mantissa)
+            and _standalone(prepared, head)
+        ):
+            index += 1
+            continue
+        last = index
+        while _thousands_follows(prepared, wholes, last) and _thousands_group(wholes[last + 1]):
+            last += 1
+        if last > index and not _thousands_follows(prepared, wholes, last):
+            group = wholes[index : last + 1]
+            merged = head.sign + "".join(number.mantissa for number in group)
+            found |= numbers(merged + group[-1].scale + group[-1].percent, keep_unscaled=True)[0]
+        index = last + 1
     return found
+
+
+def _extra_input_numbers(prepared: str, wholes: list[_WholeNumber]) -> set[Number]:
+    """`InputVocabulary` 之外多認得的輸入數字，只從完整數字取值、只取沒有指數與量詞的：
+    - 空白千分位合併（`_space_thousands`）；
+    - `2.84%-38.94%`：負號緊接在前一個數字的 `%` 後面時，另外加正的值（原本的負值照樣留著）；
+    - `10-40%`：獨立、沒有百分比的數字後面緊接 `-`＋帶 `%` 的數字時，前者另外加百分比的值；
+    - `10% points`：獨立、帶百分比的數字後面接 points 時，另外加不是百分比的值。"""
+    found: list[tuple[Decimal | None, bool]] = []
+    for previous, current in pairwise(wholes):
+        gap = prepared[previous.end : current.start]
+        if current.sign == "-" and not gap and previous.percent.endswith("%") and current.simple:
+            found.append((current.value(signed=False), bool(current.percent)))
+        if (
+            previous.simple
+            and not previous.percent
+            and current.simple
+            and current.percent.strip() == "%"
+            and _RANGE_DASH.fullmatch(gap + current.sign)
+            and _standalone(prepared, previous)
+        ):
+            found.append((previous.value(), True))
+    for number in wholes:
+        if (
+            number.percent
+            and number.simple
+            and _POINTS_AFTER.match(prepared, number.end)
+            and _standalone(prepared, number)
+        ):
+            found.append((number.value(), False))
+    extra = {(value, percent) for value, percent in found if value is not None}
+    return _space_thousands(prepared, wholes) | extra
 
 
 @dataclass(frozen=True)
 class ExtendedVocabulary:
     """中文重點用的輸入詞彙：`InputVocabulary` 加上把輸入讀得更完整的部分（ADR-0032 2026-11-18）。
 
-    - 數字：空白千分位、`%-`、`10-40%`、`10% points`（`_extra_input_numbers`）；輸出的正數可以對
-      輸入同值的負數（`knows_number`）。
+    - 數字：空白千分位、`%-`、`10-40%`、`10% points`（`_extra_input_numbers`，只從既有讀法讀到的
+      完整數字取值）；輸出的正數可以對輸入同值的負數（`knows_number`）。
     - 月份英文名、年代（`1960s`）：只給輸出裡後面接「月」「年代」的數字用（`number_text`）。
     - 字母開頭的英數詞（`B2B`、`EC2`）：整個當成一個詞比對（`number_text`、`knows_alnum`）；數字
-      開頭的（`3D`、`2x2`）照原本的方式讀數字。
+      開頭的（`3D`、`2x2`）照原本的方式讀數字。輸出的 `Q` 替換只能把完整數字整個換掉。
     - 英文詞：詞形變化、黏字（否定字首＋輸出詞剛好是整個詞時不算）、`vs`（`knows_word`）。
     """
 
@@ -778,11 +943,12 @@ class ExtendedVocabulary:
         for word in base.words:
             for root, suffix in _root_splits(word):
                 roots.setdefault(root, set()).add(suffix)
+        prepared, wholes = _whole_numbers(text)
         return cls(
             base=base,
-            numbers=base.numbers | _extra_input_numbers(text),
+            numbers=base.numbers | _extra_input_numbers(prepared, wholes),
             months=_month_numbers(text),
-            decades=_decade_numbers(text),
+            decades=_decade_numbers(prepared, wholes),
             alnum_tokens=_alnum_tokens(text),
             roots={root: frozenset(suffixes) for root, suffixes in roots.items()},
             letters=" ".join(sorted({word.lower() for word in ENGLISH_WORD.findall(text)})),
@@ -804,29 +970,45 @@ class ExtendedVocabulary:
 
         - 數字開頭的英數詞（`3D`、`12M`、`2x2`、`2020Q1`、`12million`、`1e5`）：照原本的方式讀
           （正負號、百分比、量詞都照樣檢查，數字要在輸入裡）。
-        - 字母開頭、輸入有的英數詞換成 `Q`（不再當成數字讀）；後面接百分比、量詞或「`,`＋數字」時
-          不換（`_AFTER_ALNUM_NUMBER`，照原本的方式讀）。
+        - 字母開頭、輸入有的英數詞換成 `Q`（不再當成數字讀）；但只在它碰到的每一個完整數字都整個在
+          詞裡面時才換（`_covers_whole_numbers`）——`K1e-3` 的 `1e-3`、`Top10%` 的 `10%`、`K12 萬`
+          的 `12 萬`、`K12,000` 的 `12,000` 只被蓋到一部分，照原本的方式讀。
         - 字母開頭、輸入沒有的英數詞：`H1` 這種「一個字母＋一位數字」照原本的方式讀，其他的回報
           出來（呼叫端拒收）。
-        - 後面接「月」「年代」而且是輸入裡的月份或年代的完整整數，換成 `Q`。"""
-        unknown: str | None = None
+        - 後面接「月」「年代」、剛好是一個完整數字、而且是輸入裡的月份或年代的整數，換成 `Q`。
+        - 保險（`_reads_no_new_numbers`）：換完讀到的數字必須都是換之前讀得到的，換之前讀不懂的
+          換完也要讀不懂；不是的話整欄不換（等於修改前的讀法）。"""
+        replaced, unknown = self._replaced_number_text(text)
+        if replaced != text and not _reads_no_new_numbers(text, replaced):
+            return text, unknown
+        return replaced, unknown
 
-        def replace(match: re.Match[str]) -> str:
-            nonlocal unknown
+    def _replaced_number_text(self, text: str) -> tuple[str, str | None]:
+        """`number_text` 的替換本身（還沒經過保險）。"""
+        prepared, wholes = _whole_numbers(text)
+        starts = [number.start for number in wholes]
+        spans: list[tuple[int, int]] = []
+        unknown: str | None = None
+        for match in _ALNUM_PIECE.finditer(text):
             token = match.group(0)
             if token[0].isdigit() or not _HAS_DIGIT.search(token):
-                return token
+                continue
             if self.knows_alnum(token):
-                if _AFTER_ALNUM_NUMBER.match(match.string, match.end()):
-                    return token
-                return "Q" * len(token)
-            if not _OLD_READING_TOKEN.fullmatch(token) and unknown is None:
+                if _covers_whole_numbers(prepared, text, wholes, starts, *match.span()):
+                    spans.append(match.span())
+            elif not _OLD_READING_TOKEN.fullmatch(token) and unknown is None:
                 unknown = token
-            return token
-
-        text = _ALNUM_PIECE.sub(replace, text)
-        text = _consume_context(text, _MONTH_CONTEXT, self.months)
-        return _consume_context(text, _DECADE_CONTEXT, self.decades), unknown
+        by_start = {number.start: number for number in wholes}
+        for pattern, allowed in ((_MONTH_CONTEXT, self.months), (_DECADE_CONTEXT, self.decades)):
+            if not allowed:
+                continue
+            for match in pattern.finditer(text):
+                groups = [match.span(name) for name in ("a", "b") if match[name] is not None]
+                if all(_exact_integer(by_start, start, end) for start, end in groups):
+                    spans.extend(
+                        (start, end) for start, end in groups if int(text[start:end]) in allowed
+                    )
+        return _with_q(text, spans), unknown
 
     def knows_word(self, word: str) -> bool:
         """`InputVocabulary.knows_word`，加上 `vs`、詞形變化（`_same_root`）、黏字（`_glued`）。"""

@@ -5,6 +5,7 @@
 """
 
 import contextlib
+import itertools
 import time
 from decimal import Decimal
 
@@ -13,10 +14,16 @@ import pytest
 from radar.config import load_zh_summary_rules
 from radar.domain.ai_outputs import OutputRejectedError
 from radar.domain.errors import ErrorCode
+from radar.domain.validators import text_checks
 from radar.domain.validators.text_checks import (
+    _ALNUM_PIECE,
+    _NUMBER,
     ExtendedVocabulary,
     InputVocabulary,
     Number,
+    _prepared_for_numbers,
+    _reads_no_new_numbers,
+    _whole_numbers,
     check_copy,
     numbers,
     structured_numbers,
@@ -757,6 +764,307 @@ def test_han_ratio_threshold_still_comes_from_the_rules() -> None:
     assert caught.value.code is NOT_ZH_HANT
 
 
+# --- 第二輪審查（R1～R3、F2、F4）：新規則以既有讀法的完整數字為單位 -----------------------------
+
+
+@pytest.mark.parametrize(
+    ("abstract", "method"),
+    [
+        # R1：Q 替換不能切開完整數字（`K1e-3` 的 `1e-3`）。
+        ("Model K1e uses 3 groups.", "模型 K1e-3"),
+        ("Model K1e uses 3 groups.", "模型 K1E+3"),
+        ("Model K1e uses 3 groups.", "模型 Ｋ１ｅ－３"),
+        ("Model K1e uses 3 groups and 3 percent.", "模型 K1e-3%"),
+        # R2：百分比的新規則不從科學記號裡取值。
+        ("The effect is 1.2 × 10-3% points.", "提高 10%"),
+        ("The effect is 1.2 × 10-3% points.", "提高 3 個百分點"),
+        ("The effect is 10^ -3% points.", "提高 3 個百分點"),
+        ("The effect is 10^ -3% points.", "提高 3%"),
+        ("The effect is １．２ × １０＾ －３％ points.", "提高 3 個百分點"),
+        ("The effect is １．２ × １０＾ －３％ points.", "提高 10%"),
+        # R3：年代的新規則不從科學記號裡取值。
+        ("The delay was 1.2 × 10-10s.", "追溯 10 年代"),
+        ("The delay was 1.2 × 10^ -10s.", "追溯 10 年代"),
+        ("The delay was 10 ^ - 10s.", "追溯 10 年代"),
+        # F2：指數仍不是年代。
+        ("The delay was 3e-10s.", "追溯 10 年代"),
+        ("The delay was 2E+10s.", "追溯 10 年代"),
+        # F4：`±` 後面的數字不當月份、年代。
+        ("Data were collected in March.", "前後 ±3 月"),
+        ("Firms founded in the 1960s.", "前後 ±60 年代"),
+        ("Data were collected in March.", "前後 ∓3 月"),
+    ],
+)
+def test_new_rules_do_not_read_pieces_of_whole_numbers(abstract: str, method: str) -> None:
+    assert _method_rejected(method, abstract) is UNSUPPORTED
+
+
+@pytest.mark.parametrize(
+    ("abstract", "method"),
+    [
+        # 英數詞本身照樣認得（R1 的對照）。
+        ("Model K1e uses 3 groups.", "模型 K1e 有 3 組"),
+        # F2：年代前面是英文字首＋連字號照樣算（上一版誤擋）。
+        ("Firms founded pre-1960s were studied.", "60 年代以前"),
+        ("Firms in the late-1960s grew.", "60 年代後期"),
+        ("Pre-1960s firms were studied.", "60 年代以前"),
+        ("Firms in the mid-1960s grew.", "60 年代中期"),
+    ],
+)
+def test_whole_number_rules_keep_ordinary_writings(abstract: str, method: str) -> None:
+    assert _method_only(method, abstract) == method
+
+
+# 系統性的測試：帶指數、科學記號、量詞、百分比、千分位、負號的寫法（都不是「單純的數字」），接上
+# 每一條新規則會看的前後文，斷言新規則讀不出這些寫法的片段。
+WRITINGS = [
+    "1e-3",
+    "1E+3",
+    "1e-10",
+    "2E+10",
+    "3e-1",
+    "1.2e-10",
+    "4.2 × 10^-2",
+    "4.2 x 10-2",
+    "4.2 x 10-20",
+    "1.2 × 10 ^ - 3",
+    "1.2 × 10-3",
+    "1.2 × 10-10",
+    "1.2 × 10^ -10",
+    "10^-3",
+    "10^ -3",
+    "10 ^ - 10",
+    "１．２ × １０＾ －３",
+    "12 million",
+    "12M",
+    "1,200",
+    "1,960",
+    "-0.35",
+    "35%",
+    "1.5 萬",
+    "2.5 percent",
+]
+INPUT_PREFIXES = ["", "K", "pre-", "10-", "%"]
+INPUT_SUFFIXES = [
+    "",
+    "% points",
+    " percent points",
+    "%-5%",
+    "-40%",
+    " - 40%",
+    "s",
+    "'s",
+    " 000",
+    ", 000",
+    "$\\,$000",
+    " 000 000",
+]
+
+
+def _magnitudes(values: frozenset[Number]) -> set[Decimal]:
+    return {abs(value) for value, _ in values}
+
+
+@pytest.mark.parametrize("writing", WRITINGS)
+def test_extra_input_numbers_never_come_from_pieces(writing: str) -> None:
+    # 不變量：新讀法多認得的數字與年代（只看大小），只能來自前後文自己的數字（把這個寫法換成 `Q`
+    # 後讀到的），或這個寫法整個的值（`numbers` 讀到的；科學記號整段讀不到，所以是空的）；年代另外
+    # 可以是四位數的後兩位。科學記號、指數、量詞、百分比、千分位裡的片段都不在其中。空白千分位會造出
+    # 新值，但這些寫法沒有一個是 1～3 位的單純整數，所以也不該出現。
+    whole = _magnitudes(frozenset(numbers(check_copy(writing), keep_unscaled=True)[0]))
+    broken = []
+    for prefix, suffix in itertools.product(INPUT_PREFIXES, INPUT_SUFFIXES):
+        text = check_copy(f"The value was {prefix}{writing}{suffix} here.")
+        context = check_copy(f"The value was {prefix}Q{suffix} here.")
+        allowed = whole | _magnitudes(InputVocabulary.build(context).numbers)
+        allowed_decades = allowed | {value % 100 for value in allowed if value % 1 == 0}
+        vocabulary = ExtendedVocabulary.build(text)
+        extra = _magnitudes(vocabulary.numbers - vocabulary.base.numbers)
+        decades = {Decimal(decade) for decade in vocabulary.decades}
+        if not extra <= allowed or not decades <= allowed_decades:
+            broken.append((text, extra - allowed, decades - allowed_decades))
+    assert broken == []
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("rose 10% points", _n("10")),
+        ("rose 10 percent points", _n("10")),
+        ("ranged 10-40%", _n("10", percent=True)),
+        ("ranged 10 - 40%", _n("10", percent=True)),
+        ("ranged 3%-5%", _n("5", percent=True)),
+        ("coded 1 000 posts", _n("1000")),
+        ("coded 1, 000 posts", _n("1000")),
+        ("coded 1$\\,$000 posts", _n("1000")),
+        ("coded 1 000 000 posts", _n("1000000")),
+        ("coded -1 000 posts", _n("-1000")),
+        ("coded 54 000 million posts", _n("54000000000")),
+    ],
+)
+def test_the_combination_contexts_do_add_numbers_after_plain_numbers(
+    text: str, expected: Number
+) -> None:
+    # 上面不變量測試的對照：同樣的前後文接在單純的數字後面，新規則確實會多認得（測試不是空轉）。
+    vocabulary = ExtendedVocabulary.build(check_copy(text))
+
+    assert expected in vocabulary.numbers - vocabulary.base.numbers
+
+
+@pytest.mark.parametrize(
+    ("text", "decade"),
+    [
+        ("the 1960s", 60),
+        ("the 1960's", 60),
+        ("the '90s", 90),
+        ("pre-1960s", 60),
+        ("1950s-1960s", 60),
+        ("1950-60s", 60),
+    ],
+)
+def test_the_combination_contexts_do_add_decades_after_plain_numbers(
+    text: str, decade: int
+) -> None:
+    assert decade in ExtendedVocabulary.build(check_copy(text)).decades
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "1 234 5678 posts",
+        "1 234 567.89 posts",
+        "1 000 000e3 posts",
+        "1 300.5 posts",
+        "COVID-19 300 posts",
+        "K12 345 posts",
+        "1e+3 100 posts",
+    ],
+)
+def test_space_thousands_need_a_clean_whole_run(text: str) -> None:
+    # 整串要從獨立的 1～3 位整數開始、每組剛好 3 位，後面不再接「分隔＋數字」，否則整串不合併。
+    vocabulary = ExtendedVocabulary.build(check_copy(text))
+
+    assert vocabulary.numbers - vocabulary.base.numbers == frozenset()
+
+
+OUTPUT_CONTEXTS = [
+    "{w}",
+    "K{w}",
+    "Top{w}",
+    "研究 K{w} 的",
+    "{w} 月",
+    "{w}月",
+    "K{w} 月",
+    "7-{w} 月",
+    "{w}-3 月",
+    "±{w} 月",
+    "{w} 年代",
+    "{w}-60 年代",
+    "K{w}%",
+    "K{w} 萬",
+]
+# 輸出側的詞彙：所有月份、年代都在輸入裡，所以只要結構允許，月份、年代位置的數字都會被換掉。
+CONTEXT_WORDS = (
+    "From January, February, March, April, May 1, June, July, August, September, October, "
+    "November to December, in the 1900s, 1910s, 1920s, 1930s, 1940s, 1950s, 1960s, 1970s, "
+    "1980s, 1990s, 2000s, 2010s and 2020s."
+)
+
+
+def _whole_spans(text: str) -> set[tuple[int, int, str]]:
+    prepared, wholes = _whole_numbers(text)
+    return {(number.start, number.end, prepared[number.start : number.end]) for number in wholes}
+
+
+@pytest.mark.parametrize("writing", [*WRITINGS, "3", "12", "60", "1960"])
+def test_output_replacements_only_remove_whole_numbers(writing: str) -> None:
+    # 不變量（不經保險）：替換後讀到的每一個完整數字，都是替換前就在同一個位置、一模一樣的完整數字
+    # （替換只能把完整數字整個拿掉），讀到的數字只會變少，讀不懂的仍讀不懂。
+    broken = []
+    for context in OUTPUT_CONTEXTS:
+        text = check_copy(context.format(w=writing))
+        tokens = [m.group(0) for m in _ALNUM_PIECE.finditer(text) if m.group(0)[0].isalpha()]
+        vocabulary = ExtendedVocabulary.build(
+            check_copy(f"{CONTEXT_WORDS} We study {' '.join(tokens)}.")
+        )
+        replaced, _ = vocabulary._replaced_number_text(text)
+        if not _whole_spans(replaced) <= _whole_spans(text) or not _reads_no_new_numbers(
+            text, replaced
+        ):
+            broken.append((text, replaced))
+    assert broken == []
+
+
+@pytest.mark.parametrize(
+    ("text", "replaced"),
+    [
+        ("研究 K12 的", "研究 QQQ 的"),
+        ("9 月", "Q 月"),
+        ("7-8月", "Q-Q月"),
+        ("60 年代", "QQ 年代"),
+        ("1960 年代", "QQQQ 年代"),
+    ],
+)
+def test_output_replacements_still_happen_for_plain_numbers(text: str, replaced: str) -> None:
+    # 上面不變量測試的對照：單純的數字照樣會被換掉（測試不是空轉）。
+    vocabulary = ExtendedVocabulary.build(check_copy(f"{CONTEXT_WORDS} We study K12."))
+
+    assert vocabulary.number_text(text) == (replaced, None)
+
+
+@pytest.mark.parametrize(
+    ("before", "after", "safe"),
+    [
+        ("研究 B2B", "研究 QQQ", True),
+        ("9 月", "Q 月", True),
+        # 切開完整數字：讀出新的值。
+        ("模型 K1e-3", "模型 QQQ-3", False),
+        # 把讀不懂（科學記號）變成讀得懂。
+        ("3 x 10-2 月", "3 x QQ-Q 月", False),
+    ],
+)
+def test_the_safety_net_compares_readings(before: str, after: str, *, safe: bool) -> None:
+    assert _reads_no_new_numbers(before, after) is safe
+
+
+def test_the_safety_net_keeps_the_original_text(monkeypatch: pytest.MonkeyPatch) -> None:
+    # 讓結構檢查失效（什麼片段都換）：保險仍把整欄照原本的方式讀。
+    monkeypatch.setattr(text_checks, "_covers_whole_numbers", lambda *_: True)
+    monkeypatch.setattr(text_checks, "_exact_integer", lambda *_: True)
+    vocabulary = ExtendedVocabulary.build(check_copy("Model K1e uses 3 groups in January."))
+
+    assert vocabulary._replaced_number_text("模型 K1e-3")[0] == "模型 QQQ-3"
+    assert vocabulary.number_text("模型 K1e-3") == ("模型 K1e-3", None)
+    assert vocabulary._replaced_number_text("觀察 2.1 月")[0] == "觀察 2.Q 月"
+    assert vocabulary.number_text("觀察 2.1 月") == ("觀察 2.1 月", None)
+    assert _method_rejected("模型 K1e-3", "Model K1e uses 3 groups.") is UNSUPPORTED
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        *WRITINGS,
+        "β = - 0.42",
+        "β =- 0.42",
+        "(- 0.42) and : - 3",
+        "x 10-2 and 10 ^ - 3 and 1.2 × 10^ -10",
+        "12 萬 and 3% and 1,200.5 and .05",
+    ],
+)
+def test_whole_numbers_match_the_shared_reading(text: str) -> None:
+    # 完整數字的序列就是既有讀法（`_prepared_for_numbers` 之後的 `_NUMBER`）讀到的那些，只是位置
+    # 對得回原文。
+    copy = check_copy(text)
+    shared = [match.group(0) for match in _NUMBER.finditer(_prepared_for_numbers(copy))]
+    prepared, wholes = _whole_numbers(copy)
+
+    assert [prepared[number.start : number.end] for number in wholes] == shared
+    assert len(prepared) == len(copy)
+    # `_whole_numbers` 依位置取 `_NUMBER` 的五個群組。
+    assert list(_NUMBER.groupindex) == ["sign", "mantissa", "exponent", "scale", "percent"]
+    assert _NUMBER.groups == 5
+
+
 # --- 共用函式的預設行為不變（研究模型看到的和修改前一樣）---------------------------------------
 
 
@@ -865,6 +1173,24 @@ def test_shared_vocabulary_still_reads_digits_inside_alphanumeric_words() -> Non
         "K12%",
         "K12,0",
         "a 1 b 2 ",
+        # 第二輪：_whole_numbers（_prepared_in_place、_SCIENTIFIC_PIECE）、_space_thousands、
+        # _extra_input_numbers、_decade_numbers、_covers_whole_numbers、_reads_no_new_numbers
+        "1 000 000 ",
+        "1 000 0 ",
+        "1%-1%",
+        "1-1%-",
+        "1 - 1% points ",
+        "1960s-",
+        "pre-1960s ",
+        "K1e-3 ",
+        "K1 ",
+        "1.2 × 10-10s ",
+        "K10^ -1 ",
+        "x 10-1 ",
+        "x10^",
+        "^ - 1",
+        "= - 1 ",
+        "max 10-1%",
         # 詞形變化、黏字
         "abcdefgation ",
         "a" * 7 + " ",
@@ -913,6 +1239,12 @@ CONTEXT_INPUT = "From January to December in the 1960s and 1990s."
         "60至",
         "3e-60 年代",
         "Q1 月",
+        # 第二輪：_exact_integer、新的 _CONTEXT_START（±、∓）
+        "±1 月",
+        "7 -8月",
+        "1.1 月",
+        "K1 x 10-1 月",
+        "1960s 年代",
     ],
 )
 def test_context_patterns_run_in_linear_time(unit: str) -> None:
