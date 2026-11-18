@@ -32,6 +32,7 @@ from radar.domain.backup import (
     FOREIGN_RELATION_SQLSTATE,
     LARGE_OBJECT_SQLSTATE,
     MEMBER_ROWS_SQLSTATE,
+    OTHER_CLIENT_SQLSTATE,
     PG_DUMP_LOCK_WAIT_TIMEOUT_MS,
     RESTORE_INPUT_IDLE_TIMEOUT_SECONDS,
     TARGET_NOT_EMPTY_SQLSTATE,
@@ -325,15 +326,23 @@ _TRANSACTION_WORDS = frozenset(
     {"begin", "commit", "rollback", "end", "abort", "savepoint", "release"}
 )
 _TRANSACTION_PAIRS = frozenset({("start", "transaction"), ("prepare", "transaction")})
-# 還原的 SQL 裡准出現的 psql 反斜線指令：`pg_restore` 18 的開頭與結尾（擋 psql 的其他指令）。
-# 其他的（例如 `\connect` 會換一條連線、離開我們的交易）一律停下。
-_ALLOWED_META_COMMANDS = frozenset({"restrict", "unrestrict"})
 _SPECIAL = re.compile(rb"[A-Za-z_\x80-\xff0-9$'\"\-/();\\]")
 _IDENTIFIER_TOKEN = re.compile(rb"[A-Za-z_\x80-\xff][A-Za-z0-9_$\x80-\xff]*")
-_NUMBER_TOKEN = re.compile(rb"[0-9][0-9_]*(?:\.[0-9_]*)?(?:[eE][+-]?[0-9]+)?")
+# 數字與 `$1` 後面緊接著識別字時，PostgreSQL 18 的掃描器把整串當成一個（不合法的）記號
+# （`decinteger_junk`、`param_junk`），例如 `1E'…'` 的 `'` 是一般字串、不是 `E'…'`。
+_JUNK_SUFFIX = rb"(?:[A-Za-z_\x80-\xff][A-Za-z0-9_$\x80-\xff]*)?"
+_NUMBER_TOKEN = re.compile(rb"[0-9][0-9_]*(?:\.[0-9_]*)?(?:[eE][+-]?[0-9]+)?" + _JUNK_SUFFIX)
 _DOLLAR_QUOTE = re.compile(rb"\$(?:[A-Za-z_\x80-\xff][A-Za-z0-9_\x80-\xff]*)?\$")
-_POSITIONAL_PARAMETER = re.compile(rb"\$[0-9]+")
-_META_COMMAND = re.compile(rb"\\([A-Za-z]+|[^A-Za-z]?)")
+_POSITIONAL_PARAMETER = re.compile(rb"\$[0-9][0-9_]*" + _JUNK_SUFFIX)
+# psql 的反斜線指令名稱：到空白或下一個反斜線為止（psqlscanslash.l）。
+_META_COMMAND = re.compile(rb"\\([^\s\\]*)")
+# 准許的反斜線指令只有 `pg_restore` 18 自己寫的這兩種整行（金鑰是英數字）；同一行不准有別的東西
+# （psql 在 `\\` 之後會把同一行剩下的當 SQL 執行）。
+_RESTRICT_LINE = re.compile(rb"\\(?:un)?restrict [A-Za-z0-9]+\r?\n?")
+# `--` 註解在 CR 或 LF 結束（PostgreSQL 18 的 scan.l 與 psqlscan.l：`newline [\n\r]`）。
+_NEWLINE = re.compile(rb"[\r\n]")
+# COPY 資料的結尾：psql 18 只認整行剛好是 `\.` 加 LF 或 CRLF（copy.c 的 handleCopyIn）。
+_COPY_END_LINES = (b"\\.\n", b"\\.\r\n")
 _E_STRING_STOP = re.compile(rb"[\\']")
 _COMMENT_TOKEN = re.compile(rb"/\*|\*/")
 # psql 判斷 `CREATE [OR REPLACE] FUNCTION|PROCEDURE … BEGIN ATOMIC … END` 用的前幾個詞。
@@ -348,6 +357,10 @@ class _SqlScriptGuard:
     `--` 與巢狀 `/* */` 註解、括號、`CREATE FUNCTION … BEGIN ATOMIC … END`）找每一句的第一個詞；
     `COPY … FROM stdin;` 之後到單獨一行 `\.` 是 COPY 資料，不檢查（資料裡剛好有一行 `COMMIT;`
     不算）。不准的寫法丟 `RestoreArchiveUnsafeError`，那一行還沒送進 `psql`。
+
+    行尾照 PostgreSQL 18（審查第 2 輪 R1）：psql 只用 LF 分行；`--` 註解在 CR 或 LF 結束；COPY 資料
+    只在整行剛好是 `\.` 加 LF 或 CRLF 時結束。和 psql 可能讀得不一樣的寫法（NUL 位元組、反斜線
+    緊接著引號、COPY 的選項、`\restrict` 以外的反斜線指令）一律停下，不猜。
     """
 
     def __init__(self) -> None:
@@ -378,13 +391,17 @@ class _SqlScriptGuard:
         )
 
     def check_line(self, line: bytes) -> None:
-        """檢查一行（含結尾的換行；最後一行可以沒有）。
+        """檢查一行（只用 LF 分行，和 psql 用 `fgets` 讀的一樣；含結尾的 LF，最後一行可以沒有）。
 
         Raises:
-            RestoreArchiveUnsafeError: COPY 資料以外有交易控制語句或不准的 psql 指令。
+            RestoreArchiveUnsafeError: COPY 資料以外有交易控制語句、不准的 psql 指令，或有和
+                psql 斷句可能不一致的寫法（不確定時一律停下）。
         """
+        if b"\0" in line:
+            # psql 讀到 NUL 就把那一行剩下的丟掉（字串以 NUL 結尾），COPY 的結尾判斷也會錯開。
+            raise RestoreArchiveUnsafeError("NUL 位元組（psql 斷句會和這裡不一致）")
         if self._in_copy:
-            if line.rstrip(b"\r\n") == b"\\.":
+            if line in _COPY_END_LINES:
                 self._in_copy = False
             return
         self._scan(line)
@@ -405,12 +422,25 @@ class _SqlScriptGuard:
             char = line[i : i + 1]
             if char == b"\\":
                 self._meta_command(line, i)
-                return  # 反斜線指令吃掉這一行剩下的部分
+                return  # 只准整行的 `\restrict`／`\unrestrict`，這一行沒有別的東西
             if char == b"-" and line[i + 1 : i + 2] == b"-":
-                return  # 註解到行尾
+                # 註解到 CR 或 LF 為止；CR 後面同一行的東西 psql 會當 SQL（審查第 2 輪 R1）。
+                end = _NEWLINE.search(line, i + 2)
+                if end is None:
+                    return
+                i = end.end()
+                continue
             i = self._next_token(line, i, char)
 
     def _next_token(self, line: bytes, i: int, char: bytes) -> int:
+        if self._copy_next_line:
+            # `COPY … FROM stdin;` 同一行分號後面還有東西：psql 會在 COPY 資料之後才執行它，
+            # pg_restore 不會這樣寫，停下。
+            raise RestoreArchiveUnsafeError("COPY 那一行的分號後面還有內容")
+        if self._copy_from_stdin and char != b";":
+            # pg_restore 寫的是 `COPY … FROM stdin;`；後面有選項（例如 binary 格式會讓 psql 把
+            # 剩下的輸入全當 COPY 資料）就停下。
+            raise RestoreArchiveUnsafeError("COPY … FROM stdin 後面有選項")
         if char.isdigit():
             number = _NUMBER_TOKEN.match(line, i)
             return number.end() if number else i + 1
@@ -449,6 +479,8 @@ class _SqlScriptGuard:
         if quote in (b"'", b'"'):
             assert quote is not None
             while (j := line.find(quote, i)) >= 0:
+                if quote == b"'":
+                    _check_backslashes_before_quote(line, j)
                 if line[j + 1 : j + 2] == quote:  # 兩個連在一起是跳脫
                     i = j + 2
                     continue
@@ -457,7 +489,14 @@ class _SqlScriptGuard:
         elif quote == b"E'":
             while (stop := _E_STRING_STOP.search(line, i)) is not None:
                 j = stop.start()
-                if line[j : j + 1] == b"\\" or line[j + 1 : j + 2] == b"'":
+                if line[j : j + 1] == b"\\":
+                    if j > 0 and line[j - 1] >= 0x80:
+                        # client_encoding 是 SJIS、BIG5 這類時，psql 把非 ASCII 字元後面的 `\`
+                        # 當成同一個字，跳脫的位置會和這裡不一致。
+                        raise RestoreArchiveUnsafeError("E'…' 字串裡非 ASCII 字元後面接反斜線")
+                    i = j + 2
+                    continue
+                if line[j + 1 : j + 2] == b"'":
                     i = j + 2
                     continue
                 self._quote = None
@@ -485,8 +524,12 @@ class _SqlScriptGuard:
         self._words.append(word)
         if len(self._markers) < 4:
             self._markers.append(word[0] if word in _DEFINITION_WORDS else "")
-        if self._words[0] == "copy" and self._previous_word == "from" and word == "stdin":
-            self._copy_from_stdin = True
+        if self._words[0] == "copy":
+            if word == "binary":  # 舊寫法 `COPY BINARY t FROM stdin`：psql 會讀到輸入結尾
+                raise RestoreArchiveUnsafeError("binary 格式的 COPY")
+            # `FROM STDOUT` 也是從用戶端讀資料（PostgreSQL 的文法裡 STDIN、STDOUT 都代表用戶端）。
+            if self._previous_word == "from" and word in ("stdin", "stdout"):
+                self._copy_from_stdin = True
         self._previous_word = word
         if self._is_routine_definition() and self._paren_depth == 0:
             if word == "begin" or (word == "case" and self._begin_depth >= 1):
@@ -502,10 +545,39 @@ class _SqlScriptGuard:
         )
 
     def _meta_command(self, line: bytes, i: int) -> None:
+        """只准整行、在兩句之間的 `\\restrict 金鑰`／`\\unrestrict 金鑰`（pg_restore 18 的寫法）。
+
+        Raises:
+            RestoreArchiveUnsafeError: 其他的反斜線指令，或同一行還有別的內容。
+        """
+        if (
+            i == 0
+            and not self._words
+            and self._paren_depth == 0
+            and _RESTRICT_LINE.fullmatch(line) is not None
+        ):
+            return
         match = _META_COMMAND.match(line, i)
         name = match.group(1).decode("utf-8", "replace") if match else ""
-        if name not in _ALLOWED_META_COMMANDS:
-            raise RestoreArchiveUnsafeError(f"psql 的指令 \\{name}")
+        raise RestoreArchiveUnsafeError(f"psql 的指令 \\{name}")
+
+
+def _check_backslashes_before_quote(line: bytes, j: int) -> None:
+    """一般字串 `'…'` 裡，`line[j]` 的引號前面緊接著反斜線時，判斷 psql 會不會斷在別處。
+
+    這裡照 `standard_conforming_strings = on`（pg_restore 寫在開頭）把反斜線當一般字元；但備份的
+    SQL 可以把它關掉，那時 `\\'` 是跳脫、字串沒有結束。前面有奇數個反斜線（兩種讀法不一樣），或
+    反斜線前面是非 ASCII 字元（SJIS 這類編碼會把那個反斜線當成同一個字），就停下。
+
+    Raises:
+        RestoreArchiveUnsafeError: 這個引號在兩種讀法下的意思不同。
+    """
+    start = j
+    while start > 0 and line[start - 1] == 0x5C:  # 反斜線
+        start -= 1
+    count = j - start
+    if count % 2 == 1 or (count and start > 0 and line[start - 1] >= 0x80):
+        raise RestoreArchiveUnsafeError("字串裡的反斜線緊接著引號（讀法可能和 psql 不同）")
 
 
 class _Feeder:
@@ -596,7 +668,8 @@ def restore_archive(
 
     Raises:
         RestoreArchiveUnsafeError: 備份的 SQL 有交易控制語句、不准的 psql 指令或大型物件（已退回）。
-        RestoreRefusedError: 交易裡發現目標不是空的、或有別的連線同時建了 relation（已退回）。
+        RestoreRefusedError: 交易裡發現目標不是空的、有別的連線同時建了 relation、或 COMMIT 前
+            還有別的用戶端連著目標資料庫（已退回）。
         SharedOnlyBackupHasMemberRowsError: 只有共用資料的備份裡有成員資料（已退回）。
         BackupToolError: 找不到工具，`pg_restore`、`psql` 失敗，輸入讀到一半出錯或逾時（已退回）。
     """
@@ -690,6 +763,13 @@ def _raise_for_exit_codes(
         if FOREIGN_RELATION_SQLSTATE in detail:
             raise RestoreRefusedError(
                 ["還原期間有別的連線在目標資料庫建了資料表、view 或序列；交易已退回，沒有還原"]
+            )
+        if OTHER_CLIENT_SQLSTATE in detail:
+            raise RestoreRefusedError(
+                [
+                    "還原時有別的程式連著目標資料庫（例如 api、worker）；交易已退回，沒有還原。"
+                    "先停掉它們、只留還原自己再試"
+                ]
             )
         raise BackupToolError("psql", f"失敗（退出碼 {psql.returncode}），交易已退回", detail)
     if pg_restore.returncode != 0:

@@ -347,6 +347,23 @@ def test_restore_guards_check_emptiness_and_relations_in_both_modes() -> None:
     assert "''uploaded_pdf''" in shared.before_commit_sql
 
 
+@pytest.mark.parametrize("mode", list(BackupMode))
+def test_restore_refuses_other_clients_last_with_a_fresh_activity_snapshot(
+    mode: BackupMode,
+) -> None:
+    """審查第 2 輪 R2：COMMIT 前最後一項查沒有別的用戶端連著目標（RR005），讀之前清掉快照。"""
+    sql = get_restore_request(
+        SystemViewer(), mode=mode, member_tables=("member",)
+    ).before_commit_sql
+
+    assert "ERRCODE = 'RR005'" in sql
+    assert "pg_catalog.pg_stat_activity" in sql
+    assert "pg_backend_pid()" in sql
+    assert "backend_type IS NULL" in sql  # 別的角色的連線看不到類型，也算
+    assert sql.index("pg_stat_clear_snapshot()") < sql.index("pg_stat_activity")
+    assert sql.index("RR005") > max(sql.index(code) for code in ("RR003", "RR004"))
+
+
 def test_restore_guards_are_only_for_the_system_viewer() -> None:
     with pytest.raises(TypeError):
         get_restore_request(cast(SystemViewer, object()), mode=BackupMode.FULL, member_tables=())

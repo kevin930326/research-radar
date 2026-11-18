@@ -141,6 +141,119 @@ def test_unfinished_script_is_not_at_a_statement_boundary(unfinished: bytes) -> 
     assert not _feed(unfinished).at_statement_boundary
 
 
+# --- 審查第 2 輪 R1：行尾和 PostgreSQL 18 一致（CR、CRLF），不確定的寫法停下 ----------------------
+
+
+def _feed_lf(script: bytes) -> _SqlScriptGuard:
+    """只用 LF 分行（和 psql 用 fgets 讀、轉送時 `_forward_lines` 切的一樣；CR 不分行）。"""
+    guard = _SqlScriptGuard()
+    for line in script.split(b"\n"):
+        guard.check_line(line + b"\n")
+    return guard
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        b"SELECT 1;\n-- c\rCOMMIT;\n",  # `--` 註解在 CR 就結束，後面的 COMMIT 會被執行
+        b"SELECT 1;\n-- c\r\nCOMMIT;\n",
+        b"SELECT 1; -- c\rCOMMIT;\n",
+        b"SELECT 1;\n/* c */\rCOMMIT;\n",
+        b"SELECT 1;\n/* c\r*/\rCOMMIT;\n",
+        b"COPY public.t (id) FROM stdin;\n1\r\n\\.\r\nCOMMIT;\n",  # COPY 用 CRLF 結束
+        b"COPY public.t (id) FROM stdin;\r\n1\r\n\\.\r\n-- c\rCOMMIT;\r\n",
+    ],
+)
+def test_commit_after_a_carriage_return_is_refused(script: bytes) -> None:
+    with pytest.raises(RestoreArchiveUnsafeError, match="COMMIT"):
+        _feed_lf(script)
+
+
+def test_comments_and_copy_data_with_crlf_are_not_misjudged() -> None:
+    guard = _feed_lf(
+        b"-- COMMIT;\r\n"
+        b"/* COMMIT; */\r\n"
+        b"SELECT 1; -- then COMMIT\r\n"
+        b"COMMENT ON TABLE public.t IS 'a\r\nCOMMIT;\r\n';\r\n"
+        b"COPY public.t (body) FROM stdin;\r\n"
+        b"COMMIT;\r\n"
+        b"BEGIN;\r\n"
+        b"\\.\rCOMMIT;\r\n"  # 不是整行的 `\.`：還是 COPY 資料（psql 也這樣認）
+        b"\\.\r\n"
+        b"SELECT 2;\r\n"
+    )
+
+    assert guard.at_statement_boundary
+
+
+@pytest.mark.parametrize("not_an_end", [b"\\.\r\r\n", b"\\. \n", b" \\.\n", b"\\.\\.\n"])
+def test_only_an_exact_copy_end_line_ends_the_copy_data(not_an_end: bytes) -> None:
+    guard = _SqlScriptGuard()
+    guard.check_line(b"COPY public.t (body) FROM stdin;\n")
+    guard.check_line(not_an_end)
+    guard.check_line(b"COMMIT;\n")  # 還在 COPY 資料裡（psql 也還沒結束 COPY）
+
+    assert not guard.at_statement_boundary
+
+
+def test_copy_end_without_a_newline_at_the_end_is_not_a_boundary() -> None:
+    guard = _SqlScriptGuard()
+    guard.check_line(b"COPY public.t (body) FROM stdin;\n")
+    guard.check_line(b"\\.")
+
+    assert not guard.at_statement_boundary
+
+
+@pytest.mark.parametrize(
+    ("script", "reason"),
+    [
+        # psql 在 `\\` 之後會把同一行剩下的當 SQL 執行
+        (b"\\restrict abc \\\\ COMMIT;\n", "psql 的指令"),
+        (b"SELECT 1;\n\\unrestrict abc\\\\COMMIT;\n", "psql 的指令"),
+        (b"SELECT 1 \\restrict abc\n", "psql 的指令"),
+        (b"SELECT 1;\n\\;COMMIT;\n", "psql 的指令"),
+        # psql 讀到 NUL 就丟掉那一行剩下的，斷句會錯開
+        (b"SELECT 1;\x00'\nCOMMIT;\n'\n", "NUL"),
+        (b"COPY public.t (body) FROM stdin;\n\\.\x00x\n", "NUL"),
+        # COPY 的選項（binary 會讓 psql 把剩下的輸入全當資料）、分號後面還有東西
+        (b"COPY BINARY public.t FROM stdin;\n", "binary"),
+        (b"COPY public.t FROM stdin WITH (FORMAT binary);\n", "選項"),
+        (b"COPY public.t FROM stdin (FORMAT 'binary');\n", "選項"),
+        (b"COPY public.t FROM stdin; SELECT 1;\n", "分號後面"),
+        # 關掉 standard_conforming_strings 時 `\'` 是跳脫：兩種讀法不一樣就停下
+        (b"SET standard_conforming_strings = off;\nSELECT 'a\\' ' COMMIT; '';\n", "反斜線"),
+        (b"SELECT 'a\\';\n", "反斜線"),
+        (b"SELECT '\xe4\xb8\xad\\\\';\n", "反斜線"),
+        (b"SELECT E'\x95\\';\n", "反斜線"),
+        # 數字或 $1 後面緊接著 E：PostgreSQL 把 `1E` 當一個記號，`'…'` 是一般字串
+        (b"SELECT 1E'\\';COMMIT;--';\n", "反斜線"),
+        (b"SELECT $1E'\\';COMMIT;--';\n", "反斜線"),
+    ],
+)
+def test_writings_psql_may_read_differently_are_refused(script: bytes, reason: str) -> None:
+    with pytest.raises(RestoreArchiveUnsafeError, match=reason):
+        _feed_lf(script)
+
+
+def test_copy_from_stdout_reads_from_the_client_too() -> None:
+    """`COPY … FROM STDOUT` 也會讓 psql 讀 COPY 資料；當成一般 SQL 會在資料的引號裡錯過 COMMIT。"""
+    with pytest.raises(RestoreArchiveUnsafeError, match="COMMIT"):
+        _feed_lf(b"COPY public.t (body) FROM STDOUT;\n'\n\\.\nCOMMIT;\n'\n")
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        b"SELECT 'it''s', '\\\\', 'C:\\\\dir\\\\', 'no\\escape';\n",  # 偶數個反斜線、不接引號
+        b"SELECT E'it\\'s', E'\\\\', E'\\x41';\n",
+        b"SELECT 1e5, 1_000, 0x1F, $1, $2;\n",
+        b"\\restrict abcDEF123\r\n",
+    ],
+)
+def test_ordinary_writings_still_pass(line: bytes) -> None:
+    assert _feed_lf(line).at_statement_boundary
+
+
 # --- 錯誤訊息去敏（審查 S10）------------------------------------------------------------------
 
 PG_ENV = {

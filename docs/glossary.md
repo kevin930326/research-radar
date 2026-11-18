@@ -973,3 +973,9 @@
 - **xmin（系統欄位）**：PostgreSQL 每一列都記著「哪一個交易寫了這一列」；還原 commit 前用它確認每張表都是這次還原自己建的，不是別人同時建的。
 - **閒置逾時（idle_in_transaction_session_timeout）**：交易開著卻一直沒有下一句時，伺服器等多久就把連線斷掉；備份等 `pg_dump` 時當最後一道保險。
 - **`--expect-mode`**：`radar restore` 的選用參數，先講好「我要還原的是哪一種備份」；拿錯檔（例如含成員資料的備份）就在寫入前拒絕。
+- **CR／LF／CRLF（換行字元）**：LF 是 Unix 的換行，CR 是舊 Mac 的換行，CRLF（兩個連著）是 Windows 的換行；PostgreSQL 的 `--` 註解遇到 CR 或 LF 都算結束，還原轉送照這個判斷。
+- **`standard_conforming_strings`**：PostgreSQL 的設定，開著時一般字串 `'…'` 裡的反斜線就是反斜線；關掉時反斜線變成跳脫字元，同一段文字的字串會斷在不同地方。
+- **`client_encoding`（用戶端編碼）**：連線雙方約定文字用哪一種編碼（例如 UTF8、SJIS）；SJIS 這類編碼的中文字第二個位元組可能長得跟反斜線一樣。
+- **`backend_type`（連線類型）**：`pg_stat_activity` 的一欄，寫這一列是一般的用戶端連線（`client backend`）還是自動清理這類背景程序；不是超級使用者時，看別的角色的連線這一欄是空的。
+- **`pg_stat_clear_snapshot()`**：PostgreSQL 函式；同一個交易裡 `pg_stat_activity` 會沿用第一次讀到的樣子，呼叫它之後再讀才是當下的樣子。
+- **NUL 位元組**：值是 0 的位元組；`psql` 讀到它就把那一行剩下的部分丟掉，所以還原轉送遇到它就停下。

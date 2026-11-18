@@ -385,7 +385,8 @@ class RestoreRequest:
 
     - `before_restore_sql`：`BEGIN` 之後、備份的 SQL 之前送：目標還是空的（審查 C2）。
     - `before_commit_sql`：`COMMIT` 之前送：所有使用者的 relation 都是這個交易建的、沒有大型物件；
-      只有共用資料的備份另外檢查成員資料表沒有任何一列、沒有成員上傳的 PDF 摘要。
+      只有共用資料的備份另外檢查成員資料表沒有任何一列、沒有成員上傳的 PDF 摘要；最後確認沒有
+      別的用戶端連著目標資料庫。
 
     任何一項不符就用 `RESTORE_GUARD_SQLSTATES` 裡的代碼丟錯，`psql` 停下、不送 `COMMIT`，整個交易
     退回。
@@ -414,11 +415,13 @@ MEMBER_ROWS_SQLSTATE = "RR001"  # 只有共用資料的備份帶了成員資料�
 TARGET_NOT_EMPTY_SQLSTATE = "RR002"  # BEGIN 之後再檢查一次：目標已經不是空的
 FOREIGN_RELATION_SQLSTATE = "RR003"  # COMMIT 前：有不是這個交易建的 relation
 LARGE_OBJECT_SQLSTATE = "RR004"  # COMMIT 前：目標有大型物件
+OTHER_CLIENT_SQLSTATE = "RR005"  # COMMIT 前：還有別的用戶端連著目標資料庫（審查第 2 輪 R2）
 RESTORE_GUARD_SQLSTATES = (
     MEMBER_ROWS_SQLSTATE,
     TARGET_NOT_EMPTY_SQLSTATE,
     FOREIGN_RELATION_SQLSTATE,
     LARGE_OBJECT_SQLSTATE,
+    OTHER_CLIENT_SQLSTATE,
 )
 
 

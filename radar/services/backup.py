@@ -13,11 +13,12 @@
 2. 目標不是空的、版本太舊就不執行（什麼都不寫），
 3. 整個還原在一個交易裡：BEGIN 之後再檢查一次目標是空的；COMMIT 前檢查所有 relation 都是這個
    交易建的、沒有大型物件，只有共用資料的備份另外檢查成員資料表沒有任何一列、沒有成員上傳的
-   PDF 摘要，
+   PDF 摘要，最後確認沒有別的用戶端連著目標（自己池子裡閒著的連線先關掉），
 4. commit 後重新數筆數和清單比對；不一致就失敗，還原的資料留著，不自動刪除。重數時出錯也一樣
    （資料已還原、留著）。
 """
 
+import threading
 from collections.abc import Callable
 from contextlib import AbstractContextManager, ExitStack
 from dataclasses import dataclass
@@ -31,11 +32,13 @@ from radar.domain.backup import (
     BACKUP_CONTENT_TYPE,
     MEMBER_TABLES,
     RECOUNT_STATEMENT_TIMEOUT_MS,
+    RESTORE_INPUT_IDLE_TIMEOUT_SECONDS,
     SNAPSHOT_IDLE_TIMEOUT_MS,
     BackupCounts,
     BackupError,
     BackupManifest,
     BackupMode,
+    BackupToolError,
     DumpRequest,
     PgDumpTooOldError,
     RestoreCountMismatchError,
@@ -167,6 +170,39 @@ def run_backup(
     return BackupResult(object_key=key, manifest=manifest)
 
 
+def _read_header_within_limit(source: IO[bytes]) -> BackupManifest:
+    """讀備份檔開頭的清單；超過 `RESTORE_INPUT_IDLE_TIMEOUT_SECONDS` 還沒讀完就放棄。
+
+    審查第 2 輪 O3：清單只有幾百位元組，整段讀完的時間就等於「多久沒收到資料」。這時還沒有連
+    目標資料庫。逾時時讀檔頭的執行緒（daemon）可能還卡在讀輸入，`radar restore` 結束時跟著結束。
+
+    Raises:
+        BackupFormatError: `source` 不是解密後的 radar 備份檔。
+        BackupToolError: 逾時沒讀完。
+    """
+    outcome: list[BackupManifest | BaseException] = []
+
+    def read() -> None:
+        try:
+            outcome.append(read_payload_header(source))
+        except BaseException as exc:
+            outcome.append(exc)
+
+    reader = threading.Thread(target=read, name="restore-header", daemon=True)
+    reader.start()
+    reader.join(RESTORE_INPUT_IDLE_TIMEOUT_SECONDS)
+    if not outcome:
+        raise BackupToolError(
+            "radar restore",
+            f"超過 {RESTORE_INPUT_IDLE_TIMEOUT_SECONDS} 秒沒有讀完備份檔開頭的清單，已停止；"
+            "目標資料庫沒有動",
+        )
+    result = outcome[0]
+    if isinstance(result, BaseException):
+        raise result
+    return result
+
+
 def run_restore(
     database: Database,
     source: IO[bytes],
@@ -185,7 +221,8 @@ def run_restore(
     Raises:
         BackupFormatError: `source` 不是解密後的 radar 備份檔（沒有寫任何東西）。
         RestoreRefusedError: 模式不符、遷移版本不認得、目標不是空的、或版本太舊（沒有寫任何東西）；
-            還原的交易裡發現目標不是空的、或有別的連線同時建了表（已整個退回）。
+            還原的交易裡發現目標不是空的、有別的連線同時建了表、或 COMMIT 前還有別的用戶端連著
+            目標（已整個退回）。
         SharedOnlyBackupHasMemberRowsError: 只有共用資料的備份裡有成員資料（已整個退回）。
         RestoreArchiveUnsafeError: 備份裡有會自己 commit 的內容（已整個退回）。
         BackupToolError: `pg_restore` 或 `psql` 失敗、輸入逾時（已整個退回）。
@@ -193,7 +230,7 @@ def run_restore(
         RestoreVerificationError: 還原完成，但重數筆數時出錯（還原的資料留著，不刪除）。
     """
     viewer = SystemViewer()
-    manifest = read_payload_header(source)
+    manifest = _read_header_within_limit(source)
     early = expect_mode_problems(manifest, expect_mode)
     if known_revisions is not None:
         early += unknown_revision_problems(manifest, known_revisions)
@@ -219,6 +256,8 @@ def run_restore(
         mode=manifest.mode,
         member_tables=set(MEMBER_TABLES) | set(manifest.member_table_rows),
     )
+    # 還原的 COMMIT 前會確認沒有別的用戶端連著目標（RR005），自己池子裡閒著的連線也算，先關掉。
+    database.close_idle_connections()
     restore_archive(request, source)
     # 已經 COMMIT：之後任何錯誤都說明資料已還原、留著（審查 S6）。
     try:

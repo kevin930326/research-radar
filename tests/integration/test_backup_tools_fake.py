@@ -16,6 +16,7 @@
 
 import io
 import os
+import signal
 import subprocess
 import sys
 from collections.abc import Iterator
@@ -349,6 +350,54 @@ def test_unsafe_script_stops_psql_without_commit(
     assert _ended(spawned)
 
 
+@pytest.mark.parametrize(
+    "script",
+    [
+        b"CREATE TABLE public.t (id int);\n-- c\rCOMMIT;\nSELECT 1;\n",
+        b"CREATE TABLE public.t (id int);\n-- c\r\nCOMMIT;\nSELECT 1;\n",
+        b"CREATE TABLE public.t (id int);\n/* c */\rCOMMIT;\nSELECT 1;\n",
+        b"CREATE TABLE public.t (id int);\nCOPY public.t (id) FROM stdin;\r\n1\r\n\\.\r\nCOMMIT;\n",
+    ],
+)
+def test_commit_after_a_carriage_return_stops_psql_without_commit(
+    spawned: list[Spawned], bin_dir: Path, captured: Path, script: bytes
+) -> None:
+    """審查第 2 輪 R1：PostgreSQL 的 `--` 註解在 CR 就結束；COPY 資料用 CRLF 結束。"""
+    _restore_tools(bin_dir, captured)
+
+    with pytest.raises(RestoreArchiveUnsafeError, match="COMMIT"):
+        restore_archive(REQUEST, io.BytesIO(script), pg_env=PG_ENV)
+
+    sent = captured.read_bytes() if captured.exists() else b""
+    assert b"COMMIT" not in sent
+    assert REQUEST.before_commit_sql.encode() not in sent
+    assert _ended(spawned)
+    psql = next(record for record in spawned if record.name == "psql")
+    assert psql.process.returncode == -signal.SIGKILL  # 被停掉，不是讀到結尾自己結束
+
+
+def test_crlf_comments_and_copy_data_with_commit_are_relayed_and_committed(
+    spawned: list[Spawned], bin_dir: Path, captured: Path
+) -> None:
+    """註解裡、COPY 資料裡的 COMMIT（CRLF 換行）照樣轉送，最後才送 COMMIT。"""
+    _restore_tools(bin_dir, captured)
+    script = (
+        b"-- COMMIT;\r\n/* COMMIT; */\r\nCREATE TABLE public.t (body text);\r\n"
+        b"COPY public.t (body) FROM stdin;\r\nCOMMIT;\r\n\\.\rCOMMIT;\r\n\\.\r\nSELECT 1;\r\n"
+    )
+
+    restore_archive(REQUEST, io.BytesIO(script), pg_env=PG_ENV)
+
+    assert captured.read_bytes() == (
+        b"BEGIN;\n"
+        + REQUEST.before_restore_sql.encode()
+        + script
+        + REQUEST.before_commit_sql.encode()
+        + b"COMMIT;\n"
+    )
+    assert _ended(spawned)
+
+
 def test_unfinished_script_is_not_committed(
     spawned: list[Spawned], bin_dir: Path, captured: Path
 ) -> None:
@@ -382,6 +431,7 @@ def test_psql_failure_message_hides_connection_details(
         ("RR002", RestoreRefusedError, "還原開始時目標資料庫已經不是空的"),
         ("RR003", RestoreRefusedError, "還原期間有別的連線"),
         ("RR004", RestoreArchiveUnsafeError, "大型物件"),
+        ("RR005", RestoreRefusedError, "別的程式連著目標資料庫"),
     ],
 )
 def test_guard_sqlstates_become_their_own_errors(

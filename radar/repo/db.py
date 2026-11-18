@@ -359,6 +359,14 @@ class Database:
             return False
         return True
 
+    def close_idle_connections(self) -> None:
+        """關掉連線池裡閒著的連線（之後要用時會再開新的）。
+
+        `radar restore` 在交給 `psql` 還原之前呼叫：還原 COMMIT 前會確認沒有別的用戶端連著目標
+        資料庫，自己池子裡閒著的那條也算（ADR-0051）。
+        """
+        self._engine.dispose()
+
     def schema_revisions(self) -> frozenset[str] | None:
         """資料庫目前的遷移版本；沒有 `alembic_version`（還沒遷移）時回 None。只讀，不建表。
 

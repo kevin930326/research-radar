@@ -77,9 +77,12 @@ ADR-0003 已經定了大方向：`pg_dump` 18、age 加密、上傳 R2 的 `back
     - `BEGIN` 之後、送備份 SQL 之前，再驗一次目標是空的（`RR002`）；
     - `COMMIT` 前：所有使用者 relation（和「空的」同一個定義）都是這個交易建的（`pg_class.xmin::text = pg_current_xact_id()::xid::text`，`RR003`）；
     - `COMMIT` 前：沒有大型物件（`pg_largeobject_metadata` 是空的，`RR004`）；
-    - `COMMIT` 前、只在 `--shared-only`：成員資料（`RR001`，見第 10 點）。
+    - `COMMIT` 前、只在 `--shared-only`：成員資料（`RR001`，見第 10 點）；
+    - `COMMIT` 前、最後一項：目標資料庫沒有別的用戶端連著（`RR005`，審查第 2 輪 R2）。`pg_stat_activity` 裡同一個資料庫（`datname = current_database()`）、不是自己（`pid <> pg_backend_pid()`）、有登入角色（`usesysid IS NOT NULL`，自動清理這類背景程序沒有）、類型是 `client backend` 或看不到類型（NULL）的連線，有一條就退回。還原用的 `radar_owner` 不是超級使用者、也沒有 `pg_read_all_stats`：別的角色的連線它看得到 `datname`、`pid`、`usesysid`，`backend_type` 是 NULL（在 PostgreSQL 18 的測試資料庫上確認過），所以 NULL 也算。同一個交易會沿用第一次讀到的 `pg_stat_activity` 快照，讀之前先 `pg_stat_clear_snapshot()`。`radar restore` 交給 `psql` 之前先關掉自己連線池裡閒著的連線（不然自己那條也算）。
 
     轉送時逐行檢查 `psql` 會收到的 SQL（審查 C1）：照 `psql` 的斷句方式追蹤引號、`$tag$`、註解、`BEGIN ATOMIC` 與 COPY 區段（`COPY … FROM stdin;` 到單獨一行 `\.`）；COPY 資料以外遇到交易控制語句（`BEGIN`、`COMMIT`、`ROLLBACK`、`END`、`ABORT`、`SAVEPOINT`、`RELEASE`、`START`／`PREPARE TRANSACTION`）或 `\restrict`／`\unrestrict` 以外的 `psql` 指令，就在那一行送出前殺掉 `psql`、不送 `COMMIT`，丟出「這份備份含有會自己 commit 的內容」。送 `COMMIT` 前也要確認腳本停在一句話的結尾。
+
+    行尾照 PostgreSQL 18 的 `psql` 與後端掃描器（審查第 2 輪 R1）：`psql` 只用 LF 分行（`fgets`），轉送也只用 LF 切；`--` 註解在 CR 或 LF 結束（`scan.l`／`psqlscan.l` 的 `newline [\n\r]`），CR 後面同一行的內容當 SQL 檢查；COPY 資料只在整行剛好是 `\.` 加 LF 或 CRLF 時結束（`copy.c` 的 `handleCopyIn`）。和 `psql` 可能讀得不一樣的寫法一律停下、不猜：NUL 位元組；一般字串裡引號前面有奇數個反斜線（`standard_conforming_strings` 被關掉時 `\'` 是跳脫），或反斜線前面是非 ASCII 字元（SJIS 這類編碼）；`E'…'` 裡非 ASCII 字元後面接反斜線；`COPY … FROM stdin` 後面有選項、`COPY BINARY`、COPY 那一行分號後面還有東西；不是整行的 `\restrict`／`\unrestrict 金鑰`（`psql` 在 `\\` 之後會把同一行剩下的當 SQL）。`COPY … FROM STDOUT` 也當成讀 COPY 資料（文法裡 STDIN、STDOUT 都代表用戶端）；數字或 `$1` 後面緊接的識別字和數字算同一個記號（`1E'…'` 的 `'` 是一般字串，和 PostgreSQL 18 一樣）。
 
     `radar restore --expect-mode {full,shared-only}`（選用，審查 S8）：有給而和清單的模式不同，就在讀目標之前拒絕；沒給時行為不變。備份的 Alembic 版本不是這個映像的 `migrations/` 認得的 revision（備份比映像新）也在讀目標之前拒絕（只讀遷移腳本，不連資料庫）。
 
@@ -95,7 +98,7 @@ ADR-0003 已經定了大方向：`pg_dump` 18、age 加密、上傳 R2 的 `back
     | `PG_DUMP_LOCK_WAIT_TIMEOUT_MS` | 60,000（1 分鐘） | `pg_dump --lock-wait-timeout`：等不到表的共用鎖就失敗，不無限等（例如遷移正拿著排他鎖）。正常情況幾毫秒就拿到。 |
     | `DUMP_START_TIMEOUT_SECONDS` | 300（5 分鐘） | 等 `pg_dump` 開始輸出的上限；逾時殺掉 `pg_dump` 與 age、丟 `BackupToolError`，上傳不完成、不留鍵。要比上一行長（`pg_dump` 先拿鎖才開始輸出），留足讀 catalog 的時間。 |
     | `SNAPSHOT_IDLE_TIMEOUT_MS` | 360,000（6 分鐘） | 匯出快照的交易 `SET LOCAL idle_in_transaction_session_timeout`：Python 卡住時資料庫自己斷線，不會一直拿著快照擋 vacuum。比上一行長，正常逾時先由 Python 印出清楚的訊息。 |
-    | `RESTORE_INPUT_IDLE_TIMEOUT_SECONDS` | 300（5 分鐘） | 還原時「多久沒讀到備份資料就放棄」：只在等輸入（例如 SSH 斷了沒關）時計時，`psql` 正在忙（建索引）時不算；逾時殺掉 `pg_restore` 與 `psql`、不送 `COMMIT`。 |
+    | `RESTORE_INPUT_IDLE_TIMEOUT_SECONDS` | 300（5 分鐘） | 還原時「多久沒讀到備份資料就放棄」：只在等輸入（例如 SSH 斷了沒關）時計時，`psql` 正在忙（建索引）時不算；逾時殺掉 `pg_restore` 與 `psql`、不送 `COMMIT`。讀檔頭的清單也用同一個上限（審查第 2 輪 O3；清單只有幾百位元組，整段讀完的時間就是沒資料的時間），逾時時還沒連目標資料庫。 |
     | `RECOUNT_STATEMENT_TIMEOUT_MS` | 600,000（10 分鐘） | `COMMIT` 後重數筆數的交易 `SET LOCAL statement_timeout`，蓋過連線預設的短時限；萬篇級幾秒就數完，留大量餘裕。 |
 
 17. **這個 Story 不做**：`backup` 心跳、排程（7.5）、部署、R2 的 lifecycle 規則、碰任何雲端資源。搬家程序寫在 `docs/deploy/migrate-mac-to-trial.md`，刪除的步驟都標成 Kevin 手動。
@@ -127,10 +130,12 @@ ADR-0003 已經定了大方向：`pg_dump` 18、age 加密、上傳 R2 的 `back
 - R2 的 `raw/`、成員的 PDF 不在備份裡（ADR-0003 第 5 點）。
 - 行程在上傳途中被強制結束（例如被系統殺掉）時，boto3 來不及放棄分段上傳：不會出現這個鍵，但已傳的幾段留在 bucket 裡占空間。之後設 R2 的 lifecycle 時加「清掉沒完成的分段上傳」的規則（7.5）。
 - `pg_restore` 的版本只看大版本；同一個大版本裡，舊的小版本讀新的備份格式理論上可能失敗，失敗時整個退回。
-- **空窗沒有完全關掉**（審查 C2）：別的連線在我們的交易裡、`BEGIN` 後的空檢查之後建表，但在我們 `COMMIT` 之後才 commit，我們的 `RR003` 檢查看不到那張表（還沒 commit 的 `pg_class` 列看不到），還原會成功、目標多一張表。要有人同時對空的目標資料庫建表才會發生；搬家時目標只有 Kevin 在用。
+- **空窗縮小了，還沒有完全關掉**（審查 C2、第 2 輪 R2）：`RR003` 擋得到「檢查前已經 commit 的別人的表」，`RR005` 擋得到「檢查時還連著的別的用戶端」（包括建了表、要在我們之後才 commit 的）。剩下的是 `COMMIT` 前那個 DO 區塊結束到 `COMMIT` 完成之間的幾毫秒：一條在 `RR005` 檢查**之後**才連進來的連線，在我們 `COMMIT` 之前建表並 commit（或在 `RR003` 與 `RR005` 兩項檢查之間 commit 並斷線），還原會成功、目標多一張表。要有人剛好在那一刻對空的目標資料庫建表才會發生；搬家文件寫明還原時不要起 api、worker，也不要有別的程式連著目標。要完全關掉見「要 Kevin 決定」第 9 項。
+- **子交易裡建的 relation 會被拒絕**（審查第 2 輪 R3，不改程式）：「都是這個交易建的」是用主交易的 ID 比對（`pg_class.xmin` 等於 `pg_current_xact_id()`）。子交易（`SAVEPOINT`、PL/pgSQL 的 `EXCEPTION` 區塊）裡建或改的 relation，`xmin` 是子交易的 ID，會被當成別人建的而整個退回——錯在「拒絕還原」這個安全的方向。`pg_restore` 的輸出沒有子交易（轉送器也拒絕 `SAVEPOINT`），只有特製的備份會碰到。另外 `xmin` 是那一列最後一次被改的交易、不是建立者：別人建的表在我們的交易裡被改過，`xmin` 會變成我們的；正常的 `pg_restore` 輸出不會改它沒建的表（撞名時 `CREATE` 就先失敗），只有特製的備份做得到。
 - **只因成員加入才存在的 `paper` 列**（審查 S3）：成員手動加入或上傳時建的 `paper` 列沒有成員欄位，`--shared-only` 會帶出去（標題、作者這些書目資料，不含成員是誰）。見「要 Kevin 決定」第 7 項。
 - **備份不能證明是誰做的**（審查 S7）：age 的公鑰不是秘密，拿到公鑰的人都能做一份格式正確的加密檔。只還原自己剛做、自己解密的檔。
-- **轉送檢查是照 `psql` 斷句方式寫的近似**（審查 C1）：只處理 `pg_restore` 會輸出的寫法（引號、`$tag$`、巢狀註解、`BEGIN ATOMIC`、COPY 區段）；`\if` 這類 `psql` 指令一律拒絕；`psql` 的 `:變數` 代換沒有模擬（`pg_restore` 的輸出不會有，但特製的檔可能用它組出看不出來的語句）。交易裡的 `RR003`、`RR004` 是第二道。
+- **轉送檢查是照 `psql` 斷句方式寫的近似**（審查 C1、第 2 輪 R1）：只處理 `pg_restore` 會輸出的寫法（引號、`$tag$`、巢狀註解、`BEGIN ATOMIC`、COPY 區段），行尾照 PostgreSQL 18（見第 12 點）；`\if` 這類 `psql` 指令一律拒絕；`psql` 的 `:變數` 代換沒有模擬（`pg_restore` 的輸出不會有；能用的只有 `psql` 自己預設的變數，例如版本、資料庫名稱，`\set` 這類改變數的指令會被拒絕）。編碼只照 UTF-8 看：備份的 SQL 把 `client_encoding` 改成 SJIS 這類編碼時，會讓 `psql` 斷句不同的寫法（反斜線緊接在非 ASCII 字元後面）一律停下，其他情況照 UTF-8 判斷。交易裡的 `RR003`、`RR004`、`RR005` 是第二道。
+- **`pg_dump` 開始輸出之後卡住沒有上限**（審查第 2 輪 O3）：開始輸出前有 `DUMP_START_TIMEOUT_SECONDS`；開始之後（例如連線斷了卻沒有斷線的訊號）`pg_dump` 與上傳會一直等。不會留下不完整的備份（上傳沒完成就沒有鍵），但指令不會自己結束，要手動停。7.5 排程備份時可以在外面加整體的時限。
 - **PGDG 的相依套件沒釘版本、`pgdg.list` 沒設優先順序**（審查 I1）：只釘了 `postgresql-client-18`、`libpq5`，它們拉進來的其他套件跟當下的套件庫走；PGDG 有同名套件時 apt 會照版本高低挑。
 - **`age=1.2.1-1+b5` 會從 Debian 一般庫消失**（審查 I2）：Debian 更新 age 之後，舊版本會從 `deb.debian.org` 拿掉，到時建置會壞，要改版本號或改用 `snapshot.debian.org`。見「要 Kevin 決定」第 8 項與「之後要做」。
 - **冒煙測試沒驗映像裡的工具**（審查 I3）：真工具的往返測試用的是 CI 執行機上裝的 `pg_dump` 與 age，不是映像裡的；映像裡的只在建置時印版本。
@@ -200,6 +205,16 @@ ADR-0003 已經定了大方向：`pg_dump` 18、age 加密、上傳 R2 的 `back
    - 乙. 現在改用 `snapshot.debian.org` 的固定日期。永遠裝得到同一版，但 snapshot 站慢、偶爾連不上，建置變得不穩。
    - 兩個都能改回。
 4. 建議：甲。如果不確定就選甲。
+
+**9. 還原的最後幾毫秒空窗要不要完全關掉**
+
+1. 發生什麼事：還原 COMMIT 前現在會確認沒有別的用戶端連著目標（`RR005`），但「檢查完到 COMMIT 完成」之間還有幾毫秒：那一刻才連進來、建表並 commit 的連線擋不到（審查第 2 輪 R2）。搬家時目標只有 Kevin 在用，文件也寫明還原時不要起 api、worker。
+2. 要決定：維持現在的做法，或再加一道把空窗完全關掉。
+3. 選項：
+   - 甲. 維持現在（`RR005` 加文件）。不動別的程式；之後隨時能改成乙或丙。
+   - 乙. `radar migrate` 與 `radar restore` 共用一把 advisory lock（還原的交易從 `BEGIN` 拿到 `COMMIT`）。擋得住同時跑的 `radar migrate`（radar 裡唯一會建表的入口），擋不住手動連進來建表的人；要改遷移的程式與測試。可以改回甲。
+   - 丙. 還原期間讓目標資料庫拒絕新連線（還原前 `ALTER DATABASE … ALLOW_CONNECTIONS false`，結束後改回）。擋得住所有人（超級使用者以外）；但要在交易外先改、再改回來，`radar restore` 中途被強制結束時資料庫會停在「不接受連線」，要 Kevin 手動改回；也要確認擁有者角色有權限改。可以改回甲。
+4. 建議：甲。搬家是一次性、由 Kevin 自己操作，剩下的空窗要有人剛好在那幾毫秒建表；7.5 若要排程還原再考慮乙。如果不確定就選甲。
 
 ## 之後要做
 

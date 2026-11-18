@@ -12,7 +12,9 @@ Story 3.18、ADR-0051。
 """
 
 import io
+import os
 import re
+import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -22,6 +24,7 @@ import psycopg
 import pytest
 from sqlalchemy import text
 
+import radar.services.backup as backup_service
 from radar.adapters.fake.object_store import FakeObjectStore
 from radar.domain.backup import (
     MEMBER_TABLES,
@@ -40,7 +43,7 @@ from radar.domain.backup import (
     encode_payload_header,
 )
 from radar.domain.viewer import SystemViewer
-from radar.repo.backup import get_restore_request
+from radar.repo.backup import find_user_relations, get_restore_request
 from radar.repo.db import Database
 from radar.services.backup import run_backup, run_restore
 from tests.backup_support import Seeded, count_in_snapshot, seed_source, table_rows
@@ -568,6 +571,7 @@ def _guarded_restore(
 ) -> None:
     """照還原的順序在一個交易裡執行；任何一步失敗就退回、原樣丟出 psycopg 的錯誤。"""
     with psycopg.connect(target.owner_url, autocommit=True) as connection:
+        _wait_until_alone(connection)
         connection.execute("BEGIN")
         try:
             connection.execute(request.before_restore_sql)
@@ -579,6 +583,26 @@ def _guarded_restore(
             connection.execute("ROLLBACK")
             raise
         connection.execute("COMMIT")
+
+
+def _wait_until_alone(connection: psycopg.Connection) -> None:
+    """等到目標資料庫只剩這條連線（COMMIT 前的 RR005 會擋別的用戶端）。
+
+    建資料庫、`has_table` 這些測試自己的連線剛關掉時，伺服器那一端可能還沒結束；等它們真的離開，
+    不放寬檢查。最多等 10 秒。
+    """
+    deadline = time.monotonic() + 10
+    while True:
+        row = connection.execute(
+            "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database()"
+            " AND pid <> pg_backend_pid() AND usesysid IS NOT NULL"
+        ).fetchone()
+        assert row is not None
+        if row[0] == 0:
+            return
+        if time.monotonic() > deadline:
+            pytest.fail("目標資料庫一直有別的連線，還原的測試沒辦法開始")
+        time.sleep(0.05)
 
 
 def _request(mode: BackupMode) -> RestoreRequest:
@@ -678,3 +702,70 @@ def test_member_content_in_a_shared_only_restore_is_rolled_back(
     assert not target.has_table("public.restored")
     # 預設模式本來就帶成員資料，同樣的內容照樣 commit。
     _guarded_restore(target, _request(BackupMode.FULL), RESTORED + member_content)
+
+
+# --- 審查第 2 輪：COMMIT 前還有別的用戶端連著目標（R2）、讀清單逾時（O3）--------------------------
+
+
+def _user_relations(target: TestDatabase) -> list[str]:
+    database = Database(target.owner_url, connect_timeout=5)
+    try:
+        with database.read_only_snapshot_transaction() as connection:
+            return find_user_relations(SystemViewer(), connection)
+    finally:
+        database.close_idle_connections()
+
+
+@pytest.mark.parametrize("role", ["radar_owner", "radar_app"])
+@pytest.mark.parametrize("read_activity_first", [False, True])
+def test_restore_is_refused_while_another_client_is_connected(
+    target: TestDatabase, role: str, read_activity_first: bool
+) -> None:
+    """還原時另一條連線（同一個角色看得到類型；別的角色看不到類型）連著目標：RR005，整個退回。
+
+    `read_activity_first`：備份的 SQL 先讀過一次 pg_stat_activity（同一個交易會沿用那次的快照），
+    檢查前要清掉快照才看得到之後才連進來的連線。
+    """
+    restored = RESTORED + (" SELECT count(*) FROM pg_stat_activity;" if read_activity_first else "")
+    held: list[psycopg.Connection] = []
+    try:
+        with pytest.raises(psycopg.Error) as caught:
+            _guarded_restore(
+                target,
+                _request(BackupMode.FULL),
+                restored,
+                meanwhile=lambda: held.append(target.connect(role)),
+            )
+    finally:
+        for connection in held:
+            connection.close()
+
+    assert caught.value.sqlstate == "RR005"
+    assert held  # 另一條連線真的在還原的交易途中連上了
+    assert _user_relations(target) == []
+
+
+def test_header_that_never_arrives_times_out_before_touching_the_target(
+    target: TestDatabase, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """審查第 2 輪 O3：清單送到一半就不再來、也不關（例如 SSH 斷了）。逾時在測試裡調小。"""
+    monkeypatch.setattr(backup_service, "RESTORE_INPUT_IDLE_TIMEOUT_SECONDS", 0.3)
+    restore = FakeRestore()
+    read_end, write_end = os.pipe()
+    os.write(write_end, PAYLOAD_MAGIC[:5])
+    source = os.fdopen(read_end, "rb")
+    try:
+        with pytest.raises(BackupToolError, match="沒有讀完備份檔開頭的清單"):
+            run_restore(
+                Database(target.owner_url, connect_timeout=5),
+                source,
+                pg_restore_version=lambda: "18.7",
+                restore_archive=restore,
+            )
+    finally:
+        # 先關寫的一端，卡在讀的執行緒讀到結尾，才關讀的一端。
+        os.close(write_end)
+        source.close()
+
+    assert restore.requests == []
+    assert _user_relations(target) == []

@@ -17,6 +17,7 @@ from radar.domain.backup import (
     FOREIGN_RELATION_SQLSTATE,
     LARGE_OBJECT_SQLSTATE,
     MEMBER_ROWS_SQLSTATE,
+    OTHER_CLIENT_SQLSTATE,
     TARGET_NOT_EMPTY_SQLSTATE,
     BackupCounts,
     BackupMode,
@@ -41,6 +42,21 @@ _USER_RELATIONS_WHERE = (
     " AND n.nspname NOT LIKE 'pg\\_%'"
     " AND NOT EXISTS (SELECT 1 FROM pg_depend d"
     " WHERE d.classid = 'pg_class'::regclass AND d.objid = c.oid AND d.deptype = 'e')"
+)
+
+
+# 「別的用戶端連著目標資料庫」（審查第 2 輪 R2）：pg_stat_activity 裡同一個資料庫、不是自己、有登入
+# 角色（自動清理這類背景程序沒有）的連線。還原用的擁有者角色不是超級使用者、也沒有
+# pg_read_all_stats：別的角色的連線，它看得到 datname、pid、usesysid，但 backend_type 是 NULL
+# （在 PostgreSQL 18 的測試資料庫上確認過），所以 NULL 也算（看不出是什麼，就當成用戶端）。
+# 自己這條連線的平行工作程序（同一個角色看得到 backend_type）不算。
+# 同一個交易裡 pg_stat_activity 會沿用第一次讀到的快照，所以讀之前先 pg_stat_clear_snapshot()
+# （備份的 SQL 可能先讀過一次）。
+_OTHER_CLIENTS = (
+    " a.datname = pg_catalog.current_database()"
+    " AND a.pid <> pg_catalog.pg_backend_pid()"
+    " AND a.usesysid IS NOT NULL"
+    " AND (a.backend_type = 'client backend' OR a.backend_type IS NULL)"
 )
 
 
@@ -172,7 +188,8 @@ def get_restore_request(
     - BEGIN 之後、備份的 SQL 之前：目標還是空的（和 `find_user_relations` 同一個定義）；
     - COMMIT 之前：每一個使用者的 relation 都是這個交易建的（`pg_class.xmin` 是目前的交易）、
       沒有大型物件；`SHARED_ONLY` 另外檢查 `member_tables`（存在的話）沒有任何一列、
-      `paper_abstract` 沒有成員上傳的 PDF 摘要（`uploaded_pdf`）。
+      `paper_abstract` 沒有成員上傳的 PDF 摘要（`uploaded_pdf`）；最後確認沒有別的用戶端連著
+      目標資料庫（審查第 2 輪 R2，見 `_OTHER_CLIENTS`）。
 
     Raises:
         TypeError: `viewer` 不是 `SystemViewer`。
@@ -218,6 +235,12 @@ def get_restore_request(
             + _guard("has_rows", MEMBER_ROWS_SQLSTATE, "radar restore: uploaded abstracts")
             + " END IF;"
         )
+    # 放最後：前面的檢查出錯時先報那一項（例如別的連線建了表，報 RR003）。
+    checks += " PERFORM pg_catalog.pg_stat_clear_snapshot();" + _guard(
+        f"EXISTS (SELECT 1 FROM pg_catalog.pg_stat_activity a WHERE {visible} AND{_OTHER_CLIENTS})",
+        OTHER_CLIENT_SQLSTATE,
+        "radar restore: another client is connected to the target database",
+    )
     before_commit = (
         "DO $radar_guard$ DECLARE t text; has_rows boolean; BEGIN"
         + checks
