@@ -13,7 +13,8 @@
 - `ExtendedVocabulary`（2026-11-18，只有中文重點用）：`InputVocabulary` 加上把輸入讀得更完整的部分
   ——空白千分位、月份英文名、`10-40%`、`10% points`、年代、英數詞（`B2B`）、輸出正數對輸入
   負數、英文詞的詞形變化與黏字、`vs`。數字的新規則一律以 `numbers` 讀到的「完整數字」為單位
-  （`_whole_numbers`），不另外用正規式找數字。研究模型不用它。
+  （`_whole_numbers`），不另外用正規式找數字。研究模型不用它。另外接中文重點的通用縮寫允許清單
+  （`build` 的 `acronyms`、`_allowed_acronyms`：清單裡、而且輸入有它全名的縮寫才認得）。
 
 都是純函式；上面幾項的行為和 2.4 原本在 `zh_summary.py` 的一樣（只改成公開名稱），加
 `ExtendedVocabulary` 時也沒改。判準的細節與抓不到的情況寫在 ADR-0032。
@@ -24,9 +25,10 @@ import re
 import string
 import unicodedata
 from bisect import bisect_left
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from decimal import MAX_EMAX, MIN_EMIN, Context, Decimal, DecimalException
+from functools import lru_cache
 from itertools import pairwise
 from typing import Final
 
@@ -929,6 +931,145 @@ def _alnum_tokens(text: str) -> frozenset[str]:
     return frozenset(found)
 
 
+# C 通用縮寫的允許清單（ADR-0032 的「通用縮寫的允許清單與整欄說明存成空值」更新）：清單在
+# `config/zh_summary_acronyms.yaml`，由 `zh_summary.py` 交給 `ExtendedVocabulary.build`。一個縮寫
+# 放行要兩個條件都成立：輸出寫的跟登記的縮寫一模一樣（大小寫也一樣，`knows_word`、
+# `knows_alnum`），而且輸入（標題或摘要）裡出現了它登記的某一個全名（`_allowed_acronyms`）。
+# 全名的比對：
+# - 不分大小寫；全名的詞要在輸入裡**連續**出現（只有一部分、或分散在各處都不算）。
+# - 詞與詞之間是一個空白、一個連字號，或什麼都沒有（`decision-making`＝`decision making`、
+#   `multi-criteria`＝`multi criteria`＝`multicriteria`；輸入少了空白黏成一串的也算）：兩邊的字母
+#   逐一對得上，而且開頭、結尾都落在輸入的詞頭、詞尾（`_letters_aligned`）。其他符號（逗號、括號、
+#   換行、數字、兩個以上的分隔）隔開的不算連續。
+# - 一個全名的詞對一個輸入的詞時，容許 PR 1 的詞形變化（複數、`_root_splits`／`_same_root`：
+#   `model`／`models`／`modeling`／`modelling`，`_same_word_form`）；黏字規則不用。英式美式拼法
+#   （`optimisation`／`optimization`）詞形規則蓋不到，要在設定檔多登記一個寫法。
+# - 全名開頭的那個詞，前面不能用連字號接著別的詞（`non-structural equation modeling` 不算）。
+# 只有縮寫在清單裡、輸入沒有全名的照樣擋（AI 憑背景知識多寫的縮寫）。
+_NAME_SEPARATOR: Final = re.compile(r"[ -]")
+_LINKING_GAPS: Final = frozenset({" ", "-"})
+# 詞形變化的字根至少 4 個字母（`_root_splits`），所以兩個詞的前 4 個字母不同時只可能是複數的差異。
+_ROOT_PREFIX: Final = 4
+# 找全名開頭的詞時，先用前 3 個字母分組（詞形變化、複數、連在一起的寫法，前 3 個字母都一樣；
+# 前 3 個字母不同的 `ties`／`ty` 這種很短的複數變化不認得，偏保守）。
+_START_PREFIX: Final = 3
+
+
+# 快取有上限：輸入的英文詞是外來資料，詞數沒有上限。
+@lru_cache(maxsize=4096)
+def _form_roots(word: str) -> Mapping[str, frozenset[str]]:
+    """`word`（小寫）的所有（字根 → 字尾）拆法，複數先照 `_variants` 去掉。"""
+    roots: dict[str, set[str]] = {}
+    for variant in _variants(word):
+        for root, suffix in _root_splits(variant):
+            roots.setdefault(root, set()).add(suffix)
+    return {root: frozenset(suffixes) for root, suffixes in roots.items()}
+
+
+def _same_word_form(first: str, second: str) -> bool:
+    """兩個小寫英文詞算同一個詞：一樣、複數差異（`_variants`），或詞形變化（`_same_root`）。規則和
+    `ExtendedVocabulary.knows_word` 的前兩種一樣（不含黏字）。"""
+    if first == second:
+        return True
+    if _variants(first) & _variants(second):
+        return True
+    if first[:_ROOT_PREFIX] != second[:_ROOT_PREFIX]:
+        return False
+    theirs = _form_roots(second)
+    return any(
+        _same_root(root, suffix, other)
+        for root, suffixes in _form_roots(first).items()
+        for suffix in suffixes
+        for other in theirs.get(root, ())
+    )
+
+
+def _letters_aligned(
+    words: list[str], linked: list[bool], name: tuple[str, ...], part: int, index: int
+) -> tuple[int, int] | None:
+    """從全名的第 `part` 個詞、輸入的第 `index` 個詞的開頭，兩邊逐一比對字母（詞與詞之間的空白、
+    連字號、沒有分隔都一樣）；第一次兩邊同時走到詞尾時回（全名下一個詞, 輸入下一個詞），字母對不上、
+    輸入的詞斷開（`linked` 是 False）或全名先結束是 None。每個字母只看一次。"""
+    name_offset = word_offset = 0
+    while True:
+        left, right = name[part], words[index]
+        size = min(len(left) - name_offset, len(right) - word_offset)
+        if left[name_offset : name_offset + size] != right[word_offset : word_offset + size]:
+            return None
+        name_offset += size
+        word_offset += size
+        name_done, word_done = name_offset == len(left), word_offset == len(right)
+        if name_done and word_done:
+            return part + 1, index + 1
+        if name_done:
+            part, name_offset = part + 1, 0
+            if part == len(name):
+                return None  # 全名結束在輸入的詞中間
+        else:
+            index, word_offset = index + 1, 0
+            if index == len(words) or not linked[index]:
+                return None
+
+
+def _phrase_at(words: list[str], linked: list[bool], start: int, name: tuple[str, ...]) -> bool:
+    """全名 `name`（小寫的詞）從輸入的第 `start` 個詞開始連續出現（規則見 `_NAME_SEPARATOR` 上面的
+    註解）。狀態是（全名第幾個詞, 輸入第幾個詞），每個狀態只走一次。"""
+    pending = [(0, start)]
+    seen: set[tuple[int, int]] = set()
+    while pending:
+        state = pending.pop()
+        if state in seen:
+            continue
+        seen.add(state)
+        part, index = state
+        if part == len(name):
+            return True
+        if index == len(words) or (index > start and not linked[index]):
+            continue
+        if _same_word_form(name[part], words[index]):
+            pending.append((part + 1, index + 1))
+        aligned = _letters_aligned(words, linked, name, part, index)
+        if aligned is not None:
+            pending.append(aligned)
+    return False
+
+
+def _allowed_acronyms(text: str, acronyms: Mapping[str, Sequence[str]]) -> frozenset[str]:
+    """`acronyms`（縮寫 → 全名的寫法）裡，輸入（檢查用副本）出現了某一個全名的縮寫。輸入的每個
+    英文詞照開頭 3 個字母分組，每個全名只從開頭的詞對得上的位置試，線性時間。"""
+    if not acronyms:
+        return frozenset()
+    words: list[str] = []
+    linked: list[bool] = []
+    starts: dict[str, list[int]] = {}
+    previous_end = 0
+    for match in ENGLISH_WORD.finditer(text):
+        gap = text[previous_end : match.start()]
+        word = match.group(0).lower()
+        if not words or gap != "-":
+            starts.setdefault(word, []).append(len(words))
+        linked.append(bool(words) and gap in _LINKING_GAPS)
+        words.append(word)
+        previous_end = match.end()
+    by_prefix: dict[str, list[str]] = {}
+    for word in starts:
+        by_prefix.setdefault(word[:_START_PREFIX], []).append(word)
+    found: set[str] = set()
+    for acronym, names in acronyms.items():
+        for full_name in names:
+            name = tuple(part for part in _NAME_SEPARATOR.split(full_name.lower()) if part)
+            first = name[0]
+            if any(
+                _phrase_at(words, linked, start, name)
+                for word in by_prefix.get(first[:_START_PREFIX], ())
+                if _same_word_form(first, word) or word.startswith(first) or first.startswith(word)
+                for start in starts[word]
+            ):
+                found.add(acronym)
+                break
+    return frozenset(found)
+
+
 def _thousands_follows(prepared: str, wholes: list[_WholeNumber], index: int) -> bool:
     """`wholes[index]` 後面接著「千分位的分隔＋沒有正負號的完整數字」（自己沒有量詞、百分比）。"""
     if index + 1 >= len(wholes):
@@ -1038,6 +1179,8 @@ class ExtendedVocabulary:
     - 字母開頭的英數詞（`B2B`、`EC2`）：整個當成一個詞比對（`number_text`、`knows_alnum`）；數字
       開頭的（`3D`、`2x2`）照原本的方式讀數字。輸出的 `Q` 替換只能把完整數字整個換掉。
     - 英文詞：詞形變化、黏字（否定字首＋輸出詞剛好是整個詞時不算）、`vs`（`knows_word`）。
+    - 通用縮寫的允許清單（`acronyms`）：清單裡、而且輸入有它登記的全名的縮寫
+      （`_allowed_acronyms`），輸出照登記的大小寫寫就認得（`knows_word`、`knows_alnum`）。沒給清單時是空的。
     """
 
     base: InputVocabulary
@@ -1047,10 +1190,13 @@ class ExtendedVocabulary:
     alnum_tokens: frozenset[str]
     roots: Mapping[str, frozenset[str]]
     letters: str
+    acronyms: frozenset[str] = frozenset()
 
     @classmethod
-    def build(cls, text: str) -> ExtendedVocabulary:
-        """`text` 是檢查用副本。"""
+    def build(
+        cls, text: str, acronyms: Mapping[str, Sequence[str]] | None = None
+    ) -> ExtendedVocabulary:
+        """`text` 是檢查用副本；`acronyms` 是允許清單（縮寫 → 全名的寫法），沒給就沒有。"""
         base = InputVocabulary.build(text)
         roots: dict[str, set[str]] = {}
         for word in base.words:
@@ -1065,6 +1211,7 @@ class ExtendedVocabulary:
             alnum_tokens=_alnum_tokens(text),
             roots={root: frozenset(suffixes) for root, suffixes in roots.items()},
             letters=" ".join(sorted({word.lower() for word in ENGLISH_WORD.findall(text)})),
+            acronyms=_allowed_acronyms(text, acronyms or {}),
         )
 
     def knows_number(self, number: Number) -> bool:
@@ -1074,9 +1221,9 @@ class ExtendedVocabulary:
         return number in self.numbers or (value > 0 and (-value, percent) in self.numbers)
 
     def knows_alnum(self, token: str) -> bool:
-        """輸入有同一個英數詞（不分大小寫；輸入用一個空白或連字號隔開的也算）。PR 2 的允許清單
-        （`peer-to-peer` → `P2P`）接在這裡。"""
-        return token.lower() in self.alnum_tokens
+        """輸入有同一個英數詞（不分大小寫；輸入用一個空白或連字號隔開的也算），或是允許清單裡、
+        輸入有它全名的縮寫（照登記的大小寫：`peer-to-peer` → `P2P`）。"""
+        return token.lower() in self.alnum_tokens or token in self.acronyms
 
     def number_text(self, text: str) -> tuple[str, str | None]:
         """輸出（檢查用副本）裡要拿去和輸入數字比對的文字 →（文字, 第一個輸入沒有的英數詞）。
@@ -1128,8 +1275,9 @@ class ExtendedVocabulary:
         return _with_q(text, spans), unknown
 
     def knows_word(self, word: str) -> bool:
-        """`InputVocabulary.knows_word`，加上 `vs`、詞形變化（`_same_root`）、黏字（`_glued`）。"""
-        if self.base.knows_word(word):
+        """`InputVocabulary.knows_word`，加上 `vs`、詞形變化（`_same_root`）、黏字（`_glued`）、
+        允許清單裡輸入有全名的縮寫（照登記的大小寫）。"""
+        if self.base.knows_word(word) or word in self.acronyms:
             return True
         lowered = word.lower()
         if lowered in _ALWAYS_KNOWN_WORDS:

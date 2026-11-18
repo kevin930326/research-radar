@@ -26,7 +26,11 @@ from radar.domain.llm_batches import LlmBatchConfig
 from radar.domain.pricing import ModelsConfig
 from radar.domain.settings import MigrationSettings, Settings, heartbeat_url_field
 from radar.domain.taxonomy import Taxonomy, taxonomy_registry_problems
-from radar.domain.validators.zh_summary import ZhSummaryRules
+from radar.domain.validators.zh_summary import (
+    ZhSummaryAcronyms,
+    ZhSummaryRules,
+    ZhSummaryThresholds,
+)
 
 type ProcessKind = Literal["api", "worker", "cli"]
 
@@ -171,6 +175,9 @@ MODELS_FILE = "models.yaml"
 BUDGET_FILE = "budget.yaml"
 # 中文重點的驗證門檻（PRD FR-14、ADR-0032）：跑 `zh_summary` 的工作讀（`load_zh_summary_rules`）。
 ZH_SUMMARY_FILE = "zh_summary.yaml"
+# 中文重點的通用縮寫允許清單（ADR-0032 的 2026-11-18 更新）：`load_zh_summary_rules` 和上一個檔
+# 一起讀。
+ZH_SUMMARY_ACRONYMS_FILE = "zh_summary_acronyms.yaml"
 # 主題與方法的分類表（PRD FR-15、FR-36、ADR-0033）：跑 `classify` 的工作讀（`load_taxonomy`）。
 TAXONOMY_FILE = "taxonomy.yaml"
 # 研究情境的值清單（PRD FR-3、ADR-0034）：跑 `extract_model` 的工作讀（`load_context_values`）。
@@ -272,19 +279,24 @@ def load_budget_config(environ: Mapping[str, str] | None = None) -> BudgetConfig
 
 
 def load_zh_summary_rules(environ: Mapping[str, str] | None = None) -> ZhSummaryRules:
-    """讀 `RADAR_CONFIG_DIR` 下的 `zh_summary.yaml`（中文重點的驗證門檻）並驗證。
+    """讀 `RADAR_CONFIG_DIR` 下的 `zh_summary.yaml`（中文重點的驗證門檻）與
+    `zh_summary_acronyms.yaml`（通用縮寫的允許清單）並驗證，合成一個 `ZhSummaryRules`。
 
-    讀法與錯誤格式和 `load_domain_config` 相同（「檔名：欄位路徑：原因」）。
+    讀法與錯誤格式和 `load_domain_config` 相同（「檔名：欄位路徑：原因」），兩個檔的問題一起回報。
+    `zh_summary.yaml` 只收三個門檻鍵（允許清單不能寫在這裡）。
 
     Raises:
-        ConfigError: 缺檔、不是合法 YAML、鍵寫兩次、缺鍵或多鍵、值不是整數（含浮點數、布林）、
-            0 或負數、門檻超出範圍。
+        ConfigError: 任一個檔缺檔、不是合法 YAML、鍵寫兩次、缺鍵或多鍵；門檻不是整數（含浮點數、
+            布林）、0 或負數、超出範圍；允許清單的 `version` 不是正整數、縮寫或全名寫法不對、
+            縮寫重複（不分大小寫）、同一筆的全名重複或是空的。
     """
+    directory = config_dir(environ)
     problems: list[str] = []
-    rules = _load_yaml_model(config_dir(environ), ZH_SUMMARY_FILE, ZhSummaryRules, problems)
-    if problems or rules is None:
+    thresholds = _load_yaml_model(directory, ZH_SUMMARY_FILE, ZhSummaryThresholds, problems)
+    acronyms = _load_yaml_model(directory, ZH_SUMMARY_ACRONYMS_FILE, ZhSummaryAcronyms, problems)
+    if problems or thresholds is None or acronyms is None:
         raise ConfigError(problems)
-    return rules
+    return ZhSummaryRules.model_validate({**thresholds.model_dump(), "acronyms": acronyms.acronyms})
 
 
 def load_taxonomy(environ: Mapping[str, str] | None = None) -> Taxonomy:

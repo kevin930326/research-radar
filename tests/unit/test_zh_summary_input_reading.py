@@ -391,7 +391,7 @@ def test_ordinary_number_writings_are_read_as_before(abstract: str, method: str)
         # 編造的數字不能藏在英數詞裡。
         ("We sampled N = 120 users.", "抽樣 N120"),
         ("We sampled 120 users.", "抽樣 N120"),
-        # 這個 PR 不處理展開寫法（留給 PR 2 的允許清單）。
+        # 展開寫法：這裡的 RULES 沒有允許清單，照樣擋（有清單時見 test_zh_summary_acronyms.py）。
         ("We study peer-to-peer lending in two cities.", "研究 P2P 借貸"),
         ("We study business-to-business sales in two regions.", "研究 B2B 銷售"),
         ("Hypothesis 2b was supported.", "H2b 成立"),

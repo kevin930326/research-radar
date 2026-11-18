@@ -5,15 +5,23 @@ from pathlib import Path
 
 import pytest
 
-from radar.config import ZH_SUMMARY_FILE, ConfigError, load_zh_summary_rules
+from radar.config import (
+    ZH_SUMMARY_ACRONYMS_FILE,
+    ZH_SUMMARY_FILE,
+    ConfigError,
+    load_zh_summary_rules,
+)
 from radar.domain.validators.zh_summary import ZhSummaryRules
 from tests.llm_support import ROOT
 
 REAL = (ROOT / "config" / ZH_SUMMARY_FILE).read_text(encoding="utf-8")
+# PR 2：`load_zh_summary_rules` 也讀允許清單；這裡的測試只改門檻檔，允許清單用真的那一份。
+REAL_ACRONYMS = (ROOT / "config" / ZH_SUMMARY_ACRONYMS_FILE).read_text(encoding="utf-8")
 
 
 def _load(tmp_path: Path, text: str) -> ZhSummaryRules:
     (tmp_path / ZH_SUMMARY_FILE).write_text(text, encoding="utf-8")
+    (tmp_path / ZH_SUMMARY_ACRONYMS_FILE).write_text(REAL_ACRONYMS, encoding="utf-8")
     return load_zh_summary_rules({"RADAR_CONFIG_DIR": str(tmp_path)})
 
 
@@ -30,8 +38,12 @@ def _problems(tmp_path: Path, text: str) -> list[str]:
 def test_real_config_has_the_prd_defaults() -> None:
     rules = load_zh_summary_rules({"RADAR_CONFIG_DIR": str(ROOT / "config")})
 
+    # PR 2：真的設定另外帶允許清單（`tests/unit/test_zh_summary_acronyms.py` 核對內容）。
     assert rules == ZhSummaryRules(
-        max_chars_per_field=150, translation_min_abstract_sentences=7, min_cjk_percent=50
+        max_chars_per_field=150,
+        translation_min_abstract_sentences=7,
+        min_cjk_percent=50,
+        acronyms=rules.acronyms,
     )
 
 
