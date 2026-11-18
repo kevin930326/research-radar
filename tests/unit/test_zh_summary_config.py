@@ -171,7 +171,8 @@ def test_the_real_list_is_within_the_limits() -> None:
         [(f"Z{i}", [f"alpha name{_tag(i)}"]) for i in range(MAX_ACRONYMS)],
         [("EEG", ["electroencephalography", "electroencephalogram"])],
         [("ZZ", ["abcdefghij"])],
-        [("ZZ", ["a b"])],
+        # 兩個詞、拿掉空白後剛好 6 個字母（第二輪修正，審查 L4：原本這一組是 `a b`）。
+        [("ZZ", ["abc def"])],
         # 同一筆裡兩個不同的全名可以（SDT 兩種意思）。
         [("SDT", ["self determination theory", "signal detection theory"])],
     ],
@@ -218,6 +219,23 @@ def test_lists_at_the_limits_load(tmp_path: Path, entries: list[tuple[str, list[
         (
             [("ZZ", ["abcdefghi"])],
             "acronyms.0.full_names：full_names 的每一項至少要兩個詞；只有一個詞時至少要 10 個字母",
+        ),
+        # 第二輪修正（審查 L4）：拿掉空白與連字號後不到 6 個字母。
+        (
+            [("ZZ", ["a b"])],
+            "acronyms.0.full_names：full_names 的每一項拿掉空白與連字號後至少要 6 個字母",
+        ),
+        (
+            [("ZZ", ["a-b"])],
+            "acronyms.0.full_names：full_names 的每一項拿掉空白與連字號後至少要 6 個字母",
+        ),
+        (
+            [("ZZ", ["ab cd"])],
+            "acronyms.0.full_names：full_names 的每一項拿掉空白與連字號後至少要 6 個字母",
+        ),
+        (
+            [("ZZ", ["ab-c de"])],
+            "acronyms.0.full_names：full_names 的每一項拿掉空白與連字號後至少要 6 個字母",
         ),
         (
             [

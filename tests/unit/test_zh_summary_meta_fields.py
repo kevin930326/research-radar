@@ -100,6 +100,9 @@ def test_other_fields_are_still_validated() -> None:
         # 單獨的「使用、採用」接研究要素是內容（第一輪修正，審查 A1；和 1b75559 一樣當內容存）。
         "摘要未明確提出理論，採用概念框架",
         "未說明資料來源，使用實證數據",
+        # 修飾語的動詞後面最多一個「的」（第二輪修正，審查 L3；和 1b75559 一樣當內容存）。
+        "未說明採用的的方法",
+        "未說明使用的的方法",
     ],
 )
 def test_real_content_is_kept(value: str) -> None:
@@ -222,9 +225,61 @@ BOUNDARY = [
     ("本研究僅提出概念框架，摘要未說明研究方法", PLACEHOLDER),
     ("摘要未說明，填 null", NULL),
 ]
+# 標點當子句邊界（第二輪修正，Codex Y1）：triage「第一輪修正之後」的 Y1 表。原本拿掉標點才比對，
+# 研究要素又可以直接相連，後面另列的內容被吞進前一句的受詞。「照舊」是 1b75559 的結果。
+Y1_TABLE = [
+    ("摘要未說明資料來源；研究方法：統計方法與實證分析", PLACEHOLDER),
+    ("摘要未說明資料來源。方法：統計方法", PLACEHOLDER),
+    ("摘要未說明資料來源，統計方法與實證分析", PLACEHOLDER),
+    ("摘要未說明資料來源 實證分析", PLACEHOLDER),
+    ("摘要未提及理論。理論框架", PLACEHOLDER),
+    ("摘要未說明樣本數；發現：結果", PLACEHOLDER),
+    ("摘要未說明研究方法、資料來源與樣本數", NULL),
+    # 研究要素之間沒有連接詞也沒有頓號。
+    ("摘要未說明研究方法資料來源", PLACEHOLDER),
+]
+# 自己想的標點與研究要素的邊界組合（預期先照規則寫，「照舊」的再用 1b75559 確認）。
+PUNCTUATION_BOUNDARIES = [
+    # 邊界之後是新的子句或「填 null」：收。
+    ("摘要未說明研究方法，也未提供樣本數。", NULL),
+    ("摘要未說明研究方法；未提及理論", NULL),
+    ("摘要未說明研究方法？也未說明樣本數", NULL),
+    ("摘要未說明研究方法,也未提供樣本數", NULL),
+    ("摘要未說明研究方法，，也未提及理論", NULL),
+    ("（摘要未說明研究方法），（填 null）", NULL),
+    ("摘要未說明研究方法 填 null", NULL),
+    ("摘要未說明研究方法，填null，", NULL),
+    # 頓號（全形、半形）接在研究要素之間：收；結尾的頓號和句尾標點一樣拿掉。
+    ("摘要未說明研究方法、資料來源、樣本數", NULL),
+    ("摘要未說明研究方法､資料來源", NULL),
+    ("摘要未說明研究方法、", NULL),
+    ("摘要未說明研究方法與資料來源。", NULL),
+    # 邊界之後直接接研究要素或別的字：不收。
+    ("摘要未說明研究方法,資料來源", PLACEHOLDER),
+    ("摘要未說明研究方法 與資料來源", PLACEHOLDER),
+    ("摘要未說明研究方法！資料來源", PLACEHOLDER),
+    ("摘要未說明研究方法（資料來源）", PLACEHOLDER),
+    ("摘要未說明研究方法。。資料來源", PLACEHOLDER),
+    ("摘要未說明研究方法 、資料來源", PLACEHOLDER),
+    ("摘要未說明研究方法，填 null，未提及理論", PLACEHOLDER),
+    # 頓號重複、連接詞後面又接頓號、破折號：不收。
+    ("摘要未說明研究方法、、資料來源", PLACEHOLDER),
+    ("摘要未說明研究方法與、資料來源", PLACEHOLDER),
+    ("摘要未說明研究方法－資料來源", PLACEHOLDER),
+    # 欄位中間的「欄位名稱＋冒號」：不收（後兩句冒號後面雖然是說明子句，但「研究方法：」「方法：」
+    # 是欄位名稱，只靠 `_FIELD_LABEL_INSIDE` 擋）。
+    ("摘要未說明研究方法。理論：未提及", PLACEHOLDER),
+    ("摘要未說明研究方法：未提及理論", PLACEHOLDER),
+    ("未說明方法：未提及", CONTENT),
+    # 原本的 `_PLACEHOLDER_ZH`（拿掉標點比對、這次沒動）本來就是 NULL 的，照舊 NULL。
+    ("摘要未說明：研究方法", NULL),
+    ("摘要 未說明研究方法", NULL),
+]
 
 
-@pytest.mark.parametrize(("value", "expected"), TRIAGE_TABLE + BOUNDARY)
+@pytest.mark.parametrize(
+    ("value", "expected"), TRIAGE_TABLE + BOUNDARY + Y1_TABLE + PUNCTUATION_BOUNDARIES
+)
 def test_the_subject_carries_over_to_later_clauses(value: str, expected: object) -> None:
     output = _output(method=value)
     if expected == NULL:
@@ -298,6 +353,19 @@ def test_four_explanation_fields_become_one_valid_empty_result() -> None:
         "文中僅提出概念框架與",
         "也未提出",
         "其所使用的",
+        # 第二輪修正（標點當子句邊界、研究要素之間要有連接詞或頓號、欄位中間的欄位名稱）。
+        "摘要未說明資料來源，",
+        "摘要未說明資料來源、",
+        "、資料",
+        "，、；。 ",
+        "摘要未說明理論，研究方法",
+        "（摘要未說明",
+        "未說明理論與、",
+        "研究方法：",
+        "未說明理論 ",
+        "摘要未說明)(",
+        "!?.;:",
+        " 填",
     ],
 )
 def test_whole_field_explanations_are_checked_in_linear_time(unit: str) -> None:
@@ -326,6 +394,9 @@ def test_a_long_field_of_explanations_is_validated_quickly() -> None:
         # 每個子句都對得上、主詞換來換去：一個子句一個子句讀到最後。
         "摘要未說明理論，本研究未說明方法，",
         "文中未提供資料，僅提出概念框架，",
+        # 第二輪修正：標點交錯、頓號並列。
+        "摘要未說明理論與研究方法、資料來源；",
+        "摘要未說明理論）（未提及樣本數 ",
     ],
 )
 def test_long_fields_with_many_clauses_are_null_quickly(unit: str) -> None:

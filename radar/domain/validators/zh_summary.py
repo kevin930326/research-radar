@@ -90,6 +90,9 @@ MAX_FULL_NAMES_PER_ACRONYM: Final = 12
 MAX_ACRONYMS: Final = 200
 # 只有一個詞的全名至少幾個字母（`electroencephalogram` 是 20 個）。
 MIN_SINGLE_WORD_LETTERS: Final = 10
+# 每個全名拿掉空白與連字號後至少幾個字母（第二輪修正，審查 L4：`a b` 這種太短的全名幾乎哪裡都
+# 對得上）。現有最短的是 P2P 的 `peer to peer`，10 個字母。
+MIN_FULL_NAME_LETTERS: Final = 6
 
 
 def full_name_key(name: str) -> str:
@@ -133,6 +136,10 @@ class AcronymEntry(BaseModel):
                 raise ValueError(
                     "full_names 的每一項至少要兩個詞；只有一個詞時至少要 "
                     f"{MIN_SINGLE_WORD_LETTERS} 個字母"
+                )
+            if len(full_name_key(name)) < MIN_FULL_NAME_LETTERS:
+                raise ValueError(
+                    f"full_names 的每一項拿掉空白與連字號後至少要 {MIN_FULL_NAME_LETTERS} 個字母"
                 )
         if len({full_name_key(name) for name in value}) != len(value):
             raise ValueError(
@@ -230,18 +237,30 @@ _PLACEHOLDER_EN: Final = re.compile(
 )
 
 
-# 欄位開頭的「欄位名稱＋冒號」（「理論：未提及」），整欄比對前先拿掉。
-_FIELD_LABEL: Final = re.compile(
-    r"^(?:研究問題|問題|研究方法|方法|理論框架|理論基礎|理論|研究發現|發現|研究結果|結果)\s?:"
+# 欄位名稱（「研究方法」「理論」…）。
+_FIELD_NAMES: Final = (
+    r"(?:研究問題|問題|研究方法|方法|理論框架|理論基礎|理論|研究發現|發現|研究結果|結果)"
 )
+# 欄位開頭的「欄位名稱＋冒號」（「理論：未提及」），整欄比對前先拿掉。
+_FIELD_LABEL: Final = re.compile(rf"^{_FIELD_NAMES}\s?:")
+# 欄位中間的「欄位名稱＋冒號」（「摘要未說明資料來源；研究方法：統計方法」）：有就不算整欄說明
+# （第二輪修正，Codex Y1）。
+_FIELD_LABEL_INSIDE: Final = re.compile(rf"{_FIELD_NAMES}\s?:")
 
-# 整欄說明（ADR-0032 的「通用縮寫的允許清單與整欄說明存成空值」更新）：整欄（拿掉空白與標點之後）
-# 只由一句或幾句「講摘要沒寫什麼」的子句組成，每個字都來自下面這些封閉的詞表；任何詞表外的字出現
-# 就不算（所以「僅提及『禮物經濟』的概念」「但採用了深度訪談」「受訪者未提及隱私疑慮」不算）。
+# 整欄說明（ADR-0032 的「通用縮寫的允許清單與整欄說明存成空值」更新）：整欄（拿掉開頭的「欄位
+# 名稱＋冒號」、頭尾的空白與標點之後；中間的標點保留）只由一句或幾句「講摘要沒寫什麼」的子句
+# 組成，每個字都來自下面這些封閉的詞表；任何詞表外的字或符號出現就不算（所以「僅提及『禮物經濟』
+# 的概念」「但採用了深度訪談」「受訪者未提及隱私疑慮」不算）。
+# - 標點當邊界（第二輪修正，Codex Y1：原本拿掉標點才比對，研究要素又可以不帶連接詞連續出現，
+#   「摘要未說明資料來源；研究方法：統計方法與實證分析」後半被吞進前一句的受詞）：逗號、句號、
+#   分號、冒號、驚嘆號、問號、括號、空白（全形、半形）是子句邊界（`_META_BOUNDARY`），邊界之後
+#   一定要開始一個新的子句或結尾的「填 null」；研究要素之間只能用連接詞或頓號「、」，兩個研究
+#   要素直接相連不收；欄位中間出現「欄位名稱＋冒號」（`_FIELD_LABEL_INSIDE`）就不算。
 # - 否定子句（`_META_NEGATIVE_CLAUSE`）：主詞＋地點（在／於＋摘要…＋中，在否定詞前後都可以）＋
 #   否定（未、沒有、沒，前面可接並、均、皆、也、亦、尚）＋程度（明確、具體、清楚、詳細、特別、
-#   直接，最多兩個）＋後設動詞（一定要有）＋研究要素（可省略；可用與、或、及、和、以及…並列，前面
-#   可接其、任何、相關、具體、所使用的…；「使用、採用」一定要帶「所」或「的」，第一輪修正）。
+#   直接，最多兩個）＋後設動詞（一定要有）＋研究要素（可省略；兩個以上時一定要用與、或、及、和、
+#   以及…或頓號並列，第二輪修正；前面可接其、任何、相關、具體、所使用的…；「使用、採用」一定要帶
+#   「所」或「的」，第一輪修正；動詞後面最多一個「的」，第二輪修正）。
 # - 「僅／只＋提出、提及…＋研究要素」子句（`_META_ONLY_CLAUSE`，「摘要僅提出解釋框架」）：只能接
 #   研究要素清單裡的名詞。
 # - 主詞沿用（第一輪修正，Codex X1、審查 A2、A7）：每一欄從「還不知道主詞」開始。子句裡明寫了
@@ -252,12 +271,14 @@ _FIELD_LABEL: Final = re.compile(
 #     收；「提出、提供、報告、揭露、涉及、呈現」只有摘要類才收——「未提出假設」「作者未提出假設」
 #     「在本文中未提出假設」可能是在講研究本身（探索性研究、概念性論文），照修改前的規則處理。
 #   - 「僅／只…」子句只有摘要類才收（開頭沒寫主詞的「僅提出概念框架」、接在論文類後面的都不收）。
-# - 至少要有一個否定子句；子句之間可以接而、但、且、卻；最後可以接「填 null」「故填 null」。
+# - 至少要有一個否定子句；子句之間可以直接相連或隔一串子句邊界，新的子句開頭可以接而、但、且、
+#   卻；最後可以接「填 null」「故填 null」（「填」與「null」之間可以有一個空白）。
 # 只比對整欄：前面有內容、後面多一句說明的（「以問卷調查分析（摘要未說明樣本數）」）不符合，照樣由
 # `_EMBEDDED_PLACEHOLDER` 拒收。
 # 做法（`_whole_field_meta`）：從頭一個子句一個子句往後讀（小的狀態機：狀態是目前的主詞類別），每個
-# 子句用固定開頭的正規式在目前位置比一次。每一段都用佔有式量詞或在固定位置分岔（不回頭重試），詞表裡
-# 有前綴關係的詞長的排前面；子句比不上時只會在動詞之前的固定幾個字內失敗，所以整欄是線性時間。
+# 子句用固定開頭的正規式在目前位置比一次（子句前面有邊界就先跳過那串邊界）。每一段都用佔有式量詞或
+# 在固定位置分岔（不回頭重試），詞表裡有前綴關係的詞長的排前面；子句比不上時只會在動詞之前的固定
+# 幾個字內失敗，所以整欄是線性時間。
 _META_TEXT_WORDS: Final = r"(?:摘要|原文|文中)"
 _META_PAPER_WORDS: Final = r"(?:本文|本研究|研究|作者|文章|論文)"
 _META_PAPER_PLACES: Final = r"(?:本文|文章|論文)"
@@ -277,13 +298,15 @@ _META_ELEMENT: Final = (
     r"|理論|解釋框架|概念框架|資料來源|資料|數據來源|數據|樣本數|樣本大小|樣本|變數|假設|方法論"
     r"|方法|發現|結果)"
 )
-# 「使用、採用」一定要帶「所」或「的」（第一輪修正，審查 A1：單獨的「，採用實證分析」是內容）。
+# 「使用、採用」一定要帶「所」或「的」（第一輪修正，審查 A1：單獨的「，採用實證分析」是內容）；
+# 動詞後面最多一個「的」（第二輪修正，審查 L3：「採用的的方法」不收）。
 _META_MODIFIER: Final = (
-    r"其?+(?:任何|相關|具體|明確|詳細|特定)?+的?+(?:所使用|所採用|所用|使用的|採用的)?+的?+"
+    r"其?+(?:任何|相關|具體|明確|詳細|特定)?+的?+(?:所使用|所採用|所用|(?:使用|採用)(?=的))?+的?+"
 )
+# 研究要素之間一定要有連接詞或頓號（第二輪修正，Codex Y1）。
 _META_ITEMS: Final = (
     rf"{_META_MODIFIER}{_META_ELEMENT}"
-    rf"(?:(?:以及|或是|與|或|及|和|跟|暨)?+{_META_MODIFIER}{_META_ELEMENT})*+"
+    rf"(?:(?:以及|或是|與|或|及|和|跟|暨|、){_META_MODIFIER}{_META_ELEMENT})*+"
 )
 _META_CLAUSE_JOIN: Final = r"(?:但是|而|但|且|卻)?+"
 
@@ -304,7 +327,12 @@ _META_ONLY_CLAUSE: Final = re.compile(
     rf"{_META_CLAUSE_JOIN}(?:(?P<text_subject>{_META_TEXT_WORDS}){_META_IN})?+{_META_ONLY}了?+"
     rf"{_META_ITEMS}"
 )
-_META_TAIL: Final = re.compile(r"(?:故|因此|所以|因而)?+(?:填入|填寫|填)(?:null|none|空值)")
+_META_TAIL: Final = re.compile(r"(?:故|因此|所以|因而)?+(?:填入|填寫|填) ?(?:null|none|空值)")
+# 子句邊界（第二輪修正）：逗號、句號、分號、冒號、驚嘆號、問號、括號、空白（全形的在檢查用副本裡
+# 已經是半形；句號另收「。」）。頓號不是子句邊界，只能接在研究要素之間。
+_META_BOUNDARY: Final = re.compile(r"[,.。;:!?() ]++")
+# 頭尾的空白與標點（整欄外層的括號、句尾標點）。
+_META_EDGE: Final = re.compile(r"[\W_]")
 _TEXT_GROUPS: Final = ("text_subject", "text_before", "text_after")
 _PAPER_GROUPS: Final = ("paper_subject", "paper_before", "paper_after")
 
@@ -319,13 +347,30 @@ def _subject_kind(match: re.Match[str], current: str | None) -> str | None:
     return current
 
 
-def _whole_field_meta(key: str) -> bool:
-    """`key`（拿掉空白與標點、小寫）整欄只由說明子句組成（規則見上面的註解）。"""
+def _meta_text(copy: str) -> str:
+    """整欄說明比對用的文字：`copy`（已拿掉開頭欄位名稱的檢查用副本）去掉頭尾的空白與標點、
+    不分大小寫；中間的標點保留。用迴圈找頭尾，線性時間。"""
+    start, end = 0, len(copy)
+    while start < end and _META_EDGE.match(copy[start]):
+        start += 1
+    while end > start and _META_EDGE.match(copy[end - 1]):
+        end -= 1
+    return copy[start:end].casefold()
+
+
+def _whole_field_meta(text: str) -> bool:
+    """`text`（`_meta_text` 的結果）整欄只由說明子句組成（規則見上面的註解）。子句與子句之間可以
+    直接相連或隔一串邊界；邊界之後一定要是新的子句或結尾的「填 null」。"""
+    if _FIELD_LABEL_INSIDE.search(text) is not None:
+        return False
     position = 0
     kind: str | None = None
     negatives = 0
-    while position < len(key):
-        negative = _META_NEGATIVE_CLAUSE.match(key, position)
+    while position < len(text):
+        boundary = _META_BOUNDARY.match(text, position)
+        if boundary is not None:
+            position = boundary.end()
+        negative = _META_NEGATIVE_CLAUSE.match(text, position)
         if negative is not None:
             kind = _subject_kind(negative, kind)
             if negative.group("state") is None and kind != "text":
@@ -333,29 +378,31 @@ def _whole_field_meta(key: str) -> bool:
             negatives += 1
             position = negative.end()
             continue
-        only = _META_ONLY_CLAUSE.match(key, position)
+        only = _META_ONLY_CLAUSE.match(text, position)
         if only is not None:
             kind = _subject_kind(only, kind)
             if kind != "text":
                 return False
             position = only.end()
             continue
-        return negatives > 0 and _META_TAIL.fullmatch(key, position) is not None
+        return negatives > 0 and _META_TAIL.fullmatch(text, position) is not None
     return negatives > 0
 
 
 def is_placeholder(text: str) -> bool:
     """整欄只是「摘要未提及／未提及／無／N/A」這類字，或整欄只是講「摘要沒寫什麼」的說明句
-    （`_whole_field_meta`，例如「摘要未明確說明具體研究方法與資料來源」）；都在檢查用副本上
-    拿掉空白與標點、不分大小寫後比對。拿掉之後什麼都不剩（例如只有「—」或零寬空白）也算。"""
+    （`_whole_field_meta`，例如「摘要未明確說明具體研究方法與資料來源」）。前兩種在檢查用副本上
+    拿掉空白與標點、不分大小寫後比對，拿掉之後什麼都不剩（例如只有「—」或零寬空白）也算；整欄說明
+    保留中間的標點當子句邊界比對（第二輪修正）。全形逗號先換成半形逗號再做檢查用副本，才不會被
+    當成頓號。"""
     copy = _FIELD_LABEL.sub("", _check_copy(text), count=1)
     key = _NOT_WORD.sub("", copy).casefold()
-    return (
-        not key
-        or _PLACEHOLDER_ZH.fullmatch(key) is not None
-        or _PLACEHOLDER_EN.fullmatch(key) is not None
-        or _whole_field_meta(key)
-    )
+    if not key or _PLACEHOLDER_ZH.fullmatch(key) is not None:
+        return True
+    if _PLACEHOLDER_EN.fullmatch(key) is not None:
+        return True
+    meta_copy = _FIELD_LABEL.sub("", _check_copy(text.replace("，", ",")), count=1)
+    return _whole_field_meta(_meta_text(meta_copy))
 
 
 def _normalize_field(value: str | None) -> str | None:

@@ -200,6 +200,25 @@ def test_only_the_last_word_of_a_full_name_may_change_form(
         assert _rejected(_uses(acronym), abstract) is expected
 
 
+@pytest.mark.parametrize(
+    ("abstract", "acronym"),
+    [
+        # 第二輪修正（審查 L1）：全名第一個詞被切開、第一段只有 1～2 個字母時也對得上（128ed23 擋；
+        # 字母樹不要求開頭的詞前 3 個字母一樣）。輸入仍然要有全名的每一個字母。
+        ("We use bi-directional long short-term memory.", "BiLSTM"),
+        ("We use bi directional long short term memory.", "BiLSTM"),
+        ("We adopt the re-source based view.", "RBV"),
+    ],
+)
+def test_a_split_first_word_with_a_short_first_piece_allows_the_acronym(
+    abstract: str, acronym: str
+) -> None:
+    allowed = ExtendedVocabulary.build(check_copy(abstract), REAL_RULES.acronym_full_names())
+
+    assert allowed.acronyms == {acronym}
+    assert _method(_uses(acronym), abstract) == _uses(acronym)
+
+
 def test_the_seam_between_title_and_abstract_breaks_a_full_name() -> None:
     # 標題與摘要是兩份檢查用副本、用換行接起來，接縫不算連續（摘要裡的換行算）。
     output = _output(research_question=None, theory=None, findings=None, method=_uses("DEMATEL"))
@@ -432,7 +451,7 @@ def test_duplicate_key_is_rejected(tmp_path: Path) -> None:
             "acronyms.0.acronym",
         ),
         (
-            "version: 1\nacronyms:\n  - acronym: SEM\n    full_names: [a b]\n    note: x\n",
+            "version: 1\nacronyms:\n  - acronym: SEM\n    full_names: [alpha beta]\n    note: x\n",
             "acronyms.0.note",
         ),
     ],
@@ -450,7 +469,7 @@ def test_missing_extra_or_mistyped_keys_are_rejected(
     "acronym", ["123", '""', "S", "P-2", "2B", "S E M", "SEM.", "true", "NO", "SÉM"]
 )
 def test_bad_acronyms_are_rejected(tmp_path: Path, acronym: str) -> None:
-    text = f"version: 1\nacronyms:\n  - acronym: {acronym}\n    full_names: [a b]\n"
+    text = f"version: 1\nacronyms:\n  - acronym: {acronym}\n    full_names: [alpha beta]\n"
 
     problems = _problems(tmp_path, text)
 

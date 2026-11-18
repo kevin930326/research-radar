@@ -1267,6 +1267,16 @@ CARET_AND_EXPONENT_HEAD_RUNS = [
     ("The estimate was 1.2E-1 200 978.", "估計值為 200978"),
     ("The estimate was 1e-1 200 978.", "估計值為 200978"),
     ("The estimate was 2 x 10-1 200 978.", "估計值為 200978"),
+    # 第二輪修正（審查 M1）：第一段在科學記號裡、前面又是連字號（不獨立）時也不重新開始。
+    ("The estimate was 1.2 ⋅ 10-1 200 978.", "估計值為 200978"),
+    ("The estimate was 1.2 ∙ 10-1 200 978.", "估計值為 200978"),
+    ("The estimate was 1.2 ✕ 10-1 200 978.", "估計值為 200978"),
+    ("The estimate was K1.2 × 10-1 200 978.", "估計值為 200978"),
+    ("The estimate was 1.2 E-1 200 978.", "估計值為 200978"),
+    ("The estimate was 1.2 E+1 200 978.", "估計值為 200978"),
+    ("The estimate was 7.7 e-2 200 978.", "估計值為 200978"),
+    ("The estimate was 1.2 ⋅ 10-12 345 000.", "估計值為 345000"),
+    ("The estimate was 1.2 E-1 345 000.", "估計值為 345000"),
 ]
 
 
@@ -1293,6 +1303,9 @@ def test_fragments_after_a_caret_or_exponent_are_rejected(abstract: str, method:
         "5% 000 ",
         "1.5 000 ",
         "12345 000 ",
+        # 第二輪修正（審查 M1）：科學記號裡的第一段。
+        "1.2 ⋅ 10-1 000 ",
+        "1.2 E-1 000 ",
     ],
 )
 def test_space_thousands_head_rules_run_in_linear_time(unit: str) -> None:

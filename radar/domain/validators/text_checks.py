@@ -1117,7 +1117,11 @@ _FOUR_OR_MORE_DIGITS: Final = re.compile(r"[0-9]{4,}")
 
 def _restarts_after(prepared: str, head: _WholeNumber) -> bool:
     """不合格的第一段後面，可以從下一個數字重新開始：第一段是 4 位以上、沒有指數、量詞、百分比的
-    整數，或黏在詞上（`_standalone` 不成立）。"""
+    整數，或黏在詞上（`_standalone` 不成立）。第一段在科學記號裡（`in_scientific`）一律不重新開始，
+    整串不用（第二輪修正，審查 M1：`1.2 ⋅ 10-1 200 978`、`1.2 E-1 200 978` 的 `1` 前面是連字號，
+    不獨立，原本會從 `200 978` 重新開始）。"""
+    if head.in_scientific:
+        return False
     if not _standalone(prepared, head):
         return True
     return (
@@ -1167,8 +1171,9 @@ def _space_thousands(text: str, prepared: str, wholes: list[_WholeNumber]) -> se
         head = wholes[index]
         # 第一段要是獨立、1～3 位、沒有指數與量詞、沒有百分比的整數。不是的話：4 位以上的整數或黏在
         # 詞上（`in 2019 300 000`、`COVID-19 300 000`）從下一個數字重新開始；其他（帶指數的
-        # `1.2E-1 200 978`、`1e-1 200 978`，帶量詞、百分比、小數的）後面接著的千分位組整串都不用
-        # （第一輪修正，審查 A4），所以這條只會讓合併的值變少。
+        # `1.2E-1 200 978`、`1e-1 200 978`，帶量詞、百分比、小數的，在科學記號裡的
+        # `1.2 ⋅ 10-1 200 978`）後面接著的千分位組整串都不用（第一輪修正，審查 A4；第二輪修正，
+        # 審查 M1），所以這條只會讓合併的值變少。
         if not (
             not head.exponent
             and not head.scale
