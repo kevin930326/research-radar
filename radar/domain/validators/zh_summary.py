@@ -5,7 +5,7 @@
 **正規化**（`normalize_zh_summary`，`services/ai_results.py` 寫入前也用同一個函式）：每欄 NFC、
 連續空白縮成一個、去頭尾；結果是空的，或整欄只是「摘要未提及／未提及／無／N/A」這類字，或整欄只是
 講「摘要沒寫什麼」的說明句（「摘要未明確說明具體研究方法與資料來源」，封閉詞表組成，
-`_WHOLE_FIELD_META`，2026-11-18），存 NULL。四欄都存 NULL 時是一筆四欄全空的有效結果。
+`_whole_field_meta`，2026-11-18），存 NULL。四欄都存 NULL 時是一筆四欄全空的有效結果。
 
 **拒收規則**（`validate_zh_summary`），依下面的順序檢查，第一個不過的就是原因代碼：
 
@@ -29,7 +29,8 @@
    片段；輸出裡英數詞、月份、年代的數字只能整個換掉，換完的每個完整數字都要是換之前同位置的那一個。
    通用縮寫的允許清單（`config/zh_summary_acronyms.yaml`，`ZhSummaryRules.acronyms`，2026-11-18）：
    輸出寫的縮寫和登記的一模一樣（大小寫也一樣），而且輸入有它登記的某一個全名（不分大小寫、
-   空白／連字號／連在一起不分、容許詞形變化）時認得；只有縮寫在清單裡、輸入沒有全名的照樣擋。
+   空白／連字號／連在一起不分、只有最後一個詞容許詞形變化）時認得；只有縮寫在清單裡、輸入沒有
+   全名的照樣擋。
 
 第 2～7 條都在「檢查用副本」（`_check_copy`）上做：HTML 實體解碼、拿掉零寬等格式字元、NFKC、
 各種文字的十進位數字換成 0～9、破折號類換成 `-`、空白縮成一個。存進資料庫的仍是
@@ -80,11 +81,20 @@ _ACRONYM: Final = re.compile(r"[A-Za-z][A-Za-z0-9]++")
 # 全名：英文詞（只有英文字母），詞與詞之間一個空白或一個連字號。分隔是固定的非字母字元，
 # 每個位置只有一種讀法，線性時間。
 _FULL_NAME: Final = re.compile(r"[A-Za-z]++(?:[ -][A-Za-z]++)*+")
+_FULL_NAME_SEPARATOR: Final = re.compile(r"[ -]")
+# 設定檔的上下限（第一輪修正，Codex X2、審查 A6）：全名比對對輸入長度是線性，耗時另外和清單的大小
+# 成正比，所以清單的大小要有上限；全名太短（一個常見的單字）幾乎每篇摘要都會「剛好有全名」。
+# 現有最長的全名是 MULTIMOORA 的 11 個詞，上限取 12。
+MAX_FULL_NAME_WORDS: Final = 12
+MAX_FULL_NAMES_PER_ACRONYM: Final = 12
+MAX_ACRONYMS: Final = 200
+# 只有一個詞的全名至少幾個字母（`electroencephalogram` 是 20 個）。
+MIN_SINGLE_WORD_LETTERS: Final = 10
 
 
 def full_name_key(name: str) -> str:
     """全名比對用的寫法：小寫、拿掉空白與連字號（`multi-criteria`＝`multi criteria`＝
-    `multicriteria`）。用來找同一筆裡重複的全名。"""
+    `multicriteria`）。用來找重複的全名（同一筆裡、不同筆之間）。"""
     return name.lower().replace(" ", "").replace("-", "")
 
 
@@ -108,11 +118,21 @@ class AcronymEntry(BaseModel):
     @field_validator("full_names")
     @classmethod
     def _check_full_names(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if len(value) > MAX_FULL_NAMES_PER_ACRONYM:
+            raise ValueError(f"full_names 最多 {MAX_FULL_NAMES_PER_ACRONYM} 個寫法")
         for name in value:
             if _FULL_NAME.fullmatch(name) is None:
                 raise ValueError(
                     "full_names 的每一項要是英文詞，詞與詞之間一個空白或一個連字號"
                     "（不能是空的、不能有前後空白、數字或其他符號）"
+                )
+            words = len(_FULL_NAME_SEPARATOR.split(name))
+            if words > MAX_FULL_NAME_WORDS:
+                raise ValueError(f"full_names 的每一項最多 {MAX_FULL_NAME_WORDS} 個詞")
+            if words == 1 and len(name) < MIN_SINGLE_WORD_LETTERS:
+                raise ValueError(
+                    "full_names 的每一項至少要兩個詞；只有一個詞時至少要 "
+                    f"{MIN_SINGLE_WORD_LETTERS} 個字母"
                 )
         if len({full_name_key(name) for name in value}) != len(value):
             raise ValueError(
@@ -122,12 +142,22 @@ class AcronymEntry(BaseModel):
 
 
 def _unique_acronyms(entries: tuple[AcronymEntry, ...]) -> tuple[AcronymEntry, ...]:
+    if len(entries) > MAX_ACRONYMS:
+        raise ValueError(f"acronyms 最多 {MAX_ACRONYMS} 筆")
     seen: set[str] = set()
+    owners: dict[str, str] = {}
     for entry in entries:
         key = entry.acronym.casefold()
         if key in seen:
             raise ValueError(f"acronym {entry.acronym} 寫了兩次（不分大小寫）")
         seen.add(key)
+        for name in entry.full_names:
+            owner = owners.setdefault(full_name_key(name), entry.acronym)
+            if owner != entry.acronym:
+                raise ValueError(
+                    f"{owner} 與 {entry.acronym} 登記了同一個全名（不分大小寫，空白、連字號、"
+                    "連在一起都算同一種寫法）"
+                )
     return entries
 
 
@@ -208,27 +238,38 @@ _FIELD_LABEL: Final = re.compile(
 # 整欄說明（ADR-0032 的「通用縮寫的允許清單與整欄說明存成空值」更新）：整欄（拿掉空白與標點之後）
 # 只由一句或幾句「講摘要沒寫什麼」的子句組成，每個字都來自下面這些封閉的詞表；任何詞表外的字出現
 # 就不算（所以「僅提及『禮物經濟』的概念」「但採用了深度訪談」「受訪者未提及隱私疑慮」不算）。
-# - 否定子句：主詞＋地點（在／於＋摘要…＋中）＋否定（未、沒有、沒，前面可接並、均、皆、也、亦、
-#   尚）＋程度（明確、具體、清楚、詳細、特別、直接，最多兩個）＋後設動詞（一定要有）＋研究要素
-#   （可省略；可用與、或、及、和、以及…並列，前面可接其、任何、相關、具體、所使用的…）。
-#   主詞分兩種（和 `_EMBEDDED_PLACEHOLDER` 的分法一樣）：沒有主詞、或主詞是摘要、原文、文中時，
-#   後設動詞可以是「說明、提及…」也可以是「提出、提供、報告、揭露、涉及、呈現」；主詞是本文、
-#   本研究、研究、作者、文章、論文時只能是「說明、提及、描述、指出…」這種講「寫了什麼」的動詞
-#   ——「作者未提出假設」「本研究未提供實證資料」可能是在講研究本身（探索性研究、概念性論文），
-#   不當成說明。
-# - 「僅／只＋提出、提及…＋研究要素」子句（「摘要僅提出解釋框架」）：只能接研究要素清單裡的名詞；
-#   主詞只能省略或是摘要、原文、文中（「本研究僅提出概念框架」是在講研究本身）。
+# - 否定子句（`_META_NEGATIVE_CLAUSE`）：主詞＋地點（在／於＋摘要…＋中，在否定詞前後都可以）＋
+#   否定（未、沒有、沒，前面可接並、均、皆、也、亦、尚）＋程度（明確、具體、清楚、詳細、特別、
+#   直接，最多兩個）＋後設動詞（一定要有）＋研究要素（可省略；可用與、或、及、和、以及…並列，前面
+#   可接其、任何、相關、具體、所使用的…；「使用、採用」一定要帶「所」或「的」，第一輪修正）。
+# - 「僅／只＋提出、提及…＋研究要素」子句（`_META_ONLY_CLAUSE`，「摘要僅提出解釋框架」）：只能接
+#   研究要素清單裡的名詞。
+# - 主詞沿用（第一輪修正，Codex X1、審查 A2、A7）：每一欄從「還不知道主詞」開始。子句裡明寫了
+#   摘要、原文、文中（當主詞或當地點「在／於摘要中」）→ 這個子句與之後沒寫主詞的子句是「摘要類」；
+#   明寫了本文、本研究、研究、作者、文章、論文（當主詞，或當地點「在／於本文、文章、論文中」）→
+#   「論文類」；兩類都寫了算論文類。之後又明寫另一類就換過去。
+#   - 否定子句的動詞：說明類（`_META_STATE`：說明、提及、描述、指出…，講「寫了什麼」）三種狀態都
+#     收；「提出、提供、報告、揭露、涉及、呈現」只有摘要類才收——「未提出假設」「作者未提出假設」
+#     「在本文中未提出假設」可能是在講研究本身（探索性研究、概念性論文），照修改前的規則處理。
+#   - 「僅／只…」子句只有摘要類才收（開頭沒寫主詞的「僅提出概念框架」、接在論文類後面的都不收）。
 # - 至少要有一個否定子句；子句之間可以接而、但、且、卻；最後可以接「填 null」「故填 null」。
 # 只比對整欄：前面有內容、後面多一句說明的（「以問卷調查分析（摘要未說明樣本數）」）不符合，照樣由
-# `_EMBEDDED_PLACEHOLDER` 拒收。每一段都用佔有式量詞或在固定位置分岔（不回頭重試），詞表裡有前綴
-# 關係的詞長的排前面，所以每個位置最多試固定幾種詞，線性時間。
-_META_TEXT_SUBJECT: Final = r"(?:摘要|原文|文中)(?:中|裡|內)?+"
-_META_PAPER_SUBJECT: Final = r"(?:本文|本研究|研究|作者|文章|論文)(?:中|裡|內)?+"
-_META_PLACE: Final = r"(?:在|於)(?:摘要|原文|文中|本文|文章|論文)(?:中|裡|內)?+"
+# `_EMBEDDED_PLACEHOLDER` 拒收。
+# 做法（`_whole_field_meta`）：從頭一個子句一個子句往後讀（小的狀態機：狀態是目前的主詞類別），每個
+# 子句用固定開頭的正規式在目前位置比一次。每一段都用佔有式量詞或在固定位置分岔（不回頭重試），詞表裡
+# 有前綴關係的詞長的排前面；子句比不上時只會在動詞之前的固定幾個字內失敗，所以整欄是線性時間。
+_META_TEXT_WORDS: Final = r"(?:摘要|原文|文中)"
+_META_PAPER_WORDS: Final = r"(?:本文|本研究|研究|作者|文章|論文)"
+_META_PAPER_PLACES: Final = r"(?:本文|文章|論文)"
+_META_IN: Final = r"(?:中|裡|內)?+"
+_META_SUBJECT: Final = (
+    rf"(?:(?P<text_subject>{_META_TEXT_WORDS})|(?P<paper_subject>{_META_PAPER_WORDS})){_META_IN}"
+)
 _META_NEGATION: Final = r"(?:並|均|皆|也|亦|尚)?+(?:未|沒有|沒)"
 _META_DEGREE: Final = r"(?:(?:明確|具體|清楚|詳細|特別|直接)地?+){0,2}+"
 _META_STATE: Final = r"(?:提及|提到|說明|描述|指出|指明|交代|載明|詳述|陳述|闡述|列出|寫出|寫明)"
-_META_SAY: Final = rf"(?:{_META_STATE}|提出|提供|報告|揭露|涉及|呈現)"
+# 只有摘要類才收的動詞。
+_META_SAY: Final = r"(?:提出|提供|報告|揭露|涉及|呈現)"
 _META_ONLY: Final = r"(?:僅有|只有|僅|只)(?:提出|提及|提到|說明|描述|指出|呈現)"
 _META_ELEMENT: Final = (
     r"(?:研究方法|研究設計|研究對象|研究問題|研究發現|研究結果|研究模型|研究樣本|研究資料|研究架構"
@@ -236,32 +277,76 @@ _META_ELEMENT: Final = (
     r"|理論|解釋框架|概念框架|資料來源|資料|數據來源|數據|樣本數|樣本大小|樣本|變數|假設|方法論"
     r"|方法|發現|結果)"
 )
+# 「使用、採用」一定要帶「所」或「的」（第一輪修正，審查 A1：單獨的「，採用實證分析」是內容）。
 _META_MODIFIER: Final = (
-    r"其?+(?:任何|相關|具體|明確|詳細|特定)?+的?+(?:所使用|所採用|所用|使用|採用)?+的?+"
+    r"其?+(?:任何|相關|具體|明確|詳細|特定)?+的?+(?:所使用|所採用|所用|使用的|採用的)?+的?+"
 )
 _META_ITEMS: Final = (
     rf"{_META_MODIFIER}{_META_ELEMENT}"
     rf"(?:(?:以及|或是|與|或|及|和|跟|暨)?+{_META_MODIFIER}{_META_ELEMENT})*+"
 )
-_META_NEGATIVE_CLAUSE: Final = (
-    rf"(?:{_META_PAPER_SUBJECT}(?:{_META_PLACE})?+{_META_NEGATION}(?:{_META_PLACE})?+"
-    rf"{_META_DEGREE}{_META_STATE}"
-    rf"|(?:{_META_TEXT_SUBJECT})?+(?:{_META_PLACE})?+{_META_NEGATION}(?:{_META_PLACE})?+"
-    rf"{_META_DEGREE}{_META_SAY})"
+_META_CLAUSE_JOIN: Final = r"(?:但是|而|但|且|卻)?+"
+
+
+def _meta_place(name: str) -> str:
+    return (
+        rf"(?:(?:在|於)(?:(?P<text_{name}>{_META_TEXT_WORDS})"
+        rf"|(?P<paper_{name}>{_META_PAPER_PLACES})){_META_IN})?+"
+    )
+
+
+_META_NEGATIVE_CLAUSE: Final = re.compile(
+    rf"{_META_CLAUSE_JOIN}(?:{_META_SUBJECT})?+{_meta_place('before')}{_META_NEGATION}"
+    rf"{_meta_place('after')}{_META_DEGREE}(?:(?P<state>{_META_STATE})|{_META_SAY})"
     rf"了?+(?:{_META_ITEMS})?+"
 )
-_META_ONLY_CLAUSE: Final = rf"(?:{_META_TEXT_SUBJECT})?+{_META_ONLY}了?+{_META_ITEMS}"
-_META_CLAUSE_JOIN: Final = r"(?:但是|而|但|且|卻)?+"
-_META_TAIL: Final = r"(?:故|因此|所以|因而)?+(?:填入|填寫|填)(?:null|none|空值)"
-_WHOLE_FIELD_META: Final = re.compile(
-    rf"(?:{_META_CLAUSE_JOIN}{_META_ONLY_CLAUSE})*+{_META_CLAUSE_JOIN}{_META_NEGATIVE_CLAUSE}"
-    rf"(?:{_META_CLAUSE_JOIN}(?:{_META_NEGATIVE_CLAUSE}|{_META_ONLY_CLAUSE}))*+(?:{_META_TAIL})?+"
+_META_ONLY_CLAUSE: Final = re.compile(
+    rf"{_META_CLAUSE_JOIN}(?:(?P<text_subject>{_META_TEXT_WORDS}){_META_IN})?+{_META_ONLY}了?+"
+    rf"{_META_ITEMS}"
 )
+_META_TAIL: Final = re.compile(r"(?:故|因此|所以|因而)?+(?:填入|填寫|填)(?:null|none|空值)")
+_TEXT_GROUPS: Final = ("text_subject", "text_before", "text_after")
+_PAPER_GROUPS: Final = ("paper_subject", "paper_before", "paper_after")
+
+
+def _subject_kind(match: re.Match[str], current: str | None) -> str | None:
+    """子句明寫的主詞類別（`"paper"`、`"text"`），沒寫就沿用 `current`。"""
+    groups = match.groupdict()
+    if any(groups.get(name) for name in _PAPER_GROUPS):
+        return "paper"
+    if any(groups.get(name) for name in _TEXT_GROUPS):
+        return "text"
+    return current
+
+
+def _whole_field_meta(key: str) -> bool:
+    """`key`（拿掉空白與標點、小寫）整欄只由說明子句組成（規則見上面的註解）。"""
+    position = 0
+    kind: str | None = None
+    negatives = 0
+    while position < len(key):
+        negative = _META_NEGATIVE_CLAUSE.match(key, position)
+        if negative is not None:
+            kind = _subject_kind(negative, kind)
+            if negative.group("state") is None and kind != "text":
+                return False
+            negatives += 1
+            position = negative.end()
+            continue
+        only = _META_ONLY_CLAUSE.match(key, position)
+        if only is not None:
+            kind = _subject_kind(only, kind)
+            if kind != "text":
+                return False
+            position = only.end()
+            continue
+        return negatives > 0 and _META_TAIL.fullmatch(key, position) is not None
+    return negatives > 0
 
 
 def is_placeholder(text: str) -> bool:
     """整欄只是「摘要未提及／未提及／無／N/A」這類字，或整欄只是講「摘要沒寫什麼」的說明句
-    （`_WHOLE_FIELD_META`，例如「摘要未明確說明具體研究方法與資料來源」）；都在檢查用副本上
+    （`_whole_field_meta`，例如「摘要未明確說明具體研究方法與資料來源」）；都在檢查用副本上
     拿掉空白與標點、不分大小寫後比對。拿掉之後什麼都不剩（例如只有「—」或零寬空白）也算。"""
     copy = _FIELD_LABEL.sub("", _check_copy(text), count=1)
     key = _NOT_WORD.sub("", copy).casefold()
@@ -269,7 +354,7 @@ def is_placeholder(text: str) -> bool:
         not key
         or _PLACEHOLDER_ZH.fullmatch(key) is not None
         or _PLACEHOLDER_EN.fullmatch(key) is not None
-        or _WHOLE_FIELD_META.fullmatch(key) is not None
+        or _whole_field_meta(key)
     )
 
 

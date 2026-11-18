@@ -5,7 +5,6 @@
 擋得住編造」的反例；設定檔的每種錯誤都在讀取時擋下。標題、摘要、輸出全是測試自己編的。
 """
 
-import contextlib
 import time
 from pathlib import Path
 
@@ -22,6 +21,8 @@ from radar.domain.errors import ErrorCode
 from radar.domain.fingerprints import input_sha256
 from radar.domain.validators.text_checks import ExtendedVocabulary, check_copy
 from radar.domain.validators.zh_summary import (
+    MAX_ACRONYMS,
+    MAX_FULL_NAMES_PER_ACRONYM,
     AcronymEntry,
     ZhSummaryAcronyms,
     ZhSummaryRules,
@@ -103,6 +104,10 @@ def test_real_list_documents_how_to_add_an_entry() -> None:
 def test_every_registered_full_name_allows_its_acronym(acronym: str, full_name: str) -> None:
     abstract = f"This study applies {full_name} to firm data."
 
+    # 直接斷言清單（第一輪修正，審查 B3：有些組不帶清單也會靠首字母規則過）。
+    assert ExtendedVocabulary.build(check_copy(abstract), {acronym: (full_name,)}).acronyms == {
+        acronym
+    }
     assert _method(_uses(acronym), abstract) == _uses(acronym)
 
 
@@ -132,11 +137,20 @@ def test_every_acronym_is_rejected_without_its_full_name(acronym: str) -> None:
         # 摘要少了空白黏成一串（OpenAlex 常見）：全名要從輸入的詞頭開始、在詞尾結束。
         ("We apply decisionmakingtrialandevaluationlaboratory here.", "DEMATEL"),
         ("We apply decisionmaking-trialandevaluation laboratory here.", "DEMATEL"),
-        # 複數與詞形變化。
+        # 摘要裡的換行在檢查用副本裡是一個空白，和空白一樣算連續（第一輪修正，審查 A5／B2）。
+        ("We apply the decision making\ntrial and evaluation laboratory.", "DEMATEL"),
+        ("We study peer to\r\npeer lending.", "P2P"),
+        ("We study peer to\tpeer lending.", "P2P"),
+        # 只有最後一個詞容許複數與詞形變化（第一輪修正，審查 A3）。
         ("We estimate vector autoregressive models.", "VAR"),
-        ("We use decision-making trials and evaluation laboratories.", "DEMATEL"),
-        ("We report areas under the curves.", "AUC"),
-        ("We use self-determined theory.", "SDT"),  # 詞形規則的已知寬度（決定紀錄）
+        ("We estimate a vector autoregressive model.", "VAR"),
+        ("We report areas under the curves.", "AUC"),  # 登記了 areas under the curve
+        ("We use structural equation models.", "SEM"),
+        ("We use structural equation modelling.", "SEM"),
+        ("We use partial least square regression.", "PLS"),
+        ("We use differences-in-differences.", "DID"),  # 登記了 differences in differences
+        ("We use difference-in-difference.", "DID"),
+        ("Leader–member exchange shapes trust.", "LMX"),  # en dash 在檢查用副本裡是連字號
         # 兩種意思都登記：輸入有其中一個就放行。
         ("We draw on signal detection theory.", "SDT"),
         ("We draw on self-determination theory.", "SDT"),
@@ -145,7 +159,63 @@ def test_every_acronym_is_rejected_without_its_full_name(acronym: str) -> None:
     ],
 )
 def test_full_name_variants_allow_the_acronym(abstract: str, acronym: str) -> None:
+    # 直接斷言清單（第一輪修正，審查 B3），再斷言整筆驗證。
+    allowed = ExtendedVocabulary.build(check_copy(abstract), REAL_RULES.acronym_full_names())
+    assert acronym in allowed.acronyms
     assert _method(_uses(acronym), abstract) == _uses(acronym)
+
+
+PASSES = "passes"
+
+
+@pytest.mark.parametrize(
+    ("abstract", "acronym", "expected"),
+    [
+        # 前面的詞不容許詞形變化（第一輪修正，審查 A3）：一般句子不再對上全名。
+        ("We examine how team members exchange knowledge in firms.", "TMX", UNSUPPORTED),
+        ("Team members exchanged ideas.", "TMX", UNSUPPORTED),
+        ("We study leader members exchange.", "LMX", UNSUPPORTED),
+        ("We use complexity proportional assessment.", "COPRAS", UNSUPPORTED),
+        # GloVe 拿掉了 global vectors：只有 global vectors for word representation 才算。
+        ("We build a global vector of prices for firms.", "GloVe", UNSUPPORTED),
+        ("We use global vectors for prices.", "GloVe", UNSUPPORTED),
+        # 這個寫法因此救不回來（ADR 已知的偏保守）。
+        ("We use decision-making trials and evaluation laboratories.", "DEMATEL", UNSUPPORTED),
+        # 清單對不上，但整筆照樣過：既有的首字母規則（`knows_word` 的 initials）認得 SDT、SEM，
+        # 和允許清單無關（修改前也過）。
+        ("We draw on signaling detection theory.", "SDT", PASSES),
+        ("We use self-determined theory.", "SDT", PASSES),
+        ("We use structure equation models.", "SEM", PASSES),
+    ],
+)
+def test_only_the_last_word_of_a_full_name_may_change_form(
+    abstract: str, acronym: str, expected: object
+) -> None:
+    allowed = ExtendedVocabulary.build(check_copy(abstract), REAL_RULES.acronym_full_names())
+
+    assert acronym not in allowed.acronyms
+    if expected == PASSES:
+        assert _method(_uses(acronym), abstract) == _uses(acronym)
+    else:
+        assert _rejected(_uses(acronym), abstract) is expected
+
+
+def test_the_seam_between_title_and_abstract_breaks_a_full_name() -> None:
+    # 標題與摘要是兩份檢查用副本、用換行接起來，接縫不算連續（摘要裡的換行算）。
+    output = _output(research_question=None, theory=None, findings=None, method=_uses("DEMATEL"))
+    llm_input = _input(title="Decision making", abstract="trial and evaluation laboratory is used.")
+    joined = (
+        check_copy("Decision making")
+        + "\n"
+        + check_copy("trial and evaluation laboratory is used.")
+    )
+
+    assert (
+        "DEMATEL" not in ExtendedVocabulary.build(joined, REAL_RULES.acronym_full_names()).acronyms
+    )
+    with pytest.raises(OutputRejectedError) as caught:
+        validate_zh_summary(output, llm_input, REAL_RULES)
+    assert caught.value.code is UNSUPPORTED
 
 
 def test_hyphenated_acronym_strings_check_each_part() -> None:
@@ -182,7 +252,7 @@ def test_title_counts_as_input() -> None:
         ("We use a trial and evaluation laboratory.", _uses("DEMATEL")),
         ("We use multi-criteria methods for decisions.", _uses("MCDM")),
         ("We study peer review and peer effects.", "研究借貸平台（P2P）"),
-        # 全名的詞沒有連續出現（中間隔了逗號、括號、別的詞、換行）。
+        # 全名的詞沒有連續出現（中間隔了逗號、括號、別的詞、兩個分隔；換行見上面會過的寫法）。
         ("We study decision making, trial and evaluation laboratory.", _uses("DEMATEL")),
         ("We study decision making (trial and evaluation laboratory).", _uses("DEMATEL")),
         ("We study decision making in a trial and evaluation laboratory.", _uses("DEMATEL")),
@@ -512,33 +582,93 @@ def test_many_distinct_words_with_a_shared_prefix_are_quick() -> None:
     assert time.perf_counter() - started < LONG_INPUT_SECONDS
 
 
-@pytest.mark.parametrize("pattern", ["acronym", "full_names"])
-def test_config_patterns_run_in_linear_time(pattern: str) -> None:
-    long_name = "ab " * 66_666 + "a!"
-    long_acronym = "A1" * 100_000 + "!"
+@pytest.mark.parametrize(
+    ("acronym", "full_name", "message"),
+    [
+        ("A1" * 100_000 + "!", "a b", "acronym 要是英文字母開頭"),
+        ("AB", "ab " * 66_666 + "a!", "full_names 的每一項要是英文詞"),
+        # 合法的寫法、詞太多（第一輪修正：真的跑到 `_FULL_NAME_SEPARATOR` 數詞）。
+        ("AB", "ab " * 66_666 + "ab", "full_names 的每一項最多 12 個詞"),
+    ],
+    ids=["acronym", "full_names", "many_words"],
+)
+def test_config_patterns_run_in_linear_time(acronym: str, full_name: str, message: str) -> None:
     started = time.perf_counter()
 
-    with contextlib.suppress(ValueError):
-        if pattern == "acronym":
-            AcronymEntry(acronym=long_acronym, full_names=("a b",))
-        else:
-            AcronymEntry(acronym="AB", full_names=(long_name,))
+    with pytest.raises(ValueError, match=message):
+        AcronymEntry(acronym=acronym, full_names=(full_name,))
 
     assert time.perf_counter() - started < LONG_INPUT_SECONDS
 
 
+# 長輸出（第一輪修正，Codex X3）：原本的測試先被漢字比例擋掉、又用 suppress 蓋住結果，沒有跑到縮寫
+# 比對。現在輸出能通過前面每一條規則（長度上限用到接近上限、漢字比例照真的設定），斷言明確的結果。
+LONG_ABSTRACT = (
+    "We apply decision making trial and evaluation laboratory and the technique for order of "
+    "preference by similarity to ideal solution to firm data."
+)
+LONG_UNIT = "以決策試驗與評估實驗室法（DEMATEL）與理想解類似度偏好順序評估法（TOPSIS）評估企業，"
+LONG_LIMIT = 200_000
+
+
+def _long_rules() -> ZhSummaryRules:
+    return REAL_RULES.model_copy(update={"max_chars_per_field": LONG_LIMIT})
+
+
 def test_long_output_with_acronyms_is_validated_quickly() -> None:
-    abstract = "We apply decision making trial and evaluation laboratory. " * 3_000
-    loose = REAL_RULES.model_copy(update={"max_chars_per_field": 10**6, "min_cjk_percent": 1})
-    output = _output(
-        research_question="研究" + "（DEMATEL）、（TOPSIS）" * 10_000,
-        method=None,
-        theory=None,
-        findings=None,
-    )
+    text = LONG_UNIT * (LONG_LIMIT // len(LONG_UNIT))
+    output = _output(research_question=text, method=None, theory=None, findings=None)
     started = time.perf_counter()
 
-    with contextlib.suppress(OutputRejectedError):
-        validate_zh_summary(output, _input(title="Field notes", abstract=abstract), loose)
+    content = validate_zh_summary(
+        output, _input(title="Field notes", abstract=LONG_ABSTRACT), _long_rules()
+    )
 
+    assert content.research_question == text
+    assert len(text) > LONG_LIMIT - len(LONG_UNIT)
+    assert time.perf_counter() - started < LONG_INPUT_SECONDS
+
+
+def test_long_output_with_an_unsupported_acronym_at_the_end_is_rejected_quickly() -> None:
+    tail = "以（VIKOR）排序"
+    text = LONG_UNIT * ((LONG_LIMIT - len(tail)) // len(LONG_UNIT)) + tail
+    output = _output(research_question=text, method=None, theory=None, findings=None)
+    started = time.perf_counter()
+
+    with pytest.raises(OutputRejectedError) as caught:
+        validate_zh_summary(
+            output, _input(title="Field notes", abstract=LONG_ABSTRACT), _long_rules()
+        )
+
+    assert caught.value.code is UNSUPPORTED
+    assert caught.value.detail == "research_question 有輸入沒有的英文詞"
+    assert time.perf_counter() - started < LONG_INPUT_SECONDS
+
+
+# 輸入與清單一起變長（第一輪修正，Codex X2）：清單用到設定檔驗證的上限（200 筆、每筆 12 個全名、每個
+# 全名 12 個詞），開頭的詞都一樣，輸入重複那個開頭的詞到 20 萬字元。
+def _largest_list(shared_words: int) -> dict[str, tuple[str, ...]]:
+    letters = "bcdfghjklmnpqrstvwxz"
+    tails = (f"q{a}{b}{c}{d}" for a in letters for b in letters for c in letters for d in letters)
+    entries = []
+    for number in range(MAX_ACRONYMS):
+        names = tuple(
+            " ".join(["alpha"] * shared_words + [next(tails) for _ in range(12 - shared_words)])
+            for _ in range(MAX_FULL_NAMES_PER_ACRONYM)
+        )
+        entries.append(AcronymEntry(acronym=f"ZZ{number}", full_names=names))
+    # 合法的設定（設定檔驗證收得下）。
+    listed = ZhSummaryAcronyms(version=1, acronyms=tuple(entries))
+    return {entry.acronym: entry.full_names for entry in listed.acronyms}
+
+
+@pytest.mark.parametrize("shared_words", [1, 11])
+def test_matching_stays_quick_when_the_list_is_at_its_limits(shared_words: int) -> None:
+    acronyms = _largest_list(shared_words)
+    text = check_copy(("alpha " * 40_000)[:200_000])
+    started = time.perf_counter()
+
+    vocabulary = ExtendedVocabulary.build(text, acronyms)
+
+    assert vocabulary.acronyms == frozenset()
     assert time.perf_counter() - started < LONG_INPUT_SECONDS

@@ -11,7 +11,12 @@ from radar.config import (
     ConfigError,
     load_zh_summary_rules,
 )
-from radar.domain.validators.zh_summary import ZhSummaryRules
+from radar.domain.validators.zh_summary import (
+    MAX_ACRONYMS,
+    MAX_FULL_NAME_WORDS,
+    MAX_FULL_NAMES_PER_ACRONYM,
+    ZhSummaryRules,
+)
 from tests.llm_support import ROOT
 
 REAL = (ROOT / "config" / ZH_SUMMARY_FILE).read_text(encoding="utf-8")
@@ -114,3 +119,128 @@ def test_not_a_mapping_is_rejected(tmp_path: Path) -> None:
     problems = _problems(tmp_path, "- 80\n")
 
     assert "mapping" in problems[0]
+
+
+# --- 允許清單的上下限（第一輪修正，Codex X2、審查 A6、B6）---------------------------------------
+
+
+def _write_list(tmp_path: Path, entries: list[tuple[str, list[str]]]) -> None:
+    (tmp_path / ZH_SUMMARY_FILE).write_text(REAL, encoding="utf-8")
+    lines = ["version: 1", "acronyms:" if entries else "acronyms: []"]
+    for acronym, names in entries:
+        lines.append(f"  - acronym: {acronym}")
+        lines.append("    full_names:")
+        lines.extend(f"      - {name}" for name in names)
+    (tmp_path / ZH_SUMMARY_ACRONYMS_FILE).write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+SAME_NAME = "（不分大小寫，空白、連字號、連在一起都算同一種寫法）"
+
+
+def _tag(number: int) -> str:
+    """每個號碼一個不重複、只有英文字母的詞（`aa`、`ab`…）。"""
+    letters = "abcdefghijklmnopqrstuvwxyz"
+    return letters[number // 26] + letters[number % 26]
+
+
+def _words(count: int) -> str:
+    return " ".join(f"word{chr(ord('a') + index)}" for index in range(count))
+
+
+def test_the_real_list_is_within_the_limits() -> None:
+    rules = load_zh_summary_rules({"RADAR_CONFIG_DIR": str(ROOT / "config")})
+    words = [
+        len(name.replace("-", " ").split()) for entry in rules.acronyms for name in entry.full_names
+    ]
+
+    # 現有最長的全名是 MULTIMOORA 的 11 個詞，上限 12。
+    assert max(words) == 11
+    assert max(words) <= MAX_FULL_NAME_WORDS == 12
+
+
+@pytest.mark.parametrize(
+    "entries",
+    [
+        [("ZZ", [_words(MAX_FULL_NAME_WORDS)])],
+        [
+            (
+                "ZZ",
+                [f"{_words(2)} name{chr(ord('a') + i)}" for i in range(MAX_FULL_NAMES_PER_ACRONYM)],
+            )
+        ],
+        [(f"Z{i}", [f"alpha name{_tag(i)}"]) for i in range(MAX_ACRONYMS)],
+        [("EEG", ["electroencephalography", "electroencephalogram"])],
+        [("ZZ", ["abcdefghij"])],
+        [("ZZ", ["a b"])],
+        # 同一筆裡兩個不同的全名可以（SDT 兩種意思）。
+        [("SDT", ["self determination theory", "signal detection theory"])],
+    ],
+)
+def test_lists_at_the_limits_load(tmp_path: Path, entries: list[tuple[str, list[str]]]) -> None:
+    _write_list(tmp_path, entries)
+
+    rules = load_zh_summary_rules({"RADAR_CONFIG_DIR": str(tmp_path)})
+
+    assert [entry.acronym for entry in rules.acronyms] == [acronym for acronym, _ in entries]
+
+
+@pytest.mark.parametrize(
+    ("entries", "expected"),
+    [
+        (
+            [("ZZ", [_words(MAX_FULL_NAME_WORDS + 1)])],
+            "acronyms.0.full_names：full_names 的每一項最多 12 個詞",
+        ),
+        (
+            [("ZZ", [_words(MAX_FULL_NAME_WORDS).replace(" ", "-", 3) + " wordz"])],
+            "acronyms.0.full_names：full_names 的每一項最多 12 個詞",
+        ),
+        (
+            [
+                (
+                    "ZZ",
+                    [
+                        f"{_words(2)} name{chr(ord('a') + i)}"
+                        for i in range(MAX_FULL_NAMES_PER_ACRONYM + 1)
+                    ],
+                )
+            ],
+            "acronyms.0.full_names：full_names 最多 12 個寫法",
+        ),
+        (
+            [(f"Z{i}", [f"alpha name{_tag(i)}"]) for i in range(MAX_ACRONYMS + 1)],
+            "acronyms：acronyms 最多 200 筆",
+        ),
+        (
+            [("RBV", ["view"])],
+            "acronyms.0.full_names：full_names 的每一項至少要兩個詞；只有一個詞時至少要 10 個字母",
+        ),
+        (
+            [("ZZ", ["abcdefghi"])],
+            "acronyms.0.full_names：full_names 的每一項至少要兩個詞；只有一個詞時至少要 10 個字母",
+        ),
+        (
+            [
+                ("SEM", ["structural equation modeling"]),
+                ("SEMX", ["Structural-Equation modeling"]),
+            ],
+            "acronyms：SEM 與 SEMX 登記了同一個全名" + SAME_NAME,
+        ),
+        (
+            [
+                ("MCDM", ["multi criteria decision making"]),
+                ("MCDA", ["multicriteria decision making"]),
+            ],
+            "acronyms：MCDM 與 MCDA 登記了同一個全名" + SAME_NAME,
+        ),
+    ],
+)
+def test_lists_beyond_the_limits_are_rejected(
+    tmp_path: Path, entries: list[tuple[str, list[str]]], expected: str
+) -> None:
+    _write_list(tmp_path, entries)
+
+    with pytest.raises(ConfigError) as caught:
+        load_zh_summary_rules({"RADAR_CONFIG_DIR": str(tmp_path)})
+
+    assert caught.value.problems == [f"{ZH_SUMMARY_ACRONYMS_FILE}：{expected}"]

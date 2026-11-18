@@ -938,21 +938,27 @@ def _alnum_tokens(text: str) -> frozenset[str]:
 # 全名的比對：
 # - 不分大小寫；全名的詞要在輸入裡**連續**出現（只有一部分、或分散在各處都不算）。
 # - 詞與詞之間是一個空白、一個連字號，或什麼都沒有（`decision-making`＝`decision making`、
-#   `multi-criteria`＝`multi criteria`＝`multicriteria`；輸入少了空白黏成一串的也算）：兩邊的字母
-#   逐一對得上，而且開頭、結尾都落在輸入的詞頭、詞尾（`_letters_aligned`）。其他符號（逗號、括號、
-#   換行、數字、兩個以上的分隔）隔開的不算連續。
-# - 一個全名的詞對一個輸入的詞時，容許 PR 1 的詞形變化（複數、`_root_splits`／`_same_root`：
-#   `model`／`models`／`modeling`／`modelling`，`_same_word_form`）；黏字規則不用。英式美式拼法
-#   （`optimisation`／`optimization`）詞形規則蓋不到，要在設定檔多登記一個寫法。
+#   `multi-criteria`＝`multi criteria`＝`multicriteria`；輸入少了空白黏成一串的也算）：兩邊拿掉
+#   空白與連字號之後字母逐一對得上，而且開頭、結尾都落在輸入的詞頭、詞尾。摘要裡的換行、tab 在
+#   檢查用副本裡已經縮成一個空白，所以和空白一樣算連續；標題與摘要的接縫（兩份副本用換行接起來）
+#   不算。其他符號（逗號、括號、數字、兩個以上的分隔）隔開的不算連續。
+# - 只有全名的**最後一個詞**容許 PR 1 的詞形變化（複數、`_root_splits`／`_same_root`：
+#   `model`／`models`／`modeling`／`modelling`，`_same_word_form`），而且那個詞要剛好是輸入的
+#   一個詞；前面的詞要一模一樣（第一輪修正，審查 A3：`team members exchange` 不再對上
+#   `team member exchange`）。黏字規則不用。英式美式拼法（`optimisation`／`optimization`）詞形
+#   規則蓋不到，要在設定檔多登記一個寫法。
 # - 全名開頭的那個詞，前面不能用連字號接著別的詞（`non-structural equation modeling` 不算）。
 # 只有縮寫在清單裡、輸入沒有全名的照樣擋（AI 憑背景知識多寫的縮寫）。
-_NAME_SEPARATOR: Final = re.compile(r"[ -]")
+#
+# 做法（第一輪修正，Codex X2）：全名拿掉空白與連字號後建成一棵字母樹（`_NameNode`），從輸入每個
+# 可以當開頭的詞走一次，同時比對所有全名；每一步是一次字典查詢，最多走「最長的全名」那麼多個字母。
+# 最後一個詞的詞形變化在「走完前面的詞」的節點上查（用複數變化與前 4 個字母索引，同一個節點、同一個
+# 輸入詞只查一次）。所以耗時對輸入長度是線性；全名的詞數、每筆的全名數、清單的筆數都由設定檔驗證
+# 限制上限（`zh_summary.py` 的 `AcronymEntry`、`ZhSummaryAcronyms`）。
 _LINKING_GAPS: Final = frozenset({" ", "-"})
+_NAME_SEPARATOR: Final = re.compile(r"[ -]")
 # 詞形變化的字根至少 4 個字母（`_root_splits`），所以兩個詞的前 4 個字母不同時只可能是複數的差異。
 _ROOT_PREFIX: Final = 4
-# 找全名開頭的詞時，先用前 3 個字母分組（詞形變化、複數、連在一起的寫法，前 3 個字母都一樣；
-# 前 3 個字母不同的 `ties`／`ty` 這種很短的複數變化不認得，偏保守）。
-_START_PREFIX: Final = 3
 
 
 # 快取有上限：輸入的英文詞是外來資料，詞數沒有上限。
@@ -984,88 +990,93 @@ def _same_word_form(first: str, second: str) -> bool:
     )
 
 
-def _letters_aligned(
-    words: list[str], linked: list[bool], name: tuple[str, ...], part: int, index: int
-) -> tuple[int, int] | None:
-    """從全名的第 `part` 個詞、輸入的第 `index` 個詞的開頭，兩邊逐一比對字母（詞與詞之間的空白、
-    連字號、沒有分隔都一樣）；第一次兩邊同時走到詞尾時回（全名下一個詞, 輸入下一個詞），字母對不上、
-    輸入的詞斷開（`linked` 是 False）或全名先結束是 None。每個字母只看一次。"""
-    name_offset = word_offset = 0
-    while True:
-        left, right = name[part], words[index]
-        size = min(len(left) - name_offset, len(right) - word_offset)
-        if left[name_offset : name_offset + size] != right[word_offset : word_offset + size]:
-            return None
-        name_offset += size
-        word_offset += size
-        name_done, word_done = name_offset == len(left), word_offset == len(right)
-        if name_done and word_done:
-            return part + 1, index + 1
-        if name_done:
-            part, name_offset = part + 1, 0
-            if part == len(name):
-                return None  # 全名結束在輸入的詞中間
-        else:
-            index, word_offset = index + 1, 0
-            if index == len(words) or not linked[index]:
-                return None
+@dataclass(eq=False, slots=True)
+class _NameNode:
+    """全名字母樹的一個節點（從根走到這裡的字母＝某些全名拿掉空白與連字號後的開頭）。"""
+
+    children: dict[str, _NameNode]
+    # 走到這裡剛好是整個全名：那些全名的縮寫。
+    ends: set[str]
+    # 走到這裡剛好是某些全名「最後一個詞之前」的部分：最後一個詞（小寫）→ 縮寫。用複數變化
+    # （`_variants`）與前 4 個字母兩種索引找候選，再用 `_same_word_form` 確認。
+    last_by_variant: dict[str, set[tuple[str, str]]]
+    last_by_prefix: dict[str, set[tuple[str, str]]]
 
 
-def _phrase_at(words: list[str], linked: list[bool], start: int, name: tuple[str, ...]) -> bool:
-    """全名 `name`（小寫的詞）從輸入的第 `start` 個詞開始連續出現（規則見 `_NAME_SEPARATOR` 上面的
-    註解）。狀態是（全名第幾個詞, 輸入第幾個詞），每個狀態只走一次。"""
-    pending = [(0, start)]
-    seen: set[tuple[int, int]] = set()
-    while pending:
-        state = pending.pop()
-        if state in seen:
-            continue
-        seen.add(state)
-        part, index = state
-        if part == len(name):
-            return True
-        if index == len(words) or (index > start and not linked[index]):
-            continue
-        if _same_word_form(name[part], words[index]):
-            pending.append((part + 1, index + 1))
-        aligned = _letters_aligned(words, linked, name, part, index)
-        if aligned is not None:
-            pending.append(aligned)
-    return False
+def _new_node() -> _NameNode:
+    return _NameNode({}, set(), {}, {})
+
+
+def _name_tree(acronyms: Mapping[str, Sequence[str]]) -> _NameNode:
+    """把每個全名拿掉空白與連字號、小寫後放進字母樹；最後一個詞之前的節點另外記下最後一個詞。"""
+    root = _new_node()
+    for acronym, names in acronyms.items():
+        for full_name in names:
+            parts = [part for part in _NAME_SEPARATOR.split(full_name.lower()) if part]
+            if not parts:
+                continue
+            node = root
+            for index, part in enumerate(parts):
+                if index == len(parts) - 1:
+                    entry = (part, acronym)
+                    for variant in _variants(part):
+                        node.last_by_variant.setdefault(variant, set()).add(entry)
+                    node.last_by_prefix.setdefault(part[:_ROOT_PREFIX], set()).add(entry)
+                for char in part:
+                    node = node.children.setdefault(char, _new_node())
+            node.ends.add(acronym)
+    return root
+
+
+def _last_word_forms(node: _NameNode, word: str) -> set[str]:
+    """`node` 是某些全名「最後一個詞之前」的位置；輸入的詞 `word` 是那些全名最後一個詞的詞形變化
+    時，回它們的縮寫。"""
+    candidates: set[tuple[str, str]] = set()
+    for variant in _variants(word):
+        candidates |= node.last_by_variant.get(variant, set())
+    candidates |= node.last_by_prefix.get(word[:_ROOT_PREFIX], set())
+    return {acronym for last, acronym in candidates if _same_word_form(last, word)}
 
 
 def _allowed_acronyms(text: str, acronyms: Mapping[str, Sequence[str]]) -> frozenset[str]:
-    """`acronyms`（縮寫 → 全名的寫法）裡，輸入（檢查用副本）出現了某一個全名的縮寫。輸入的每個
-    英文詞照開頭 3 個字母分組，每個全名只從開頭的詞對得上的位置試，線性時間。"""
+    """`acronyms`（縮寫 → 全名的寫法）裡，輸入（檢查用副本）出現了某一個全名的縮寫（規則與做法見
+    `_LINKING_GAPS` 上面的註解）。"""
     if not acronyms:
         return frozenset()
     words: list[str] = []
     linked: list[bool] = []
-    starts: dict[str, list[int]] = {}
+    starts: list[int] = []
     previous_end = 0
     for match in ENGLISH_WORD.finditer(text):
         gap = text[previous_end : match.start()]
-        word = match.group(0).lower()
         if not words or gap != "-":
-            starts.setdefault(word, []).append(len(words))
+            starts.append(len(words))
         linked.append(bool(words) and gap in _LINKING_GAPS)
-        words.append(word)
+        words.append(match.group(0).lower())
         previous_end = match.end()
-    by_prefix: dict[str, list[str]] = {}
-    for word in starts:
-        by_prefix.setdefault(word[:_START_PREFIX], []).append(word)
+    root = _name_tree(acronyms)
     found: set[str] = set()
-    for acronym, names in acronyms.items():
-        for full_name in names:
-            name = tuple(part for part in _NAME_SEPARATOR.split(full_name.lower()) if part)
-            first = name[0]
-            if any(
-                _phrase_at(words, linked, start, name)
-                for word in by_prefix.get(first[:_START_PREFIX], ())
-                if _same_word_form(first, word) or word.startswith(first) or first.startswith(word)
-                for start in starts[word]
-            ):
-                found.add(acronym)
+    # 同一個節點、同一個輸入詞的詞形變化只查一次。
+    forms: dict[tuple[_NameNode, str], set[str]] = {}
+    for start in starts:
+        node: _NameNode | None = root
+        index = start
+        while node is not None:
+            word = words[index]
+            if node.last_by_prefix:
+                key = (node, word)
+                if key not in forms:
+                    forms[key] = _last_word_forms(node, word)
+                found |= forms[key]
+            for char in word:
+                node = node.children.get(char)
+                if node is None:
+                    break
+            if node is None:
+                break
+            found |= node.ends
+            index += 1
+            if index == len(words) or not linked[index]:
                 break
     return frozenset(found)
 
@@ -1101,14 +1112,63 @@ def _number_continues(prepared: str, wholes: list[_WholeNumber], index: int) -> 
     return prepared[wholes[index].end : wholes[index + 1].start] != _LIST_GAP
 
 
+_FOUR_OR_MORE_DIGITS: Final = re.compile(r"[0-9]{4,}")
+
+
+def _restarts_after(prepared: str, head: _WholeNumber) -> bool:
+    """不合格的第一段後面，可以從下一個數字重新開始：第一段是 4 位以上、沒有指數、量詞、百分比的
+    整數，或黏在詞上（`_standalone` 不成立）。"""
+    if not _standalone(prepared, head):
+        return True
+    return (
+        not head.exponent
+        and not head.scale
+        and not head.percent
+        and _FOUR_OR_MORE_DIGITS.fullmatch(head.mantissa) is not None
+    )
+
+
+def _end_of_groups(prepared: str, wholes: list[_WholeNumber], index: int) -> int:
+    """`wholes[index]` 後面接著的千分位組（分隔＋沒有正負號、剛好 3 位的整數）的最後一個。第一段本身
+    的量詞、百分比不看（整串都要丟掉），之後每一組照 `_thousands_follows`。"""
+    last = index
+    while last + 1 < len(wholes):
+        current, following = wholes[last], wholes[last + 1]
+        if last > index and (current.scale or current.percent):
+            break
+        if (
+            following.sign
+            or prepared[current.end : following.start] not in _THOUSANDS_GAPS
+            or not _thousands_group(following)
+        ):
+            break
+        last += 1
+    return last
+
+
+def _after_replaced(text: str, prepared: str, head: _WholeNumber) -> bool:
+    """`head` 前面（跳過最多一個空白）那個字元，在讀數字用的文字裡被換成空白：前面那一段是既有讀法
+    整段換掉的科學記號或 `^`（`10^ 12 345 000` 的 `10^ 12`、`2 x 10-1 200 978` 的 `2 x 10-1`）。
+    起點的找法和 `_clean_start` 一樣。"""
+    start = head.start
+    if head.sign and text[start] != head.sign:
+        start -= 1
+    index = start - 1
+    if index >= 0 and text[index] == " ":
+        index -= 1
+    return index >= 0 and prepared[index] != text[index]
+
+
 def _space_thousands(text: str, prepared: str, wholes: list[_WholeNumber]) -> set[Number]:
     """A1 空白千分位合併後的值（規則見 `_THOUSANDS_GAPS` 上面的註解）。每個完整數字只看一次。"""
     found: set[Number] = set()
     index = 0
     while index < len(wholes):
         head = wholes[index]
-        # 第一段要是獨立、1～3 位、沒有指數與量詞、沒有百分比的整數；不是的話（4 位數、黏在詞上：
-        # `in 2019 300 000`、`COVID-19 300 000`）從下一個數字重新開始。
+        # 第一段要是獨立、1～3 位、沒有指數與量詞、沒有百分比的整數。不是的話：4 位以上的整數或黏在
+        # 詞上（`in 2019 300 000`、`COVID-19 300 000`）從下一個數字重新開始；其他（帶指數的
+        # `1.2E-1 200 978`、`1e-1 200 978`，帶量詞、百分比、小數的）後面接著的千分位組整串都不用
+        # （第一輪修正，審查 A4），所以這條只會讓合併的值變少。
         if not (
             not head.exponent
             and not head.scale
@@ -1116,17 +1176,23 @@ def _space_thousands(text: str, prepared: str, wholes: list[_WholeNumber]) -> se
             and _THOUSANDS_HEAD.fullmatch(head.mantissa)
             and _standalone(prepared, head)
         ):
-            index += 1
+            if _restarts_after(prepared, head):
+                index += 1
+            else:
+                index = _end_of_groups(prepared, wholes, index) + 1
             continue
         last = index
         while _thousands_follows(prepared, wholes, last) and _thousands_group(wholes[last + 1]):
             last += 1
-        # 第一段在科學記號裡（`_SCIENTIFIC_PIECE`：`**1 200 000**`、`1.2E -1 200 000`）或沒過白名單
-        # 時，整串都不用，也不從第二段重新開始（`**1 200 000**`、`⋅ 1 200 978` 不能變成 200000、
-        # 200978；PR 1 審查 V1），所以這兩個條件只會讓合併的值變少。
+        # 第一段在科學記號裡（`_SCIENTIFIC_PIECE`：`**1 200 000**`、`1.2E -1 200 000`）、前面緊接著
+        # 被既有讀法整段換成空白的科學記號或 `^`（`10^ 12 345 000`、`2 x 10-1 200 978`，
+        # `_after_replaced`）、或沒過白名單時，整串都不用，也不從第二段重新開始（`**1 200 000**`、
+        # `⋅ 1 200 978` 不能變成 200000、200978；PR 1 審查 V1、第一輪修正審查 A4／B1），所以這三個
+        # 條件只會讓合併的值變少。
         if (
             last > index
             and not head.in_scientific
+            and not _after_replaced(text, prepared, head)
             and _clean_start(text, head)
             and not _number_continues(prepared, wholes, last)
         ):

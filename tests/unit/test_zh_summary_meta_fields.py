@@ -1,4 +1,4 @@
-"""中文重點：整欄只有說明的存成空值（`is_placeholder` 的 `_WHOLE_FIELD_META`，ADR-0032 的
+"""中文重點：整欄只有說明的存成空值（`is_placeholder` 的 `_whole_field_meta`，ADR-0032 的
 「通用縮寫的允許清單與整欄說明存成空值」更新）。
 
 整欄只由「講摘要沒寫什麼」的子句組成時存 NULL，其他欄位照常驗證；前面有內容、後面多一句說明的維持
@@ -14,7 +14,6 @@ from radar.domain.ai_outputs import (
     InputKind,
     NewAiResult,
     OutputLang,
-    OutputRejectedError,
     ResultStatus,
     ZhSummaryContent,
 )
@@ -98,6 +97,9 @@ def test_other_fields_are_still_validated() -> None:
         "本研究未提供實證資料",
         # 只有「僅提出…」、沒有否定子句。
         "摘要僅提出解釋框架",
+        # 單獨的「使用、採用」接研究要素是內容（第一輪修正，審查 A1；和 1b75559 一樣當內容存）。
+        "摘要未明確提出理論，採用概念框架",
+        "未說明資料來源，使用實證數據",
     ],
 )
 def test_real_content_is_kept(value: str) -> None:
@@ -122,6 +124,12 @@ def test_real_content_is_kept(value: str) -> None:
         "摘要未明確說明具體研究方法與資料來源，但以問卷調查",
         # 主詞是本研究、但動詞是說明類的整欄說明夾在內容後面。
         "科技接受模型，本研究未說明所用理論框架",
+        # 說明後面接單獨的「使用、採用＋研究要素」是內容（第一輪修正，審查 A1；
+        # 和 1b75559 一樣拒收）。
+        "摘要未說明具體研究方法，採用實證分析",
+        "摘要未明確說明資料來源，使用統計方法",
+        "摘要未說明樣本數，採用實證分析",
+        "摘要未說明資料來源，採用統計方法與實證分析",
     ],
 )
 def test_explanations_next_to_real_content_are_still_rejected(value: str) -> None:
@@ -147,6 +155,87 @@ def test_explanations_next_to_real_content_are_still_rejected(value: str) -> Non
 )
 def test_placeholders_that_were_null_stay_null(value: str) -> None:
     assert _validate(_output(theory=value)).theory is None
+
+
+# --- 主詞沿用（第一輪修正，Codex X1、審查 A1、A2、A7）---------------------------------------------
+
+NULL = "null"
+CONTENT = "content"
+# triage 對照表的每一列（`docs/runs/epic-2c/reviews/pr2-triage.md`）。「照舊」的預期是 1b75559（PR 2
+# 之前）的結果：拒收（`zh_summary_placeholder_text`）或當內容存，逐句用 1b75559 的模組對照確認過。
+TRIAGE_TABLE = [
+    ("摘要未明確說明具體研究方法與資料來源", NULL),
+    ("未於摘要中說明具體資料來源與分析方法", NULL),
+    ("摘要未明確提出理論或理論框架，填 null", NULL),
+    ("未明確說明（摘要僅提出解釋框架，未描述實證資料或分析方法）", NULL),
+    ("摘要沒有提到相關理論，而僅提及分析框架", NULL),
+    ("摘要未說明研究方法，也未提供樣本數", NULL),
+    ("未說明具體方法", NULL),
+    ("未提及具體的研究設計，也未說明樣本", NULL),
+    ("僅提出概念框架（摘要未說明具體研究方法）", PLACEHOLDER),
+    ("僅提及理論框架，未說明研究方法", CONTENT),
+    ("未說明研究方法，僅提出概念框架", CONTENT),
+    ("未提出假設", CONTENT),
+    ("未提供研究假設", CONTENT),
+    ("未涉及實證分析", CONTENT),
+    ("未呈現結果", CONTENT),
+    ("在本文中未提出假設", CONTENT),
+    ("於論文中並未提供實證資料", CONTENT),
+    ("本研究未說明理論，也未提出假設", PLACEHOLDER),
+    ("作者未說明資料來源，且未提供實證資料", PLACEHOLDER),
+    ("摘要未說明具體研究方法，採用實證分析", PLACEHOLDER),
+    ("未說明資料來源，使用實證數據", CONTENT),
+    # F2：「使用、採用」帶「所」或「的」照樣收。
+    ("摘要未說明所使用的研究方法", NULL),
+    ("未說明其採用的分析方法", NULL),
+]
+# 自己想的接近邊界的句子：主詞×地點×動詞×「僅」的組合、主詞換來換去的多子句。預期先照規則寫，
+# 「照舊」的再用 1b75559 的模組確認是拒收還是當內容。
+BOUNDARY = [
+    # 摘要類之後沒寫主詞的子句沿用摘要類，可以用「提出、提供」。
+    ("原文未說明研究方法，也未提出假設", NULL),
+    # 論文類之後明寫摘要，換成摘要類。
+    ("本文未說明研究方法，摘要也未提供樣本數", NULL),
+    # 摘要類之後明寫論文類＋「提出」：不收。
+    ("摘要未說明研究方法，本研究也未提出假設", PLACEHOLDER),
+    # 「僅…」接在摘要類後面收、接在論文類後面不收。
+    ("文中未提及理論，僅提出概念框架", NULL),
+    ("本研究未說明理論，僅提出概念框架", PLACEHOLDER),
+    # 「僅…」自己明寫摘要。
+    ("未說明研究方法，摘要僅提出概念框架", NULL),
+    ("摘要僅提出解釋框架，未提供實證資料", NULL),
+    # 地點在否定詞前後都算。
+    ("在摘要中未提出理論", NULL),
+    ("未在摘要中提出理論", NULL),
+    ("未於本文中提供實證資料", CONTENT),
+    # 主詞是論文類、地點是摘要：算論文類。
+    ("本文未於摘要中提供實證資料", PLACEHOLDER),
+    # 兩個子句都是說明類動詞：論文類、摘要類都收。
+    ("作者未說明資料來源，摘要也未說明研究方法", NULL),
+    # 換到論文類之後沒寫主詞的「提供」：不收。
+    ("摘要未說明樣本數，作者未說明資料來源，也未提供實證資料", PLACEHOLDER),
+    # 開頭沒寫主詞的「提供」不會因為後面才寫摘要就收。
+    ("未提供樣本數，摘要未說明研究方法", PLACEHOLDER),
+    ("研究未提及理論", NULL),
+    ("論文中並未明確說明研究方法", NULL),
+    # 主詞是論文類的「僅…」子句本身就不在詞表裡。
+    ("本研究僅提出概念框架，摘要未說明研究方法", PLACEHOLDER),
+    ("摘要未說明，填 null", NULL),
+]
+
+
+@pytest.mark.parametrize(("value", "expected"), TRIAGE_TABLE + BOUNDARY)
+def test_the_subject_carries_over_to_later_clauses(value: str, expected: object) -> None:
+    output = _output(method=value)
+    if expected == NULL:
+        assert is_placeholder(value)
+        assert _validate(output).method is None
+    elif expected == CONTENT:
+        assert not is_placeholder(value)
+        assert _validate(output).method == value
+    else:
+        assert not is_placeholder(value)
+        assert _rejected(output) is expected
 
 
 # --- 四欄全部變成 NULL ---------------------------------------------------------------------------
@@ -200,6 +289,15 @@ def test_four_explanation_fields_become_one_valid_empty_result() -> None:
         "填null",
         "但",
         "摘要",
+        # 第一輪修正（`_whole_field_meta` 的子句逐一比對、主詞沿用）：子句在動詞前失敗、
+        # 主詞換來換去。
+        "本文中於論文中並未明確具體",
+        "未於摘要中",
+        "摘要未說明理論本研究未說明方法",
+        "本研究未說明理論也未說明",
+        "文中僅提出概念框架與",
+        "也未提出",
+        "其所使用的",
     ],
 )
 def test_whole_field_explanations_are_checked_in_linear_time(unit: str) -> None:
@@ -216,11 +314,25 @@ def test_a_long_field_of_explanations_is_validated_quickly() -> None:
     output = _output(theory="摘要未說明理論與研究方法，" * 15_000)
     started = time.perf_counter()
 
-    try:
-        content = validate_zh_summary(output, _input(), loose)
-    except OutputRejectedError:  # pragma: no cover - 只量時間
-        content = None
+    content = validate_zh_summary(output, _input(), loose)
 
-    assert content is not None
     assert content.theory is None
+    assert time.perf_counter() - started < LONG_INPUT_SECONDS
+
+
+@pytest.mark.parametrize(
+    "unit",
+    [
+        # 每個子句都對得上、主詞換來換去：一個子句一個子句讀到最後。
+        "摘要未說明理論，本研究未說明方法，",
+        "文中未提供資料，僅提出概念框架，",
+    ],
+)
+def test_long_fields_with_many_clauses_are_null_quickly(unit: str) -> None:
+    text = unit * (200_000 // len(unit))
+    started = time.perf_counter()
+
+    assert is_placeholder(text)
+    assert not is_placeholder(text + "X")
+
     assert time.perf_counter() - started < LONG_INPUT_SECONDS

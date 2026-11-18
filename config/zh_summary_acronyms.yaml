@@ -12,15 +12,19 @@ version: 1
 #      全大寫的縮寫要全大寫）。PLS-SEM 這種連字號串是每一段各自照規則。
 #   2. 標題或摘要裡出現了它登記的某一個 `full_names`：不分大小寫；詞要連續出現；詞與詞之間的
 #      空白、連字號、連在一起都算一樣（decision-making ＝ decision making，multi-criteria ＝
-#      multi criteria ＝ multicriteria）；一個詞對一個詞時容許複數與詞形變化（model、models、
-#      modeling、modelling 都算）。英式美式拼法（optimisation／optimization）蓋不到，兩種都要登記。
+#      multi criteria ＝ multicriteria）；只有最後一個詞容許複數與詞形變化（model、models、
+#      modeling、modelling 都算），前面的詞要一模一樣（differences in differences、areas under
+#      the curve 這種前面的詞是複數的常見寫法要另外登記）。英式美式拼法（optimisation／
+#      optimization）蓋不到，兩種都要登記。
 #   只有縮寫在清單裡、輸入沒有全名的照樣擋（模型憑背景知識多寫的縮寫）。
 #
 # 加一筆：
 #   - `acronym`：英文字母開頭、只有英文字母與數字（P2P、B2B 可以），至少 2 個字元；不分大小寫也
 #     不能和別筆重複。
-#   - `full_names`：至少一個；每一項只有英文字母，詞與詞之間一個空白或一個連字號。寫英文摘要裡
-#     實際會出現的寫法，常見的幾種都登記（同一筆裡不能重複；空白、連字號、連在一起算同一種）。
+#   - `full_names`：至少一個、最多 12 個；每一項只有英文字母，詞與詞之間一個空白或一個連字號，
+#     至少兩個詞（只有一個詞時至少 10 個字母）、最多 12 個詞。寫英文摘要裡實際會出現的寫法，常見的
+#     幾種都登記（空白、連字號、連在一起算同一種寫法；同一筆裡、不同筆之間都不能重複）。
+#   - 整份清單最多 200 筆（全名比對的耗時和清單大小成正比）。
 #     縮寫有兩種常見意思的（例如 SDT）可以兩個全名都登記：輸入要有全名才放行。
 #   - 拿不準全名的不要放（全名寫錯只會救不回來；寫成別的東西的全名會放過編造）。
 # `version` 在增刪縮寫或改全名時加一（給人看「清單改過了」；沒有雜湊登記）。這份清單和
@@ -43,6 +47,7 @@ acronyms:
   - acronym: DID
     full_names:
       - difference in differences
+      - differences in differences
   - acronym: EEG
     full_names:
       - electroencephalography
@@ -69,13 +74,15 @@ acronyms:
       - area under curve
       - area under the ROC curve
       - area under the receiver operating characteristic curve
+      - areas under the curve
+      - areas under the ROC curve
+      - areas under the receiver operating characteristic curve
   - acronym: SHAP
     full_names:
       - Shapley additive explanations
   - acronym: GloVe
     full_names:
       - global vectors for word representation
-      - global vectors
   - acronym: IPFS
     full_names:
       - InterPlanetary File System

@@ -1256,6 +1256,54 @@ def test_fragments_of_scientific_runs_are_rejected(abstract: str, method: str) -
     assert _method_rejected(method, abstract) is UNSUPPORTED
 
 
+# 第一輪修正（審查 A4、B1）：`^`、帶指數的第一段、合併起點前面是被既有讀法整段換成空白的科學記號
+# 或 `^`：整串都不用，也不從片段重新開始。
+CARET_AND_EXPONENT_HEAD_RUNS = [
+    ("The estimate was 10^ 12 345 000.", "估計值為 345000"),
+    ("The estimate was 1.2 × 10^ 12 345 000.", "估計值為 345000"),
+    ("The estimate was 10^ 1 200 000.", "估計值為 200000"),
+    ("The estimate was 10^-1 200 000.", "估計值為 200000"),
+    ("The estimate was 10 ^ -1 200 978.", "估計值為 200978"),
+    ("The estimate was 1.2E-1 200 978.", "估計值為 200978"),
+    ("The estimate was 1e-1 200 978.", "估計值為 200978"),
+    ("The estimate was 2 x 10-1 200 978.", "估計值為 200978"),
+]
+
+
+@pytest.mark.parametrize(("text", "fragment"), CARET_AND_EXPONENT_HEAD_RUNS)
+def test_space_thousands_after_a_caret_or_exponent_add_no_numbers(text: str, fragment: str) -> None:
+    vocabulary = ExtendedVocabulary.build(check_copy(text))
+
+    assert vocabulary.numbers - vocabulary.base.numbers == frozenset()
+
+
+@pytest.mark.parametrize(("abstract", "method"), CARET_AND_EXPONENT_HEAD_RUNS)
+def test_fragments_after_a_caret_or_exponent_are_rejected(abstract: str, method: str) -> None:
+    assert _method_rejected(method, abstract) is UNSUPPORTED
+
+
+@pytest.mark.parametrize(
+    "unit",
+    [
+        # _restarts_after、_end_of_groups、_after_replaced（第一輪修正）。
+        "1e-1 000 ",
+        "1.2E-1 000 ",
+        "10^ 1 000 ",
+        "2 x 10-1 000 ",
+        "5% 000 ",
+        "1.5 000 ",
+        "12345 000 ",
+    ],
+)
+def test_space_thousands_head_rules_run_in_linear_time(unit: str) -> None:
+    text = check_copy(unit * (200_000 // len(unit)))
+    started = time.perf_counter()
+
+    ExtendedVocabulary.build(text)
+
+    assert time.perf_counter() - started < LONG_INPUT_SECONDS
+
+
 @pytest.mark.parametrize(
     ("abstract", "method"),
     [
