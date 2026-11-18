@@ -841,6 +841,9 @@ WRITINGS = [
     "7.7 ✕ 10-9",
     "1.2 E -3",
     "1.2 E - 3",
+    # PR 1 審查 V2：E 黏在數字上、後面隔空白的正負號。
+    "1.2E -3",
+    "1.2E +3",
     "10^ ±3",
     "10**-9",
     "7.7e - 90",
@@ -1229,6 +1232,44 @@ def test_space_thousands_with_an_unclean_head_drop_the_whole_run(text: str) -> N
     assert vocabulary.numbers - vocabulary.base.numbers == frozenset()
 
 
+# PR 1 審查 V1：第一段在科學記號裡（`_SCIENTIFIC_PIECE`）時整串都不用，也不從第二段重新開始。
+SCIENTIFIC_HEAD_RUNS = [
+    ("We surveyed **1 200 000** users.", "調查 200000 名使用者"),
+    ("The estimate was 1.2E -1 200 000.", "估計值為 200000"),
+    ("The estimate was 7.7E -1 200 978.", "估計值為 200978"),
+    ("The estimate was 10** 1 200 000.", "估計值為 200000"),
+    ("The estimate was -**12 345 000.", "估計值為 345000"),
+]
+
+
+@pytest.mark.parametrize(("text", "fragment"), SCIENTIFIC_HEAD_RUNS)
+def test_space_thousands_starting_inside_scientific_notation_add_no_numbers(
+    text: str, fragment: str
+) -> None:
+    vocabulary = ExtendedVocabulary.build(check_copy(text))
+
+    assert vocabulary.numbers - vocabulary.base.numbers == frozenset()
+
+
+@pytest.mark.parametrize(("abstract", "method"), SCIENTIFIC_HEAD_RUNS)
+def test_fragments_of_scientific_runs_are_rejected(abstract: str, method: str) -> None:
+    assert _method_rejected(method, abstract) is UNSUPPORTED
+
+
+@pytest.mark.parametrize(
+    ("abstract", "method"),
+    [
+        # 第一段是 4 位數或黏在詞上：照舊從下一個數字重新開始。
+        ("COVID-19 300 000 cases were reported.", "通報 300000 例"),
+        ("In 2019 300 000 firms joined.", "300000 家企業加入"),
+    ],
+)
+def test_space_thousands_restart_after_a_four_digit_or_attached_head(
+    abstract: str, method: str
+) -> None:
+    assert _method_only(method, abstract) == method
+
+
 @pytest.mark.parametrize(
     ("abstract", "method"),
     [
@@ -1237,6 +1278,8 @@ def test_space_thousands_with_an_unclean_head_drop_the_whole_run(text: str) -> N
         ("The effect is 1.2 ∙ 10-3% points.", "提高 10%"),
         ("The effect is 1.2 E -3% points.", "提高 3 個百分點"),
         ("The effect is 1.2 E - 3% points.", "提高 3 個百分點"),
+        # PR 1 審查 V2：E 黏在數字上、後面隔空白的正負號。
+        ("The effect is 1.2E -3% points.", "提高 3 個百分點"),
         ("The effect is 10^ ±3% points.", "提高 3 個百分點"),
         ("The rate was 7.7 ✕ 10-9%.", "比例為 10%"),
         ("The value was 10**-9 300s.", "數值 9300"),
@@ -1440,6 +1483,9 @@ LONG_INPUT_SECONDS = 3
         "= - 1% points ",
         "1 000, 1 ",
         "1 000, 1",
+        # PR 1 審查 V1：第一段在科學記號裡的空白千分位
+        "**1 000 ",
+        "1E -1 000 ",
         "10-1960s ",
         "1 - 1960s ",
         # 詞形變化、黏字

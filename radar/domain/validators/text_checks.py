@@ -517,8 +517,8 @@ def _prepared_in_place(text: str) -> str:
 # - 乘號（`×`、`x`、`*`、`·`、`⋅`、`∙`、`✕`、`✖`、`⨯`；`x` 前面不能是字母：`max 10-20%` 不算）後面
 #   的「10＋次方」；
 # - `^` 或 `**` 後面（可隔空白、正負號，含 `±`、`∓`）的次方；
-# - 數字後面 `E` 前後有空白（或正負號是 `±`、`∓`）的指數：`1.2 E -3`、`1.2 E - 3`、`7.7e - 90`
-#   （沒有空白的 `1e-3` 本來就是一個帶指數的完整數字，不在這裡）。
+# - 數字後面 `E` 前後有空白（或正負號是 `±`、`∓`）的指數：`1.2 E -3`、`1.2 E - 3`、`1.2E -3`、
+#   `7.7e - 90`（沒有空白的 `1e-3` 本來就是一個帶指數的完整數字，不在這裡）。
 # 這只會讓新規則少認（`Group X 10-40%`、`2 × 10-40%` 的 10 也不當百分比，偏保守）。每一種都從固定的
 # 字元開始試、量詞不巢狀，線性時間。
 _SCIENTIFIC_PIECE: Final = re.compile(
@@ -1107,8 +1107,11 @@ def _space_thousands(text: str, prepared: str, wholes: list[_WholeNumber]) -> se
     index = 0
     while index < len(wholes):
         head = wholes[index]
+        # 第一段要是獨立、1～3 位、沒有指數與量詞、沒有百分比的整數；不是的話（4 位數、黏在詞上：
+        # `in 2019 300 000`、`COVID-19 300 000`）從下一個數字重新開始。
         if not (
-            head.simple
+            not head.exponent
+            and not head.scale
             and not head.percent
             and _THOUSANDS_HEAD.fullmatch(head.mantissa)
             and _standalone(prepared, head)
@@ -1118,10 +1121,12 @@ def _space_thousands(text: str, prepared: str, wholes: list[_WholeNumber]) -> se
         last = index
         while _thousands_follows(prepared, wholes, last) and _thousands_group(wholes[last + 1]):
             last += 1
-        # 第一段沒過白名單時整串都不用（也不從第二段重新開始：`⋅ 1 200 978` 不能變成 200978），
-        # 所以白名單只會讓合併的值變少。
+        # 第一段在科學記號裡（`_SCIENTIFIC_PIECE`：`**1 200 000**`、`1.2E -1 200 000`）或沒過白名單
+        # 時，整串都不用，也不從第二段重新開始（`**1 200 000**`、`⋅ 1 200 978` 不能變成 200000、
+        # 200978；PR 1 審查 V1），所以這兩個條件只會讓合併的值變少。
         if (
             last > index
+            and not head.in_scientific
             and _clean_start(text, head)
             and not _number_continues(prepared, wholes, last)
         ):
