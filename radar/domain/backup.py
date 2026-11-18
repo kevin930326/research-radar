@@ -278,6 +278,25 @@ class DatabaseVersions:
         return self.postgres_version_num // 10000
 
 
+def unknown_revision_problems(manifest: BackupManifest, known: frozenset[str]) -> list[str]:
+    """備份的 Alembic 版本有這個映像不認得的（備份比程式新）時，每個版本一條；沒有問題時是空清單。
+
+    `known` 是這個映像的遷移檔認得的全部版本（不連資料庫）。
+    """
+    return [
+        f"備份的遷移版本 {revision} 這個映像不認得（備份比程式新）；先換成新的映像再還原"
+        for revision in manifest.alembic_revisions
+        if revision not in known
+    ]
+
+
+def expect_mode_problems(manifest: BackupManifest, expected: BackupMode | None) -> list[str]:
+    """`radar restore --expect-mode` 有給、而備份的模式不同時一條；沒給或相同時是空清單。"""
+    if expected is None or manifest.mode is expected:
+        return []
+    return [f"這份備份是「{manifest.mode.label}」，和 --expect-mode 指定的「{expected.label}」不同"]
+
+
 def restore_version_problems(
     manifest: BackupManifest, target: DatabaseVersions, pg_restore_major: int
 ) -> list[str]:
@@ -362,15 +381,59 @@ class DumpRequest:
 
 @dataclass(frozen=True)
 class RestoreRequest:
-    """一次還原：`member_tables_must_be_empty` 有表時（只有共用資料的備份），commit 前檢查這些表
-    一列都沒有，有就整個退回。"""
+    """一次還原在同一個交易裡要多送的兩段檢查（`repo/backup.get_restore_request` 組的 SQL）。
 
-    member_tables_must_be_empty: tuple[str, ...]
+    - `before_restore_sql`：`BEGIN` 之後、備份的 SQL 之前送：目標還是空的（審查 C2）。
+    - `before_commit_sql`：`COMMIT` 之前送：所有使用者的 relation 都是這個交易建的、沒有大型物件；
+      只有共用資料的備份另外檢查成員資料表沒有任何一列、沒有成員上傳的 PDF 摘要。
+
+    任何一項不符就用 `RESTORE_GUARD_SQLSTATES` 裡的代碼丟錯，`psql` 停下、不送 `COMMIT`，整個交易
+    退回。
+    """
+
+    before_restore_sql: str
+    before_commit_sql: str
 
     def __post_init__(self) -> None:
-        for table in self.member_tables_must_be_empty:
-            if not _IDENTIFIER.fullmatch(table):
-                raise ValueError("表名只能是小寫識別字")
+        for sql in (self.before_restore_sql, self.before_commit_sql):
+            if not sql.endswith(";\n"):
+                raise ValueError("檢查的 SQL 要是完整的一句（以分號與換行結尾）")
+
+
+def check_table_name(table: str) -> str:
+    """表名不是小寫識別字就丟 `ValueError`（組進 SQL 之前檢查）。"""
+    if not _IDENTIFIER.fullmatch(table):
+        raise ValueError("表名只能是小寫識別字")
+    return table
+
+
+# --- 還原時在交易裡的檢查（SQLSTATE）--------------------------------------------------------------
+
+# 還原的交易裡，檢查不過時 `RAISE` 用的自訂 SQLSTATE；`psql` 用 `VERBOSITY=sqlstate`，錯誤只印代碼。
+MEMBER_ROWS_SQLSTATE = "RR001"  # 只有共用資料的備份帶了成員資料（成員表有列、成員上傳的 PDF 摘要）
+TARGET_NOT_EMPTY_SQLSTATE = "RR002"  # BEGIN 之後再檢查一次：目標已經不是空的
+FOREIGN_RELATION_SQLSTATE = "RR003"  # COMMIT 前：有不是這個交易建的 relation
+LARGE_OBJECT_SQLSTATE = "RR004"  # COMMIT 前：目標有大型物件
+RESTORE_GUARD_SQLSTATES = (
+    MEMBER_ROWS_SQLSTATE,
+    TARGET_NOT_EMPTY_SQLSTATE,
+    FOREIGN_RELATION_SQLSTATE,
+    LARGE_OBJECT_SQLSTATE,
+)
+
+
+# --- 逾時（審查 C4、S6；數值與理由見 ADR-0051 決定第 16 點）----------------------------------
+
+# `pg_dump --lock-wait-timeout`：每張表等鎖最多這麼久，等不到就失敗，不無限期排在別人後面。
+PG_DUMP_LOCK_WAIT_TIMEOUT_MS = 60_000
+# 等 `pg_dump` 開始輸出（已經匯入快照、鎖好表）最多這麼久；逾時就停掉兩個子程序，沒有備份。
+DUMP_START_TIMEOUT_SECONDS = 300
+# 匯出快照的交易在等 `pg_dump` 時是閒置的；伺服器端的最後保險，比上一個長，讓程式的逾時先發生。
+SNAPSHOT_IDLE_TIMEOUT_MS = 360_000
+# 還原時輸入（檔案或標準輸入）多久沒有新資料就放棄：停掉 `psql`、不送 `COMMIT`。
+RESTORE_INPUT_IDLE_TIMEOUT_SECONDS = 300
+# 還原 commit 之後重數筆數的連線用的 `statement_timeout`（平常的連線是幾秒）。
+RECOUNT_STATEMENT_TIMEOUT_MS = 600_000
 
 
 # --- age 的公鑰 --------------------------------------------------------------------------------
@@ -479,8 +542,41 @@ class RestoreRefusedError(BackupError):
 class SharedOnlyBackupHasMemberRowsError(BackupError):
     def __init__(self) -> None:
         super().__init__(
-            "清單說這份備份只有共用資料，但備份裡的成員資料表有資料；沒有還原（整個交易已退回，"
-            "目標資料庫還是空的）"
+            "清單說這份備份只有共用資料，但備份裡有成員資料（成員資料表有資料，或有成員上傳的 PDF"
+            " 摘要）；沒有還原（整個交易已退回，目標資料庫還是空的）"
+        )
+
+
+class SharedOnlyBackupRefusedError(BackupError):
+    """`--shared-only` 備份前的檢查沒過：共用表裡有成員來源的內容。沒有備份。"""
+
+    def __init__(self, uploaded_abstracts: int) -> None:
+        super().__init__(
+            f"有 {uploaded_abstracts} 筆成員上傳的 PDF 摘要（只有上傳者看得到）；只有共用資料的備份"
+            "不能帶它們，沒有備份"
+        )
+
+
+class RestoreArchiveUnsafeError(BackupError):
+    """備份裡有會自己 commit 的內容（交易控制語句、大型物件），不能在一個交易裡還原。
+
+    已經停掉 `psql`、沒有送 `COMMIT`，交易退回，目標沒有被寫入。
+    """
+
+    def __init__(self, what: str) -> None:
+        super().__init__(
+            f"這份備份含有會自己 commit 的內容（{what}），不能在同一個交易裡還原；沒有送 COMMIT，"
+            "交易已退回，目標資料庫沒有被寫入"
+        )
+
+
+class RestoreVerificationError(BackupError):
+    """已經 COMMIT（資料已還原），但之後重數筆數時出錯，沒比對成功。資料留著，不自動刪除。"""
+
+    def __init__(self, error_type: str) -> None:
+        super().__init__(
+            f"資料已還原，但還原後重數筆數時出錯（{error_type}），筆數沒比對成功；還原的資料留著"
+            "沒有刪除，要不要刪掉重來由 Kevin 決定"
         )
 
 

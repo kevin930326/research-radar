@@ -14,8 +14,9 @@ RUN npm run build:member
 
 # 備份與還原（Story 3.18、ADR-0051）：PostgreSQL 官方套件庫（PGDG）的簽章金鑰。在這一段下載並驗
 # 指紋（gpg 只裝在這一段，不進最後的映像），最後一段只複製驗過的金鑰檔。不執行任何下載來的腳本。
+# 指紋直接寫在 RUN 裡（不用建置參數，建置時換不掉）；和 .github/workflows/ci.yml 的同一個值，
+# tests/arch/test_structure.py 檢查兩邊一樣。
 FROM python:3.14-slim-trixie AS pgdg-key
-ARG PGDG_SIGNER_FPR=B97B0AFCAA1A47F044F244A07FCC7D46ACCC4CF8
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends ca-certificates curl gnupg \
     && rm -rf /var/lib/apt/lists/*
@@ -23,7 +24,8 @@ RUN curl --fail --silent --show-error --location --proto '=https' \
         --output /pgdg.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc \
     && gpg --show-keys --with-colons /pgdg.asc > /pgdg-keys.txt \
     && test "$(grep -c '^pub:' /pgdg-keys.txt)" = 1 \
-    && test "$(awk -F: '$1 == "fpr" { print $10; exit }' /pgdg-keys.txt)" = "${PGDG_SIGNER_FPR}"
+    && test "$(awk -F: '$1 == "fpr" { print $10; exit }' /pgdg-keys.txt)" \
+        = "B97B0AFCAA1A47F044F244A07FCC7D46ACCC4CF8"
 
 FROM python:3.14-slim-trixie AS build
 COPY --from=uv /uv /bin/uv

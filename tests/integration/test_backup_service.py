@@ -13,13 +13,14 @@ Story 3.18、ADR-0051。
 
 import io
 import re
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from io import Reader
 
 import psycopg
 import pytest
+from sqlalchemy import text
 
 from radar.adapters.fake.object_store import FakeObjectStore
 from radar.domain.backup import (
@@ -34,8 +35,12 @@ from radar.domain.backup import (
     RestoreCountMismatchError,
     RestoreRefusedError,
     RestoreRequest,
+    RestoreVerificationError,
+    SharedOnlyBackupRefusedError,
     encode_payload_header,
 )
+from radar.domain.viewer import SystemViewer
+from radar.repo.backup import get_restore_request
 from radar.repo.db import Database
 from radar.services.backup import run_backup, run_restore
 from tests.backup_support import Seeded, count_in_snapshot, seed_source, table_rows
@@ -189,6 +194,15 @@ def test_full_backup_counts_come_from_the_dumped_snapshot(
     assert manifest.alembic_revisions == tuple(sorted(source.revisions()))
     assert re.fullmatch(r"\d+(\.\d+)*", manifest.postgres_version)
     assert manifest.pg_dump_version == "18.7"
+    # 審查 T5：版本與時間對真的值（記錯 pgvector 版本會讓還原的版本檢查悄悄放行）。
+    [(pgvector, server_version_num)] = execute(
+        source,
+        "SELECT extversion, current_setting('server_version_num')::int"
+        " FROM pg_extension WHERE extname = 'vector'",
+    )
+    assert manifest.pgvector_version == pgvector
+    assert manifest.postgres_version_num == server_version_num
+    assert manifest.created_at == NOW
     assert dump.requests[0].exclude_table_data == ()
     # 開始傾印時匯出快照的交易還開著；上傳時已經結束。
     assert dump.open_at_start == 1
@@ -299,12 +313,17 @@ def test_non_empty_target_is_refused_before_restoring(
     assert restore.requests == []
 
 
+@pytest.mark.parametrize(
+    "create",
+    ["CREATE TABLE stray (id int)", "CREATE VIEW stray AS SELECT 1 AS id", "CREATE SEQUENCE stray"],
+)
 def test_one_stray_empty_table_makes_the_target_non_empty(
-    manifest: BackupManifest, target: TestDatabase
+    manifest: BackupManifest, target: TestDatabase, create: str
 ) -> None:
     # 「空的」是沒有任何使用者的資料表、view、序列（ADR-0051），不是「每張表都是 0 列」。
+    # 審查 T6：表、view、序列各一個。
     with psycopg.connect(target.admin_url, autocommit=True) as connection:
-        connection.execute("CREATE TABLE stray (id int)")
+        connection.execute(create)
     restore = FakeRestore()
 
     with pytest.raises(RestoreRefusedError, match=r"public\.stray"):
@@ -319,7 +338,11 @@ def test_extensions_alone_count_as_empty(manifest: BackupManifest, target: TestD
     with pytest.raises(RestoreCountMismatchError):
         _restore(target, _payload(manifest), restore)
 
-    assert restore.requests == [RestoreRequest(())]
+    [request] = restore.requests
+    # 預設模式：還原前、commit 前的檢查都有，但不查成員資料（審查 C2、C3）。
+    assert "RR002" in request.before_restore_sql
+    assert "RR003" in request.before_commit_sql
+    assert "RR001" not in request.before_commit_sql
     assert restore.body == FAKE_DUMP
 
 
@@ -366,7 +389,11 @@ def test_shared_only_backup_asks_the_restore_to_check_member_tables(
     with pytest.raises(RestoreCountMismatchError):
         _restore(target, _payload(shared), restore)
 
-    assert restore.requests == [RestoreRequest(tuple(sorted(MEMBER_TABLES)))]
+    [request] = restore.requests
+    assert "RR001" in request.before_commit_sql
+    for table in MEMBER_TABLES:
+        assert f"'{table}'" in request.before_commit_sql, table
+    assert "uploaded_pdf" in request.before_commit_sql
 
 
 def test_count_mismatch_names_each_item_and_keeps_the_restored_data(
@@ -396,3 +423,258 @@ def test_encrypted_input_is_rejected_without_touching_the_target(target: TestDat
 
     assert restore.requests == []
     assert PAYLOAD_MAGIC.startswith(b"RADAR-BACKUP")
+
+
+# --- 審查第 1 輪：成員上傳的 PDF 摘要（S3）-------------------------------------------------------
+
+
+def _uploaded_abstract(db: TestDatabase, paper_id: object) -> None:
+    """一筆成員上傳的 PDF 摘要（只有上傳者看得到、永遠不是目前的摘要；內容是編的）。"""
+    execute(
+        db,
+        "INSERT INTO paper_abstract (paper_id, source, content, is_current)"
+        " VALUES (%s, 'uploaded_pdf', 'A made-up abstract from a member PDF.', false)",
+        paper_id,
+    )
+
+
+def test_shared_only_backup_refuses_uploaded_pdf_abstracts(
+    source: TestDatabase, seeded: Seeded
+) -> None:
+    _uploaded_abstract(source, seeded.papers[0])
+    store = FakeObjectStore()
+    dump = FakeDump(source)
+
+    with pytest.raises(SharedOnlyBackupRefusedError, match="1 筆成員上傳的 PDF 摘要"):
+        run_backup(
+            Database(source.app_url, connect_timeout=5),
+            store,
+            mode=BackupMode.SHARED_ONLY,
+            recipient=RECIPIENT,
+            pg_dump_version=lambda: "18.7",
+            start_dump=dump,
+            now=lambda: NOW,
+        )
+
+    assert dump.requests == []
+    assert store.objects == {}
+    # 預設模式本來就帶成員資料，照樣備份。
+    assert _backup(source, FakeObjectStore(), FakeDump(source), BackupMode.FULL).counts
+
+
+# --- 審查第 1 輪：--expect-mode、遷移版本（S8）--------------------------------------------------
+
+
+def test_expect_mode_mismatch_is_refused_before_touching_the_target(
+    manifest: BackupManifest, target: TestDatabase
+) -> None:
+    restore = FakeRestore()
+
+    with pytest.raises(RestoreRefusedError, match="--expect-mode") as caught:
+        run_restore(
+            Database(target.owner_url, connect_timeout=5),
+            _payload(manifest),
+            pg_restore_version=lambda: "18.7",
+            restore_archive=restore,
+            expect_mode=BackupMode.SHARED_ONLY,
+        )
+
+    assert caught.value.problems == [
+        "這份備份是「完整（含成員資料）」，和 --expect-mode 指定的「只有共用資料」不同"
+    ]
+    assert restore.requests == []
+
+
+def test_backup_newer_than_the_image_is_refused(
+    manifest: BackupManifest, target: TestDatabase
+) -> None:
+    newer = manifest.model_copy(update={"alembic_revisions": ("0099_future",)})
+    restore = FakeRestore()
+
+    with pytest.raises(RestoreRefusedError, match="0099_future 這個映像不認得"):
+        run_restore(
+            Database(target.owner_url, connect_timeout=5),
+            _payload(newer),
+            pg_restore_version=lambda: "18.7",
+            restore_archive=restore,
+            known_revisions=frozenset(manifest.alembic_revisions),
+        )
+
+    assert restore.requests == []
+
+
+# --- 審查第 1 輪：commit 之後重數失敗（S6）------------------------------------------------------
+
+
+class _RestoreThenBreakCounting(FakeRestore):
+    """還原了結構（遷移好），再把 `embedding` 改名，讓之後的重數一定失敗。"""
+
+    def __call__(self, request: RestoreRequest, stream: Reader[bytes]) -> None:
+        super().__call__(request, stream)
+        assert self.target is not None
+        execute(self.target, "ALTER TABLE embedding RENAME TO embedding_renamed")
+
+
+def test_recount_failure_after_commit_says_the_data_is_kept(
+    manifest: BackupManifest, target: TestDatabase
+) -> None:
+    restore = _RestoreThenBreakCounting(schema_from=True)
+
+    with pytest.raises(RestoreVerificationError, match="資料已還原") as caught:
+        _restore(target, _payload(manifest), restore)
+
+    assert "UndefinedTable" in str(caught.value) or "ProgrammingError" in str(caught.value)
+    assert "留著" in str(caught.value)
+    assert target.has_table("paper")
+
+
+def test_snapshot_transaction_can_set_local_timeouts(source: TestDatabase) -> None:
+    database = Database(source.app_url, connect_timeout=5)
+
+    with database.read_only_snapshot_transaction(
+        statement_timeout_ms=600_000, idle_in_transaction_timeout_ms=360_000
+    ) as connection:
+        assert connection.execute(text("SHOW statement_timeout")).scalar_one() == "10min"
+        assert (
+            connection.execute(text("SHOW idle_in_transaction_session_timeout")).scalar_one()
+            == "6min"
+        )
+    with database.read_only_snapshot_transaction() as connection:
+        # SET LOCAL：交易結束就回到連線原本的設定。
+        assert connection.execute(text("SHOW statement_timeout")).scalar_one() == "5s"
+        assert (
+            connection.execute(text("SHOW idle_in_transaction_session_timeout")).scalar_one() == "0"
+        )
+    with (
+        pytest.raises(ValueError, match="正整數"),
+        database.read_only_snapshot_transaction(statement_timeout_ms=0),
+    ):
+        pass
+
+
+# --- 審查第 1 輪：還原交易裡的檢查（C2、C3、S3），直接在目標上執行 repo 組的 SQL -----------------
+#
+# 真的還原由 `psql` 依序送「BEGIN、還原前的檢查、備份的 SQL、commit 前的檢查、COMMIT」
+# （`tests/integration/test_backup_tools_fake.py` 驗這個順序）。這裡用一條連線照同樣的順序執行，
+# 在「還原前的檢查之後、commit 之前」由另一條連線動手，時間點由測試控制，不靠 sleep。
+
+
+def _guarded_restore(
+    target: TestDatabase,
+    request: RestoreRequest,
+    restored_sql: str,
+    *,
+    meanwhile: Callable[[], None] | None = None,
+) -> None:
+    """照還原的順序在一個交易裡執行；任何一步失敗就退回、原樣丟出 psycopg 的錯誤。"""
+    with psycopg.connect(target.owner_url, autocommit=True) as connection:
+        connection.execute("BEGIN")
+        try:
+            connection.execute(request.before_restore_sql)
+            connection.execute(restored_sql)
+            if meanwhile is not None:
+                meanwhile()
+            connection.execute(request.before_commit_sql)
+        except psycopg.Error:
+            connection.execute("ROLLBACK")
+            raise
+        connection.execute("COMMIT")
+
+
+def _request(mode: BackupMode) -> RestoreRequest:
+    return get_restore_request(SystemViewer(), mode=mode, member_tables=MEMBER_TABLES)
+
+
+def _create_intruder(target: TestDatabase) -> None:
+    """另一條連線建一張名稱不撞的表並 commit。"""
+    with psycopg.connect(target.admin_url, autocommit=True) as other:
+        other.execute("CREATE TABLE public.intruder (id int)")
+
+
+# 還原的 SQL 會做的幾種事（建表、索引、主鍵、權限、序列、view、資料）；pg_class 的列都在這個交易
+# 裡建或改，COMMIT 前的檢查（xmin 是目前的交易）要放行。
+RESTORED = (
+    "CREATE TABLE public.restored (id int); INSERT INTO public.restored VALUES (1);"
+    " CREATE INDEX restored_id ON public.restored (id);"
+    " ALTER TABLE public.restored ADD PRIMARY KEY (id);"
+    " GRANT SELECT ON public.restored TO radar_app;"
+    " CREATE SEQUENCE public.restored_seq OWNED BY public.restored.id;"
+    " SELECT pg_catalog.setval('public.restored_seq', 5, true);"
+    " CREATE VIEW public.restored_view AS SELECT 1 AS id;"
+    " CREATE MATERIALIZED VIEW public.restored_matview AS SELECT id FROM public.restored;"
+    " CREATE TABLE public.member (id int);"
+    " CREATE TABLE public.paper_abstract (source text);"
+    " INSERT INTO public.paper_abstract VALUES ('openalex');"
+)
+
+
+@pytest.mark.parametrize("mode", list(BackupMode))
+def test_guards_let_a_clean_restore_commit(target: TestDatabase, mode: BackupMode) -> None:
+    _guarded_restore(target, _request(mode), RESTORED)
+
+    assert target.has_table("public.restored")
+
+
+def test_table_created_by_another_connection_during_restore_is_rolled_back(
+    target: TestDatabase,
+) -> None:
+    """審查 C2：空檢查之後、還原 commit 之前，別的連線建了一張不撞名的表並 commit。"""
+    with pytest.raises(psycopg.Error) as caught:
+        _guarded_restore(
+            target,
+            _request(BackupMode.FULL),
+            RESTORED,
+            meanwhile=lambda: _create_intruder(target),
+        )
+
+    assert caught.value.sqlstate == "RR003"
+    assert target.has_table("public.intruder")
+    assert not target.has_table("public.restored")
+
+
+def test_table_created_before_the_restore_transaction_is_refused(target: TestDatabase) -> None:
+    """審查 C2：還原前的唯讀檢查之後、BEGIN 之前就有人建表：BEGIN 之後的檢查擋下。"""
+    _create_intruder(target)
+
+    with pytest.raises(psycopg.Error) as caught:
+        _guarded_restore(target, _request(BackupMode.FULL), RESTORED)
+
+    assert caught.value.sqlstate == "RR002"
+    assert not target.has_table("public.restored")
+
+
+@pytest.mark.parametrize("mode", list(BackupMode))
+def test_large_objects_in_the_restore_are_rolled_back(
+    target: TestDatabase, mode: BackupMode
+) -> None:
+    """審查 C1、C3：備份帶了大型物件（內容是編的）就整個退回。"""
+    with pytest.raises(psycopg.Error) as caught:
+        _guarded_restore(
+            target,
+            _request(mode),
+            RESTORED + " SELECT lo_from_bytea(0, convert_to('backup-a@example.com note', 'UTF8'));",
+        )
+
+    assert caught.value.sqlstate == "RR004"
+    [(objects,)] = execute(target, "SELECT count(*) FROM pg_largeobject_metadata")
+    assert objects == 0
+
+
+@pytest.mark.parametrize(
+    "member_content",
+    [
+        "INSERT INTO public.member VALUES (1);",
+        "INSERT INTO public.paper_abstract VALUES ('uploaded_pdf');",
+    ],
+)
+def test_member_content_in_a_shared_only_restore_is_rolled_back(
+    target: TestDatabase, member_content: str
+) -> None:
+    """審查 S3：只有共用資料的備份帶了成員資料表的列、或成員上傳的 PDF 摘要。"""
+    with pytest.raises(psycopg.Error) as caught:
+        _guarded_restore(target, _request(BackupMode.SHARED_ONLY), RESTORED + member_content)
+
+    assert caught.value.sqlstate == "RR001"
+    assert not target.has_table("public.restored")
+    # 預設模式本來就帶成員資料，同樣的內容照樣 commit。
+    _guarded_restore(target, _request(BackupMode.FULL), RESTORED + member_content)

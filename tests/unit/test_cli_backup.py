@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from structlog.testing import capture_logs
 from typer.testing import CliRunner
 
 import radar.entrypoints.cli as cli
@@ -20,6 +21,7 @@ from radar.domain.backup import (
     BackupToolError,
     RestoreCountMismatchError,
     RestoreRefusedError,
+    RestoreVerificationError,
 )
 from radar.services.backup import BackupResult, RestoreResult
 
@@ -66,8 +68,11 @@ def built(monkeypatch: pytest.MonkeyPatch) -> list[str]:
         "build_backup_tools",
         "build_restore_database",
         "build_restore_tools",
+        "build_known_revisions",
     ):
         monkeypatch.setattr(backup_cli, name, stub(name))
+    # 日誌由 capture_logs 接（CLI 自己的設定會蓋掉它）。
+    monkeypatch.setattr(backup_cli, "configure_logging", lambda: None)
     return calls
 
 
@@ -162,12 +167,15 @@ def test_backup_tool_error_exits_one_without_connection_details(
     _backup_env(monkeypatch, RECIPIENT)
     _run_backup_returning(monkeypatch, BackupToolError("pg_dump", "失敗（退出碼 1）"))
 
-    result = runner.invoke(cli.app, ["backup"])
+    with capture_logs() as logs:
+        result = runner.invoke(cli.app, ["backup"])
 
     assert result.exit_code == 1
     assert "備份失敗：pg_dump 失敗（退出碼 1）" in result.stderr
     assert "s3cret" not in result.output
     assert "db.example" not in result.output
+    # 審查 T9：日誌只記錯誤類別。
+    assert logs == [{"event": "備份失敗", "error_type": "BackupToolError", "log_level": "error"}]
 
 
 def test_backup_unexpected_error_shows_only_its_type(
@@ -176,12 +184,15 @@ def test_backup_unexpected_error_shows_only_its_type(
     _backup_env(monkeypatch, RECIPIENT)
     _run_backup_returning(monkeypatch, ConnectionError(f"could not connect to {APP_URL}"))
 
-    result = runner.invoke(cli.app, ["backup"])
+    with capture_logs() as logs:
+        result = runner.invoke(cli.app, ["backup"])
 
     assert result.exit_code == 1
     assert "ConnectionError" in result.stderr
     assert "s3cret" not in result.output
     assert "db.example" not in result.output
+    assert "s3cret" not in repr(logs)
+    assert "db.example" not in repr(logs)
 
 
 # --- radar restore ----------------------------------------------------------------------------
@@ -216,6 +227,7 @@ def test_restore_refused_lists_every_reason(
     assert "沒有還原：" in lines
     assert f"- {problems[0]}" in lines
     assert f"- {problems[1]}" in lines
+    assert "s3cret" not in result.output  # 審查 T9：不印 RADAR_MIGRATION_DATABASE_URL
 
 
 def test_restore_count_mismatch_says_the_data_is_kept(
@@ -230,6 +242,7 @@ def test_restore_count_mismatch_says_the_data_is_kept(
     assert result.exit_code == 1
     assert "還原的資料留著，沒有刪除" in result.stderr
     assert "- 算數的論文：清單 3，還原後 2，差 -1" in result.stderr.splitlines()
+    assert "s3cret" not in result.output  # 審查 T9
 
 
 def test_restore_from_stdin_reads_the_pipe(
@@ -251,3 +264,71 @@ def test_restore_from_stdin_reads_the_pipe(
     assert seen == [b"piped-bytes"]
     assert "已還原，筆數和清單一致" in result.stdout.splitlines()
     assert "s3cret" not in result.output
+
+
+# --- 審查第 1 輪 ------------------------------------------------------------------------------
+
+
+def test_restore_unexpected_error_shows_only_its_type(
+    monkeypatch: pytest.MonkeyPatch, backup_file: Path, built: list[str]
+) -> None:
+    """審查 T9：例外訊息帶連線字串時，輸出與日誌都只有類別名稱。"""
+    _run_restore_returning(monkeypatch, ConnectionError(f"could not connect to {OWNER_URL}"))
+
+    with capture_logs() as logs:
+        result = runner.invoke(cli.app, ["restore", str(backup_file)])
+
+    assert result.exit_code == 1
+    assert "ConnectionError" in result.stderr
+    for secret in ("s3cret", "db.example", "radar_owner"):
+        assert secret not in result.output
+        assert secret not in repr(logs)
+    assert logs == [{"event": "還原失敗", "error_type": "ConnectionError", "log_level": "error"}]
+
+
+def test_restore_verification_error_says_the_data_was_restored(
+    monkeypatch: pytest.MonkeyPatch, backup_file: Path, built: list[str]
+) -> None:
+    """審查 S6：已經 COMMIT 之後重數失敗，不能印成「還原失敗」。"""
+    _run_restore_returning(monkeypatch, RestoreVerificationError("OperationalError"))
+
+    result = runner.invoke(cli.app, ["restore", str(backup_file)])
+
+    assert result.exit_code == 1
+    assert result.stderr.startswith("資料已還原，但還原後重數筆數時出錯（OperationalError）")
+    assert "還原的資料留著沒有刪除" in result.stderr
+    assert "還原失敗" not in result.stderr
+    assert "s3cret" not in result.output
+
+
+@pytest.mark.parametrize(
+    ("argument", "expected"),
+    [([], None), (["--expect-mode", "shared-only"], BackupMode.SHARED_ONLY)],
+)
+def test_restore_passes_the_expected_mode(
+    monkeypatch: pytest.MonkeyPatch,
+    backup_file: Path,
+    built: list[str],
+    argument: list[str],
+    expected: BackupMode | None,
+) -> None:
+    seen: list[object] = []
+
+    def run(*_a: object, **kwargs: object) -> RestoreResult:
+        seen.append(kwargs["expect_mode"])
+        return RestoreResult(manifest=MANIFEST, counts=MANIFEST.counts, member_table_rows={})
+
+    monkeypatch.setattr(backup_cli, "run_restore", run)
+
+    result = runner.invoke(cli.app, ["restore", *argument, str(backup_file)])
+
+    assert result.exit_code == 0
+    assert seen == [expected]
+    assert "build_known_revisions" in built
+
+
+def test_restore_rejects_an_unknown_expected_mode(backup_file: Path, built: list[str]) -> None:
+    result = runner.invoke(cli.app, ["restore", "--expect-mode", "everything", str(backup_file)])
+
+    assert result.exit_code == 2
+    assert built == []

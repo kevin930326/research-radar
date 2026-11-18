@@ -482,3 +482,16 @@ def test_put_stream_s3_error_is_not_retried_and_hides_the_host(client: Any) -> N
     assert seen == ["PUT"]
     assert "amazonaws" not in str(caught.value)
     assert caught.value.__cause__ is None
+
+
+def test_put_stream_failing_at_the_end_of_a_small_stream_leaves_no_key(client: Any) -> None:
+    """Story 3.18 審查 T3：小於一段（單次 PutObject）、讀到結尾才丟例外（`pg_dump` 一開始就失敗
+    時多半走這條）：例外原樣往上丟，`backup/` 沒有鍵。"""
+    store = S3ObjectStore(client, BUCKET, attempts=3)
+    stream = _Chunks(10, fail_after=10)
+
+    with pytest.raises(RuntimeError, match="backup tool failed"):
+        store.put_stream("backup/small.age", stream, content_type="application/octet-stream")
+
+    assert client.list_objects_v2(Bucket=BUCKET, Prefix="backup/").get("KeyCount") == 0
+    assert client.list_multipart_uploads(Bucket=BUCKET).get("Uploads", []) == []

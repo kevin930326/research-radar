@@ -13,6 +13,8 @@ age 的金鑰在測試執行時產生在 pytest 的臨時資料夾；物件儲�
 """
 
 import io
+import shutil
+import subprocess
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
@@ -23,13 +25,16 @@ from radar.adapters.fake.object_store import FakeObjectStore
 from radar.config import load_migration_settings, load_settings
 from radar.domain.backup import (
     MEMBER_TABLES,
+    PAYLOAD_MAGIC,
     BackupManifest,
     BackupMode,
     BackupToolError,
+    RestoreArchiveUnsafeError,
     RestoreCountMismatchError,
     RestoreRefusedError,
     SharedOnlyBackupHasMemberRowsError,
     encode_payload_header,
+    libpq_environment,
     read_payload_header,
 )
 from radar.entrypoints.bootstrap import (
@@ -151,8 +156,11 @@ def test_full_round_trip_restores_member_data(
     store = FakeObjectStore()
     backup = _backup(source, store, age_key.recipient, BackupMode.FULL)
     assert backup.object_key == "backup/20261118T120000Z-full.radar-backup.age"
-    # 沒加密的傾印不出現在物件儲存。
-    assert b"backup-a@example.com" not in store.objects[backup.object_key]
+    # 沒加密的內容不出現在物件儲存：檔頭與清單那一行 JSON 不會被 pg_dump 壓縮，加密前一定是
+    # 明文（審查 T2：pg_dump 的 custom 格式本來就壓縮，找信箱證明不了有加密）。
+    encrypted = store.objects[backup.object_key]
+    assert PAYLOAD_MAGIC not in encrypted
+    assert b'"counted_paper"' not in encrypted
 
     restored = _restore(target, _decrypted(store, backup, age_key))
 
@@ -288,3 +296,79 @@ def test_failed_dump_leaves_no_object(
 
     assert store.objects == {}
     assert wrong.name not in str(caught.value)
+
+
+# --- 大型物件（審查 C1、C3）--------------------------------------------------------------------
+
+
+def _large_object(db: TestDatabase) -> int:
+    """來源裡一個大型物件，內容是測試成員的假資料。擁有者角色建（還原時的 `ALTER LARGE OBJECT
+    … OWNER TO` 才不會因為權限先失敗），應用程式角色讀得到（pg_dump 用它的身分）。"""
+    with db.connect("radar_owner") as owner:
+        row = owner.execute(
+            "SELECT lo_from_bytea(0, convert_to('backup-a@example.com 的私人筆記（測試編的）',"
+            " 'UTF8'))"
+        ).fetchone()
+        assert row is not None
+        oid = int(row[0])
+        owner.execute(f"GRANT SELECT ON LARGE OBJECT {oid} TO radar_app")
+    return oid
+
+
+def _large_objects(db: TestDatabase) -> int:
+    [(count,)] = execute(db, "SELECT count(*) FROM pg_largeobject_metadata")
+    return int(count)
+
+
+def test_dump_with_large_objects_is_refused_and_the_target_stays_empty(
+    source: TestDatabase, seeded: Seeded, age_key: AgeKey, target: TestDatabase
+) -> None:
+    """自己用 pg_dump（不加 --no-large-objects）做一份含大型物件的備份：還原轉送遇到大型物件
+    自己的 BEGIN 就停下，不送 COMMIT，目標還是空的。"""
+    _large_object(source)
+    store = FakeObjectStore()
+    manifest = _backup(source, store, age_key.recipient, BackupMode.FULL).manifest
+    pg_dump = shutil.which("pg_dump")
+    assert pg_dump is not None
+    env = libpq_environment(source.app_url, connect_timeout=5, application_name="radar-test")
+    dump = subprocess.run(
+        [
+            pg_dump,
+            "--format=custom",
+            "--no-password",
+            "--large-objects",
+            "--exclude-extension=vector",
+            "--exclude-extension=pg_trgm",
+        ],
+        env=env,
+        capture_output=True,
+        check=True,
+    ).stdout
+    encrypted = subprocess.run(
+        ["age", "--encrypt", "--recipient", age_key.recipient],
+        input=encode_payload_header(manifest) + dump,
+        capture_output=True,
+        check=True,
+    ).stdout
+
+    with pytest.raises(RestoreArchiveUnsafeError, match="會自己 commit"):
+        _restore(target, age_key.decrypt(encrypted))
+
+    assert _user_tables(target) == []
+    assert _large_objects(target) == 0
+
+
+@pytest.mark.parametrize("mode", list(BackupMode))
+def test_round_trip_from_a_source_with_large_objects_leaves_them_behind(
+    source: TestDatabase, seeded: Seeded, age_key: AgeKey, target: TestDatabase, mode: BackupMode
+) -> None:
+    """`radar backup` 一律 --no-large-objects：來源有大型物件也照樣往返，目標沒有任何大型物件。"""
+    _large_object(source)
+    store = FakeObjectStore()
+    backup = _backup(source, store, age_key.recipient, mode)
+
+    restored = _restore(target, _decrypted(store, backup, age_key))
+
+    assert restored.manifest.mode is mode
+    assert _large_objects(source) == 1
+    assert _large_objects(target) == 0

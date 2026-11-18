@@ -159,7 +159,12 @@ class Database:
             yield connection
 
     @contextmanager
-    def read_only_snapshot_transaction(self) -> Iterator[Connection]:
+    def read_only_snapshot_transaction(
+        self,
+        *,
+        statement_timeout_ms: int | None = None,
+        idle_in_transaction_timeout_ms: int | None = None,
+    ) -> Iterator[Connection]:
         """開一個**唯讀**、REPEATABLE READ 的交易：裡面每一句都讀同一份資料狀態（交易第一句拿到的
         快照），中間別的交易 commit 的改動看不到。
 
@@ -170,9 +175,29 @@ class Database:
 
         隔離層級與唯讀用交易的第一句 `SET TRANSACTION` 設，只在這個交易有效，連線還回連線池時不用
         還原。區塊正常結束就 commit（唯讀，沒有東西要寫），丟出例外就退回。
+
+        `statement_timeout_ms`、`idle_in_transaction_timeout_ms` 有給時用 `SET LOCAL`（只在這個交易
+        有效）換掉連線的 `statement_timeout`、設 `idle_in_transaction_session_timeout`（Story 3.18：
+        備份等 `pg_dump` 時的最後保險、還原後重數筆數放寬時限）。
+
+        Raises:
+            ValueError: 時限不是正整數。
         """
+        local = {
+            "statement_timeout": statement_timeout_ms,
+            "idle_in_transaction_session_timeout": idle_in_transaction_timeout_ms,
+        }
+        for value in local.values():
+            if value is not None and (type(value) is not int or value < 1):
+                raise ValueError("時限要是正整數（毫秒）")
         with self._engine.begin() as connection:
             connection.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"))
+            for name, value in local.items():
+                if value is not None:
+                    connection.execute(
+                        text("SELECT set_config(:name, :value, true)"),
+                        {"name": name, "value": f"{value}ms"},
+                    )
             yield connection
 
     @contextmanager

@@ -2,17 +2,20 @@
 
 備份：
 1. 先問映像裡 `pg_dump` 的大版本（不在交易裡），
-2. 開一個唯讀、REPEATABLE READ 的交易：讀版本、檢查 `pg_dump` 不比資料庫舊、匯出快照、數筆數、
-   組清單，開始 `pg_dump --snapshot`（等它開始輸出、已經匯入快照）——清單的筆數和備份的內容是
-   同一個時間點，
+2. 開一個唯讀、REPEATABLE READ 的交易（閒置逾時當最後保險）：讀版本、檢查 `pg_dump` 不比資料庫
+   舊、`--shared-only` 時檢查沒有成員上傳的 PDF 摘要、匯出快照、數筆數、組清單，開始
+   `pg_dump --snapshot`（等它開始輸出、已經匯入快照）——清單的筆數和備份的內容是同一個時間點，
 3. 結束交易後才把加密串流上傳到物件儲存的 `backup/`（不在開著的交易裡呼叫外部服務）。
 子程序失敗時上傳在完成之前就失敗，`backup/` 不留半個檔。這個 Story 不送 `backup` 心跳（7.5）。
 
 還原（目標是另一個空的資料庫，擁有者角色）：
-1. 讀備份檔開頭的清單，
+1. 讀備份檔開頭的清單；`--expect-mode` 有給而模式不同、遷移版本這個映像不認得就不執行，
 2. 目標不是空的、版本太舊就不執行（什麼都不寫），
-3. 整個還原在一個交易裡；只有共用資料的備份在 commit 前再檢查一次成員資料表沒有任何一列，
-4. commit 後重新數筆數和清單比對；不一致就失敗，還原的資料留著，不自動刪除。
+3. 整個還原在一個交易裡：BEGIN 之後再檢查一次目標是空的；COMMIT 前檢查所有 relation 都是這個
+   交易建的、沒有大型物件，只有共用資料的備份另外檢查成員資料表沒有任何一列、沒有成員上傳的
+   PDF 摘要，
+4. commit 後重新數筆數和清單比對；不一致就失敗，還原的資料留著，不自動刪除。重數時出錯也一樣
+   （資料已還原、留著）。
 """
 
 from collections.abc import Callable
@@ -27,6 +30,8 @@ import structlog
 from radar.domain.backup import (
     BACKUP_CONTENT_TYPE,
     MEMBER_TABLES,
+    RECOUNT_STATEMENT_TIMEOUT_MS,
+    SNAPSHOT_IDLE_TIMEOUT_MS,
     BackupCounts,
     BackupError,
     BackupManifest,
@@ -36,14 +41,19 @@ from radar.domain.backup import (
     RestoreCountMismatchError,
     RestoreRefusedError,
     RestoreRequest,
+    RestoreVerificationError,
+    SharedOnlyBackupRefusedError,
     backup_object_key,
     count_differences,
     encode_payload_header,
+    expect_mode_problems,
     read_payload_header,
     restore_version_problems,
+    unknown_revision_problems,
     version_text,
     version_tuple,
 )
+from radar.domain.papers import AbstractSource
 from radar.domain.viewer import SystemViewer
 from radar.ports import ObjectStore
 from radar.repo.backup import (
@@ -51,8 +61,10 @@ from radar.repo.backup import (
     find_user_relations,
     get_database_versions,
     get_exported_snapshot,
+    get_restore_request,
 )
 from radar.repo.db import Database
+from radar.repo.papers import count_abstracts_from_source
 
 log = structlog.get_logger(__name__)
 
@@ -94,19 +106,28 @@ def run_backup(
 
     Raises:
         PgDumpTooOldError: `pg_dump` 的大版本比資料庫舊（沒有備份）。
-        BackupToolError: `pg_dump` 或 `age` 找不到或失敗（`backup/` 不留這個鍵）。
+        SharedOnlyBackupRefusedError: `SHARED_ONLY` 而有成員上傳的 PDF 摘要（沒有備份）。
+        BackupToolError: `pg_dump` 或 `age` 找不到、失敗或逾時（`backup/` 不留這個鍵）。
         BackupError: 資料庫沒有 pgvector。
     """
     viewer = SystemViewer()
     dump_version = version_text(pg_dump_version())
     dump_major = version_tuple(dump_version)[0]
     with ExitStack() as stack:
-        with database.read_only_snapshot_transaction() as connection:
+        with database.read_only_snapshot_transaction(
+            idle_in_transaction_timeout_ms=SNAPSHOT_IDLE_TIMEOUT_MS
+        ) as connection:
             versions = get_database_versions(viewer, connection)
             if dump_major < versions.postgres_major:
                 raise PgDumpTooOldError(dump_major, versions.postgres_major)
             if versions.pgvector_version is None:
                 raise BackupError("資料庫沒有 pgvector，不是 radar 的資料庫；沒有備份")
+            if mode is BackupMode.SHARED_ONLY:
+                uploaded = count_abstracts_from_source(
+                    viewer, connection, AbstractSource.UPLOADED_PDF
+                )
+                if uploaded:
+                    raise SharedOnlyBackupRefusedError(uploaded)
             snapshot_id = get_exported_snapshot(viewer, connection)
             counts, member_rows = count_backup_rows(viewer, connection, MEMBER_TABLES)
             if mode is BackupMode.SHARED_ONLY:
@@ -152,18 +173,32 @@ def run_restore(
     *,
     pg_restore_version: Callable[[], str],
     restore_archive: Callable[[RestoreRequest, Reader[bytes]], None],
+    expect_mode: BackupMode | None = None,
+    known_revisions: frozenset[str] | None = None,
 ) -> RestoreResult:
     """把解密後的備份（`source`：檔案或標準輸入）還原到 `database`（擁有者角色、要是空的）。
 
+    `expect_mode` 有給時，備份的模式要相同（`radar restore --expect-mode`）；沒給時不檢查。
+    `known_revisions` 是這個映像的遷移檔認得的版本：備份的 Alembic 版本有不認得的就不還原
+    （`radar restore` 一定會給；沒給時不檢查）。
+
     Raises:
         BackupFormatError: `source` 不是解密後的 radar 備份檔（沒有寫任何東西）。
-        RestoreRefusedError: 目標不是空的、或版本太舊（沒有寫任何東西）。
-        SharedOnlyBackupHasMemberRowsError: 只有共用資料的備份裡成員資料表有資料（已整個退回）。
-        BackupToolError: `pg_restore` 或 `psql` 失敗（已整個退回）。
+        RestoreRefusedError: 模式不符、遷移版本不認得、目標不是空的、或版本太舊（沒有寫任何東西）；
+            還原的交易裡發現目標不是空的、或有別的連線同時建了表（已整個退回）。
+        SharedOnlyBackupHasMemberRowsError: 只有共用資料的備份裡有成員資料（已整個退回）。
+        RestoreArchiveUnsafeError: 備份裡有會自己 commit 的內容（已整個退回）。
+        BackupToolError: `pg_restore` 或 `psql` 失敗、輸入逾時（已整個退回）。
         RestoreCountMismatchError: 還原完成但筆數和清單不一致（還原的資料留著，不刪除）。
+        RestoreVerificationError: 還原完成，但重數筆數時出錯（還原的資料留著，不刪除）。
     """
     viewer = SystemViewer()
     manifest = read_payload_header(source)
+    early = expect_mode_problems(manifest, expect_mode)
+    if known_revisions is not None:
+        early += unknown_revision_problems(manifest, known_revisions)
+    if early:
+        raise RestoreRefusedError(early)
     with database.read_only_snapshot_transaction() as connection:
         relations = find_user_relations(viewer, connection)
         versions = get_database_versions(viewer, connection)
@@ -179,14 +214,24 @@ def run_restore(
     problems = restore_version_problems(manifest, versions, restore_major)
     if problems:
         raise RestoreRefusedError(problems)
-    guarded: tuple[str, ...] = ()
-    if manifest.mode is BackupMode.SHARED_ONLY:
-        guarded = tuple(sorted(set(MEMBER_TABLES) | set(manifest.member_table_rows)))
-    restore_archive(RestoreRequest(member_tables_must_be_empty=guarded), source)
-    with database.read_only_snapshot_transaction() as connection:
-        counts, member_rows = count_backup_rows(
-            viewer, connection, manifest.member_table_rows.keys()
-        )
+    request = get_restore_request(
+        viewer,
+        mode=manifest.mode,
+        member_tables=set(MEMBER_TABLES) | set(manifest.member_table_rows),
+    )
+    restore_archive(request, source)
+    # 已經 COMMIT：之後任何錯誤都說明資料已還原、留著（審查 S6）。
+    try:
+        with database.read_only_snapshot_transaction(
+            statement_timeout_ms=RECOUNT_STATEMENT_TIMEOUT_MS
+        ) as connection:
+            counts, member_rows = count_backup_rows(
+                viewer, connection, manifest.member_table_rows.keys()
+            )
+    except Exception as exc:
+        # 例外訊息可能含主機與帳號，只記類別名稱。
+        log.error("還原後重數筆數失敗，資料已還原", error_type=type(exc).__name__)
+        raise RestoreVerificationError(type(exc).__name__) from None
     differences = count_differences(manifest, counts, member_rows)
     if differences:
         log.error("還原後的筆數和清單不一致", differences=len(differences))

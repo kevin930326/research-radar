@@ -419,6 +419,15 @@ def build_restore_database(settings: MigrationSettings) -> Database:
     )
 
 
+def build_known_revisions(migrations_dir: Path = DEFAULT_MIGRATIONS_DIR) -> frozenset[str]:
+    """這個映像的遷移檔認得的全部 Alembic 版本（`radar restore` 擋比程式新的備份用）。不連線。
+
+    Raises:
+        MigrationsNotFoundError: 找不到遷移檔。
+    """
+    return MigrationScripts.load(migrations_dir).known
+
+
 def build_restore_tools(
     settings: MigrationSettings,
 ) -> tuple[Callable[[], str], Callable[[RestoreRequest, Reader[bytes]], None]]:

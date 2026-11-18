@@ -3,6 +3,9 @@
 只有維運的 `radar backup`／`radar restore` 用，`viewer` 一律是 `SystemViewer`（整個資料庫都要讀）。
 全部只讀；收呼叫端開好的交易連線，不自己 commit。表名只來自 `radar/domain/backup.py` 的固定清單
 （小寫識別字），組進 SQL 時一律加雙引號。
+
+`get_restore_request` 不連資料庫：它組還原時在 `psql` 的交易裡送的檢查（BEGIN 之後、COMMIT 之前），
+和 `find_user_relations` 用同一個「空的」定義。
 """
 
 from collections.abc import Iterable
@@ -10,7 +13,19 @@ from collections.abc import Iterable
 from sqlalchemy import Connection, text
 
 from radar.domain.ai_outputs import LlmTask
-from radar.domain.backup import BackupCounts, DatabaseVersions, version_text
+from radar.domain.backup import (
+    FOREIGN_RELATION_SQLSTATE,
+    LARGE_OBJECT_SQLSTATE,
+    MEMBER_ROWS_SQLSTATE,
+    TARGET_NOT_EMPTY_SQLSTATE,
+    BackupCounts,
+    BackupMode,
+    DatabaseVersions,
+    RestoreRequest,
+    check_table_name,
+    version_text,
+)
+from radar.domain.papers import AbstractSource
 from radar.domain.viewer import SystemViewer
 from radar.repo.ai_outputs import count_active_ai_results
 from radar.repo.stats import list_cube_counts
@@ -139,3 +154,73 @@ def count_backup_rows(
                 ).scalar_one()
             )
     return counts, rows
+
+
+def _guard(condition: str, sqlstate: str, message: str) -> str:
+    """`condition` 成立就用 `sqlstate` 丟錯的一段 PL/pgSQL（放在 DO 區塊裡）。"""
+    return f" IF {condition} THEN RAISE EXCEPTION '{message}' USING ERRCODE = '{sqlstate}'; END IF;"
+
+
+def get_restore_request(
+    viewer: SystemViewer, *, mode: BackupMode, member_tables: Iterable[str]
+) -> RestoreRequest:
+    """還原時在同一個交易裡送的兩段檢查（審查 C2、C3、S3；ADR-0051 決定第 10、12 點）。
+
+    還原的 SQL 會把 `search_path` 設成空的，所以表名一律寫 `public.`；系統目錄（`pg_class` 等）
+    在 `pg_catalog`，空的 `search_path` 也找得到。
+
+    - BEGIN 之後、備份的 SQL 之前：目標還是空的（和 `find_user_relations` 同一個定義）；
+    - COMMIT 之前：每一個使用者的 relation 都是這個交易建的（`pg_class.xmin` 是目前的交易）、
+      沒有大型物件；`SHARED_ONLY` 另外檢查 `member_tables`（存在的話）沒有任何一列、
+      `paper_abstract` 沒有成員上傳的 PDF 摘要（`uploaded_pdf`）。
+
+    Raises:
+        TypeError: `viewer` 不是 `SystemViewer`。
+        ValueError: `member_tables` 有不是小寫識別字的表名。
+    """
+    visible = visible_to_system_only(viewer)
+    user_relations = (
+        "EXISTS (SELECT 1 FROM pg_catalog.pg_class c"
+        " JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace"
+        f" WHERE {visible} AND{_USER_RELATIONS_WHERE}"
+    )
+    before_restore = (
+        "DO $radar_guard$ BEGIN"
+        + _guard(
+            user_relations + ")",
+            TARGET_NOT_EMPTY_SQLSTATE,
+            "radar restore: target is not empty",
+        )
+        + " END $radar_guard$;\n"
+    )
+    checks = _guard(
+        user_relations + " AND c.xmin::text <> pg_catalog.pg_current_xact_id()::xid::text)",
+        FOREIGN_RELATION_SQLSTATE,
+        "radar restore: a relation was not created by this restore",
+    ) + _guard(
+        f"EXISTS (SELECT 1 FROM pg_catalog.pg_largeobject_metadata WHERE {visible})",
+        LARGE_OBJECT_SQLSTATE,
+        "radar restore: large objects are not restored",
+    )
+    if mode is BackupMode.SHARED_ONLY:
+        names = ", ".join(f"'{check_table_name(t)}'" for t in sorted(set(member_tables)))
+        checks += (
+            f" FOREACH t IN ARRAY ARRAY[{names}]::text[] LOOP"
+            " IF to_regclass(format('public.%I', t)) IS NOT NULL THEN"
+            f" EXECUTE format('SELECT EXISTS (SELECT 1 FROM public.%I WHERE {visible})', t)"
+            " INTO has_rows;"
+            + _guard("has_rows", MEMBER_ROWS_SQLSTATE, "radar restore: member table has rows")
+            + " END IF; END LOOP;"
+            " IF to_regclass('public.paper_abstract') IS NOT NULL THEN"
+            " EXECUTE 'SELECT EXISTS (SELECT 1 FROM public.paper_abstract"
+            f" WHERE {visible} AND source = ''{AbstractSource.UPLOADED_PDF.value}'')'"
+            " INTO has_rows;"
+            + _guard("has_rows", MEMBER_ROWS_SQLSTATE, "radar restore: uploaded abstracts")
+            + " END IF;"
+        )
+    before_commit = (
+        "DO $radar_guard$ DECLARE t text; has_rows boolean; BEGIN"
+        + checks
+        + " END $radar_guard$;\n"
+    )
+    return RestoreRequest(before_restore_sql=before_restore, before_commit_sql=before_commit)

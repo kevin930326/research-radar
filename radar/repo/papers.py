@@ -473,6 +473,25 @@ def list_paper_dois(
     return {uuid.UUID(str(paper_id)): tuple(dois) for paper_id, dois in rows}
 
 
+def count_abstracts_from_source(
+    viewer: SystemViewer, connection: Connection, source: AbstractSource
+) -> int:
+    """來源是 `source` 的摘要有幾筆（不管是不是目前的摘要；不接 `paper`，不是統計用的篇數）。
+
+    `radar backup --shared-only` 的擋下條件（Story 3.18 審查 S3）：成員上傳的 PDF 摘要
+    （`uploaded_pdf`，只有上傳者看得到、永遠不是目前的）不能帶到只有共用資料的備份。
+
+    Raises:
+        TypeError: `viewer` 不是 `SystemViewer`。
+    """
+    visible = visible_to_system_only(viewer)
+    value = connection.execute(
+        text(f"SELECT count(*) FROM paper_abstract WHERE {visible} AND source = :source"),
+        {"source": AbstractSource(source).value},
+    ).scalar_one()
+    return int(value)
+
+
 def count_papers_with_current_abstract_source(
     viewer: SystemViewer, connection: Connection, source: AbstractSource
 ) -> int:

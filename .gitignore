@@ -34,6 +34,8 @@ data/
 backups/
 # radar backup 的加密備份檔（age，Story 3.18、ADR-0051）：不進 repo
 *.age
+# age 的私鑰檔（搬家文件建議放在 repo 以外的 ~/.config/age/radar-backup.agekey）：萬一放進來也不進 repo
+*.agekey
 
 # =========================================================
 # Python

@@ -11,6 +11,7 @@
 import sys
 from contextlib import ExitStack
 from datetime import UTC, datetime
+from enum import StrEnum
 from pathlib import Path
 from typing import IO, Annotated, NoReturn
 
@@ -25,10 +26,13 @@ from radar.domain.backup import (
     BackupMode,
     RestoreCountMismatchError,
     RestoreRefusedError,
+    RestoreVerificationError,
 )
 from radar.entrypoints.bootstrap import (
+    MigrationsNotFoundError,
     build_backup_tools,
     build_database,
+    build_known_revisions,
     build_object_store,
     build_restore_database,
     build_restore_tools,
@@ -50,6 +54,27 @@ _SourceArgument = Annotated[
     typer.Argument(
         help="解密後的備份檔；- 代表標準輸入（經 SSH 串流時用）",
         metavar="備份檔或-",
+        show_default=False,
+    ),
+]
+
+
+class ExpectMode(StrEnum):
+    """`radar restore --expect-mode` 的值（指令列用連字號）。"""
+
+    FULL = "full"
+    SHARED_ONLY = "shared-only"
+
+    @property
+    def mode(self) -> BackupMode:
+        return BackupMode.FULL if self is ExpectMode.FULL else BackupMode.SHARED_ONLY
+
+
+_ExpectModeOption = Annotated[
+    ExpectMode | None,
+    typer.Option(
+        "--expect-mode",
+        help="備份的模式要是這一種，不是就在寫入前拒絕（搬到試用主機時用 shared-only）",
         show_default=False,
     ),
 ]
@@ -108,11 +133,12 @@ def backup(shared_only: _SharedOnlyOption = False) -> None:
         typer.echo(line)
 
 
-def restore(source: _SourceArgument) -> None:
+def restore(source: _SourceArgument, expect_mode: _ExpectModeOption = None) -> None:
     """把解密後的備份還原到空的資料庫（擁有者角色 RADAR_MIGRATION_DATABASE_URL）。
 
-    目標不是空的、版本比備份時舊：不執行，印出原因。整個還原在一個交易裡，失敗就整個退回。
-    還原後重新數筆數和清單比對，不一致就失敗、印出哪一項差多少；還原的資料留著，不自動刪除。
+    目標不是空的、版本比備份時舊、--expect-mode 不符、備份比這個映像新：不執行，印出原因。
+    整個還原在一個交易裡，失敗就整個退回。還原後重新數筆數和清單比對，不一致就失敗、印出哪一項
+    差多少；還原的資料留著，不自動刪除。
     """
     configure_logging()
     try:
@@ -130,10 +156,15 @@ def restore(source: _SourceArgument) -> None:
                 stream,
                 pg_restore_version=pg_restore_version,
                 restore_archive=restore_archive,
+                expect_mode=None if expect_mode is None else expect_mode.mode,
+                known_revisions=build_known_revisions(),
             )
         except ConfigError as exc:
             log.error("設定錯誤，沒有還原", problems=exc.problems)
             _fail("設定錯誤，沒有還原：", exc.problems)
+        except MigrationsNotFoundError:
+            log.error("找不到遷移檔，沒有還原")
+            _fail("找不到遷移檔（認不出備份的遷移版本），沒有還原")
         except RestoreRefusedError as exc:
             log.error("還原前的檢查沒過，沒有還原", problems=len(exc.problems))
             _fail("沒有還原：", exc.problems)
@@ -144,6 +175,10 @@ def restore(source: _SourceArgument) -> None:
                 "要不要刪掉重來由 Kevin 決定）：",
                 exc.differences,
             )
+        except RestoreVerificationError as exc:
+            # 已經 COMMIT：不能寫「還原失敗」，要說資料已還原、留著（審查 S6）。
+            log.error("資料已還原，但筆數沒比對成功", error_type=type(exc).__name__)
+            _fail(str(exc))
         except BackupError as exc:
             log.error("還原失敗", error_type=type(exc).__name__)
             _fail(f"還原失敗：{exc}")

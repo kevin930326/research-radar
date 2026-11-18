@@ -299,13 +299,20 @@ def test_private_table_check_catches_each_violation(migrated_database: TestDatab
 # --- 備份的資料表歸類（Story 3.18、ADR-0051）-----------------------------------------------------
 
 # 看得出「屬於某位成員」的欄位：有這種欄位的表一定要歸成員資料（`--shared-only` 不帶它的資料）。
+# 只認名稱（審查 T8 加了 `*_by`、`user_id`、`google_sub`）：新增成員欄位請用 `*_member_id` 命名；
+# 放在 jsonb 裡、或名稱完全不同的成員資料抓不到，新增資料表的 Story 要自己判斷歸類。
+MEMBER_COLUMN_NAMES = "owner_id、member_id、*_member_id、*_by、user_id、google_sub、email"
 MEMBER_COLUMN_SQL = """
 SELECT DISTINCT c.relname
 FROM pg_attribute a
 JOIN pg_class c ON c.oid = a.attrelid
 JOIN pg_namespace n ON n.oid = c.relnamespace
 WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p') AND a.attnum > 0 AND NOT a.attisdropped
-  AND (a.attname IN ('owner_id', 'member_id', 'email') OR a.attname LIKE '%\\_member\\_id')
+  AND (
+    a.attname IN ('owner_id', 'member_id', 'email', 'user_id', 'google_sub')
+    OR a.attname LIKE '%\\_member\\_id'
+    OR a.attname LIKE '%\\_by'
+  )
 """
 
 FOREIGN_KEY_TABLES_SQL = """
@@ -330,7 +337,7 @@ def classification_problems(
     ]
     with_member_columns = {row[0] for row in connection.execute(MEMBER_COLUMN_SQL).fetchall()}
     problems += [
-        f"{t}：有成員欄位（owner_id、member_id、email），要歸成員資料"
+        f"{t}：有成員欄位（{MEMBER_COLUMN_NAMES}），要歸成員資料"
         for t in sorted(with_member_columns & shared)
     ]
     problems += [
@@ -360,12 +367,19 @@ def test_classification_check_catches_each_violation(migrated_database: TestData
                 "CREATE TABLE shared_pointing_at_member (id uuid PRIMARY KEY,"
                 " created_by uuid REFERENCES member (id))"
             )
+            # 審查 T8：沒有外鍵、名稱是 `user_id`、`google_sub`、`*_by` 的成員欄位也抓得到。
+            connection.execute("CREATE TABLE shared_with_user_id (id uuid, user_id uuid)")
+            connection.execute("CREATE TABLE shared_with_google_sub (id uuid, google_sub text)")
+            connection.execute("CREATE TABLE shared_with_reviewed_by (id uuid, reviewed_by uuid)")
             problems = classification_problems(
                 connection,
                 {
                     **SHARED_TABLES,
                     "shared_with_owner": "測試用",
                     "shared_pointing_at_member": "測試用",
+                    "shared_with_user_id": "測試用",
+                    "shared_with_google_sub": "測試用",
+                    "shared_with_reviewed_by": "測試用",
                     "member": "測試用：兩份都列",
                     "no_such_backup_table": "測試用",
                 },
@@ -374,10 +388,17 @@ def test_classification_check_catches_each_violation(migrated_database: TestData
         finally:
             connection.rollback()
 
+    member_column = f"有成員欄位（{MEMBER_COLUMN_NAMES}），要歸成員資料"
     assert problems == [
         "member：同時在共用資料與成員資料",
         "unclassified_table：沒有歸類（共用資料或成員資料）",
         "no_such_backup_table：在歸類清單裡，但資料庫沒有這張表",
-        "shared_with_owner：有成員欄位（owner_id、member_id、email），要歸成員資料",
+        # `member` 有 `google_sub`（審查 T8 新認的名稱），被列進共用資料時也抓得到。
+        f"member：{member_column}",
+        f"shared_pointing_at_member：{member_column}",
+        f"shared_with_google_sub：{member_column}",
+        f"shared_with_owner：{member_column}",
+        f"shared_with_reviewed_by：{member_column}",
+        f"shared_with_user_id：{member_column}",
         "shared_pointing_at_member：共用表有外鍵指到成員表 member",
     ]
