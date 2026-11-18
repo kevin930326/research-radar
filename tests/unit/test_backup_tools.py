@@ -254,6 +254,105 @@ def test_ordinary_writings_still_pass(line: bytes) -> None:
     assert _feed_lf(line).at_statement_boundary
 
 
+# --- 審查第 3 輪 Q1：standard_conforming_strings 是 on 之後，反斜線是一般字元 -------------------
+
+STD_ON = b"SET standard_conforming_strings = on;\n"
+
+
+@pytest.mark.parametrize(
+    "header",
+    [
+        STD_ON,
+        b"SET standard_conforming_strings TO on;\n",
+        b"set STANDARD_CONFORMING_STRINGS = ON ;\n",
+    ],
+)
+def test_backslash_before_quote_is_plain_text_once_strings_are_standard(header: bytes) -> None:
+    guard = _feed_lf(
+        header + b"COMMENT ON TABLE public.t IS 'C:\\';\n"
+        b"ALTER TABLE public.t ALTER COLUMN p SET DEFAULT 'a\\\\\\';\n"  # 三個反斜線接引號
+        b"COMMENT ON COLUMN public.t.p IS '\xe4\xb8\xad\\';\n"
+        b"SELECT 1;\n"
+    )
+
+    assert guard.at_statement_boundary
+
+
+def test_commit_after_a_backslash_string_is_still_refused_when_standard() -> None:
+    guard = _feed_lf(STD_ON + b"COMMENT ON TABLE public.t IS 'C:\\';\n")
+
+    with pytest.raises(RestoreArchiveUnsafeError, match="COMMIT"):
+        guard.check_line(b"COMMIT;\n")
+    with pytest.raises(RestoreArchiveUnsafeError, match="COMMIT"):
+        _feed_lf(STD_ON + b"SELECT 'C:\\';COMMIT;--';\n")
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        b"BEGIN;\n",
+        b"COMMIT;\n",
+        b"ROLLBACK;\n",
+        b"END;\n",
+        b"ABORT;\n",
+        b"SAVEPOINT a;\n",
+        b"RELEASE a;\n",
+        b"START TRANSACTION;\n",
+        b"PREPARE TRANSACTION 'x';\n",
+        b"SELECT 1;\n-- c\rCOMMIT;\n",
+        b"SELECT 1;\n/* c */\rCOMMIT;\n",
+        b"COPY public.t (id) FROM stdin;\n1\r\n\\.\r\nCOMMIT;\n",
+        b"SELECT 1E'\\';COMMIT;--';\n",
+        b"SELECT E'\\'';COMMIT;--';\n",
+    ],
+)
+def test_transaction_control_is_still_refused_when_standard(script: bytes) -> None:
+    with pytest.raises(
+        RestoreArchiveUnsafeError,
+        match="交易控制語句",
+    ):
+        _feed_lf(STD_ON + script)
+
+
+def test_the_set_line_itself_is_still_read_the_old_way() -> None:
+    """psql 每一行開始時才讀一次字串的讀法：SET 同一行後面的字串還照舊的讀。"""
+    with pytest.raises(RestoreArchiveUnsafeError, match="反斜線"):
+        _feed_lf(b"SET standard_conforming_strings = on; SELECT 'C:\\';\n")
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        b"SET standard_conforming_strings = off;\n",
+        b"SET standard_conforming_strings TO off;\n",
+        b"SET standard_conforming_strings = 'on';\n",  # 認不得的寫法也停下
+        b"SET standard_conforming_strings = DEFAULT;\n",
+        b"SET standard_conforming_strings = on, off;\n",
+        b"SET standard_conforming_strings = 1;\n",
+        b"SET LOCAL standard_conforming_strings = off;\n",
+        b"SET SESSION standard_conforming_strings = on;\n",
+        b"RESET standard_conforming_strings;\n",
+        b"RESET ALL;\n",
+        b'SET "standard_conforming_strings" = off;\n',
+        b'SET U&"standard_conforming_strings" = off;\n',
+        b"SELECT pg_catalog.set_config('standard_conforming_strings', 'off', false);\n",
+        b"SELECT set_config('search_path', '', false);\n",  # 不是 pg_restore 那一行
+        b"ALTER ROLE r SET standard_conforming_strings = off;\n",
+    ],
+)
+def test_other_changes_to_string_reading_are_refused(script: bytes) -> None:
+    with pytest.raises(RestoreArchiveUnsafeError, match="反斜線"):
+        _feed_lf(script)
+    with pytest.raises(RestoreArchiveUnsafeError, match="反斜線"):
+        _feed_lf(STD_ON + script)  # 已經是 on 之後再改也一樣停下
+
+
+def test_pg_restore_search_path_line_is_allowed() -> None:
+    guard = _feed_lf(STD_ON + b"SELECT pg_catalog.set_config('search_path', '', false);\r\n")
+
+    assert guard.at_statement_boundary
+
+
 # --- 錯誤訊息去敏（審查 S10）------------------------------------------------------------------
 
 PG_ENV = {

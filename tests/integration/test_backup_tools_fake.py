@@ -448,6 +448,21 @@ def test_guard_sqlstates_become_their_own_errors(
         restore_archive(REQUEST, io.BytesIO(b"SELECT 1;\n"), pg_env=PG_ENV)
 
 
+def test_other_client_message_mentions_the_health_check(
+    spawned: list[Spawned], bin_dir: Path, captured: Path
+) -> None:
+    """審查第 3 輪 P1：資料庫的健康檢查可能剛好連進來；訊息說明目標仍是空的、可以直接重跑。"""
+    _restore_tools(bin_dir, captured, psql_code=3, stderr="psql:<stdin>:9: ERROR:  RR005\n")
+
+    with pytest.raises(RestoreRefusedError) as caught:
+        restore_archive(REQUEST, io.BytesIO(b"SELECT 1;\n"), pg_env=PG_ENV)
+
+    message = str(caught.value)
+    assert "可能是資料庫的健康檢查剛好連進來；目標仍是空的，可以直接重跑" in message
+    for secret in SECRETS:
+        assert secret not in message, secret
+
+
 def test_stalled_restore_input_times_out_without_commit(
     spawned: list[Spawned], bin_dir: Path, captured: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

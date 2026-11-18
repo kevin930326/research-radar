@@ -347,6 +347,10 @@ _E_STRING_STOP = re.compile(rb"[\\']")
 _COMMENT_TOKEN = re.compile(rb"/\*|\*/")
 # psql 判斷 `CREATE [OR REPLACE] FUNCTION|PROCEDURE … BEGIN ATOMIC … END` 用的前幾個詞。
 _DEFINITION_WORDS = frozenset({"create", "function", "procedure", "or", "replace"})
+# 字串的讀法（審查第 3 輪 Q1）：只認得 pg_restore 18 在開頭寫的這兩種，其他改設定的寫法一律停下。
+_STD_STRINGS = "standard_conforming_strings"
+_STD_STRINGS_ON_WORDS = (("set", _STD_STRINGS, "on"), ("set", _STD_STRINGS, "to", "on"))
+_SEARCH_PATH_LINE = b"SELECT pg_catalog.set_config('search_path', '', false);"
 
 
 class _SqlScriptGuard:
@@ -357,6 +361,12 @@ class _SqlScriptGuard:
     `--` 與巢狀 `/* */` 註解、括號、`CREATE FUNCTION … BEGIN ATOMIC … END`）找每一句的第一個詞；
     `COPY … FROM stdin;` 之後到單獨一行 `\.` 是 COPY 資料，不檢查（資料裡剛好有一行 `COMMIT;`
     不算）。不准的寫法丟 `RestoreArchiveUnsafeError`，那一行還沒送進 `psql`。
+
+    一般字串 `'…'` 裡的反斜線（審查第 3 輪 Q1）：`standard_conforming_strings` 是 on 時只是普通
+    文字，off 時 `\'` 是跳脫。psql 照連線回報的值切字串，而且每一行開始時才讀一次，所以這裡也只在
+    `SET standard_conforming_strings = on;` 那一句結束之後的**下一行**起照 on 的規則讀；在那之前
+    照舊遇到兩種讀法不一樣的寫法就停下。之後任何可能改掉這個設定的寫法（設成 on 以外的值、
+    `SET LOCAL`、`RESET`、`set_config(…)`、`SET` 用雙引號名稱）一律停下，不猜。
 
     行尾照 PostgreSQL 18（審查第 2 輪 R1）：psql 只用 LF 分行；`--` 註解在 CR 或 LF 結束；COPY 資料
     只在整行剛好是 `\.` 加 LF 或 CRLF 時結束。和 psql 可能讀得不一樣的寫法（NUL 位元組、反斜線
@@ -369,6 +379,9 @@ class _SqlScriptGuard:
         self._quote: bytes | None = None  # b"'"、b"E'"、b'"'、b"$"、b"/*"
         self._dollar_tag = b""
         self._comment_depth = 0
+        self._std_strings_on = False  # 已確定 psql 照 standard_conforming_strings = on 切字串
+        self._std_strings_on_next_line = False
+        self._search_path_line = False
         self._new_statement()
 
     def _new_statement(self) -> None:
@@ -378,6 +391,7 @@ class _SqlScriptGuard:
         self._paren_depth = 0
         self._begin_depth = 0
         self._copy_from_stdin = False
+        self._only_words = True  # 這一句到目前只有名稱（`=` 這類標點這裡看不到，不影響）
 
     @property
     def at_statement_boundary(self) -> bool:
@@ -404,7 +418,15 @@ class _SqlScriptGuard:
             if line in _COPY_END_LINES:
                 self._in_copy = False
             return
+        # pg_restore 自己寫的那一行 `set_config('search_path', …)` 是唯一准許的 set_config。
+        self._search_path_line = (
+            self.at_statement_boundary and line.rstrip(b"\r\n") == _SEARCH_PATH_LINE
+        )
         self._scan(line)
+        if self._std_strings_on_next_line:
+            # psql 在每一行開始時才讀一次字串的讀法，同一行後面的東西還照舊的讀。
+            self._std_strings_on_next_line = False
+            self._std_strings_on = True
         if self._copy_next_line:
             self._copy_next_line = False
             self._in_copy = True
@@ -441,13 +463,16 @@ class _SqlScriptGuard:
             # pg_restore 寫的是 `COPY … FROM stdin;`；後面有選項（例如 binary 格式會讓 psql 把
             # 剩下的輸入全當 COPY 資料）就停下。
             raise RestoreArchiveUnsafeError("COPY … FROM stdin 後面有選項")
+        identifier = _IDENTIFIER_TOKEN.match(line, i)
+        if identifier is None and char != b";":
+            self._only_words = False
         if char.isdigit():
             number = _NUMBER_TOKEN.match(line, i)
             return number.end() if number else i + 1
-        identifier = _IDENTIFIER_TOKEN.match(line, i)
         if identifier is not None:
             word = identifier.group(0)
             if word in (b"E", b"e") and line[identifier.end() : identifier.end() + 1] == b"'":
+                self._only_words = False
                 self._quote = b"E'"
                 return identifier.end() + 1
             self._identifier(word.decode("utf-8", "replace").lower())
@@ -460,6 +485,11 @@ class _SqlScriptGuard:
             parameter = _POSITIONAL_PARAMETER.match(line, i)
             return parameter.end() if parameter else i + 1
         if char in (b"'", b'"'):
+            if char == b'"' and self._words and self._words[0] in ("set", "reset"):
+                # `SET "standard_conforming_strings" = off` 這類寫法：名稱看不到，不猜。
+                raise RestoreArchiveUnsafeError(
+                    "SET 用雙引號的設定名稱（可能改變字串裡反斜線的讀法）"
+                )
             self._quote = char
         elif char == b"/" and line[i + 1 : i + 2] == b"*":
             self._quote, self._comment_depth = b"/*", 1
@@ -470,6 +500,7 @@ class _SqlScriptGuard:
             self._paren_depth = max(0, self._paren_depth - 1)
         elif char == b";" and self._paren_depth == 0 and self._begin_depth == 0:
             self._copy_next_line = self._copy_from_stdin
+            self._end_statement()
             self._new_statement()
         return i + 1
 
@@ -479,7 +510,7 @@ class _SqlScriptGuard:
         if quote in (b"'", b'"'):
             assert quote is not None
             while (j := line.find(quote, i)) >= 0:
-                if quote == b"'":
+                if quote == b"'" and not self._std_strings_on:
                     _check_backslashes_before_quote(line, j)
                 if line[j + 1 : j + 2] == quote:  # 兩個連在一起是跳脫
                     i = j + 2
@@ -521,6 +552,14 @@ class _SqlScriptGuard:
             raise RestoreArchiveUnsafeError(f"交易控制語句 {word.upper()}，例如大型物件")
         if position == 1 and (self._words[0], word) in _TRANSACTION_PAIRS:
             raise RestoreArchiveUnsafeError(f"交易控制語句 {self._words[0].upper()} TRANSACTION")
+        if word == _STD_STRINGS and not (position == 1 and self._words[0] == "set"):
+            raise RestoreArchiveUnsafeError(
+                f"{_STD_STRINGS} 不是用 SET … = on 設定（字串裡反斜線的讀法可能和 psql 不同）"
+            )
+        if word == "set_config" and not self._search_path_line:
+            raise RestoreArchiveUnsafeError("set_config（可能改變字串裡反斜線的讀法）")
+        if position == 1 and (self._words[0], word) == ("reset", "all"):
+            raise RestoreArchiveUnsafeError("RESET ALL（可能改變字串裡反斜線的讀法）")
         self._words.append(word)
         if len(self._markers) < 4:
             self._markers.append(word[0] if word in _DEFINITION_WORDS else "")
@@ -536,6 +575,20 @@ class _SqlScriptGuard:
                 self._begin_depth += 1
             elif word == "end" and self._begin_depth > 0:
                 self._begin_depth -= 1
+
+    def _end_statement(self) -> None:
+        """一句結束（分號）：設定字串讀法的那一句只准剛好是 `SET standard_conforming_strings = on`。
+
+        Raises:
+            RestoreArchiveUnsafeError: 設成 on 以外的值，或寫法認不得。
+        """
+        if self._words[:2] != ["set", _STD_STRINGS]:
+            return
+        if not self._only_words or tuple(self._words) not in _STD_STRINGS_ON_WORDS:
+            raise RestoreArchiveUnsafeError(
+                f"{_STD_STRINGS} 設成 on 以外的值或認不得的寫法（字串裡反斜線的讀法會和 psql 不同）"
+            )
+        self._std_strings_on_next_line = True
 
     def _is_routine_definition(self) -> bool:
         """這一句是 `CREATE [OR REPLACE] FUNCTION|PROCEDURE`（照 psql 的判斷）。"""
@@ -565,9 +618,10 @@ class _SqlScriptGuard:
 def _check_backslashes_before_quote(line: bytes, j: int) -> None:
     """一般字串 `'…'` 裡，`line[j]` 的引號前面緊接著反斜線時，判斷 psql 會不會斷在別處。
 
-    這裡照 `standard_conforming_strings = on`（pg_restore 寫在開頭）把反斜線當一般字元；但備份的
-    SQL 可以把它關掉，那時 `\\'` 是跳脫、字串沒有結束。前面有奇數個反斜線（兩種讀法不一樣），或
-    反斜線前面是非 ASCII 字元（SJIS 這類編碼會把那個反斜線當成同一個字），就停下。
+    只在還沒看到 `SET standard_conforming_strings = on;`（pg_restore 寫在開頭）之前用：那時不知道
+    psql 用哪一種讀法，on 時反斜線是一般字元，off 時 `\\'` 是跳脫、字串沒有結束。前面有奇數個反斜線
+    （兩種讀法不一樣），或反斜線前面是非 ASCII 字元（SJIS 這類編碼會把那個反斜線當成同一個字），
+    就停下。確定是 on 之後照 on 的規則讀，不再呼叫這裡（審查第 3 輪 Q1）。
 
     Raises:
         RestoreArchiveUnsafeError: 這個引號在兩種讀法下的意思不同。
@@ -768,7 +822,8 @@ def _raise_for_exit_codes(
             raise RestoreRefusedError(
                 [
                     "還原時有別的程式連著目標資料庫（例如 api、worker）；交易已退回，沒有還原。"
-                    "先停掉它們、只留還原自己再試"
+                    "先停掉它們、只留還原自己再試。沒有開別的程式時，"
+                    "可能是資料庫的健康檢查剛好連進來；目標仍是空的，可以直接重跑"
                 ]
             )
         raise BackupToolError("psql", f"失敗（退出碼 {psql.returncode}），交易已退回", detail)
