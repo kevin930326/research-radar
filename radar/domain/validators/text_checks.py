@@ -13,7 +13,8 @@
 - `ExtendedVocabulary`（2026-11-18，只有中文重點用）：`InputVocabulary` 加上把輸入讀得更完整的部分
   ——空白千分位、月份英文名、`10-40%`、`10% points`、年代、英數詞（`B2B`）、輸出正數對輸入
   負數、英文詞的詞形變化與黏字、`vs`。數字的新規則一律以 `numbers` 讀到的「完整數字」為單位
-  （`_whole_numbers`），不另外用正規式找數字。研究模型不用它。
+  （`_whole_numbers`），不另外用正規式找數字。研究模型不用它。另外接中文重點的通用縮寫允許清單
+  （`build` 的 `acronyms`、`_allowed_acronyms`：清單裡、而且輸入有它全名的縮寫才認得）。
 
 都是純函式；上面幾項的行為和 2.4 原本在 `zh_summary.py` 的一樣（只改成公開名稱），加
 `ExtendedVocabulary` 時也沒改。判準的細節與抓不到的情況寫在 ADR-0032。
@@ -24,9 +25,10 @@ import re
 import string
 import unicodedata
 from bisect import bisect_left
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from decimal import MAX_EMAX, MIN_EMIN, Context, Decimal, DecimalException
+from functools import lru_cache
 from itertools import pairwise
 from typing import Final
 
@@ -515,8 +517,8 @@ def _prepared_in_place(text: str) -> str:
 # - 乘號（`×`、`x`、`*`、`·`、`⋅`、`∙`、`✕`、`✖`、`⨯`；`x` 前面不能是字母：`max 10-20%` 不算）後面
 #   的「10＋次方」；
 # - `^` 或 `**` 後面（可隔空白、正負號，含 `±`、`∓`）的次方；
-# - 數字後面 `E` 前後有空白（或正負號是 `±`、`∓`）的指數：`1.2 E -3`、`1.2 E - 3`、`7.7e - 90`
-#   （沒有空白的 `1e-3` 本來就是一個帶指數的完整數字，不在這裡）。
+# - 數字後面 `E` 前後有空白（或正負號是 `±`、`∓`）的指數：`1.2 E -3`、`1.2 E - 3`、`1.2E -3`、
+#   `7.7e - 90`（沒有空白的 `1e-3` 本來就是一個帶指數的完整數字，不在這裡）。
 # 這只會讓新規則少認（`Group X 10-40%`、`2 × 10-40%` 的 10 也不當百分比，偏保守）。每一種都從固定的
 # 字元開始試、量詞不巢狀，線性時間。
 _SCIENTIFIC_PIECE: Final = re.compile(
@@ -929,6 +931,156 @@ def _alnum_tokens(text: str) -> frozenset[str]:
     return frozenset(found)
 
 
+# C 通用縮寫的允許清單（ADR-0032 的「通用縮寫的允許清單與整欄說明存成空值」更新）：清單在
+# `config/zh_summary_acronyms.yaml`，由 `zh_summary.py` 交給 `ExtendedVocabulary.build`。一個縮寫
+# 放行要兩個條件都成立：輸出寫的跟登記的縮寫一模一樣（大小寫也一樣，`knows_word`、
+# `knows_alnum`），而且輸入（標題或摘要）裡出現了它登記的某一個全名（`_allowed_acronyms`）。
+# 全名的比對：
+# - 不分大小寫；全名的詞要在輸入裡**連續**出現（只有一部分、或分散在各處都不算）。
+# - 詞與詞之間是一個空白、一個連字號，或什麼都沒有（`decision-making`＝`decision making`、
+#   `multi-criteria`＝`multi criteria`＝`multicriteria`；輸入少了空白黏成一串的也算）：兩邊拿掉
+#   空白與連字號之後字母逐一對得上，而且開頭、結尾都落在輸入的詞頭、詞尾。摘要裡的換行、tab 在
+#   檢查用副本裡已經縮成一個空白，所以和空白一樣算連續；標題與摘要的接縫（兩份副本用換行接起來）
+#   不算。其他符號（逗號、括號、數字、兩個以上的分隔）隔開的不算連續。
+# - 只有全名的**最後一個詞**容許 PR 1 的詞形變化（複數、`_root_splits`／`_same_root`：
+#   `model`／`models`／`modeling`／`modelling`，`_same_word_form`），而且那個詞要剛好是輸入的
+#   一個詞；前面的詞要一模一樣（第一輪修正，審查 A3：`team members exchange` 不再對上
+#   `team member exchange`）。黏字規則不用。英式美式拼法（`optimisation`／`optimization`）詞形
+#   規則蓋不到，要在設定檔多登記一個寫法。
+# - 全名開頭的那個詞，前面不能用連字號接著別的詞（`non-structural equation modeling` 不算）。
+# 只有縮寫在清單裡、輸入沒有全名的照樣擋（AI 憑背景知識多寫的縮寫）。
+#
+# 做法（第一輪修正，Codex X2）：全名拿掉空白與連字號後建成一棵字母樹（`_NameNode`），從輸入每個
+# 可以當開頭的詞走一次，同時比對所有全名；每一步是一次字典查詢，最多走「最長的全名」那麼多個字母。
+# 最後一個詞的詞形變化在「走完前面的詞」的節點上查（用複數變化與前 4 個字母索引，同一個節點、同一個
+# 輸入詞只查一次）。所以耗時對輸入長度是線性；全名的詞數、每筆的全名數、清單的筆數都由設定檔驗證
+# 限制上限（`zh_summary.py` 的 `AcronymEntry`、`ZhSummaryAcronyms`）。
+_LINKING_GAPS: Final = frozenset({" ", "-"})
+_NAME_SEPARATOR: Final = re.compile(r"[ -]")
+# 詞形變化的字根至少 4 個字母（`_root_splits`），所以兩個詞的前 4 個字母不同時只可能是複數的差異。
+_ROOT_PREFIX: Final = 4
+
+
+# 快取有上限：輸入的英文詞是外來資料，詞數沒有上限。
+@lru_cache(maxsize=4096)
+def _form_roots(word: str) -> Mapping[str, frozenset[str]]:
+    """`word`（小寫）的所有（字根 → 字尾）拆法，複數先照 `_variants` 去掉。"""
+    roots: dict[str, set[str]] = {}
+    for variant in _variants(word):
+        for root, suffix in _root_splits(variant):
+            roots.setdefault(root, set()).add(suffix)
+    return {root: frozenset(suffixes) for root, suffixes in roots.items()}
+
+
+def _same_word_form(first: str, second: str) -> bool:
+    """兩個小寫英文詞算同一個詞：一樣、複數差異（`_variants`），或詞形變化（`_same_root`）。規則和
+    `ExtendedVocabulary.knows_word` 的前兩種一樣（不含黏字）。"""
+    if first == second:
+        return True
+    if _variants(first) & _variants(second):
+        return True
+    if first[:_ROOT_PREFIX] != second[:_ROOT_PREFIX]:
+        return False
+    theirs = _form_roots(second)
+    return any(
+        _same_root(root, suffix, other)
+        for root, suffixes in _form_roots(first).items()
+        for suffix in suffixes
+        for other in theirs.get(root, ())
+    )
+
+
+@dataclass(eq=False, slots=True)
+class _NameNode:
+    """全名字母樹的一個節點（從根走到這裡的字母＝某些全名拿掉空白與連字號後的開頭）。"""
+
+    children: dict[str, _NameNode]
+    # 走到這裡剛好是整個全名：那些全名的縮寫。
+    ends: set[str]
+    # 走到這裡剛好是某些全名「最後一個詞之前」的部分：最後一個詞（小寫）→ 縮寫。用複數變化
+    # （`_variants`）與前 4 個字母兩種索引找候選，再用 `_same_word_form` 確認。
+    last_by_variant: dict[str, set[tuple[str, str]]]
+    last_by_prefix: dict[str, set[tuple[str, str]]]
+
+
+def _new_node() -> _NameNode:
+    return _NameNode({}, set(), {}, {})
+
+
+def _name_tree(acronyms: Mapping[str, Sequence[str]]) -> _NameNode:
+    """把每個全名拿掉空白與連字號、小寫後放進字母樹；最後一個詞之前的節點另外記下最後一個詞。"""
+    root = _new_node()
+    for acronym, names in acronyms.items():
+        for full_name in names:
+            parts = [part for part in _NAME_SEPARATOR.split(full_name.lower()) if part]
+            if not parts:
+                continue
+            node = root
+            for index, part in enumerate(parts):
+                if index == len(parts) - 1:
+                    entry = (part, acronym)
+                    for variant in _variants(part):
+                        node.last_by_variant.setdefault(variant, set()).add(entry)
+                    node.last_by_prefix.setdefault(part[:_ROOT_PREFIX], set()).add(entry)
+                for char in part:
+                    node = node.children.setdefault(char, _new_node())
+            node.ends.add(acronym)
+    return root
+
+
+def _last_word_forms(node: _NameNode, word: str) -> set[str]:
+    """`node` 是某些全名「最後一個詞之前」的位置；輸入的詞 `word` 是那些全名最後一個詞的詞形變化
+    時，回它們的縮寫。"""
+    candidates: set[tuple[str, str]] = set()
+    for variant in _variants(word):
+        candidates |= node.last_by_variant.get(variant, set())
+    candidates |= node.last_by_prefix.get(word[:_ROOT_PREFIX], set())
+    return {acronym for last, acronym in candidates if _same_word_form(last, word)}
+
+
+def _allowed_acronyms(text: str, acronyms: Mapping[str, Sequence[str]]) -> frozenset[str]:
+    """`acronyms`（縮寫 → 全名的寫法）裡，輸入（檢查用副本）出現了某一個全名的縮寫（規則與做法見
+    `_LINKING_GAPS` 上面的註解）。"""
+    if not acronyms:
+        return frozenset()
+    words: list[str] = []
+    linked: list[bool] = []
+    starts: list[int] = []
+    previous_end = 0
+    for match in ENGLISH_WORD.finditer(text):
+        gap = text[previous_end : match.start()]
+        if not words or gap != "-":
+            starts.append(len(words))
+        linked.append(bool(words) and gap in _LINKING_GAPS)
+        words.append(match.group(0).lower())
+        previous_end = match.end()
+    root = _name_tree(acronyms)
+    found: set[str] = set()
+    # 同一個節點、同一個輸入詞的詞形變化只查一次。
+    forms: dict[tuple[_NameNode, str], set[str]] = {}
+    for start in starts:
+        node: _NameNode | None = root
+        index = start
+        while node is not None:
+            word = words[index]
+            if node.last_by_prefix:
+                key = (node, word)
+                if key not in forms:
+                    forms[key] = _last_word_forms(node, word)
+                found |= forms[key]
+            for char in word:
+                node = node.children.get(char)
+                if node is None:
+                    break
+            if node is None:
+                break
+            found |= node.ends
+            index += 1
+            if index == len(words) or not linked[index]:
+                break
+    return frozenset(found)
+
+
 def _thousands_follows(prepared: str, wholes: list[_WholeNumber], index: int) -> bool:
     """`wholes[index]` 後面接著「千分位的分隔＋沒有正負號的完整數字」（自己沒有量詞、百分比）。"""
     if index + 1 >= len(wholes):
@@ -960,27 +1112,92 @@ def _number_continues(prepared: str, wholes: list[_WholeNumber], index: int) -> 
     return prepared[wholes[index].end : wholes[index + 1].start] != _LIST_GAP
 
 
+_FOUR_OR_MORE_DIGITS: Final = re.compile(r"[0-9]{4,}")
+
+
+def _restarts_after(prepared: str, head: _WholeNumber) -> bool:
+    """不合格的第一段後面，可以從下一個數字重新開始：第一段是 4 位以上、沒有指數、量詞、百分比的
+    整數，或黏在詞上（`_standalone` 不成立）。第一段在科學記號裡（`in_scientific`）一律不重新開始，
+    整串不用（第二輪修正，審查 M1：`1.2 ⋅ 10-1 200 978`、`1.2 E-1 200 978` 的 `1` 前面是連字號，
+    不獨立，原本會從 `200 978` 重新開始）。"""
+    if head.in_scientific:
+        return False
+    if not _standalone(prepared, head):
+        return True
+    return (
+        not head.exponent
+        and not head.scale
+        and not head.percent
+        and _FOUR_OR_MORE_DIGITS.fullmatch(head.mantissa) is not None
+    )
+
+
+def _end_of_groups(prepared: str, wholes: list[_WholeNumber], index: int) -> int:
+    """`wholes[index]` 後面接著的千分位組（分隔＋沒有正負號、剛好 3 位的整數）的最後一個。第一段本身
+    的量詞、百分比不看（整串都要丟掉），之後每一組照 `_thousands_follows`。"""
+    last = index
+    while last + 1 < len(wholes):
+        current, following = wholes[last], wholes[last + 1]
+        if last > index and (current.scale or current.percent):
+            break
+        if (
+            following.sign
+            or prepared[current.end : following.start] not in _THOUSANDS_GAPS
+            or not _thousands_group(following)
+        ):
+            break
+        last += 1
+    return last
+
+
+def _after_replaced(text: str, prepared: str, head: _WholeNumber) -> bool:
+    """`head` 前面（跳過最多一個空白）那個字元，在讀數字用的文字裡被換成空白：前面那一段是既有讀法
+    整段換掉的科學記號或 `^`（`10^ 12 345 000` 的 `10^ 12`、`2 x 10-1 200 978` 的 `2 x 10-1`）。
+    起點的找法和 `_clean_start` 一樣。"""
+    start = head.start
+    if head.sign and text[start] != head.sign:
+        start -= 1
+    index = start - 1
+    if index >= 0 and text[index] == " ":
+        index -= 1
+    return index >= 0 and prepared[index] != text[index]
+
+
 def _space_thousands(text: str, prepared: str, wholes: list[_WholeNumber]) -> set[Number]:
     """A1 空白千分位合併後的值（規則見 `_THOUSANDS_GAPS` 上面的註解）。每個完整數字只看一次。"""
     found: set[Number] = set()
     index = 0
     while index < len(wholes):
         head = wholes[index]
+        # 第一段要是獨立、1～3 位、沒有指數與量詞、沒有百分比的整數。不是的話：4 位以上的整數或黏在
+        # 詞上（`in 2019 300 000`、`COVID-19 300 000`）從下一個數字重新開始；其他（帶指數的
+        # `1.2E-1 200 978`、`1e-1 200 978`，帶量詞、百分比、小數的，在科學記號裡的
+        # `1.2 ⋅ 10-1 200 978`）後面接著的千分位組整串都不用（第一輪修正，審查 A4；第二輪修正，
+        # 審查 M1），所以這條只會讓合併的值變少。
         if not (
-            head.simple
+            not head.exponent
+            and not head.scale
             and not head.percent
             and _THOUSANDS_HEAD.fullmatch(head.mantissa)
             and _standalone(prepared, head)
         ):
-            index += 1
+            if _restarts_after(prepared, head):
+                index += 1
+            else:
+                index = _end_of_groups(prepared, wholes, index) + 1
             continue
         last = index
         while _thousands_follows(prepared, wholes, last) and _thousands_group(wholes[last + 1]):
             last += 1
-        # 第一段沒過白名單時整串都不用（也不從第二段重新開始：`⋅ 1 200 978` 不能變成 200978），
-        # 所以白名單只會讓合併的值變少。
+        # 第一段在科學記號裡（`_SCIENTIFIC_PIECE`：`**1 200 000**`、`1.2E -1 200 000`）、前面緊接著
+        # 被既有讀法整段換成空白的科學記號或 `^`（`10^ 12 345 000`、`2 x 10-1 200 978`，
+        # `_after_replaced`）、或沒過白名單時，整串都不用，也不從第二段重新開始（`**1 200 000**`、
+        # `⋅ 1 200 978` 不能變成 200000、200978；PR 1 審查 V1、第一輪修正審查 A4／B1），所以這三個
+        # 條件只會讓合併的值變少。
         if (
             last > index
+            and not head.in_scientific
+            and not _after_replaced(text, prepared, head)
             and _clean_start(text, head)
             and not _number_continues(prepared, wholes, last)
         ):
@@ -1038,6 +1255,8 @@ class ExtendedVocabulary:
     - 字母開頭的英數詞（`B2B`、`EC2`）：整個當成一個詞比對（`number_text`、`knows_alnum`）；數字
       開頭的（`3D`、`2x2`）照原本的方式讀數字。輸出的 `Q` 替換只能把完整數字整個換掉。
     - 英文詞：詞形變化、黏字（否定字首＋輸出詞剛好是整個詞時不算）、`vs`（`knows_word`）。
+    - 通用縮寫的允許清單（`acronyms`）：清單裡、而且輸入有它登記的全名的縮寫
+      （`_allowed_acronyms`），輸出照登記的大小寫寫就認得（`knows_word`、`knows_alnum`）。沒給清單時是空的。
     """
 
     base: InputVocabulary
@@ -1047,10 +1266,13 @@ class ExtendedVocabulary:
     alnum_tokens: frozenset[str]
     roots: Mapping[str, frozenset[str]]
     letters: str
+    acronyms: frozenset[str] = frozenset()
 
     @classmethod
-    def build(cls, text: str) -> ExtendedVocabulary:
-        """`text` 是檢查用副本。"""
+    def build(
+        cls, text: str, acronyms: Mapping[str, Sequence[str]] | None = None
+    ) -> ExtendedVocabulary:
+        """`text` 是檢查用副本；`acronyms` 是允許清單（縮寫 → 全名的寫法），沒給就沒有。"""
         base = InputVocabulary.build(text)
         roots: dict[str, set[str]] = {}
         for word in base.words:
@@ -1065,6 +1287,7 @@ class ExtendedVocabulary:
             alnum_tokens=_alnum_tokens(text),
             roots={root: frozenset(suffixes) for root, suffixes in roots.items()},
             letters=" ".join(sorted({word.lower() for word in ENGLISH_WORD.findall(text)})),
+            acronyms=_allowed_acronyms(text, acronyms or {}),
         )
 
     def knows_number(self, number: Number) -> bool:
@@ -1074,9 +1297,9 @@ class ExtendedVocabulary:
         return number in self.numbers or (value > 0 and (-value, percent) in self.numbers)
 
     def knows_alnum(self, token: str) -> bool:
-        """輸入有同一個英數詞（不分大小寫；輸入用一個空白或連字號隔開的也算）。PR 2 的允許清單
-        （`peer-to-peer` → `P2P`）接在這裡。"""
-        return token.lower() in self.alnum_tokens
+        """輸入有同一個英數詞（不分大小寫；輸入用一個空白或連字號隔開的也算），或是允許清單裡、
+        輸入有它全名的縮寫（照登記的大小寫：`peer-to-peer` → `P2P`）。"""
+        return token.lower() in self.alnum_tokens or token in self.acronyms
 
     def number_text(self, text: str) -> tuple[str, str | None]:
         """輸出（檢查用副本）裡要拿去和輸入數字比對的文字 →（文字, 第一個輸入沒有的英數詞）。
@@ -1128,8 +1351,9 @@ class ExtendedVocabulary:
         return _with_q(text, spans), unknown
 
     def knows_word(self, word: str) -> bool:
-        """`InputVocabulary.knows_word`，加上 `vs`、詞形變化（`_same_root`）、黏字（`_glued`）。"""
-        if self.base.knows_word(word):
+        """`InputVocabulary.knows_word`，加上 `vs`、詞形變化（`_same_root`）、黏字（`_glued`）、
+        允許清單裡輸入有全名的縮寫（照登記的大小寫）。"""
+        if self.base.knows_word(word) or word in self.acronyms:
             return True
         lowered = word.lower()
         if lowered in _ALWAYS_KNOWN_WORDS:

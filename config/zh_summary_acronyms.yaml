@@ -1,0 +1,132 @@
+version: 1
+
+# 中文重點的通用縮寫允許清單（PRD FR-14、ADR-0032 的「通用縮寫的允許清單與整欄說明存成空值」更新）。
+# domain 驗證（radar/domain/validators/zh_summary.py）讀這份；只經 radar/config.py 的
+# load_zh_summary_rules 讀（和 config/zh_summary.yaml 一起），worker 與 CLI 啟動時驗證。
+#
+# 為什麼有這份：摘要寫全名（decision making trial and evaluation laboratory），模型在輸出加了通用縮寫
+# （「決策試驗與評估實驗室法（DEMATEL）」），縮寫本身不在標題或摘要裡，原本會被當成編造擋下。
+#
+# 放行條件（兩個都要成立）：
+#   1. 輸出寫的縮寫和下面登記的 `acronym` 一模一樣（大小寫也要一樣：GloVe、fNIRS、BiLSTM 照寫；
+#      全大寫的縮寫要全大寫）。PLS-SEM 這種連字號串是每一段各自照規則。
+#   2. 標題或摘要裡出現了它登記的某一個 `full_names`：不分大小寫；詞要連續出現；詞與詞之間的
+#      空白、連字號、連在一起都算一樣（decision-making ＝ decision making，multi-criteria ＝
+#      multi criteria ＝ multicriteria）；只有最後一個詞容許複數與詞形變化（model、models、
+#      modeling、modelling 都算），前面的詞要一模一樣（differences in differences、areas under
+#      the curve 這種前面的詞是複數的常見寫法要另外登記）。英式美式拼法（optimisation／
+#      optimization）蓋不到，兩種都要登記。
+#   只有縮寫在清單裡、輸入沒有全名的照樣擋（模型憑背景知識多寫的縮寫）。
+#
+# 加一筆：
+#   - `acronym`：英文字母開頭、只有英文字母與數字（P2P、B2B 可以），至少 2 個字元；不分大小寫也
+#     不能和別筆重複。
+#   - `full_names`：至少一個、最多 12 個；每一項只有英文字母，詞與詞之間一個空白或一個連字號，
+#     至少兩個詞（只有一個詞時至少 10 個字母）、最多 12 個詞。寫英文摘要裡實際會出現的寫法，常見的
+#     幾種都登記（空白、連字號、連在一起算同一種寫法；同一筆裡、不同筆之間都不能重複）。
+#   - 整份清單最多 200 筆（全名比對的耗時和清單大小成正比）。
+#     縮寫有兩種常見意思的（例如 SDT）可以兩個全名都登記：輸入要有全名才放行。
+#   - 拿不準全名的不要放（全名寫錯只會救不回來；寫成別的東西的全名會放過編造）。
+# `version` 在增刪縮寫或改全名時加一（給人看「清單改過了」；沒有雜湊登記）。這份清單和
+# config/zh_summary.yaml 一樣不算進輸入指紋、改了不必升 prompt 版本：已經被拒收的論文要用
+# `radar runs retry` 重跑才會用新清單（ADR-0032）。
+
+acronyms:
+  - acronym: DEMATEL
+    full_names:
+      - decision making trial and evaluation laboratory
+  - acronym: VAR
+    full_names:
+      - vector autoregression
+  - acronym: SEM
+    full_names:
+      - structural equation modeling
+  - acronym: PLS
+    full_names:
+      - partial least squares
+  - acronym: DID
+    full_names:
+      - difference in differences
+      - differences in differences
+  - acronym: EEG
+    full_names:
+      - electroencephalography
+      - electroencephalogram
+  - acronym: fNIRS
+    full_names:
+      - functional near infrared spectroscopy
+  - acronym: MLP
+    full_names:
+      - multilayer perceptron
+  - acronym: BiLSTM
+    full_names:
+      - bidirectional long short term memory
+  - acronym: MDS
+    full_names:
+      - multidimensional scaling
+  - acronym: MCDM
+    full_names:
+      - multi criteria decision making
+      - multiple criteria decision making
+  - acronym: AUC
+    full_names:
+      - area under the curve
+      - area under curve
+      - area under the ROC curve
+      - area under the receiver operating characteristic curve
+      - areas under the curve
+      - areas under the ROC curve
+      - areas under the receiver operating characteristic curve
+  - acronym: SHAP
+    full_names:
+      - Shapley additive explanations
+  - acronym: GloVe
+    full_names:
+      - global vectors for word representation
+  - acronym: IPFS
+    full_names:
+      - InterPlanetary File System
+  - acronym: TOPSIS
+    full_names:
+      - technique for order of preference by similarity to ideal solution
+      - technique for order of preference by similarity to an ideal solution
+      - technique for order of preference by similarity to the ideal solution
+      - technique for order preference by similarity to ideal solution
+      - technique for order preference by similarity to an ideal solution
+      - technique for order preference by similarity to the ideal solution
+  - acronym: COPRAS
+    full_names:
+      - complex proportional assessment
+  - acronym: WASPAS
+    full_names:
+      - weighted aggregated sum product assessment
+  - acronym: MULTIMOORA
+    full_names:
+      - multi objective optimization by ratio analysis plus the full multiplicative form
+      - multi objective optimisation by ratio analysis plus the full multiplicative form
+  - acronym: LMX
+    full_names:
+      - leader member exchange
+  - acronym: TMX
+    full_names:
+      - team member exchange
+  - acronym: RBV
+    full_names:
+      - resource based view
+  - acronym: SDT
+    full_names:
+      - self determination theory
+      - signal detection theory
+  - acronym: XAI
+    full_names:
+      - explainable artificial intelligence
+      - explainable AI
+  - acronym: QCA
+    full_names:
+      - qualitative comparative analysis
+  - acronym: P2P
+    full_names:
+      - peer to peer
+  - acronym: B2B
+    full_names:
+      - business to business
