@@ -97,7 +97,7 @@ deferred: []
 - `tests/arch/test_stats_queries.py` -- 例外與自我測試。
 - `tests/permissions/cases.py` 與上面列的既有測試 -- 登記與規格造成的改變。
 - `openapi.json`、`web/src/generated/` -- `uv run radar export-schema`、`cd web && npm run generate:api`。
-- EXPLAIN：用一個不提交的臨時整合測試（在 55432 的測試資料庫建資料、`EXPLAIN (ANALYZE, BUFFERS)` 三種查詢：預設排序第一頁與翻頁、期刊＋年份、主題；各看一次 `SET enable_seqscan = off`），摘要寫進 `/Users/kevin/Documents/research-radar/docs/runs/epic-3d/reviews/3.13-explain.md`，臨時檔刪掉。
+- EXPLAIN：用一個不提交的臨時整合測試（在 55432 的測試資料庫建資料、`EXPLAIN (ANALYZE, BUFFERS)` 三種查詢：預設排序第一頁與翻頁、期刊＋年份、主題；各看一次 `SET enable_seqscan = off`），摘要寫進 本機工作資料夾的 EXPLAIN 紀錄（`docs/runs/`，不進 repo），臨時檔刪掉。
 - `docs/adr/0050-*.md`、`docs/adr/README.md`、`docs/glossary.md`、`sprint-status.yaml` -- 由主流程在實作之後寫（實作者不用做）。
 
 **Acceptance Criteria:**
@@ -154,7 +154,7 @@ deferred: []
 
 ## 執行環境與安全（實作者必讀）
 
-- 只在 git worktree `/Users/kevin/Documents/research-radar/.claude/worktrees/epic3d` 做事（分支 `feat/3-13-paper-list-api`）；不碰主資料夾（`/Users/kevin/Documents/research-radar/docs/runs/epic-3d/reviews/3.13-explain.md` 例外），不 `git stash`／`git clean`／commit／push（commit 由主流程做）。
+- 只在 這一輪的 git worktree 做事（分支 `feat/3-13-paper-list-api`）；不碰主資料夾（本機工作資料夾的 EXPLAIN 紀錄（`docs/runs/`，不進 repo） 例外），不 `git stash`／`git clean`／commit／push（commit 由主流程做）。
 - `127.0.0.1:5432` 是真實資料庫。**每一個**跑 pytest 的指令都以 `export RADAR_TEST_ADMIN_DATABASE_URL=postgresql://postgres@127.0.0.1:55432/postgres;` 開頭；跑 `-m integration`／`-m arch` 的同一個指令先 `echo "$RADAR_TEST_ADMIN_DATABASE_URL" | grep -q 55432 &&`。整合測試只跑相關的檔，不跑整套 `-m integration`。萬一連到 5432：立刻停、不清理、回報跑了什麼。
 - 不跑任何帶 `-p radar` 的 docker 指令；docker 只准 `docker ps --format '{{.Names}}\t{{.Ports}}' | grep radar-ci`。不跑 `radar migrate`、`alembic check`、`radar export-demo`、`radar batches`、`radar runs`。可以跑 `uv run radar export-schema`。
 - 不讀、不印 `.env*`；不呼叫真的模型或外部服務；不加套件。前端只准 `npm run generate:api`（`node_modules` 已在），`web/` 只會變動 `src/generated/`。
