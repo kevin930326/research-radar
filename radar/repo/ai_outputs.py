@@ -741,6 +741,28 @@ def count_ai_results_by_abstract_source(
     )
 
 
+def count_active_ai_results(viewer: SystemViewer, connection: Connection) -> dict[LlmTask, int]:
+    """三種表頭表各有幾筆 `active`（整個資料庫）。`radar backup` 的清單與 `radar restore` 還原後的
+    比對用（Story 3.18、ADR-0051）；「哪一筆算數」只在這個模組決定。
+
+    Raises:
+        TypeError: `viewer` 不是 `SystemViewer`。
+    """
+    visible = visible_to_system_only(viewer)
+    rows = connection.execute(
+        text(
+            "SELECT 'zh_summary' AS task, count(*) FROM zh_summary AS h"
+            f" WHERE {visible} AND h.status = :active"
+            " UNION ALL SELECT 'classify', count(*) FROM classification AS h"
+            f" WHERE {visible} AND h.status = :active"
+            " UNION ALL SELECT 'extract_model', count(*) FROM research_model AS h"
+            f" WHERE {visible} AND h.status = :active"
+        ),
+        {"active": ResultStatus.ACTIVE.value},
+    ).all()
+    return {LlmTask(task): int(count) for task, count in rows}
+
+
 def _construct_unused(other: str) -> str:
     """構面 `c` 沒有其他人用的條件（`other` 篩出「其他」的構面、假設：預覽時是這個來源以外的表頭，
     刪完細項後是全部）：沒有其他構面提及、假設，沒有別的構面以它為代表（`canonical_id`），也沒有

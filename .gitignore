@@ -32,6 +32,8 @@ data/
 *.dump
 *.sql.gz
 backups/
+# radar backup 的加密備份檔（age，Story 3.18、ADR-0051）：不進 repo
+*.age
 
 # =========================================================
 # Python

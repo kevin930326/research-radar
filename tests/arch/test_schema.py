@@ -6,10 +6,15 @@
 - 外鍵：每個外鍵的欄位都要有索引（索引的開頭幾欄剛好是外鍵的欄位，順序不拘；
   部分索引（帶 WHERE）不算）。
 - 私人表（AD-4）：`PRIVATE_TABLES` 列的每一張表都要有 NOT NULL 的 `owner_id`（Story 3.16 起）。
+- 備份的歸類（Story 3.18、ADR-0051）：每張表剛好在 `radar/domain/backup.py` 的共用資料或成員資料
+  其中一份；有成員欄位的表是成員資料；共用表沒有外鍵指到成員表（`--shared-only` 才還原得起來）。
 """
+
+from collections.abc import Iterable
 
 import psycopg
 
+from radar.domain.backup import MEMBER_TABLES, SHARED_TABLES
 from tests.database import OWNER_ROLE, TestDatabase
 
 # 之後的 Story 加例外時寫在這裡並註明理由（例如 snapshot.number、複合主鍵的 embedding、qa_usage）。
@@ -288,4 +293,91 @@ def test_private_table_check_catches_each_violation(migrated_database: TestDatab
         "bad_nullable_owner：私人表的 owner_id 要是 NOT NULL",
         "bad_no_owner：私人表要有 owner_id",
         "no_such_private_table：在私人表清單裡，但資料庫沒有這張表",
+    ]
+
+
+# --- 備份的資料表歸類（Story 3.18、ADR-0051）-----------------------------------------------------
+
+# 看得出「屬於某位成員」的欄位：有這種欄位的表一定要歸成員資料（`--shared-only` 不帶它的資料）。
+MEMBER_COLUMN_SQL = """
+SELECT DISTINCT c.relname
+FROM pg_attribute a
+JOIN pg_class c ON c.oid = a.attrelid
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p') AND a.attnum > 0 AND NOT a.attisdropped
+  AND (a.attname IN ('owner_id', 'member_id', 'email') OR a.attname LIKE '%\\_member\\_id')
+"""
+
+FOREIGN_KEY_TABLES_SQL = """
+SELECT DISTINCT src.relname, dst.relname
+FROM pg_constraint k
+JOIN pg_class src ON src.oid = k.conrelid
+JOIN pg_class dst ON dst.oid = k.confrelid
+WHERE k.contype = 'f' AND k.connamespace = 'public'::regnamespace
+"""
+
+
+def classification_problems(
+    connection: psycopg.Connection, shared: Iterable[str], member: Iterable[str]
+) -> list[str]:
+    """每張表剛好在一份清單；清單裡的表都存在；有成員欄位的表在成員資料；共用表沒有外鍵指到成員表。"""
+    shared, member = set(shared), set(member)
+    tables = {_short(name) for _oid, name in connection.execute(TABLES_SQL).fetchall()}
+    problems = [f"{t}：同時在共用資料與成員資料" for t in sorted(shared & member)]
+    problems += [f"{t}：沒有歸類（共用資料或成員資料）" for t in sorted(tables - shared - member)]
+    problems += [
+        f"{t}：在歸類清單裡，但資料庫沒有這張表" for t in sorted((shared | member) - tables)
+    ]
+    with_member_columns = {row[0] for row in connection.execute(MEMBER_COLUMN_SQL).fetchall()}
+    problems += [
+        f"{t}：有成員欄位（owner_id、member_id、email），要歸成員資料"
+        for t in sorted(with_member_columns & shared)
+    ]
+    problems += [
+        f"{src}：共用表有外鍵指到成員表 {dst}"
+        for src, dst in sorted(connection.execute(FOREIGN_KEY_TABLES_SQL).fetchall())
+        if src in shared and dst in member
+    ]
+    return problems
+
+
+def test_every_table_is_classified_for_backup(migrated_database: TestDatabase) -> None:
+    with migrated_database.connect(OWNER_ROLE) as connection:
+        assert classification_problems(connection, SHARED_TABLES, MEMBER_TABLES) == []
+    # 私人表一定是成員資料。
+    assert set(PRIVATE_TABLES) <= set(MEMBER_TABLES)
+
+
+def test_classification_check_catches_each_violation(migrated_database: TestDatabase) -> None:
+    # 證明體檢抓得到：在交易裡建沒歸類、歸錯的表，檢查完整個退回。
+    with migrated_database.connect(OWNER_ROLE, autocommit=False) as connection:
+        try:
+            connection.execute("CREATE TABLE unclassified_table (id uuid PRIMARY KEY)")
+            connection.execute(
+                "CREATE TABLE shared_with_owner (id uuid PRIMARY KEY, owner_id uuid NOT NULL)"
+            )
+            connection.execute(
+                "CREATE TABLE shared_pointing_at_member (id uuid PRIMARY KEY,"
+                " created_by uuid REFERENCES member (id))"
+            )
+            problems = classification_problems(
+                connection,
+                {
+                    **SHARED_TABLES,
+                    "shared_with_owner": "測試用",
+                    "shared_pointing_at_member": "測試用",
+                    "member": "測試用：兩份都列",
+                    "no_such_backup_table": "測試用",
+                },
+                MEMBER_TABLES,
+            )
+        finally:
+            connection.rollback()
+
+    assert problems == [
+        "member：同時在共用資料與成員資料",
+        "unclassified_table：沒有歸類（共用資料或成員資料）",
+        "no_such_backup_table：在歸類清單裡，但資料庫沒有這張表",
+        "shared_with_owner：有成員欄位（owner_id、member_id、email），要歸成員資料",
+        "shared_pointing_at_member：共用表有外鍵指到成員表 member",
     ]

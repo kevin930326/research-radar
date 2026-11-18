@@ -1,5 +1,6 @@
 """目錄照架構文件的 Structural Seed（`web/` 留到 Epic 3）。"""
 
+import re
 from pathlib import Path
 
 import pytest
@@ -127,3 +128,38 @@ def test_dockerfile_always_rebuilds_the_project_package() -> None:
     ]
     assert len(install_project) == 1, install_project
     assert "--reinstall-package radar" in install_project[0]
+
+
+def test_backup_files_are_ignored() -> None:
+    # Story 3.18：加密備份（*.age）與傾印（*.dump）不進 repo（ADR-0051）。
+    lines = (ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
+    assert "*.age" in lines
+    assert "*.dump" in lines
+
+
+def test_image_adds_only_pinned_backup_clients() -> None:
+    """Story 3.18（ADR-0051）：只加 PG 18 用戶端與 age，版本釘住、金鑰驗指紋、不裝伺服器。"""
+    dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+    final_stage = dockerfile.rsplit("\nFROM ", 1)[1]
+
+    assert re.search(r"postgresql-client-18=\S+", final_stage)
+    assert re.search(r"libpq5=\S+", final_stage)
+    assert re.search(r"\bage=\S+", final_stage)
+    assert not re.search(r"\bpostgresql-18\b", final_stage)  # 伺服器套件
+    assert "--no-install-recommends" in final_stage
+    assert "gnupg" not in final_stage
+    assert "curl" not in final_stage
+    assert "| sh" not in dockerfile
+    assert "|sh" not in dockerfile
+    assert re.search(r"ARG PGDG_SIGNER_FPR=[0-9A-F]{40}\n", dockerfile)
+    path = re.search(r"ENV PATH=(\S+)", final_stage)
+    assert path is not None
+    assert path.group(1).index("/usr/lib/postgresql/18/bin") < path.group(1).index("$PATH")
+
+
+def test_no_setting_holds_an_age_private_key() -> None:
+    # 主機上只放公鑰（ADR-0051）：設定裡沒有私鑰或 identity 檔的欄位。
+    for model in (Settings, MigrationSettings):
+        for name in model.model_fields:
+            assert "identity" not in name, name
+            assert "private" not in name, name

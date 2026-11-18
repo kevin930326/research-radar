@@ -78,8 +78,33 @@ jobs:
       - name: 起 compose 的 db（測試資料庫與 alembic check 用）
         run: docker compose --env-file /dev/null --project-name radar-ci --file compose.yaml up --detach --wait db
 
+      # 備份與還原的整合測試（Story 3.18、ADR-0051）要真的 pg_dump／pg_restore／psql 18 與 age：
+      # 執行機內建的 PostgreSQL 用戶端比資料庫（18）舊，也沒有 age。PGDG 的金鑰先驗指紋才用；
+      # 不執行任何下載來的腳本。18 版的執行檔目錄放進 PATH 最前面（不經 Debian 的版本選擇包裝）。
+      - name: 裝 PostgreSQL 18 的用戶端與 age（備份與還原的整合測試用）
+        env:
+          PGDG_SIGNER_FPR: B97B0AFCAA1A47F044F244A07FCC7D46ACCC4CF8
+        run: |
+          set -euo pipefail
+          key="${RUNNER_TEMP}/pgdg.asc"
+          curl --fail --silent --show-error --location --proto '=https' --retry 3 \
+            --output "${key}" https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          gpg --show-keys --with-colons "${key}" > "${RUNNER_TEMP}/pgdg-keys.txt"
+          test "$(grep -c '^pub:' "${RUNNER_TEMP}/pgdg-keys.txt")" = 1
+          test "$(awk -F: '$1 == "fpr" { print $10; exit }' "${RUNNER_TEMP}/pgdg-keys.txt")" \
+            = "${PGDG_SIGNER_FPR}"
+          sudo install -D --mode 0644 "${key}" /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list > /dev/null
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends postgresql-client-18 age
+          echo "/usr/lib/postgresql/18/bin" >> "${GITHUB_PATH}"
+
       - id: pytest-integration
         name: pytest（integration）
+        # 找不到 pg_dump、age 時備份與還原的整合測試直接失敗（本機才是跳過）。
+        env:
+          RADAR_REQUIRE_BACKUP_TOOLS: "1"
         run: uv run --no-sync pytest -m integration
 
       - id: pytest-arch

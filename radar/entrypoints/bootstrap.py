@@ -2,12 +2,15 @@
 
 import importlib.metadata
 from collections.abc import Callable, Iterator, Mapping
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import partial
+from io import Reader
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+from pydantic import SecretStr
 
 from radar.adapters.heartbeat import HttpHeartbeat
 from radar.adapters.jobs import JobApp, create_job_app, defer_job, retry_stalled_jobs
@@ -15,6 +18,7 @@ from radar.config import ConfigError, env_name
 from radar.domain.ai_outputs import CallMode, GatewayConfig
 from radar.domain.auth import FakeLoginRequest, LoginIdentity
 from radar.domain.auth_settings import AuthSettings, FakeLoginMode, fake_login_mode
+from radar.domain.backup import DumpRequest, RestoreRequest, libpq_environment
 from radar.domain.domain_config import OpenAlexConfig
 from radar.domain.embeddings import EmbeddingConfig
 from radar.domain.jobs import Enqueue
@@ -368,6 +372,70 @@ def build_fake_login_confirm(
                 fetch_jwks=partial(fetch_access_jwks, team_domain),
                 clock=_utc_now,
             )
+
+
+# --- 備份與還原（Story 3.18、ADR-0051） ----------------------------------------------------------
+
+
+def _libpq_environment(
+    url: SecretStr, field: str, connect_timeout: int, app: str
+) -> dict[str, str]:
+    """連線字串換成 libpq 的環境變數；錯誤訊息只帶環境變數名稱。"""
+    try:
+        return libpq_environment(
+            url.get_secret_value(), connect_timeout=connect_timeout, application_name=app
+        )
+    except ValueError as exc:
+        raise ConfigError(
+            [f"環境變數 {env_name(field)} 不能給 pg_dump／psql 用（{exc}）"]
+        ) from None
+
+
+def build_backup_tools(
+    settings: Settings,
+) -> tuple[Callable[[], str], Callable[[DumpRequest], AbstractContextManager[Reader[bytes]]]]:
+    """`radar backup` 的兩個工具：問 `pg_dump` 的版本、開始一次加密傾印（應用程式角色）。不連線。
+
+    Raises:
+        ConfigError: `DATABASE_URL` 不能換成 libpq 的連線參數。
+    """
+    from radar.adapters.backup_tools import postgres_tool_version, start_encrypted_dump
+
+    pg_env = _libpq_environment(
+        settings.database_url,
+        "database_url",
+        settings.database_connect_timeout,
+        "radar-backup",
+    )
+    return partial(postgres_tool_version, "pg_dump"), partial(start_encrypted_dump, pg_env=pg_env)
+
+
+def build_restore_database(settings: MigrationSettings) -> Database:
+    """`radar restore` 讀目標狀態、比對筆數用的連線（擁有者角色），最多 1 條。不連線。"""
+    return Database(
+        settings.migration_database_url.get_secret_value(),
+        connect_timeout=settings.database_connect_timeout,
+        pool_size=1,
+    )
+
+
+def build_restore_tools(
+    settings: MigrationSettings,
+) -> tuple[Callable[[], str], Callable[[RestoreRequest, Reader[bytes]], None]]:
+    """`radar restore` 的兩個工具：問 `pg_restore` 的版本、還原一份備份（擁有者角色）。不連線。
+
+    Raises:
+        ConfigError: `RADAR_MIGRATION_DATABASE_URL` 不能換成 libpq 的連線參數。
+    """
+    from radar.adapters.backup_tools import postgres_tool_version, restore_archive
+
+    pg_env = _libpq_environment(
+        settings.migration_database_url,
+        "migration_database_url",
+        settings.database_connect_timeout,
+        "radar-restore",
+    )
+    return partial(postgres_tool_version, "pg_restore"), partial(restore_archive, pg_env=pg_env)
 
 
 def _utc_now() -> datetime:
