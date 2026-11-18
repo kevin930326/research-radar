@@ -648,7 +648,8 @@ def test_long_adversarial_input_is_validated_quickly(unit: str) -> None:
     ("method", "abstract"),
     [
         ("效果為 1e3", "The effect was 1e-3."),
-        ("效果為 0.35", "The effect was -0.35."),
+        # 2026-11-18（A4）：輸出 0.35 對輸入 -0.35 改成放行（輸出用「下降」寫方向而省略負號），
+        # 移到 test_zh_summary_input_reading.py；反過來（輸出負數、輸入只有正數）照樣擋。
         ("效果為 -0.35", "The effect was 0.35."),
         ("效果為 0.35%", "The effect was 0.35."),
         ("採用率 35", "Adoption was 35%."),

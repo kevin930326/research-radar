@@ -64,13 +64,15 @@ SYSTEM = SystemViewer()
 NOW = datetime(2026, 11, 15, 4, 0, tzinfo=UTC)
 USAGE = LlmUsage(input_tokens=900, output_tokens=120)
 TITLE = "Collaboration platform adoption in remote teams"
-# 5 句（逐句翻譯的門檻）。
+# 7 句（逐句翻譯的門檻，config/zh_summary.yaml 2026-11-18 從 5 改 7）。
 ABSTRACT = (
     "This study examines how remote teams adopt collaboration platforms. "
     "Drawing on the technology acceptance model (TAM), we surveyed 312 employees in 41 firms. "
     "We analyzed the data with partial least squares structural equation modeling (PLS-SEM). "
     "Perceived usefulness increased adoption intention. "
-    "Perceived ease of use had no significant effect."
+    "Perceived ease of use had no significant effect. "
+    "Team size did not moderate these effects. "
+    "We discuss implications for platform vendors."
 )
 GOOD: dict[str, Any] = {
     "research_question": "遠距團隊如何採用協作平台？",
@@ -219,7 +221,7 @@ def test_not_mentioned_field_is_null_and_the_rest_is_stored(
         ({"method": "使用問卷，摘要未提及樣本數"}, ErrorCode.ZH_SUMMARY_PLACEHOLDER_TEXT),
         ({"findings": "團" * 151}, ErrorCode.ZH_SUMMARY_FIELD_TOO_LONG),
         (
-            {"research_question": "遠距團隊如何採用協作平台。這是研究目的。"},
+            {"research_question": "遠距團隊如何採用協作平台。這是研究目的。團隊規模。廠商意涵。"},
             ErrorCode.ZH_SUMMARY_SENTENCE_TRANSLATION,
         ),
         ({"method": "問卷調查 41 家企業的 500 名員工"}, ErrorCode.ZH_SUMMARY_UNSUPPORTED_CONTENT),
