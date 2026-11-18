@@ -692,9 +692,8 @@ export const getRestoreLibraryItemUrl = (paperId: string,) => {
 }
 
 /**
- * 復原最近一次移出的那一篇（原本的加入方式與時間）；已經又在文獻庫就回現在那一筆，那筆
- * 封存照樣用掉。自己沒有移出過回 404，沒登入 401；`Origin` 缺少或不是本站 403
- * `origin_rejected`。
+ * 復原最近一次移出的那一篇（原本的加入方式與時間）；已經在文獻庫就回現在那一筆，不動任何
+ * 封存。自己沒有移出過回 404，沒登入 401；`Origin` 缺少或不是本站 403 `origin_rejected`。
  * @summary Restore Library Item
  */
 export const restoreLibraryItem = async (paperId: string, options?: RequestInit): Promise<restoreLibraryItemResponse> => {

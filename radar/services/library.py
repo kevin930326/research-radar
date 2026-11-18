@@ -8,11 +8,14 @@
   （`added_via`、`added_at` 不變），沒有就是看不到。
 - 移出：讀自己的那一筆 → 讀論文列（刪掉之後，私人論文就看不到了）→ 整列複製到 `deleted_record`
   → 刪 → 稽核；回移出前的那一筆。
-- 復原：讀自己最新的一筆封存 → 用原本的 `id`／`added_via`／`added_at` 寫回（已經又在文獻庫就不
-  寫，回現在那一筆）→ 刪掉那筆封存（不管有沒有寫回都消耗）→ 稽核。
-- 同時兩個請求：兩張表的應用程式角色都沒有 UPDATE，所以不能 `SELECT … FOR UPDATE` 鎖列（PostgreSQL
-  鎖列要 UPDATE 權限）。列不會被改，只會被刪：移出時複製不到或刪不到、復原時封存刪不到，就是另一個
-  請求先做完了；整個交易退回（不留多的封存、不寫稽核），照「不在」回 None。
+- 復原：這篇已經在自己的文獻庫 → 回現在那一筆、不動任何封存（稽核記 `restored: false`、對象與
+  `added_via` 都是現在那一筆）；不在 → 讀自己最新的一筆封存，用原本的 `id`／`added_via`／`added_at`
+  寫回、刪掉那筆封存、稽核；沒有封存 → None。
+- 同時兩個請求：三個寫入在交易一開始拿（成員, 論文）的交易級 advisory lock
+  （`domain/library.library_item_lock_key`、`Database.transaction_lock`），同一位成員對同一篇的加入、
+  移出、復原排隊做完，交錯不會讓復原拿錯筆。兩張表的應用程式角色都沒有 UPDATE，所以不鎖列
+  （PostgreSQL 鎖列要 UPDATE 權限）。第二道防線：移出時複製不到或刪不到、復原時寫不回或封存刪
+  不到，就當作另一個請求先做完了，整個交易退回（不留多的封存、不寫稽核），照「不在」回 None。
 - 清單：`added_at DESC, id DESC` 的 keyset 分頁，一頁 `LIBRARY_PAGE_SIZE` 篇，另給總篇數。
 - 日誌只有 id，不帶論文標題這類內容。
 """
@@ -32,6 +35,7 @@ from radar.domain.library import (
     LibraryItem,
     LibraryPage,
     encode_library_cursor,
+    library_item_lock_key,
 )
 from radar.domain.permissions import Action, require
 from radar.domain.viewer import MemberViewer
@@ -126,6 +130,7 @@ def add_library_item(
     require(actor, Action.ADD_LIBRARY_ITEM, actor.member_id)
     try:
         with database.transaction() as connection:
+            Database.transaction_lock(connection, library_item_lock_key(actor.member_id, paper_id))
             created = create_library_item(
                 connection,
                 actor,
@@ -165,6 +170,7 @@ def remove_library_item(
     """
     try:
         with database.transaction() as connection:
+            Database.transaction_lock(connection, library_item_lock_key(actor.member_id, paper_id))
             item = find_library_item(actor, connection, paper_id)
             if item is None:
                 return None
@@ -206,46 +212,68 @@ def restore_library_item(
     """把 `actor` 最近一次移出的 `paper_id` 復原成原本那一筆（`id`、`added_via`、`added_at` 不變），
     刪掉那筆封存、寫稽核，回現在文獻庫裡的那一筆。
 
-    那篇已經又在文獻庫時不再寫入，回現在那一筆（冪等），封存照樣消耗。自己沒有這一篇的封存（或是
-    別人的、或同時被另一個請求用掉了）回 None。
+    那篇已經在自己的文獻庫時不寫入、**不動任何封存**，回現在那一筆（冪等：重送幾次都是同樣的
+    200 與同一筆），稽核記一筆 `restored: false`。不在文獻庫、自己也沒有這一篇的封存（或是別人的）
+    回 None。
 
     Raises:
-        PermissionDeniedError: `actor` 不是這筆封存的擁有者（權限表）。
+        PermissionDeniedError: `actor` 不是這一筆或這筆封存的擁有者（權限表）。
     """
     try:
         with database.transaction() as connection:
+            Database.transaction_lock(connection, library_item_lock_key(actor.member_id, paper_id))
+            current = find_library_item(actor, connection, paper_id)
+            if current is not None:
+                require(actor, Action.ADD_LIBRARY_ITEM, current.owner_id)
+                _audit_restore(actor, connection, current, record_id=None)
+                entry = _entry(actor, connection, current)
+                log.info(
+                    "要復原的那一篇已經在文獻庫，不動封存",
+                    library_item_id=str(current.id),
+                )
+                return entry
             record = find_deleted_library_item(actor, connection, paper_id)
             if record is None:
                 return None
             require(actor, Action.ADD_LIBRARY_ITEM, record.item.owner_id)
             restored = create_restored_library_item(connection, record.item)
-            current = restored or find_library_item(actor, connection, paper_id)
-            if current is None or not delete_deleted_record(connection, record.record_id):
+            if restored is None or not delete_deleted_record(connection, record.record_id):
                 raise _ChangedMeanwhileError
-            create_audit_event(
-                connection,
-                member_audit_event(
-                    actor,
-                    action=RESTORE_LIBRARY_ITEM_ACTION,
-                    target_type=LIBRARY_ITEM_TARGET,
-                    # 已經又在文獻庫時是現在那一筆（不是封存裡的舊 id）。
-                    target_id=current.id,
-                    detail={
-                        "paper_id": str(paper_id),
-                        "added_via": record.item.added_via.value,
-                        "deleted_record_id": str(record.record_id),
-                        "restored": restored is not None,
-                    },
-                ),
-            )
-            entry = _entry(actor, connection, current)
+            _audit_restore(actor, connection, restored, record_id=record.record_id)
+            entry = _entry(actor, connection, restored)
     except _ChangedMeanwhileError:
-        log.info("要復原的封存已經被另一個請求用掉", paper_id=str(paper_id))
+        log.info("要復原的那一篇同時被另一個請求改了", paper_id=str(paper_id))
         return None
     log.info(
         "已復原文獻庫的一篇",
-        library_item_id=str(current.id),
+        library_item_id=str(restored.id),
         deleted_record_id=str(record.record_id),
-        restored=restored is not None,
     )
     return entry
+
+
+def _audit_restore(
+    actor: MemberViewer,
+    connection: DbConnection,
+    item: LibraryItem,
+    *,
+    record_id: uuid.UUID | None,
+) -> None:
+    """復原的稽核：對象與 `added_via` 都是現在文獻庫裡的那一筆；真的寫回時多記用掉的封存 id。"""
+    detail: dict[str, object] = {
+        "paper_id": str(item.paper_id),
+        "added_via": item.added_via.value,
+        "restored": record_id is not None,
+    }
+    if record_id is not None:
+        detail["deleted_record_id"] = str(record_id)
+    create_audit_event(
+        connection,
+        member_audit_event(
+            actor,
+            action=RESTORE_LIBRARY_ITEM_ACTION,
+            target_type=LIBRARY_ITEM_TARGET,
+            target_id=item.id,
+            detail=detail,
+        ),
+    )

@@ -26,7 +26,7 @@ deferred: []
 **Always:**
 - 加入：一句 `INSERT … SELECT … WHERE <可見> AND excluded_reason IS NULL ON CONFLICT DO NOTHING`，不先查再寫；沒寫入時查自己的文獻庫，有就回原本那一筆（不改），沒有就 404。真的新增才寫稽核。
 - 移出：同一交易 `FOR UPDATE` 讀自己的那一筆 → `to_jsonb` 複製到 `deleted_record` → 刪 → 稽核。不在自己文獻庫 → 404。
-- 復原：讀自己最新一筆 `library_item` 的 `deleted_record`（`FOR UPDATE`）→ 用原本的 `id`／`added_via`／`added_at` 寫回（`ON CONFLICT DO NOTHING`）→ 刪掉那筆 `deleted_record` → 稽核。沒有自己的紀錄 → 404；那篇已經又在文獻庫 → 200 回現在那一筆（冪等），紀錄照樣消耗。
+- 復原：讀自己最新一筆 `library_item` 的 `deleted_record`（`FOR UPDATE`）→ 用原本的 `id`／`added_via`／`added_at` 寫回（`ON CONFLICT DO NOTHING`）→ 刪掉那筆 `deleted_record` → 稽核。沒有自己的紀錄 → 404；那篇已經又在文獻庫 → 200 回現在那一筆（冪等），紀錄照樣消耗。（審查後改了，見 Spec Change Log 第 2 條：已經在文獻庫時先回現在那一筆、不動任何紀錄。）
 - 看不到、不存在、壞 ID、別人的：同一個 `ApiProblemError(NOT_FOUND, headers=NO_STORE)`。寫入過 `check_origin`。回應帶 `no-store`。壞 cursor → 422 `request_invalid`。
 - 清單：keyset（`added_at DESC, id DESC`），一頁 `LIBRARY_PAGE_SIZE = 50`（放 `client-config` 的 `library_page_size`），每頁給 `items`／`next_cursor`／`total`。
 - 測試資料自己編；`openapi.json`、`web/src/generated/` 重新產生後一起提交；ADR-0049、glossary、README、sprint-status 加在檔尾。
@@ -85,6 +85,7 @@ deferred: []
 ## Spec Change Log
 
 - 2026-11-18（實作時，沒改規格本文）：規格要移出與復原用 `SELECT … FOR UPDATE` 鎖列，同時要兩張表收回 UPDATE；PostgreSQL 鎖列需要 UPDATE 權限，照寫會 500。保留收回 UPDATE，改用「刪除有沒有真的刪到」判斷被搶先、刪不到整個交易退回（回 404）。寫進 ADR-0049 與 PR 的偏離。
+- 2026-11-18（審查修正第 1 輪）：(1) 加入、移出、復原在交易一開始拿（成員, 論文）的交易級 advisory lock，排隊做完；「刪到沒有」留作第二道防線。(2) 復原的冪等範圍：這篇**現在在自己的文獻庫**就回 200＋現在那一筆、`restored: false`、**不動任何封存**，稽核的對象與 `added_via` 都是現在那一筆；不在才取最新封存寫回並刪掉它；沒有封存 404。原本「封存照樣消耗」會讓重送復原吃掉另一次移出的舊封存。(3) 下一頁位置重新編碼時超出年份範圍（`OverflowError`）也回 422。
 
 ## Review Triage Log
 

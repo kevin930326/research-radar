@@ -2,7 +2,8 @@
 
 - `AddedVia` 剛好三種值；`LibraryItem` 的時間要帶時區；`LibraryEntry` 的論文列要是那一篇。
 - 下一頁的位置（cursor）：編碼後解得回來（時間轉成 UTC）；不是它產生的寫法（亂碼、改過、補了 `=`、
-  太長、沒有時區）一律 `ValueError`。
+  太長、沒有時區、轉成 UTC 超出年份範圍）一律 `ValueError`。
+- 文獻庫寫入的鎖鍵：同一組（成員, 論文）同一個鍵，換成員或論文就不同，和固定名稱的鎖不撞。
 - `LibraryPage` 一頁最多 `LIBRARY_PAGE_SIZE` 篇；`client-config` 給的是同一個數字。
 - 論文列（`PaperRowFacts`、`PaperRow`）：作者最多 3 位、總人數不少於列出的；`doi_url` 由 `doi`
   產生。
@@ -22,6 +23,7 @@ from pydantic import ValidationError
 
 from radar.domain.audit import AuditActorRole, member_audit_event
 from radar.domain.contracts import ClientConfig, PaperRow, build_client_config
+from radar.domain.fingerprints import LLM_BATCH_BUDGET_LOCK_KEY, named_lock_key
 from radar.domain.library import (
     LIBRARY_PAGE_SIZE,
     AddedVia,
@@ -32,6 +34,7 @@ from radar.domain.library import (
     LibraryPage,
     decode_library_cursor,
     encode_library_cursor,
+    library_item_lock_key,
 )
 from radar.domain.paper_rows import PAPER_ROW_AUTHOR_LIMIT, PaperRowFacts
 from radar.domain.viewer import MemberViewer, PublicViewer, SystemViewer
@@ -145,9 +148,34 @@ def test_cursor_rejects_anything_it_did_not_write(value: str) -> None:
         decode_library_cursor(value)
 
 
+@pytest.mark.parametrize(
+    "added_at",
+    ["0001-01-01T00:00:00.000000+14:00", "9999-12-31T23:59:59.999999-14:00"],
+)
+def test_cursor_out_of_range_in_utc_is_a_value_error(added_at: str) -> None:
+    # 解得出時間與 ID，但轉成 UTC 會超出年份範圍（OverflowError）：一樣當格式錯，api 回 422。
+    with pytest.raises(ValueError, match="下一頁的位置"):
+        decode_library_cursor(_b64(f"{added_at},{ITEM_ID}"))
+
+
 def test_cursor_needs_an_aware_time() -> None:
     with pytest.raises(ValueError, match="時區"):
         LibraryCursor(added_at=datetime(2026, 11, 18), item_id=ITEM_ID)
+
+
+# --- 寫入的鎖鍵 -----------------------------------------------------------------------------------
+
+
+def test_lock_key_is_per_member_and_paper() -> None:
+    key = library_item_lock_key(OWNER_ID, PAPER_ID)
+
+    assert key == library_item_lock_key(OWNER_ID, PAPER_ID)
+    assert -(2**63) <= key < 2**63
+    assert key != library_item_lock_key(ITEM_ID, PAPER_ID)
+    assert key != library_item_lock_key(OWNER_ID, ITEM_ID)
+    # 有自己的命名空間：不是沒有前綴的同一串名稱，也不是既有的固定鍵。
+    assert key != named_lock_key(f"{OWNER_ID}:{PAPER_ID}")
+    assert key != LLM_BATCH_BUDGET_LOCK_KEY
 
 
 # --- 論文列 ------------------------------------------------------------------------------------

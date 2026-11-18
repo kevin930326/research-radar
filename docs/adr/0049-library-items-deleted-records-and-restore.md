@@ -25,7 +25,8 @@
 |---|---|---|
 | A | `SELECT … FOR UPDATE` 鎖列 | PostgreSQL 鎖列要 UPDATE 權限；兩張表收回了 UPDATE（列只新增、刪除），兩條規則互相衝突 |
 | B | 給應用程式角色 UPDATE 權限再鎖列 | 失去「資料庫層擋住修改」這道防線 |
-| C | 不鎖：列不會被改、只會被刪，以「刪除有沒有真的刪到」判斷是否被搶先，刪不到就丟例外、整個交易退回 | 被搶先的那個請求回 404（不是 200） |
+| C | 不鎖：列不會被改、只會被刪，以「刪除有沒有真的刪到」判斷是否被搶先，刪不到就丟例外、整個交易退回 | 只擋得住兩個同樣的請求互搶；移出、加入、復原交錯時，復原可能拿錯筆封存而且回 200（審查時找到） |
+| D | 加入、移出、復原在交易一開始拿（成員, 論文）的交易級 advisory lock（`pg_advisory_xact_lock`，不需要 UPDATE 權限），C 的檢查留作第二道防線 | 同一位成員對同一篇的寫入要排隊；鎖等太久受 `statement_timeout` 限制 |
 
 **`upload_item` 欄位**
 
@@ -36,7 +37,7 @@
 
 ## 決定
 
-**復原選 B、防同時選 C、`upload_item` 選 A。**
+**復原選 B、防同時選 D（C 留作第二道防線；Story 3.16 審查後從 C 改成 D）、`upload_item` 選 A。**
 
 1. **遷移 0020**（接 0019）：
    - `library_item`：`id`（uuid、`uuidv7()`）、`owner_id`（NOT NULL，外鍵 `member`）、`paper_id`（NOT NULL，外鍵 `paper`，有索引）、`added_via`（`upload`／`shared_list`／`manual`，`TEXT`＋`CHECK`）、`added_at`（timestamptz，預設 `now()`）。（`owner_id`, `paper_id`）UNIQUE；（`owner_id`, `added_at`, `id`）索引給清單分頁，也當 `owner_id` 外鍵的索引。
@@ -48,11 +49,13 @@
    - `GET /api/v1/library?cursor=…`：自己的文獻庫一頁，`items`／`next_cursor`／`total`（每一頁都給總數）。別人讀到的是自己的（沒有就是空清單）。
    - `PUT /api/v1/library/{paper_id}`：加入（`added_via = manual`）。一句 `INSERT … SELECT … WHERE <可見> AND excluded_reason IS NULL ON CONFLICT DO NOTHING`，不先查再寫；沒寫入時查自己的文獻庫，有就回原本那一筆（不改、不寫稽核），沒有就 404。
    - `DELETE /api/v1/library/{paper_id}`：同一個交易讀自己的那一筆 → `to_jsonb` 複製到 `deleted_record` → 刪 → 稽核；回 200＋移出前的那一列（不是 204：換人測試的對照要 A 拿到 200 且有本文）。
-   - `POST /api/v1/library/{paper_id}/restore`：讀自己最新的一筆封存 → 用原本的 `id`／`added_via`／`added_at` 寫回 → 刪掉那筆封存 → 稽核。
+   - `POST /api/v1/library/{paper_id}/restore`：這篇已經在自己的文獻庫 → 回現在那一筆、不動任何封存；不在 → 讀自己最新的一筆封存 → 用原本的 `id`／`added_via`／`added_at` 寫回 → 刪掉那筆封存 → 稽核；沒有封存 → 404。
    - 看不到、不存在、被排除、壞 ID、別人的、沒有封存：同一個 `not_found`（和論文頁同一個 404）。壞的 `cursor` 回 422 `request_invalid`。
-   - 寫入都在一個交易裡：`permissions.require`（加入與復原用 `ADD_LIBRARY_ITEM`、移出用 `REMOVE_LIBRARY_ITEM`，擁有者是那一筆的 `owner_id`）→ 改資料 → `repo.audit.create_audit_event`（動作 `add_library_item`／`remove_library_item`／`restore_library_item`，對象 `library_item`，`detail` 只有 ID 與 `added_via`）。
+   - 寫入都在一個交易裡，交易一開始先拿（成員, 論文）的鎖（`domain/library.library_item_lock_key`：`radar-lock:library_item:<成員>:<論文>` 的雜湊，和其他鎖分開命名空間；`Database.transaction_lock`）：`permissions.require`（加入與復原用 `ADD_LIBRARY_ITEM`、移出用 `REMOVE_LIBRARY_ITEM`，擁有者是那一筆的 `owner_id`）→ 改資料 → `repo.audit.create_audit_event`（動作 `add_library_item`／`remove_library_item`／`restore_library_item`，對象 `library_item`，`detail` 只有 ID 與 `added_via`）。
 4. **復原的細節**：
-   - 那篇已經又在文獻庫（唯一衝突）：回 200＋現在那一筆（冪等），封存照樣消耗，稽核寫一筆（`restored: false`、對象是現在那一筆）。選冪等而不是 404：使用者看到的結果一樣（那篇在文獻庫），前端不用多處理一種錯誤。
+   - **冪等的範圍**：只要這篇**現在在自己的文獻庫**，復原一律回 200＋現在那一筆、**不動任何封存**（不寫回、不刪），稽核寫一筆（`restored: false`，對象與 `detail.added_via` 都是現在那一筆的，沒有 `deleted_record_id`）。所以重送復原（連點、逾時重送）幾次都是同樣的 200 與同一筆，不會吃掉另一次移出留下的較舊封存。選冪等而不是 404：使用者看到的結果一樣（那篇在文獻庫），前端不用多處理一種錯誤。
+   - 這篇不在文獻庫時才用封存：取最新的一筆寫回並刪掉它（`restored: true`、`detail.deleted_record_id` 是用掉的那一筆）；寫不回或刪不到（第二道防線）整個交易退回、回 404。不在文獻庫、也沒有自己的封存 → 404。
+   - 審查後（Story 3.16 第 1 輪）改的：原本「已經又在文獻庫時封存照樣消耗」，重送復原會吃掉另一次移出的舊封存，回應也時而 404 時而 200；稽核的 `added_via` 也記成封存的舊值。
    - 復原後刪掉那筆封存（不留著）：留著會讓同一筆被復原兩次，也讓已經回到文獻庫的內容多一份副本。
    - 不重新檢查論文看不看得到、有沒有被排除：復原是「回到原本那一筆」，和清單照列「加入之後才被排除的論文」一致。
    - 後端不設期限（UX「離開頁面後消失」由前端決定）。
@@ -69,7 +72,7 @@
 ## 取捨
 
 - **和 AD-26 不一致**：成員經 API 讀得到自己的 `deleted_record`（只限自己的、只為了復原），也多了一個還原端點。架構文件沒有改，列為 Kevin 決定 1。
-- **被搶先的請求回 404**：兩個請求同時移出（或同時復原）同一篇時，後到的那個整個退回、回 404；不會留下多的封存或稽核。
+- **同一篇的寫入排隊**：同一位成員對同一篇同時送加入、移出、復原時，後到的等前一個交易結束才開始（不同篇、不同成員不互等）。兩個同時的移出：後到的那個看到已經不在、回 404；不會留下多的封存或稽核。等鎖的時間受連線的 `statement_timeout` 限制（預設 `connect_timeout` 秒），超過回 500；交易都很短，實際上碰不到。
 - **總數和這一頁是兩句 SQL**：READ COMMITTED 下兩句看到的快照可能差一點（只有自己同時在改自己的文獻庫才會發生）。
 - **一頁的篇數寫在程式裡**：AD-18 說每頁筆數放設定檔；現在是 `domain/library.LIBRARY_PAGE_SIZE` 常數，經 `client-config` 給前端，前端沒有另一份。要改成設定檔時只改後端。
 - **`DELETE` 回 200 帶本文**：多傳一列資料，換來換人測試能用同一個框架驗證。
@@ -81,6 +84,7 @@
 - **復原不檢查期限**：任何時候都能把最新一筆封存復原（前端只在同一頁提供按鈕）。
 - **`added_via = upload`、`shared_list` 現在沒有正式的寫入路徑**：只有測試經 repo 寫；Epic 6 接上，屆時加 `upload_item` 欄位與外鍵。
 - **論文列沒有第三行**（中文重點的研究問題與 AI 標章）：每列要判 AI 區塊的狀態，這一輪不做；3.13／3.14／3.17 需要時在 `PaperRow` 加欄位（兩邊一起拿到）。
+- **一篇論文列不合 `PaperRow` 的限制時整頁 500**：例如 `paper.title` 是空字串、`authors` 陣列裡有 NULL。清單整頁一起驗證，一篇壞資料就讓整個文獻庫打不開；論文頁的 `PaperBiblio` 有同樣的既有限制（不是這次新增的風險）。不悄悄略過，因為略過會讓 `total` 和實際列數對不上；要擋就在 `paper` 補 CHECK（另外評估既有資料）。
 - **論文被刪除**：目前沒有刪論文的功能；之後有時，文獻庫的列與封存的復原都要另外處理（外鍵會擋）。
 - **可見範圍變寬只直接測了論文頁與文獻庫**：檢索、向量等其他接 `visible_papers` 的查詢沿用同一個條件，沒有逐一寫「A 私人論文出現在 A 的檢索裡」的測試（之後各自的 Story 寫換人測試時涵蓋）。
 
@@ -106,7 +110,7 @@
 
 **3. 復原時那篇已經又在文獻庫**
 
-1. 發生什麼事：移出後又從別處加回來，再按復原時，選了「回 200＋現在那一筆、封存照樣消耗」，不是 404。
+1. 發生什麼事：這篇已經在文獻庫時（移出後又從別處加回來、或重送復原），再按復原選了「回 200＋現在那一筆、不動任何封存」，不是 404。
 2. 要決定什麼：維持冪等，還是改回 404。
 3. 選項：
    - 維持：前端不用多處理一種錯誤；現在那一筆的 `added_via` 不會被改回舊值。可以改回。

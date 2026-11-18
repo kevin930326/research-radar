@@ -2,6 +2,7 @@
 
 - 根目錄的 `openapi.json` 和程式產生的一樣（CI 另外有一步重新輸出後 `git diff`）。
 - `openapi.json` 的每個端點都在登記表（`tests/permissions/cases.py`）：有換人測試或寫了理由的豁免。
+  讀或改某位成員資料的五個端點（論文頁與文獻庫的四個）一定不豁免。
 - app 上沒有躲在 `openapi.json` 外面的 API 路由；真正的 `main()` 組出來的 app 也一樣。
 - **示範**：加一個只在這裡存在的端點，框架真的報「這個端點沒有換人測試」；登記之後就不報。
 - 換人測試的判定（404 或空清單）與金絲雀檢查，對故意寫錯（會洩漏）的端點真的會失敗；對照（A 自己
@@ -100,6 +101,20 @@ def test_committed_openapi_matches_the_app() -> None:
 
 def test_every_endpoint_in_openapi_has_a_cross_member_case_or_exemption() -> None:
     assert coverage_problems(_committed_openapi(), REGISTRY.cases) == []
+
+
+def test_member_data_endpoints_are_never_exempt() -> None:
+    # 論文頁（看得到自己文獻庫的私人論文）與文獻庫的四個端點：在登記表裡加 `exempt=` 會讓它們的
+    # 換人測試整個消失（Story 3.16 審查後）。
+    for endpoint in (
+        Endpoint("GET", "/api/v1/papers/{paper_id}"),
+        Endpoint("GET", "/api/v1/library"),
+        Endpoint("PUT", "/api/v1/library/{paper_id}"),
+        Endpoint("DELETE", "/api/v1/library/{paper_id}"),
+        Endpoint("POST", "/api/v1/library/{paper_id}/restore"),
+    ):
+        case = REGISTRY.cases[endpoint]
+        assert (case.exempt_reason, case.expected_status) == (None, None), endpoint
 
 
 def test_openapi_lists_the_current_endpoints() -> None:

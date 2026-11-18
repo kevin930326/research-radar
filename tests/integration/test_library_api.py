@@ -1,21 +1,28 @@
 """個人文獻庫的 API 對真的 PostgreSQL（Story 3.16、ADR-0002、AD-4、AD-26）：spec 的 I/O 表每一列。
 
 - 加入：看得到的論文 → 200（`added_via = manual`）＋一筆稽核；再加一次（任何 `added_via`）回原本
-  那一筆、不寫稽核。
+  那一筆、不寫稽核。B 加入 A 也有的論文：B 自己的一筆，A 那一筆不變。
 - 加看不到的（別人的私人論文）、不存在、壞 ID、被排除的非研究文章：完全相同的 404，沒有寫入。
 - 移出：200 回移出前那一筆、`deleted_record` 一筆（整列的 jsonb）、稽核；清單不再有它。移出不在的
   （別人的、沒加過的）404，別人的那一筆不動。
-- 復原：200，`id`／`added_via`／`added_at` 同原本，封存刪掉、稽核；別人的封存、沒有封存 404；那篇
-  已經又在文獻庫時回現在那一筆，封存照樣消耗。
+- 復原：200，`id`／`added_via`／`added_at` 同原本，封存刪掉、稽核；別人的封存、沒有封存 404，不寫
+  稽核；那篇已經在文獻庫時回現在那一筆、不動任何封存（重送復原不會吃掉另一次移出的封存）。
 - 清單：51 篇 → 第一頁 50＋`next_cursor`＋`total` 51，第二頁 1 篇、`next_cursor` null；照
-  `added_at DESC, id DESC`（同一時間的照 id）；別人讀是空清單；壞 cursor 422。
+  `added_at DESC, id DESC`（同一時間的照 id，不是照 paper_id）；別人讀是空清單；壞 cursor（含轉成
+  UTC 會超出年份範圍的）422。
+- 同時：另一條連線拿著（成員, 論文）的鎖時，加入、移出、復原都排隊等它（看 `pg_locks`），放掉後
+  才做完。
 - 論文頁：A 文獻庫裡的私人論文 A 200；B 和不存在的完全一樣的 404。
 
 兩位成員經開發環境的假登入取得真的 session（路由用正式的 `install_api_routes`）。資料全是測試自己
 編的（`*@example.com`、假標題）。
 """
 
+import base64
+import threading
+import time
 import uuid
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -25,7 +32,7 @@ from httpx2 import Response
 
 from radar.adapters.fake.login import pick_member_identity
 from radar.domain.auth_settings import AuthSettings, Environment
-from radar.domain.library import AddedVia
+from radar.domain.library import AddedVia, library_item_lock_key
 from radar.domain.viewer import SystemViewer
 from radar.entrypoints.api.app import REQUEST_ID_HEADER, create_app
 from radar.entrypoints.api.auth import SESSION_COOKIE, build_auth_routes
@@ -215,6 +222,29 @@ def test_adding_again_returns_the_original_item(
     assert [row[2] for row in _audits(db)] == ["add_library_item"]
 
 
+def test_other_member_adds_a_paper_that_is_also_in_my_library(
+    db: TestDatabase, database: Database, api: Api
+) -> None:
+    paper_id = create_paper(database)
+    api.add(paper_id, api.owner_token)
+    (owner_row,) = _items(db)
+
+    response = api.add(paper_id, api.other_token)
+
+    assert response.status_code == 200, response.text
+    rows = {row[1]: row for row in _items(db)}
+    assert set(rows) == {api.owner_id, api.other_id}
+    assert rows[api.owner_id] == owner_row
+    other_id, _owner, _paper, other_via, other_at = rows[api.other_id]
+    assert other_id != owner_row[0]
+    assert (response.json()["added_via"], other_via) == ("manual", "manual")
+    assert response.json()["added_at"] == _z(other_at)
+    assert [(row[0], row[4]) for row in _audits(db)] == [
+        (api.owner_id, owner_row[0]),
+        (api.other_id, other_id),
+    ]
+
+
 def test_hidden_missing_malformed_and_excluded_papers_get_the_same_404(
     db: TestDatabase, database: Database, api: Api
 ) -> None:
@@ -271,8 +301,10 @@ def test_remove_copies_to_deleted_record_then_deletes(
         str(paper_id),
         "manual",
     )
-    actions = [(row[2], row[4], row[5]) for row in _audits(db)]
+    actions = [(row[0], row[1], row[2], row[4], row[5]) for row in _audits(db)]
     assert actions[-1] == (
+        api.owner_id,
+        "member",
         "remove_library_item",
         item_id,
         {"paper_id": str(paper_id), "added_via": "manual", "deleted_record_id": str(record_id)},
@@ -302,6 +334,7 @@ def test_removing_what_is_not_in_my_library_is_404(
     assert _comparable(others) == _comparable(missing)
     assert _items(db) == before
     assert execute(db, "SELECT count(*) FROM deleted_record") == [(0,)]
+    assert [row[2] for row in _audits(db)] == ["add_library_item"]
 
 
 # --- 復原 -------------------------------------------------------------------------------------
@@ -355,6 +388,7 @@ def test_restore_needs_my_own_record(db: TestDatabase, database: Database, api: 
     assert CANARY not in others.text
     assert _items(db) == []
     assert execute(db, "SELECT count(*) FROM deleted_record") == [(1,)]
+    assert [row[2] for row in _audits(db)] == ["remove_library_item"]
 
 
 def test_restore_when_already_back_returns_the_current_item(
@@ -363,18 +397,57 @@ def test_restore_when_already_back_returns_the_current_item(
     paper_id = create_paper(database)
     api.add(paper_id, api.owner_token)
     api.remove(paper_id, api.owner_token)
+    records = execute(db, "SELECT id FROM deleted_record")
     current = api.add(paper_id, api.owner_token).json()
     current_rows = _items(db)
 
-    response = api.restore(paper_id, api.owner_token)
+    first = api.restore(paper_id, api.owner_token)
+    again = api.restore(paper_id, api.owner_token)
 
-    assert response.status_code == 200, response.text
-    assert response.json() == current
+    # 冪等：重送幾次都是 200＋現在那一筆，封存一筆都不動。
+    assert first.status_code == again.status_code == 200, first.text
+    assert first.json() == again.json() == current
     assert _items(db) == current_rows
-    assert execute(db, "SELECT count(*) FROM deleted_record") == [(0,)]
-    assert _audits(db)[-1][5]["restored"] is False
-    # 封存已經用掉：再復原一次是 404。
-    assert api.restore(paper_id, api.owner_token).json() == NOT_FOUND
+    assert execute(db, "SELECT id FROM deleted_record") == records
+    restores = [row for row in _audits(db) if row[2] == "restore_library_item"]
+    expected = (
+        api.owner_id,
+        "member",
+        "restore_library_item",
+        "library_item",
+        current_rows[0][0],
+        {"paper_id": str(paper_id), "added_via": "manual", "restored": False},
+    )
+    assert restores == [expected, expected]
+
+
+def test_repeated_restore_keeps_the_older_removal(
+    db: TestDatabase, database: Database, api: Api
+) -> None:
+    # PUT → DELETE → PUT → DELETE → restore → restore：第二次復原時那篇已經回來了，不能吃掉第一次
+    # 移出留下的封存。
+    paper_id = create_paper(database)
+    api.add(paper_id, api.owner_token)
+    (first_item,) = _items(db)
+    api.remove(paper_id, api.owner_token)
+    ((first_record,),) = execute(db, "SELECT id FROM deleted_record")
+    api.add(paper_id, api.owner_token)
+    (second_item,) = _items(db)
+    api.remove(paper_id, api.owner_token)
+
+    restored = api.restore(paper_id, api.owner_token)
+    again = api.restore(paper_id, api.owner_token)
+
+    assert restored.status_code == again.status_code == 200
+    assert again.json() == restored.json()
+    assert _items(db) == [second_item]
+    assert execute(db, "SELECT id, source_id FROM deleted_record") == [
+        (first_record, first_item[0])
+    ]
+    assert [row[5]["restored"] for row in _audits(db) if row[2] == "restore_library_item"] == [
+        True,
+        False,
+    ]
 
 
 def test_restore_uses_the_latest_record(db: TestDatabase, database: Database, api: Api) -> None:
@@ -400,24 +473,27 @@ def test_list_pages_by_added_at_then_id(db: TestDatabase, database: Database, ap
         for n in range(51)
     ]
     base = datetime(2026, 11, 1, tzinfo=UTC)
+    rows = []
     for n, paper_id in enumerate(paper_ids):
-        # 每三篇同一個時間：同一時間的照 id 由大到小。
+        # 每三篇同一個時間。文獻庫的 id 和論文建立的順序相反：同一時間「照 id」和「照 paper_id」
+        # 排出來的順序不同。
+        item_id = uuid.UUID(int=1000 - n)
+        added_at = base + timedelta(minutes=n // 3)
+        rows.append((added_at, item_id, paper_id))
         execute(
             db,
-            "INSERT INTO library_item (owner_id, paper_id, added_via, added_at)"
-            " VALUES (%s, %s, 'manual', %s)",
+            "INSERT INTO library_item (id, owner_id, paper_id, added_via, added_at)"
+            " VALUES (%s, %s, %s, 'manual', %s)",
+            item_id,
             api.owner_id,
             paper_id,
-            base + timedelta(minutes=n // 3),
+            added_at,
         )
-    expected = [
-        str(row[0])
-        for row in execute(
-            db,
-            "SELECT paper_id FROM library_item WHERE owner_id = %s ORDER BY added_at DESC, id DESC",
-            api.owner_id,
-        )
+    expected = [str(row[2]) for row in sorted(rows, key=lambda row: (row[0], row[1]), reverse=True)]
+    by_paper_id = [
+        str(row[2]) for row in sorted(rows, key=lambda row: (row[0], row[2]), reverse=True)
     ]
+    assert expected != by_paper_id
 
     first = api.list(api.owner_token)
     body = first.json()
@@ -450,6 +526,28 @@ def test_malformed_cursor_is_422(api: Api) -> None:
 
     assert response.status_code == 422
     assert response.json()["code"] == "request_invalid"
+
+
+@pytest.mark.parametrize(
+    "added_at",
+    ["0001-01-01T00:00:00.000000+14:00", "9999-12-31T23:59:59.999999-14:00"],
+)
+def test_cursor_out_of_range_in_utc_is_422(api: Api, added_at: str) -> None:
+    # 時間與 ID 都解得出來，轉成 UTC 才超出年份範圍：ADR-0047 的 422，不是 500。
+    plain = f"{added_at},{uuid.UUID(int=0)}"
+    cursor = base64.urlsafe_b64encode(plain.encode()).decode().rstrip("=")
+
+    response = api.list(api.owner_token, cursor)
+
+    assert response.status_code == 422, response.text
+    assert response.headers["content-type"] == "application/problem+json"
+    assert response.headers["cache-control"] == "no-store"
+    assert response.json() == {
+        "type": "about:blank",
+        "title": "Unprocessable Content",
+        "status": 422,
+        "code": "request_invalid",
+    }
 
 
 # --- 論文頁 -----------------------------------------------------------------------------------
@@ -559,3 +657,57 @@ def test_restore_rolls_back_when_the_record_was_used_meanwhile(
     assert _items(db) == []
     assert execute(db, "SELECT id FROM deleted_record") == records
     assert "restore_library_item" not in [row[2] for row in _audits(db)]
+
+
+# --- 同一位成員同一篇的寫入排隊（兩條真的資料庫連線） ---------------------------------------
+
+
+def _waiting_for(db: TestDatabase, key: int) -> bool:
+    """這個測試資料庫裡有沒有連線正在等 `key` 這把 advisory lock（`pg_locks` 沒拿到的列）。"""
+    unsigned = key & 0xFFFF_FFFF_FFFF_FFFF
+    ((waiting,),) = execute(
+        db,
+        "SELECT count(*) FROM pg_locks"
+        " WHERE locktype = 'advisory' AND NOT granted AND objsubid = 1"
+        " AND database = (SELECT oid FROM pg_database WHERE datname = current_database())"
+        " AND classid = %s::bigint::oid AND objid = %s::bigint::oid",
+        unsigned >> 32,
+        unsigned & 0xFFFF_FFFF,
+    )
+    return bool(waiting)
+
+
+@pytest.mark.parametrize("action", ["add", "remove", "restore"])
+def test_writes_for_the_same_paper_wait_for_the_lock(
+    db: TestDatabase, database: Database, api: Api, action: str
+) -> None:
+    paper_id = create_paper(database)
+    if action in ("remove", "restore"):
+        api.add(paper_id, api.owner_token)
+    if action == "restore":
+        api.remove(paper_id, api.owner_token)
+    before = _items(db)
+    send: Callable[[object, str], Response] = getattr(api, action)
+    key = library_item_lock_key(api.owner_id, paper_id)
+    results: list[Response] = []
+    holder = Database(db.app_url, connect_timeout=5)
+    with holder.transaction() as connection:
+        Database.transaction_lock(connection, key)
+        worker = threading.Thread(target=lambda: results.append(send(paper_id, api.owner_token)))
+        worker.start()
+        # 等到那個請求真的卡在這把鎖上（看 pg_locks，不猜時間）；它的 statement_timeout 是 5 秒。
+        deadline = time.monotonic() + 4
+        while not _waiting_for(db, key):
+            assert time.monotonic() < deadline, "請求沒有在等這把鎖"
+            time.sleep(0.02)
+        assert worker.is_alive()
+        assert results == []
+        assert _items(db) == before
+    worker.join(timeout=10)
+
+    assert not worker.is_alive()
+    (response,) = results
+    assert response.status_code == 200, response.text
+    assert not _waiting_for(db, key)
+    in_library = [row for row in _items(db) if row[2] == paper_id]
+    assert len(in_library) == (0 if action == "remove" else 1)

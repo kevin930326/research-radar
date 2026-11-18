@@ -7,7 +7,8 @@
 - `PUT /api/v1/library/{paper_id}`：加入（`added_via = manual`）；已經在就回原本那一筆。
 - `DELETE /api/v1/library/{paper_id}`：移出，回移出前的那一筆（200，不是 204：換人測試的對照要有
   本文）。
-- `POST /api/v1/library/{paper_id}/restore`：復原最近一次移出的那一筆。
+- `POST /api/v1/library/{paper_id}/restore`：復原最近一次移出的那一筆；已經在文獻庫就回現在那一筆、
+  不動封存。
 - 看不到、不存在、被排除、別人的、路徑參數不是 UUID：一律丟同一個
   `ApiProblemError(not_found, headers=NO_STORE)`（ADR-0002，和論文頁同一個寫法）；路徑參數宣告成
   字串、自己轉 UUID。
@@ -197,9 +198,8 @@ def install_library_routes(app: FastAPI, routes: LibraryRoutes, auth_routes: Aut
     def restore_library_item(
         paper_id: str, request: Request, response: Response
     ) -> LibraryItemResponse:
-        """復原最近一次移出的那一篇（原本的加入方式與時間）；已經又在文獻庫就回現在那一筆，那筆
-        封存照樣用掉。自己沒有移出過回 404，沒登入 401；`Origin` 缺少或不是本站 403
-        `origin_rejected`。"""
+        """復原最近一次移出的那一篇（原本的加入方式與時間）；已經在文獻庫就回現在那一筆，不動任何
+        封存。自己沒有移出過回 404，沒登入 401；`Origin` 缺少或不是本站 403 `origin_rejected`。"""
         return change(request, response, paper_id, routes.restore)
 
     app.include_router(router)

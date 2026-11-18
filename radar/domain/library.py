@@ -6,6 +6,8 @@
   那一筆（`id`、`added_via`、`added_at` 都不變）。復原沒有期限（前端決定什麼時候不再提供）。
 - 清單照 `added_at DESC, id DESC` 排，keyset 分頁（`LibraryCursor`）：一頁 `LIBRARY_PAGE_SIZE` 篇，
   下一頁的位置是這一頁最後一筆的（`added_at`, `id`），編成不透明的字串給前端原樣傳回。
+- 加入、移出、復原在交易一開始拿（成員, 論文）的交易級 advisory lock（`library_item_lock_key`），
+  同一位成員對同一篇的寫入排隊做完。
 """
 
 import base64
@@ -16,6 +18,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Final
 
+from radar.domain.fingerprints import named_lock_key
 from radar.domain.paper_rows import PaperRowFacts
 
 # 文獻庫清單一頁幾篇（前端的 `client-config` 也給這個值）。
@@ -38,6 +41,16 @@ class DeletedSource(StrEnum):
     """`deleted_record.source_table` 可以是哪些表（`repo/deleted_records.py` 的白名單）。"""
 
     LIBRARY_ITEM = "library_item"
+
+
+def library_item_lock_key(owner_id: uuid.UUID, paper_id: uuid.UUID) -> int:
+    """（成員, 論文）的交易級 advisory lock 鍵（Story 3.16 審查後）：加入、移出、復原都在交易一開始
+    拿這把獨佔鎖（`repo/db.Database.transaction_lock`），同一位成員對同一篇的寫入排隊做完。
+
+    名稱帶 `library_item:` 前綴再經 `fingerprints.named_lock_key` 雜湊，和其他鎖（固定名稱、
+    `run_lock_key`、摘要來源）分在不同的命名空間；撞到的機率約 2^-64，撞到只是多等一下。
+    """
+    return named_lock_key(f"library_item:{owner_id}:{paper_id}")
 
 
 def _check_aware(value: datetime, name: str) -> None:
@@ -154,8 +167,10 @@ def decode_library_cursor(value: str) -> LibraryCursor:
         cursor = LibraryCursor(
             added_at=datetime.fromisoformat(added_at_text), item_id=uuid.UUID(item_id_text)
         )
-    except (UnicodeError, binascii.Error, ValueError) as exc:
+        # 重新編碼會轉成 UTC：年份 1 或 9999 帶極端時差時超出範圍（`OverflowError`），也算格式錯。
+        same = encode_library_cursor(cursor) == value
+    except (UnicodeError, binascii.Error, ValueError, OverflowError) as exc:
         raise ValueError("下一頁的位置格式不對") from exc
-    if encode_library_cursor(cursor) != value:
+    if not same:
         raise ValueError("下一頁的位置格式不對")
     return cursor
