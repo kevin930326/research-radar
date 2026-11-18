@@ -21,8 +21,8 @@ from radar.domain.validators.text_checks import (
     ExtendedVocabulary,
     InputVocabulary,
     Number,
+    _keeps_whole_numbers,
     _prepared_for_numbers,
-    _reads_no_new_numbers,
     _whole_numbers,
     check_copy,
     numbers,
@@ -835,6 +835,15 @@ WRITINGS = [
     "10^ -3",
     "10 ^ - 10",
     "１．２ × １０＾ －３",
+    # 第三輪 T2：既有讀法認不出整段的科學記號。
+    "1.2 ⋅ 10-3",
+    "1.2 ∙ 10-3",
+    "7.7 ✕ 10-9",
+    "1.2 E -3",
+    "1.2 E - 3",
+    "10^ ±3",
+    "10**-9",
+    "7.7e - 90",
     "12 million",
     "12M",
     "1,200",
@@ -988,7 +997,7 @@ def test_output_replacements_only_remove_whole_numbers(writing: str) -> None:
             check_copy(f"{CONTEXT_WORDS} We study {' '.join(tokens)}.")
         )
         replaced, _ = vocabulary._replaced_number_text(text)
-        if not _whole_spans(replaced) <= _whole_spans(text) or not _reads_no_new_numbers(
+        if not _whole_spans(replaced) <= _whole_spans(text) or not _keeps_whole_numbers(
             text, replaced
         ):
             broken.append((text, replaced))
@@ -1017,26 +1026,63 @@ def test_output_replacements_still_happen_for_plain_numbers(text: str, replaced:
     [
         ("研究 B2B", "研究 QQQ", True),
         ("9 月", "Q 月", True),
+        ("7-8月", "Q-Q月", True),
         # 切開完整數字：讀出新的值。
         ("模型 K1e-3", "模型 QQQ-3", False),
+        # 切出來的值剛好在別處也有（審查 T5）：只比數值集合會判成安全，比位置才擋得住。
+        ("模型 K1e-3、共 3 組", "模型 QQQ-3、共 3 組", False),
         # 把讀不懂（科學記號）變成讀得懂。
         ("3 x 10-2 月", "3 x QQ-Q 月", False),
     ],
 )
-def test_the_safety_net_compares_readings(before: str, after: str, *, safe: bool) -> None:
-    assert _reads_no_new_numbers(before, after) is safe
+def test_the_safety_net_compares_whole_numbers(before: str, after: str, *, safe: bool) -> None:
+    # 第三輪審查 T5：保險改成比位置——替換後的每一個完整數字都要是替換前同位置、各部分一模一樣的。
+    assert _keeps_whole_numbers(before, after) is safe
+
+
+def test_the_safety_net_is_not_fooled_by_a_matching_value(monkeypatch: pytest.MonkeyPatch) -> None:
+    # 審查 T5 的例子：結構檢查失效時，切出來的 3 剛好也在輸出別處、也在輸入裡，保險仍整欄不換。
+    monkeypatch.setattr(text_checks, "_covers_whole_numbers", lambda *_: True)
+    monkeypatch.setattr(text_checks, "_exact_integer", lambda *_: True)
+    abstract = "Model K1e uses 3 groups in March."
+    vocabulary = ExtendedVocabulary.build(check_copy(abstract))
+    method = check_copy("模型 K1e-3，共 3 組")
+
+    assert vocabulary._replaced_number_text(method)[0] == "模型 QQQ-3、共 3 組"
+    assert vocabulary.number_text(method) == (method, None)
+    assert _method_rejected("模型 K1e-3，共 3 組", abstract) is UNSUPPORTED
+
+
+def test_unreadable_is_also_taken_from_the_text_before_replacement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # `zh_summary.py` 的「讀不懂取聯集」那一行是多一層的保險：讓結構檢查與保險都失效，
+    # `3 x 10-2 月` 換成讀得懂的 `3 x QQ-Q 月`，仍因為替換前讀不懂而拒收。
+    monkeypatch.setattr(text_checks, "_covers_whole_numbers", lambda *_: True)
+    monkeypatch.setattr(text_checks, "_exact_integer", lambda *_: True)
+    monkeypatch.setattr(text_checks, "_keeps_whole_numbers", lambda *_: True)
+    abstract = "Data were collected in February and October from 3 groups."
+    vocabulary = ExtendedVocabulary.build(check_copy(abstract))
+
+    assert vocabulary.number_text("觀察 3 x 10-2 月") == ("觀察 3 x QQ-Q 月", None)
+    assert _method_rejected("觀察 3 x 10-2 月", abstract) is UNSUPPORTED
 
 
 def test_the_safety_net_keeps_the_original_text(monkeypatch: pytest.MonkeyPatch) -> None:
     # 讓結構檢查失效（什麼片段都換）：保險仍把整欄照原本的方式讀。
     monkeypatch.setattr(text_checks, "_covers_whole_numbers", lambda *_: True)
     monkeypatch.setattr(text_checks, "_exact_integer", lambda *_: True)
-    vocabulary = ExtendedVocabulary.build(check_copy("Model K1e uses 3 groups in January."))
+    vocabulary = ExtendedVocabulary.build(
+        check_copy("Model K1e uses 3 groups in January and October.")
+    )
 
     assert vocabulary._replaced_number_text("模型 K1e-3")[0] == "模型 QQQ-3"
     assert vocabulary.number_text("模型 K1e-3") == ("模型 K1e-3", None)
-    assert vocabulary._replaced_number_text("觀察 2.1 月")[0] == "觀察 2.Q 月"
-    assert vocabulary.number_text("觀察 2.1 月") == ("觀察 2.1 月", None)
+    # 第三輪 T4 之後 `2.1 月` 的 1 前面是 `.`，正規式就不配了（原本這裡用 `2.1 月` 當例子），改用
+    # 科學記號裡的月份位置。
+    assert vocabulary._replaced_number_text("觀察 2.1 月")[0] == "觀察 2.1 月"
+    assert vocabulary._replaced_number_text("觀察 3 x 10-1 月")[0] == "觀察 3 x QQ-Q 月"
+    assert vocabulary.number_text("觀察 3 x 10-1 月") == ("觀察 3 x 10-1 月", None)
     assert _method_rejected("模型 K1e-3", "Model K1e uses 3 groups.") is UNSUPPORTED
 
 
@@ -1063,6 +1109,189 @@ def test_whole_numbers_match_the_shared_reading(text: str) -> None:
     # `_whole_numbers` 依位置取 `_NUMBER` 的五個群組。
     assert list(_NUMBER.groupindex) == ["sign", "mantissa", "exponent", "scale", "percent"]
     assert _NUMBER.groups == 5
+
+
+# --- 第三輪審查（S1、T1、T2、T4）-----------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("abstract", "method"),
+    [
+        # S1：月份、年代位置的數字前面隔一個空白是正負號。
+        ("Data were collected in March.", "前後 ± 3 月"),
+        ("Data were collected in March.", "前後 ∓ 3 月"),
+        ("Data were collected in March.", "約 + 3 月"),
+        ("Data were collected in March.", "前後 - 3 月"),
+        ("Data were collected in March.", "- 3 月"),
+        ("Data were collected in March and July.", "前後 ± 3-7 月"),
+        ("Firms founded in the 1960s.", "前後 ± 60 年代"),
+        ("Firms founded in the 1960s.", "前後 - 60 年代"),
+        ("Firms founded in the 1960s.", "前後 + 60 年代"),
+    ],
+)
+def test_signs_one_space_before_months_or_decades_are_rejected(abstract: str, method: str) -> None:
+    assert _method_rejected(method, abstract) is UNSUPPORTED
+
+
+@pytest.mark.parametrize(
+    ("abstract", "method"),
+    [
+        # S1：「-＋空白」在兩個「月」／「年代」之間是範圍；同一段裡的範圍不受影響。
+        ("Data were collected from December to March.", "12 月 - 3 月"),
+        ("Data were collected from December 2014 to March 2015.", "2014 年 12 月 - 2015 年 3 月"),
+        ("Data were collected from December 2014 to March.", "2014 年 12 月 - 3 月"),
+        ("Firms founded in the 1950s and 1960s.", "50 年代 - 60 年代"),
+        ("Firms founded in the 1950s and 1960s.", "1950 年代 - 1960 年代"),
+        ("Data were collected in July and August.", "7 - 8月"),
+        ("Data were collected in July and August.", "7-8月"),
+        ("Data were collected in July and August.", "7 至 8 月"),
+        # T4：範圍前半是某個完整數字的片段時，後面獨立的「N 月」照樣換。
+        ("Cases rose during COVID-19 in March.", "COVID-19 至 3 月"),
+        ("We studied Web2.0 sites in August.", "Web2.0至8月"),
+    ],
+)
+def test_month_and_decade_ranges_still_match(abstract: str, method: str) -> None:
+    assert _method_only(method, abstract) == method
+
+
+@pytest.mark.parametrize(
+    ("abstract", "method"),
+    [
+        # T4 的反例：輸入沒有 March。
+        ("Cases rose during COVID-19 in April.", "COVID-19 至 3 月"),
+        ("We studied Web2.0 sites in July.", "Web2.0至8月"),
+        # 第二輪的收緊照樣在（數字黏在詞、小數、指數、連字號後面）。
+        ("Data were collected in March by 1 team.", "觀察 1,3 月"),
+        ("Data were collected in March of 2014.", "觀察 2014-3 月"),
+        ("Data were collected in March. There were 3 groups.", "觀察 3e-3 月"),
+    ],
+)
+def test_month_numbers_attached_to_other_numbers_are_rejected(abstract: str, method: str) -> None:
+    assert _method_rejected(method, abstract) is UNSUPPORTED
+
+
+@pytest.mark.parametrize(
+    ("abstract", "method"),
+    [
+        # T1：空白千分位後面接「逗號＋空白＋別的數字」是列舉，前面那串照樣合併。
+        ("The sample (n = 12 345, 51.2% female) was used.", "樣本 12345 人"),
+        ("Samples of 1 200, 3 400 and 5 600 firms.", "1200 家企業"),
+        ("Samples of 1 200, 3 400 and 5 600 firms.", "3400 與 5600 家企業"),
+        ("We coded 131 978, 27 397 and 54 000 posts.", "編碼 131978 則"),
+        ("We coded 54 000, 2019 data.", "編碼 54000 則"),
+    ],
+)
+def test_space_thousands_followed_by_a_list_are_merged(abstract: str, method: str) -> None:
+    assert _method_only(method, abstract) == method
+
+
+@pytest.mark.parametrize(
+    ("abstract", "method"),
+    [
+        ("Samples of 1 200, 3 400 and 5 600 firms.", "1201 家企業"),
+        ("Samples of 1 200, 3 400 and 5 600 firms.", "12003400 家企業"),
+        ("The sample (n = 12 345, 51.2% female) was used.", "樣本 12346 人"),
+        ("We coded 54 000, 2019 data.", "編碼 540002019 則"),
+    ],
+)
+def test_space_thousands_followed_by_a_list_still_reject_invented_numbers(
+    abstract: str, method: str
+) -> None:
+    assert _method_rejected(method, abstract) is UNSUPPORTED
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # T1 不動「空白或 `$\,$` 後面還接數字就不合併」。
+        "1 234 567.89 posts",
+        "1 300.5 posts",
+        "1 000 000e3 posts",
+        "1 000 5G sites",
+        "1 000$\\,$5 sites",
+    ],
+)
+def test_space_thousands_followed_by_more_digits_are_not_merged(text: str) -> None:
+    vocabulary = ExtendedVocabulary.build(check_copy(text))
+
+    assert vocabulary.numbers - vocabulary.base.numbers == frozenset()
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["⋅ 1 200 978 posts", "± 1 200 978 posts", "- 131 978 000 posts", "⊗ 1 200 978 posts"],
+)
+def test_space_thousands_with_an_unclean_head_drop_the_whole_run(text: str) -> None:
+    # 第一段沒過白名單時整串都不用，也不從第二段重新開始（修正時自己找到的：否則
+    # `⋅ 1 200 978` 會多認 200978，白名單反而多放行）。
+    vocabulary = ExtendedVocabulary.build(check_copy(text))
+
+    assert vocabulary.numbers - vocabulary.base.numbers == frozenset()
+
+
+@pytest.mark.parametrize(
+    ("abstract", "method"),
+    [
+        # T2：既有讀法認不出整段的科學記號（`_SCIENTIFIC_PIECE` 與白名單）。
+        ("The effect is 1.2 ⋅ 10-3% points.", "提高 10%"),
+        ("The effect is 1.2 ∙ 10-3% points.", "提高 10%"),
+        ("The effect is 1.2 E -3% points.", "提高 3 個百分點"),
+        ("The effect is 1.2 E - 3% points.", "提高 3 個百分點"),
+        ("The effect is 10^ ±3% points.", "提高 3 個百分點"),
+        ("The rate was 7.7 ✕ 10-9%.", "比例為 10%"),
+        ("The value was 10**-9 300s.", "數值 9300"),
+        ("The value was 7.7e - 90 000.", "數值 90000"),
+        # 沒列在任何清單裡的符號：白名單預設不放行。
+        ("The effect is 1.2 ⊗ 10-3% points.", "提高 10%"),
+        ("The effect is 1.2 ⨂ 10-3% points.", "提高 10%"),
+        ("The value was 7.7 ⊗ 10 - 90 000.", "數值 90000"),
+        # 年代的後兩位也要前面乾淨（第三輪確認年代規則時找到）。
+        ("The value was 1.2 ⊗ 10-1960s.", "追溯 60 年代"),
+        ("The value was 1.2 ⊗ 10 - 1960s.", "追溯 60 年代"),
+    ],
+)
+def test_unrecognized_scientific_writings_add_no_new_numbers(abstract: str, method: str) -> None:
+    assert _method_rejected(method, abstract) is UNSUPPORTED
+
+
+@pytest.mark.parametrize(
+    ("abstract", "method"),
+    [
+        # T2：白名單之後，TASK 的正向樣式照樣過。
+        ("We raised $150 000 in total.", "募得 150000 元"),
+        ("Adoption was about 10–40%.", "採用率約 10%"),
+        ("Adoption (10-40%) varied.", "採用率 10%"),
+        ("Adoption rose by 10% points.", "提高 10 個百分點"),
+        ("Adoption rose, 4.5% points in total.", "提高 4.5 個百分點"),
+        # 摘要第一個字就是數字：輸入是「標題\n摘要」，換行算文字開頭。
+        ("131 978 firms were sampled.", "抽樣 131978 家"),
+        ("Firms (131 978 in total) were sampled.", "抽樣 131978 家"),
+        ("We sampled ≈131 978 firms.", "抽樣 131978 家"),
+        ("We sampled ~ 131 978 firms.", "抽樣 131978 家"),
+        ("We sampled firms: 131 978.", "抽樣 131978 家"),
+        # `= - 4.5`：既有讀法把負號挪到數字旁邊，白名單從原本的 `-` 往前看。
+        ("The change was β = - 4.5% points.", "下降 4.5 個百分點"),
+        # 年代的後兩位：前面是詞、連字號接在字母或乾淨的數字後面。
+        ("Firms founded 1950-1960s grew.", "60 年代"),
+        ("Firms founded pre-1960s grew.", "60 年代"),
+        ("Firms founded (1960s) grew.", "60 年代"),
+    ],
+)
+def test_the_start_whitelist_keeps_ordinary_writings(abstract: str, method: str) -> None:
+    assert _method_only(method, abstract) == method
+
+
+@pytest.mark.parametrize(
+    ("abstract", "method"),
+    [
+        # 白名單偏保守的誤擋（ADR 有列）：`±`、破折號後面的數字不當新規則的起點。
+        ("Adoption ranged ±10-40%.", "採用率 10%"),
+        ("Firms - 131 978 in total - were sampled.", "抽樣 131978 家"),
+        ("Firms founded 1950s – 1960s grew.", "60 年代"),
+    ],
+)
+def test_the_start_whitelist_is_conservative(abstract: str, method: str) -> None:
+    assert _method_rejected(method, abstract) is UNSUPPORTED
 
 
 # --- 共用函式的預設行為不變（研究模型看到的和修改前一樣）---------------------------------------
@@ -1119,7 +1348,11 @@ def test_shared_vocabulary_still_reads_digits_inside_alphanumeric_words() -> Non
     assert vocabulary.numbers == frozenset({_n("2"), _n("3"), _n("19")})
 
 
-# --- 新加的正規式：20 萬字元的最壞情況在 1 秒內跑完 ---------------------------------------------
+# --- 新加的正規式：20 萬字元的最壞情況在 3 秒內跑完 ---------------------------------------------
+
+# 長輸入測試的時間上限（第三輪審查 T7 從 1 秒放寬）：本機最慢約 0.45 秒，CI 的機器慢 2～3 倍，1 秒會
+# 偶發失敗；平方級的寫法在 20 萬字元要幾十秒以上，3 秒仍抓得到。
+LONG_INPUT_SECONDS = 3
 
 
 @pytest.mark.parametrize(
@@ -1174,7 +1407,7 @@ def test_shared_vocabulary_still_reads_digits_inside_alphanumeric_words() -> Non
         "K12,0",
         "a 1 b 2 ",
         # 第二輪：_whole_numbers（_prepared_in_place、_SCIENTIFIC_PIECE）、_space_thousands、
-        # _extra_input_numbers、_decade_numbers、_covers_whole_numbers、_reads_no_new_numbers
+        # _extra_input_numbers、_decade_numbers、_covers_whole_numbers、保險（_keeps_whole_numbers）
         "1 000 000 ",
         "1 000 0 ",
         "1%-1%",
@@ -1191,6 +1424,24 @@ def test_shared_vocabulary_still_reads_digits_inside_alphanumeric_words() -> Non
         "^ - 1",
         "= - 1 ",
         "max 10-1%",
+        # 第三輪：_SCIENTIFIC_PIECE 的新寫法、白名單（_clean_start、_START_PUNCTUATION）、
+        # _number_continues（逗號列舉）、_decade_tail_clean、_keeps_whole_numbers
+        "1.2 ⋅ 10-1% points ",
+        "x 10**-1 ",
+        "10**",
+        "1 E -1 ",
+        "1 e - 1 ",
+        "1e ±1 ",
+        "1E- 1",
+        "^ ±1 ",
+        "± 1-1%",
+        "- 1 000 ",
+        "⊗ 1% points ",
+        "= - 1% points ",
+        "1 000, 1 ",
+        "1 000, 1",
+        "10-1960s ",
+        "1 - 1960s ",
         # 詞形變化、黏字
         "abcdefgation ",
         "a" * 7 + " ",
@@ -1212,7 +1463,7 @@ def test_new_patterns_run_in_linear_time(unit: str) -> None:
     vocabulary.knows_token("abcdefghij-configurational")
     _english_word_count(text)
 
-    assert time.perf_counter() - started < 1
+    assert time.perf_counter() - started < LONG_INPUT_SECONDS
 
 
 # 有月份、年代的輸入（審查 B-2）：詞彙裡有月份與年代，`_MONTH_CONTEXT`、`_DECADE_CONTEXT` 才真的
@@ -1245,6 +1496,13 @@ CONTEXT_INPUT = "From January to December in the 1960s and 1990s."
         "1.1 月",
         "K1 x 10-1 月",
         "1960s 年代",
+        # 第三輪：_signed_context（S1）、_CONTEXT_START 加回數字與 `.`（T4）
+        "± 1 月",
+        "月 - 1 月",
+        "- 1 月",
+        "代 - 60 年代",
+        "1.1 至 1 月",
+        "19 至 1 月",
     ],
 )
 def test_context_patterns_run_in_linear_time(unit: str) -> None:
@@ -1256,7 +1514,7 @@ def test_context_patterns_run_in_linear_time(unit: str) -> None:
 
     vocabulary.number_text(text)
 
-    assert time.perf_counter() - started < 1
+    assert time.perf_counter() - started < LONG_INPUT_SECONDS
 
 
 def test_glued_negation_check_is_quick() -> None:
@@ -1278,7 +1536,7 @@ def test_glued_negation_check_is_quick() -> None:
     for code in codes[:200]:
         assert not vocabulary.knows_word(code)
 
-    assert time.perf_counter() - started < 1
+    assert time.perf_counter() - started < LONG_INPUT_SECONDS
 
 
 def test_many_distinct_input_words_are_quick() -> None:
@@ -1294,7 +1552,7 @@ def test_many_distinct_input_words_are_quick() -> None:
     for index in range(100):
         vocabulary.knows_word(f"unrelatedation{index}")
 
-    assert time.perf_counter() - started < 1
+    assert time.perf_counter() - started < LONG_INPUT_SECONDS
 
 
 def test_long_adversarial_output_is_validated_quickly() -> None:
@@ -1309,4 +1567,4 @@ def test_long_adversarial_output_is_validated_quickly() -> None:
     with contextlib.suppress(OutputRejectedError):
         validate_zh_summary(output, _input(abstract=abstract), loose)
 
-    assert time.perf_counter() - started < 2
+    assert time.perf_counter() - started < LONG_INPUT_SECONDS
