@@ -14,10 +14,11 @@
 3. 夾「摘要未提及…」這類講摘要本身的句子 → `zh_summary_placeholder_text`。
 4. 任一欄正規化後的字元數超過 `max_chars_per_field` → `zh_summary_field_too_long`。
 5. 不是繁中：沒有漢字、漢字比例低於 `min_cjk_percent`、或含簡體專用字 → `zh_summary_not_zh_hant`。
-   漢字比例不算「中文名稱（英文）」括號裡的英文（緊接在漢字後面、有閉合、不巢狀、8 個詞以內）。
+   漢字比例不算「中文名稱（英文）」括號裡的英文（緊接在漢字後面、有閉合、最外層而且不巢狀；整欄
+   合計最多 8 個詞不算，超過的部分照算）。
 6. 逐句翻譯：摘要句數 ≥ `translation_min_abstract_sentences`，而且輸出句數 ≥ 摘要句數
    → `zh_summary_sentence_translation`。
-7. 編造：有輸入（標題＋摘要）沒有的數字（含正負號、指數、萬／億等單位、百分比）、英數混寫的詞
+7. 編造：有輸入（標題＋摘要）沒有的數字（含正負號、指數、萬／億等單位、百分比）、字母開頭的英數詞
    （`B2B`、`N120`）或英文詞，或用了不支援的數字寫法（數字後面的上標、分數字元、`^`、`×10`、`፱`
    這類數字字元）→ `zh_summary_unsupported_content`。輸入用 `ExtendedVocabulary` 讀（2026-11-18）：
    空白千分位、月份英文名（只對「9 月」這種接「月」的數字）、年代（只對接「年代」的數字）、
@@ -179,14 +180,10 @@ _EMBEDDED_PLACEHOLDER: Final = re.compile(
 # 句點後面沒有空白時只掃一次（原本的 `[.!?]+\s+` 會平方級回溯）。
 _ABSTRACT_SENTENCE_END: Final = re.compile(r"(?<![.!?])[.!?]++\s+")
 _OUTPUT_SENTENCE_END: Final = re.compile(r"[。！？!?]+")
-# 「中文名稱（英文）」：漢字（範圍同 `is_han`）或漢字＋一個空白後面的括號（全形括號在檢查用副本裡
-# 已經是半形）。括號裡不能再有括號；佔有式量詞，一長串沒閉合的括號只掃一次。
-_HAN_PARENTHESIS: Final = re.compile(
-    "[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\U00020000-\U000323af] ?"
-    r"\((?P<inside>[^()]*+)\)"
-)
-# 括號裡的英文最多幾個詞還算「名稱」（「整合型科技接受模型（unified theory of acceptance and use of
-# technology）」是 8 個）；更多的當成整句英文，照算。
+# 括號（全形括號在檢查用副本裡已經是半形）。
+_PARENTHESIS: Final = re.compile(r"[()]")
+# 每欄「中文名稱（英文）」括號裡的英文，合計最多幾個詞不算進漢字比例（「整合型科技接受模型（unified
+# theory of acceptance and use of technology）」是 8 個）；超過的部分照算（審查 C7、A-3、B-6）。
 _MAX_PARENTHESIZED_WORDS: Final = 8
 _HAS_WORD: Final = re.compile(r"\w")
 
@@ -222,15 +219,37 @@ def _check_not_zh_hant(name: str, text: str, rules: ZhSummaryRules) -> None:
 
 
 def _english_word_count(text: str) -> int:
-    """算漢字比例用的英文詞數：緊接在漢字（或漢字＋一個空白）後面、有閉合、裡面沒有別的括號、
-    英文詞不超過 `_MAX_PARENTHESIZED_WORDS` 個的括號（prompt 規則 3 的「中文名稱（英文）」）裡的
-    英文不算。其他括號（沒閉合、巢狀、前面不是漢字、整句英文塞進括號）裡的英文照算。"""
+    """算漢字比例用的英文詞數。「中文名稱（英文）」括號（prompt 規則 3）裡的英文，整欄合計最多
+    `_MAX_PARENTHESIZED_WORDS` 個詞不算，超過的部分照算。算數的括號要：緊接在漢字（或漢字＋
+    一個空白）後面、有閉合、是最外層（不在別的括號裡）、裡面沒有別的括號（審查 C5）。其他括號
+    （沒閉合、巢狀、前面不是漢字）裡的英文照算。只掃一次括號，線性時間。"""
     words = len(_ENGLISH_WORD.findall(text))
-    for match in _HAN_PARENTHESIS.finditer(text):
-        inside = len(_ENGLISH_WORD.findall(match["inside"]))
-        if inside <= _MAX_PARENTHESIZED_WORDS:
-            words -= inside
-    return words
+    exempt = 0
+    depth = 0
+    opened = 0
+    nested = False
+    for match in _PARENTHESIS.finditer(text):
+        position = match.start()
+        if match.group(0) == "(":
+            if depth == 0:
+                opened, nested = position, False
+            else:
+                nested = True
+            depth += 1
+            continue
+        if depth == 0:
+            continue  # 沒有對應開括號的 `)`
+        depth -= 1
+        if depth == 0 and not nested and _after_han(text, opened):
+            exempt += len(_ENGLISH_WORD.findall(text, opened + 1, position))
+    return words - min(exempt, _MAX_PARENTHESIZED_WORDS)
+
+
+def _after_han(text: str, position: int) -> bool:
+    """`position` 前面緊接漢字，或漢字＋一個空白。"""
+    before = text[max(0, position - 2) : position]
+    before = before[:-1] if before.endswith(" ") else before[-1:]
+    return len(before) == 1 and _is_han(before)
 
 
 def count_abstract_sentences(abstract: str) -> int:

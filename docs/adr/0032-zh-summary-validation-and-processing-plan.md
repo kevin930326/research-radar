@@ -207,47 +207,63 @@
 
 選 C，只改中文重點；研究模型不動（D 不選）。共用函式（`numbers`、`structured_numbers`、`InputVocabulary`）的行為一個字都沒改，新的讀法寫成 `text_checks.ExtendedVocabulary`，只有 `zh_summary.py` 用（單元測試固定共用函式對這些新寫法的結果和以前一樣）。
 
+下面的規則已經照 PR 審查（Codex 與兩個 Opus 視角）修過一輪。數字規則共同的一點：新規則讀的數字都要是**完整、獨立的數字**——開頭不能接在字母、數字、`.`、`,`、`^` 後面，也不能接在「英數字或 `.`＋正負號」後面，也就是不能從指數的尾段（`1e-3` 的 3、`3e+1` 的 1）、範圍的後半或 `COVID-19` 這種詞的中間開始讀，否則會造出輸入沒有的值。
+
 數字（輸入這一側多認得）：
 
-1. **空白當千分位**：1～3 位數字後面接一組以上「一個空白（不換行空白、窄空白在檢查用副本裡已經是一般空白）／逗號＋空白／LaTeX 的 `$\,$`＋剛好 3 位數字」才合併（`131 978`、`387, 000`、`150$\,$000`）。前一段是 4 位數（`in 2019 300 firms`）不合併。合併後的值與沒合併的各段都留在輸入的數字裡。
-2. **月份英文名**：全名與常見縮寫（`Jan`…`Sept`／`Sep`…`Dec`，可接 `.`）對應 1～12，首字大寫或全大寫才算；`May` 另外要緊鄰數字（`May 2015`、`5 May`）。**只用來讓輸出裡後面接「月」的數字對得上**（「9 月」「7–8月」「7 至 8 月」「9、10 月」「2014 年 9 月至 2015 年 5 月」）；輸出裡別的位置的 9 不因此放行，「3 個月」也不算。
-3. **範圍與百分點**：`10-40%` 的前半 10 也是百分比；`2.84%-38.94%` 另讀一次，`%` 後面的 `-` 不當負號（原本的讀法照樣留著）；`10% points`、`10 percent points` 讀成不是百分比的 10，對得上輸出的「10 個百分點」（輸出這樣寫本來就讀成不是百分比的 10；`10 percentage points` 本來就對得上）。
+1. **空白當千分位**：1～3 位數字後面接一組以上「一個空白（不換行空白、窄空白在檢查用副本裡已經是一般空白）／逗號＋空白／LaTeX 的 `$\,$`＋剛好 3 位數字」才合併（`131 978`、`387, 000`、`150$\,$000`）。開頭要是完整的數字：前一段是 4 位數（`in 2019 300 firms`）、`COVID-19 300`、`1e+3 100`、`1e-3 100` 都不合併。每一組後面不能再接數字或指數（`1 000e3` 不會合併成 1000e3）。合併後的值與沒合併的各段都留在輸入的數字裡。
+2. **月份英文名**：全名與常見縮寫（`Jan`…`Sept`／`Sep`…`Dec`，可接 `.`）對應 1～12。全名要首字大寫或全大寫（`March`、`MARCH`）；三、四個字母的縮寫只認首字大寫（`Mar`、`Sept.`），全大寫的 `MAR`（missing at random）、`APR`（年利率）不算。`May` 另外要緊鄰數字（`May 2015`、`5 May`）。**只用來讓輸出裡後面接「月」的數字對得上**（「9 月」「7–8月」「7 至 8 月」「9、10 月」「2014 年 9 月至 2015 年 5 月」）；那個數字要是完整、獨立的整數，前面不能是正負號（`3e-1 月`、`-3 月` 不算）。輸出裡別的位置的 9 不因此放行，「3 個月」也不算。
+3. **範圍與百分點**：`10-40%` 的前半 10 也是百分比；`2.84%-38.94%` 另讀一次，`%` 後面的 `-` 不當負號（原本的讀法照樣留著）；`10% points`、`10 percent points` 讀成不是百分比的 10，對得上輸出的「10 個百分點」（輸出這樣寫本來就讀成不是百分比的 10；`10 percentage points` 本來就對得上）。開頭要是完整的數字，可以帶負號（`-10-40%` 的 -10、`-10% points` 的 -10）；`1.2e-3% points` 的 3、`1e-10-40%` 的 10 不算。
 4. **正負號**：輸出的正數可以對輸入同值的負數（輸入 `-4.40%`、輸出「下跌約 4.40%」）。反過來（輸出寫負數、輸入只有正數）照樣擋。百分比與否仍要一致。
-5. **年代**：輸入 `1960s`、`1960's`、`60s`、`'60s`（最後一位是 0）只讓輸出裡後面接「年代」的數字對得上（「60年代」「1960 年代」）；輸出「60 名」照樣擋。
+5. **年代**：輸入 `1960s`、`1960's`、`60s`、`'60s`（最後一位是 0）只讓輸出裡後面接「年代」的數字對得上（「60年代」「1960 年代」）；輸出「60 名」照樣擋。輸入那一側，指數的尾段不是年代（`3e-10s`）；範圍的後半照樣是（`1950s-1960s`）。輸出那一側的數字要是完整、獨立的整數（`3e-60 年代`、`-60 年代` 不算）。
 
 數字（輸出這一側）：
 
-6. **英數混寫的詞**（字母和數字連在一起：`B2B`、`P2P`、`EC2`、`H2b`、`Web2.0`、`N120`）：裡面的數字不當成數字讀，整個當成一個詞，要在輸入出現同樣的詞（不分大小寫；輸入用一個空白或連字號隔開的 2～3 段也算：`3-D` 對 `3D`、`Web 2.0` 對 `Web2.0`、`COVID-19` 對 `COVID19`）。輸入沒有時拒收，例外是「一個字母＋一位數字」（`H1`、`R2`）與「數字開頭只接字母」（`3D`、`5G`、`12M`、`1960s`、`20th`），照原本的方式讀（數字照樣要在輸入裡）；指數（`2E5`、`1e-3`）照樣是數字。「這個英數詞認不認得」是 `ExtendedVocabulary.knows_alnum` 一個函式，下一個 PR 的允許清單（`peer-to-peer` → `P2P`）接在那裡；這次 `P2P` 對 `peer-to-peer` 照樣擋。
+6. **英數詞**（字母和數字連在一起的詞）：
+   - **數字開頭的**（`3D`、`5G`、`12M`、`2x2`、`2020Q1`、`1960s`、`20th`、`1e-3`）：一律照原本的方式讀數字，正負號、百分比、量詞照樣檢查，數字要在輸入裡（`12million%`、`-12million` 擋）。
+   - **字母開頭、輸入有同一個詞的**（`B2B`、`P2P`、`EC2`、`H2b`、`Web2.0`、`COVID19`）：裡面的數字不當成數字讀。不分大小寫；輸入用一個空白或連字號隔開的 2～3 段也算（`Web 2.0` 對 `Web2.0`、`COVID-19` 對 `COVID19`、`SARS-CoV-2`），但串起來的各段最多只能有一段含數字（`top 5 10` 不會變成 `top510`、`Study 1 30` 不會變成 `Study130`）。後面（可隔一個空白）接 `%`、`percent`、萬／億／兆／千／百、`thousand`／`million`／`billion`，或「`,`＋數字」時，照原本的方式讀（`Top10%`、`K12 萬`、`Web2.0%` 裡的數字照樣要對得上）。
+   - **字母開頭、輸入沒有的**：「一個字母＋一位數字」（`H1`、`R2`）照原本的方式讀（數字照樣要在輸入裡）；其他（`N120`、`EC3`、`H2b` 對 `Hypothesis 2b`）拒收。
+   - 「這個英數詞認不認得」是 `ExtendedVocabulary.knows_alnum` 一個函式，下一個 PR 的允許清單（`peer-to-peer` → `P2P`）接在那裡；這次 `P2P` 對 `peer-to-peer` 擋（修改前只要輸入別處有 2 或 two 就會過）。
 
 不做（照樣擋）：單位換算（`561K` → 56.1 萬、`£21M` → 2100 萬）、取概數（385,306 → 38.5 萬）、把幾個數加起來。
 
 英文詞：
 
-7. **詞形變化**：把詞拆成「字根＋字尾」（-al、-ial、-ical、-ic、-etic、-etical、-ally、-ly、-ian、-ity、-ion、-ation、-ational、-ive、-ively、-ise、-ize、-ism、-ist，與 -ing、-ed、-set），兩個詞字根相同、而且（a）一邊是原形（沒有字尾或只去掉結尾的 e、y）、另一邊是原形加字尾：字根至少 5 個字母（-ing、-ed、-set 至少 4 個）；或（b）兩邊都有字尾：字根至少 6 個字母（-ism／-ist、兩邊都是 -ing／-ed／-set 時至少 4 個）；（c）兩邊只差 e、y 不算。字尾前重複的子音也試去掉一個（`diagramming`）。複數照原本的規則先去掉。所以 theory／theoretical、Weber／Weberian、calibrate／calibration、abduction／abductive、data／dataset、hacking／hacks 認得；model／modern、form／formal、organ／organization、policy／police、general／generation、relation／relative、community／communication 擋。
-8. **輸入黏字**：輸出的英文詞 6 個字母以上、而且是輸入某個英文詞（連續英文字母）的子字串（不分大小寫）時算認得；5 個字母以下不找。（Kevin 指定的規則。）
+7. **詞形變化**：把詞拆成「字根＋字尾」（-al、-ial、-ical、-ic、-etic、-etical、-ally、-ly、-ian、-ity、-ion、-ation、-ational、-ive、-ively、-ise、-ize、-ism、-ist，與 -ing、-ed、-set），兩個詞字根相同、而且：
+   - （a）一邊是原形（沒有字尾或只去掉結尾的 e、y）、另一邊是原形加字尾：字根至少 5 個字母（-ing、-ed、-set 至少 4 個）。但 -ism、-ist、-ive、-ively 不和原形配（individual／individualism、posit／positive、object／objective 擋）；-ity 和原形配時字根至少 7 個字母（sociomaterial／sociomateriality 過；minor／minority、prior／priority、morale／morality、author／authority 擋）。
+   - （b）兩邊都有字尾：字根至少 6 個字母。-ism 和 -ist 只和彼此配（字根至少 4 個：realism／realist）；兩邊都是 -ing／-ed／-set 時至少 4 個；其中一邊是 -etic／-etical 時至少 5 個（theoretic／theorise、theoretical／theorise）。
+   - （c）兩邊只差 e、y 不算。
+   - 字尾前重複的子音也試去掉一個（`diagramming`）。複數照原本的規則先去掉。
+   - 所以需求列的 15 組（theory／theoretic／theoretical／theorise、netnography／netnographic、sociomateriality／sociomaterial、realism／realist、Weber／Weberian、Schumpeter／Schumpeterian、paradox／paradoxical、calibrate／calibration、configuration／configuring／configurational、abduction／abductive／abductively、cognition／cognitive、mediation／mediating、data／dataset、diagram／diagramming、hacking／hacks）兩個方向都認得；model／modern、form／formal、organ／organization、policy／police、general／generation、relation／relative、community／communication 擋。
+8. **輸入黏字**：輸出的英文詞 6 個字母以上、而且是輸入某個英文詞（連續英文字母）的子字串（不分大小寫）時算認得；5 個字母以下不找。（Kevin 指定的規則。）一個例外（審查後加）：命中位置前面到詞首剛好是一個否定字首（un、in、im、ir、il、dis、non、mis），而且命中之後就是詞尾（或只剩複數的 s、es）時，那個命中不算；同一個輸出詞在輸入別處有別的命中照算。所以 unemployment 不讓 employment 認得、dissatisfaction 不讓 satisfaction 認得；`usingFoocoinandBarledgerblockchain`、`parasocialinteraction` 照樣認得。
 9. `vs`、`vs.` 不必在輸入出現。
 
 其他：
 
 10. **逐句翻譯門檻** `translation_min_abstract_sentences` 5 → 7（`config/zh_summary.yaml`）。
-11. **繁中比例**：算漢字佔比時，緊接在漢字（或漢字＋一個空白）後面、有閉合、裡面沒有別的括號、英文詞不超過 8 個的括號（全形半形都算）裡的英文不算進英文詞數（「知識基礎觀（knowledge-based view of the firm）」「Q 方法（Q methodology）」）。括號外的英文照算；沒閉合、巢狀、前面不是漢字的括號照算；超過 8 個詞的括號當成整句英文照算；沒有漢字的欄位、有簡體專用字的欄位照樣擋。
+11. **繁中比例**：算漢字佔比時，「中文名稱（英文）」括號裡的英文**整欄合計最多 8 個詞不算**，超過的部分照算（「整合型科技接受模型（unified theory of acceptance and use of technology）」是 8 個；9 個詞的名稱只多算 1 個）。算數的括號要緊接在漢字（或漢字＋一個空白）後面、有閉合、是最外層（不在別的括號裡）、裡面沒有別的括號（全形半形都算）。括號外的英文照算；沒閉合、巢狀、前面不是漢字的括號照算；沒有漢字的欄位、有簡體專用字的欄位照樣擋。
+
+刻意沒照需求字面做的地方：
+
+- **英數詞**：需求要「`3D`、`2D` 這類整個當成英文詞檢查」。實作對「一個字母＋一位數字」（`H1`）與數字開頭的英數詞（`3D`、`5G`、`2x2`）照原本的方式讀數字，數字在輸入裡就過（和修改前一樣寬）。照字面收緊會讓 `three-dimensional` → `3D`、`Hypothesis 1` → `H1`、`2 × 2` → `2x2` 變成新的誤擋；要不要收緊由 Kevin 決定。
+- **繁中比例**：需求只寫「括號裡的英文不算」。實作另外要求括號緊接漢字，並設整欄 8 個詞的額度，避免「研究（整段英文照抄）」或拆成很多括號就讓整欄英文過關；額度要不要拿掉或調整由 Kevin 決定。
 
 ### 取捨與還不知道的事
 
 抓不到的情況（每一項放行帶來的已知漏網）：
 
-- **空白千分位**：「數字＋空白＋3 位數字」一律多認一個合併的值，所以「Study 2 150 participants」會讓 2150 也對得上；`387, 000` 這種逗號＋空白也會把「1, 234」這種列舉多認成 1234。合併只會多認，不會少認。
-- **月份**：輸入有某個月份時，輸出把任何「N 月」寫成那個月都對得上，不管是不是同一件事（輸入「September 2014」，輸出「9 月上線」）。`Jan`、`Mar`、`Jun` 這種縮寫是人名或別的字時也會被當成月份。句首大寫的助動詞 `May` 剛好緊鄰數字時（「May 5 groups differ?」）也會被當成五月；反過來，`between April and May` 的 May 沒接數字，不算五月（偏保守的誤擋）。
-- **範圍與百分點**：`10-40%` 讓輸出「10%」對得上，即使原意是「10 到 40%」以外的寫法；`%` 後面的 `-` 兩種讀法都留，輸出寫 `-38.94%` 仍對得上（和修改前一樣）。`10 to 40%` 的 10 不算百分比（偏保守）。
+- **空白千分位**：「數字＋空白＋3 位數字」一律多認一個合併的值，所以「Study 2 150 participants」會讓 2150 也對得上；更常見的還有 `Wave 1 312 firms` → 1312、`Table 3 312 employees` → 3312、`Group 5 250 adults` → 5250；`387, 000` 這種逗號＋空白也會把「120, 240, and 360」這種列舉多認成 120240。最後一組後面接小數（`1 300.5`）時也多認 1300.5。合併只會多認，不會少認。
+- **月份**：輸入有某個月份時，輸出把任何「N 月」寫成那個月都對得上，不管是不是同一件事（輸入「September 2014」，輸出「9 月上線」）；「每 3 月」「前 3 月」這種沒有「個」的期間寫法也會被當成月份。`Jan`、`Mar`、`Jun` 這種首字大寫的縮寫是人名或別的字時也會被當成月份。句首大寫的助動詞 `May` 剛好緊鄰數字時（「May 5 groups differ?」）也會被當成五月；反過來，`between April and May` 的 May 沒接數字，不算五月（偏保守的誤擋）。
+- **範圍與百分點**：`10-40%` 讓輸出「10%」對得上，即使原意是「10 到 40%」以外的寫法；`2019-20%` 會讓「2019%」對得上（前半沒限制位數）。`%` 後面的 `-` 兩種讀法都留，輸出寫 `-38.94%` 仍對得上（和修改前一樣）。`A 10% point estimate` 的 10 也會被當成百分點（`point` 後面接的是別的名詞）。`10 to 40%` 的 10、`10-40% points` 的 40 不算（偏保守）。
 - **正負號**：輸出把負的效果寫成正數（漏掉「下降」這類方向詞）時抓不到；輸出的方向寫反（輸入 -0.35、輸出「提高 0.35」）也抓不到。
-- **年代**：輸入有 `1960s` 時，輸出把別的事寫成「60 年代」也對得上；`participants in their 60s` 這種年齡寫法也會被當成年代。
-- **英數混寫的詞**：輸入剛好有用空白隔開的兩段（`N 120`）時，輸出 `N120` 會對得上。「一個字母＋一位數字」與「數字開頭只接字母」照原本的方式讀，所以輸入寫 `Hypothesis 1`、輸出寫 `H1` 仍會過，輸出寫 `5G` 而輸入只有 `fifth` 也會過（和修改前一樣）。
-- **詞形變化**：只看字尾、不查字典，字尾剛好對得上的不同詞擋不住：universe／university、organ／organic、organ／organism、author／authority、digit／digital（單元測試寫成已知漏網）；commune／community、ration／rational、policy／policing 同理。反過來，同一個字根的兩種變化、字根只有 5 個字母時認不得（theoretic／theorise、theoretical／theorise 會被擋，偏保守）。
-- **黏字**：子字串不分詞義，輸入有 `information` 時輸出的 `format` 也算認得（單元測試寫成已知漏網）；`interaction` 讓 `action` 認得，`organization` 讓 `organiz…` 開頭的 6 個字母以上片段認得。
-- **繁中比例**：括號裡 8 個詞以內的英文不算，所以「研究（照抄摘要的一小段英文）」只要 8 個詞以內就不會被比例擋（英文詞仍然要在摘要裡出現）。
+- **年代**：輸入有 `1960s` 時，輸出把別的事寫成「60 年代」也對得上；`participants in their 60s` 這種年齡、`each 30s video ad` 這種秒數也會被當成年代。
+- **英數詞**：輸入剛好有用空白隔開的兩段（`N 120`）時，輸出 `N120` 會對得上。「一個字母＋一位數字」與數字開頭的英數詞照原本的方式讀，所以輸入寫 `Hypothesis 1`、輸出寫 `H1` 仍會過，輸出寫 `5G` 而輸入只有 5 也會過（和修改前一樣）。英數詞前面緊接 `.`（`研究.N120`）時不當成英數詞，照原本的方式讀（和修改前一樣）。
+- **詞形變化**：只看字尾、不查字典，字尾剛好對得上的不同詞擋不住：universe／university、organ／organic、digit／digital、execution／executive、conservation／conservative、personal／personality、institute／institution、integral／integrity、physical／physician、ration／rational、policy／policing、mean／meaning、mind／mindset、Victor／Victorian（前六組單元測試寫成已知漏網）。審查後收緊，individual／individualism、posit／positive、object／objective、minor／minority、author／authority、organ／organism、commune／community 這類已經擋下。
+- **黏字**：子字串不分詞義，輸入有 `information` 時輸出的 `format` 也算認得；`international` 讓 `national`、`asymmetric` 讓 `symmetric`、`interpersonal` 讓 `personal`、`overconfidence` 讓 `confidence` 認得（字首不是單一否定字首，或是 a-、inter-、over- 這種不在清單裡的）。輸入是變化形、輸出是 6 個字母以上的原形時，也由這條認得（輸入 `individualism`、輸出 `individual`；輸入 `authority`、輸出 `author`），所以詞形變化收緊的那幾組只擋「輸入原形、輸出變化形」這個方向。單元測試寫成已知漏網。
+- **繁中比例**：一個漢字帶一個 8 個詞以內的英文括號（「研（八個英文詞）」）仍不會被比例擋（英文詞仍然要在摘要裡出現，不是編造；單元測試寫成已知漏網）。
 
 其他：
 
 - **門檻不算進指紋**：已經 `rejected` 的論文要用 `radar runs retry` 重跑才會用新判準；重跑是重新呼叫模型，實際救回幾篇要跑了才知道（約 240 篇是照上次的輸出估的）。
-- **英數混寫的詞變嚴**：輸入沒有同一個詞、而字母不只一個或數字不只一位的英數詞（`H2b` 對 `Hypothesis 2b`、`H12` 對 `twelve hypotheses`、`2x2` 對 `two-by-two`、`B2C` 對 `business-to-consumer`）原本只要數字在輸入裡就會過，現在擋。
+- **英數詞變嚴**：字母開頭、輸入沒有同一個詞、而且不是「一個字母＋一位數字」的英數詞，原本只要數字在輸入裡就會過，現在擋：`H2b` 對 `Hypothesis 2b`、`H12` 對 `twelve hypotheses`、`B2C` 對 `business-to-consumer`、`Web3` 對 `Web 3.0`、`v2.1` 對 `version 2.1`、`SDG13` 對 `Sustainable Development Goal 13`、`FY2020` 對 `fiscal year 2020`、`SP500` 對 `S&P 500`、`P2P`／`B2B` 對 `peer-to-peer`／`business-to-business`（輸入別處剛好有 2 或 two 時）。數字開頭的（`2x2` 對 `2 × 2`、`2020Q1` 對 `Q1 2020`）照原本的方式讀，不會變嚴。
 - **研究模型沒有跟著改**：同一份摘要，研究模型的英文名、繁中標籤仍用原本的判準，會比中文重點嚴。要不要跟著放寬另外決定。

@@ -11,7 +11,7 @@
   與英文詞比對（輸出的數字與英文詞都要在輸入出現）。
 - `is_han`、`SIMPLIFIED_ONLY`：漢字與簡體專用字。
 - `ExtendedVocabulary`（2026-11-18，只有中文重點用）：`InputVocabulary` 加上把輸入讀得更完整的部分
-  ——空白千分位、月份英文名、`10-40%`、`10% points`、年代、英數混寫的詞（`B2B`）、輸出正數對輸入
+  ——空白千分位、月份英文名、`10-40%`、`10% points`、年代、英數詞（`B2B`）、輸出正數對輸入
   負數、英文詞的詞形變化與黏字、`vs`。研究模型不用它。
 
 都是純函式；上面幾項的行為和 2.4 原本在 `zh_summary.py` 的一樣（只改成公開名稱），加
@@ -457,28 +457,41 @@ class InputVocabulary:
 # 輸出的數字與英文詞都要在標題或摘要裡有依據；這裡只是把輸入讀得更完整，每一項放行都有「仍然擋得住
 # 編造」的反例測試。
 
+# 「完整、獨立的數字」的開頭（2026-11-18 審查 C2～C4）：不能接在字母、數字、`.`、`,`、`^` 後面，
+# 也不能接在「英數字、`.` 或 `^`＋正負號」後面——後者是指數的尾段（`1e-3`、`1e+3`、`10^-3`）、範圍
+# 的後半（`10-40`）或 `COVID-19` 這種詞的一部分，從那裡開始讀會造出輸入沒有的值。
+_WHOLE_NUMBER_START: Final = r"(?<![0-9A-Za-z.,^])(?<![0-9A-Za-z.^][-+])"
 # A1 空白當千分位（`131 978`、`387, 000`、LaTeX 的 `150$\,$000`；不換行空白、窄空白在檢查用副本裡
-# 已經是一般空白）：1～3 位數字後面接一組以上「分隔＋剛好 3 位數字」才合併。開頭不能接在字母、
-# 數字、`.`、`,`、「英數＋連字號」後面（`in 2019 300 firms` 的 2019 是 4 位，不合併；`COVID-19 300`
-# 不合併）。每一組後面都不能再接數字，量詞用佔有式（不退回重試，不會平方級回溯）。
+# 已經是一般空白）：1～3 位數字後面接一組以上「分隔＋剛好 3 位數字」才合併。開頭是完整的數字
+# （`_WHOLE_NUMBER_START`：`in 2019 300 firms` 的 2019 是 4 位，不合併；`COVID-19 300`、`1e+3 100`、
+# `1e-3 100` 不合併）。每一組後面都不能再接數字或指數（`1 000e3` 只合併到 `1 000` 前面那段為止），
+# 量詞用佔有式（不退回重試，不會平方級回溯）。
 _SPACE_GROUPED: Final = re.compile(
-    r"(?<![0-9A-Za-z.,])(?<![0-9A-Za-z]-)[0-9]{1,3}(?:(?: |, |\$\\,\$)[0-9]{3}(?![0-9]))++"
+    rf"{_WHOLE_NUMBER_START}[0-9]{{1,3}}"
+    r"(?:(?: |, |\$\\,\$)[0-9]{3}(?![0-9]|[eE][-+]?[0-9]))++"
 )
 _NOT_DIGIT: Final = re.compile(r"[^0-9]")
 # A3 `2.84%-38.94%`：`%` 後面的 `-` 是範圍，不是負號；另讀一次時換成空白。
 _PERCENT_DASH: Final = re.compile(r"%-(?=[0-9.])")
+# 範圍、百分點開頭的數字：完整的數字，可以帶負號（`-10-40%` 的 -10；負號本身也要是完整數字的開頭，
+# 所以 `1e-10-40%` 的 `-10`、`1.2e-3% points` 的 `-3` 都不算）。
+_SIGNED_WHOLE_NUMBER: Final = (
+    r"(?:(?<![0-9A-Za-z.,^)\]])-|" + _WHOLE_NUMBER_START + r")[0-9]++(?:\.[0-9]++)?+"
+)
 # A3 `10-40%` 的前半也是百分比（只認 `-`，`10 to 40%` 不算）。
 _PERCENT_RANGE: Final = re.compile(
-    r"(?<![0-9A-Za-z.,])(?P<low>[0-9]++(?:\.[0-9]++)?+)\s?-\s?[0-9]++(?:\.[0-9]++)?+\s?%"
+    rf"(?P<low>{_SIGNED_WHOLE_NUMBER})\s?-\s?[0-9]++(?:\.[0-9]++)?+\s?%"
 )
 # A3 `10% points`、`10 percent points`：讀成不是百分比的 10，對得上輸出的「10 個百分點」。
 # （`10 percentage points` 本來就讀成不是百分比的 10。）
 _PERCENT_POINTS: Final = re.compile(
-    r"(?<![0-9A-Za-z.,])(?P<value>[0-9]++(?:\.[0-9]++)?+)\s?(?:%|(?i:percent|per cent))\s?"
+    rf"(?P<value>{_SIGNED_WHOLE_NUMBER})\s?(?:%|(?i:percent|per cent))\s?"
     r"(?i:points?)(?![A-Za-z])"
 )
-# A2 月份英文名：全名與常見縮寫。首字大寫（其餘小寫）或全大寫才算；`May` 也是助動詞，另外要緊鄰
-# 數字（`May 2019`、`May 5`、`5 May`）才算。
+# A2 月份英文名：全名與常見縮寫。全名首字大寫（其餘小寫）或全大寫才算；三、四個字母的縮寫
+# （`_MONTH_ABBREVIATIONS`）只認首字大寫（`Mar`、`Sept.`），全大寫的 `MAR`（missing at random）、
+# `APR`（年利率）不算（審查 A-5）。`May` 也是助動詞，另外要緊鄰數字（`May 2019`、`May 5`、`5 May`）
+# 才算。
 _MONTHS: Final[Mapping[str, int]] = {
     "january": 1,
     "jan": 1,
@@ -505,44 +518,61 @@ _MONTHS: Final[Mapping[str, int]] = {
     "december": 12,
     "dec": 12,
 }
+_MONTH_ABBREVIATIONS: Final = frozenset(
+    {"jan", "feb", "mar", "apr", "jun", "jul", "aug", "sep", "sept", "oct", "nov", "dec"}
+)
 _MAY_THEN_NUMBER: Final = re.compile(r"\.? ?[0-9]")
 # A5 年代：`1960s`、`1960's`、`60s`、`'60s`（最後一位是 0）。四位數的另外留後兩位（60）。
-_DECADE: Final = re.compile(r"(?<![0-9A-Za-z.])'?(?P<year>[0-9]{3}0|[0-9]0)'?s(?![A-Za-z])")
+# 開頭不能接在字母、數字、`.`、`,`、`^` 後面，也不能是指數的尾段（`3e-10s`、`2E+10s` 的 10
+# 不算）；範圍的後半（`1950s-60s`、`1950-60s`）照樣算。
+_DECADE: Final = re.compile(
+    r"(?<![0-9A-Za-z.,^])(?<![eE^][-+])'?(?P<year>[0-9]{3}0|[0-9]0)'?s(?![A-Za-z])"
+)
 # 輸出裡後面接「月」「年代」的數字（含範圍：`7-8月`、`7 至 8 月`、`9、10 月`）：只有這種位置的數字
-# 才拿月份、年代比對；其他位置的 9 不因為輸入有 September 而放行。
+# 才拿月份、年代比對；其他位置的 9 不因為輸入有 September 而放行。第一個數字必須是完整、獨立的整數
+# （審查 C2）：不能接在字母、數字、`.`、`,`、`^` 後面，也不能接在正負號後面（`3e-1 月`、`3e+1 月`
+# 的 1 是指數，`-3 月` 是負數）；後面只能接範圍或「月」「年代」，所以也不會是小數或指數的開頭。
 _RANGE_JOIN: Final = r"\s?(?:-|至|到|~|、)\s?"
+_CONTEXT_START: Final = r"(?<![0-9A-Za-z.,^+\-])"
 _MONTH_CONTEXT: Final = re.compile(
-    rf"(?<![0-9A-Za-z.])(?P<a>[0-9]{{1,2}})(?:{_RANGE_JOIN}(?P<b>[0-9]{{1,2}}))?\s?月"
+    rf"{_CONTEXT_START}(?P<a>[0-9]{{1,2}})(?:{_RANGE_JOIN}(?P<b>[0-9]{{1,2}}))?\s?月"
 )
 _DECADE_CONTEXT: Final = re.compile(
-    rf"(?<![0-9A-Za-z.])(?P<a>[0-9]{{4}}|[0-9]{{2}})(?:{_RANGE_JOIN}(?P<b>[0-9]{{4}}|[0-9]{{2}}))?"
+    rf"{_CONTEXT_START}(?P<a>[0-9]{{4}}|[0-9]{{2}})(?:{_RANGE_JOIN}(?P<b>[0-9]{{4}}|[0-9]{{2}}))?"
     r"\s?年代"
 )
-# A6 英數混寫的詞（`B2B`、`EC2`、`3D`、`H2b`、`Web2.0`、`N120`）：字母與數字連在一起、前後不接字母、
-# 數字、`.`；`.數字` 可以接在後面（`Web2.0`）。佔有式量詞：讀不成一個完整的詞（`2.5D`、`1.5e3`）就
-# 不算英數詞，照原本的方式讀數字。輸入這一側另外把用一個空白或連字號隔開的 2～3 段串起來
-# （`Web 2.0` → web2.0、`3-D` → 3d、`COVID-19` → covid19、`SARS-CoV-2`）。
+# A6 英數詞（字母和數字連在一起的詞：`B2B`、`EC2`、`3D`、`H2b`、`Web2.0`、`N120`）：開頭不接字母、
+# 數字、`.`，後面不接字母、數字（可以接 `.`：句尾的 `B2B.` 是 `B2B`）；`.數字` 可以接在後面
+# （`Web2.0`）。佔有式量詞：讀不成一個完整的詞（`2.5D`、`1.5e3`）就不算英數詞，照原本的方式讀數字。
 _ALNUM_PIECE: Final = re.compile(r"(?<![0-9A-Za-z.])[0-9A-Za-z]++(?:\.[0-9]++)*+(?![0-9A-Za-z])")
-_HAS_LETTER: Final = re.compile(r"[A-Za-z]")
 _HAS_DIGIT: Final = re.compile(r"[0-9]")
-# 英數詞裡仍然當成數字讀的：指數（`2E5`；`1e-3` 讀到的是 `1e`）。
-_EXPONENT_TOKEN: Final = re.compile(r"[0-9]+[eE][0-9]*")
-# 輸入沒有同一個英數詞時，照原本的方式讀（數字照樣要在輸入裡）：一個字母＋一位數字（`H1`、`R2`、
-# `T2`）、數字開頭後面只有字母（`3D`、`5G`、`12M`、`1960s`、`20th`、`24h`）。其他的（`B2B`、`P2P`、
-# `EC2`、`H2b`、`N120`、`COVID19`）輸入沒有同一個詞就拒收。
-_OLD_READING_TOKEN: Final = re.compile(r"[A-Za-z][0-9]|[0-9]+[A-Za-z]+")
+# 輸出裡字母開頭、輸入沒有同一個詞時，照原本的方式讀的（數字照樣要在輸入裡）：一個字母＋一位數字
+# （`H1`、`R2`、`T2`）。其他的（`B2B`、`P2P`、`EC2`、`H2b`、`N120`、`COVID19`）拒收。數字開頭的
+# 英數詞（`3D`、`12M`、`2x2`、`2020Q1`、`1e5`）一律照原本的方式讀，不在這裡判斷。
+_OLD_READING_TOKEN: Final = re.compile(r"[A-Za-z][0-9]")
+# 字母開頭、輸入有的英數詞後面（可隔一個空白）接百分比、量詞，或「`,`＋數字」時不換成 `Q`、照原本的
+# 方式讀（審查 C1、A-6）：`Top10%`、`K12 萬`、`Web2.0%`、`K12,000` 裡的數字照樣要對得上輸入。
+_AFTER_ALNUM_NUMBER: Final = re.compile(
+    r"\s?(?:%|[萬億兆千百]|(?i:percent|per cent|thousand|million|billion)(?![A-Za-z]))|,[0-9]"
+)
 # B1 詞形變化（ADR-0032 2026-11-18 更新）：把一個詞拆成「字根＋字尾」，兩個詞的字根相同、而且字尾的
-# 組合是下面三種之一才算同一個詞：
+# 組合是下面幾種之一才算同一個詞：
 # 1. 一邊是原形（沒有字尾，或只去掉結尾的 e、y），另一邊是原形加一個字尾：字根至少 5 個字母
 #    （`paradox`→`paradoxical`、`theory`→`theoretical`、`calibrate`→`calibration`）；字尾是 -ing、
 #    -ed、-set 時至少 4 個字母（`hack`→`hacking`、`data`→`dataset`）。所以 `form`／`formal` 擋。
+#    審查 A-1 收緊：-ism、-ist、-ive、-ively 不和原形配（`individual`／`individualism`、
+#    `posit`／`positive`、`object`／`objective` 擋）；-ity 和原形配時字根至少 7 個字母
+#    （`sociomaterial`／`sociomateriality` 過，`minor`／`minority`、`prior`／`priority`、
+#    `morale`／`morality`、`author`／`authority` 擋）。
 # 2. 兩邊都有字尾（同一個字根的兩種變化）：字根至少 6 個字母（`abduction`／`abductive`、
 #    `mediation`／`mediating`）；所以 `relation`／`relative`（relat 5 個）、`general`／`generation`
-#    （gener）擋。例外：-ism／-ist、兩邊都是 -ing／-ed／-set 時字根至少 4 個（`realism`／
-#    `realist`、`hacking`／`hacked`）。
+#    （gener）擋。例外：-ism 和 -ist 只和彼此配，字根至少 4 個（`realism`／`realist`）；兩邊都是
+#    -ing／-ed／-set 時字根至少 4 個（`hacking`／`hacked`）；其中一邊是 -etic／-etical 時字根至少
+#    5 個（`theoretic`／`theorise`，審查 C6）。
 # 3. 兩邊都只差 e、y（`policy`／`police`）不算。
 # 字尾前面的子音重複時也試去掉一個（`diagramming` → diagram）。複數（s、es、ies）先照 `_variants`
-# 去掉。只看字尾，不查字典：`universe`／`university` 這種字尾剛好對得上的不同詞擋不住（已知漏網）。
+# 去掉。只看字尾，不查字典：`universe`／`university`、`execution`／`executive` 這種字尾剛好對得上的
+# 不同詞擋不住（已知漏網）。
 _DERIVATIONAL_SUFFIXES: Final = frozenset(
     {
         "al",
@@ -569,9 +599,15 @@ _DERIVATIONAL_SUFFIXES: Final = frozenset(
 _INFLECTIONAL_SUFFIXES: Final = frozenset({"ing", "ed", "set"})
 _SUFFIXES: Final = _DERIVATIONAL_SUFFIXES | _INFLECTIONAL_SUFFIXES
 _BASE_ENDINGS: Final = frozenset({"", "e", "y"})
+_ISM_IST: Final = frozenset({"ism", "ist"})
+_NOT_WITH_BASE: Final = _ISM_IST | {"ive", "ively"}
+_ETIC: Final = frozenset({"etic", "etical"})
 _VOWELS: Final = frozenset("aeiou")
 # B2 黏字：輸出的英文詞至少幾個字母，才拿去輸入的詞裡找子字串。
 _GLUED_MIN_LETTERS: Final = 6
+# 黏字的命中前面到詞首剛好是這些否定字首、命中之後就是詞尾時，那個命中不算（審查 A-2、B-5：
+# `unemployment` 不讓 `employment` 認得）。
+_NEGATION_PREFIXES: Final = frozenset({"un", "in", "im", "ir", "il", "dis", "non", "mis"})
 # B3 不必在輸入出現的英文詞。
 _ALWAYS_KNOWN_WORDS: Final = frozenset({"vs"})
 
@@ -605,11 +641,18 @@ def _same_root(root: str, first: str, second: str) -> bool:
         return False
     if first in _BASE_ENDINGS or second in _BASE_ENDINGS:
         suffix = second if first in _BASE_ENDINGS else first
+        if suffix in _NOT_WITH_BASE:
+            return False
+        if suffix == "ity":
+            return len(root) >= 7
         return len(root) >= (4 if suffix in _INFLECTIONAL_SUFFIXES else 5)
-    if {first, second} == {"ism", "ist"}:
-        return len(root) >= 4
+    pair = {first, second}
+    if pair & _ISM_IST:
+        return pair == _ISM_IST and len(root) >= 4
     if first in _INFLECTIONAL_SUFFIXES and second in _INFLECTIONAL_SUFFIXES:
         return len(root) >= 4
+    if pair & _ETIC:
+        return len(root) >= 5
     return len(root) >= 6
 
 
@@ -635,8 +678,10 @@ def _month_numbers(text: str) -> frozenset[int]:
     found: set[int] = set()
     for match in ENGLISH_WORD.finditer(text):
         word = match.group(0)
-        month = _MONTHS.get(word.lower())
-        if month is None or not (word.isupper() or (word[0].isupper() and word[1:].islower())):
+        lowered = word.lower()
+        month = _MONTHS.get(lowered)
+        title = word[0].isupper() and word[1:].islower()
+        if month is None or not (title or (word.isupper() and lowered not in _MONTH_ABBREVIATIONS)):
             continue
         if month == 5 and not _may_next_to_number(text, match.start(), match.end()):
             continue
@@ -662,24 +707,30 @@ def _decade_numbers(text: str) -> frozenset[int]:
 
 
 def _alnum_tokens(text: str) -> frozenset[str]:
-    """輸入裡的英數詞（小寫），加上用一個空白或連字號隔開的 2～3 段串起來的寫法。"""
+    """輸入裡字母開頭的英數詞（小寫），加上用一個空白或連字號隔開的 2～3 段串起來的寫法
+    （`Web 2.0` → web2.0、`COVID-19` → covid19、`SARS-CoV-2` → sarscov2）。串起來的各段最多只能有
+    一段含數字（審查 C1：`top 5 10 firms` 不串成 top510、`Study 1 30` 不串成 study130）。數字開頭的
+    英數詞在輸出那一側照原本的方式讀，這裡不收。"""
     pieces = [(match.start(), match.end(), match.group(0)) for match in _ALNUM_PIECE.finditer(text)]
     found: set[str] = set()
     for index, (_, end, piece) in enumerate(pieces):
+        if not piece[0].isalpha():
+            continue
         joined = piece
         candidates = [piece]
         last_end = end
+        digit_pieces = 1 if _HAS_DIGIT.search(piece) else 0
         for next_start, next_end, next_piece in pieces[index + 1 : index + 3]:
             if text[last_end:next_start] not in {" ", "-"}:
                 break
+            if _HAS_DIGIT.search(next_piece):
+                digit_pieces += 1
+                if digit_pieces > 1:
+                    break
             joined += next_piece
             candidates.append(joined)
             last_end = next_end
-        found.update(
-            candidate.lower()
-            for candidate in candidates
-            if _HAS_LETTER.search(candidate) and _HAS_DIGIT.search(candidate)
-        )
+        found.update(candidate.lower() for candidate in candidates if _HAS_DIGIT.search(candidate))
     return frozenset(found)
 
 
@@ -706,8 +757,9 @@ class ExtendedVocabulary:
     - 數字：空白千分位、`%-`、`10-40%`、`10% points`（`_extra_input_numbers`）；輸出的正數可以對
       輸入同值的負數（`knows_number`）。
     - 月份英文名、年代（`1960s`）：只給輸出裡後面接「月」「年代」的數字用（`number_text`）。
-    - 英數詞（`B2B`、`EC2`）：整個當成一個詞比對（`number_text`、`knows_alnum`）。
-    - 英文詞：詞形變化、黏字、`vs`（`knows_word`）。
+    - 字母開頭的英數詞（`B2B`、`EC2`）：整個當成一個詞比對（`number_text`、`knows_alnum`）；數字
+      開頭的（`3D`、`2x2`）照原本的方式讀數字。
+    - 英文詞：詞形變化、黏字（否定字首＋輸出詞剛好是整個詞時不算）、`vs`（`knows_word`）。
     """
 
     base: InputVocabulary
@@ -750,19 +802,23 @@ class ExtendedVocabulary:
     def number_text(self, text: str) -> tuple[str, str | None]:
         """輸出（檢查用副本）裡要拿去和輸入數字比對的文字 →（文字, 第一個輸入沒有的英數詞）。
 
-        輸入有的英數詞、後面接「月」「年代」而且是輸入裡的月份或年代的數字，換成 `Q`（不再當成
-        數字讀）。輸入沒有的英數詞：`H1`、`3D` 這種照原本的方式讀（數字照樣要在輸入裡），其他的
-        回報出來（呼叫端拒收）。"""
+        - 數字開頭的英數詞（`3D`、`12M`、`2x2`、`2020Q1`、`12million`、`1e5`）：照原本的方式讀
+          （正負號、百分比、量詞都照樣檢查，數字要在輸入裡）。
+        - 字母開頭、輸入有的英數詞換成 `Q`（不再當成數字讀）；後面接百分比、量詞或「`,`＋數字」時
+          不換（`_AFTER_ALNUM_NUMBER`，照原本的方式讀）。
+        - 字母開頭、輸入沒有的英數詞：`H1` 這種「一個字母＋一位數字」照原本的方式讀，其他的回報
+          出來（呼叫端拒收）。
+        - 後面接「月」「年代」而且是輸入裡的月份或年代的完整整數，換成 `Q`。"""
         unknown: str | None = None
 
         def replace(match: re.Match[str]) -> str:
             nonlocal unknown
             token = match.group(0)
-            if not (_HAS_LETTER.search(token) and _HAS_DIGIT.search(token)):
-                return token
-            if _EXPONENT_TOKEN.fullmatch(token):
+            if token[0].isdigit() or not _HAS_DIGIT.search(token):
                 return token
             if self.knows_alnum(token):
+                if _AFTER_ALNUM_NUMBER.match(match.string, match.end()):
+                    return token
                 return "Q" * len(token)
             if not _OLD_READING_TOKEN.fullmatch(token) and unknown is None:
                 unknown = token
@@ -773,8 +829,7 @@ class ExtendedVocabulary:
         return _consume_context(text, _DECADE_CONTEXT, self.decades), unknown
 
     def knows_word(self, word: str) -> bool:
-        """`InputVocabulary.knows_word`，加上 `vs`、詞形變化（`_same_root`）、黏字（6 個字母以上、是
-        輸入某個英文詞的子字串）。"""
+        """`InputVocabulary.knows_word`，加上 `vs`、詞形變化（`_same_root`）、黏字（`_glued`）。"""
         if self.base.knows_word(word):
             return True
         lowered = word.lower()
@@ -785,9 +840,33 @@ class ExtendedVocabulary:
             for root, suffix in _root_splits(variant):
                 if any(_same_root(root, suffix, other) for other in self.roots.get(root, ())):
                     return True
-        return any(
-            len(variant) >= _GLUED_MIN_LETTERS and variant in self.letters for variant in variants
-        )
+        return any(self._glued(variant) for variant in variants)
+
+    def _glued(self, variant: str) -> bool:
+        """黏字：`variant` 6 個字母以上、是輸入某個英文詞（`letters` 用空白隔開的詞）的子字串。命中
+        前面到詞首剛好是一個否定字首（`_NEGATION_PREFIXES`）、命中之後就是詞尾（或只剩複數的 s、es）
+        時，那個命中不算，找下一個命中。每個命中只看前後幾個字元；不算的命中一個詞最多一個，所以仍是
+        線性時間。"""
+        if len(variant) < _GLUED_MIN_LETTERS:
+            return False
+        letters = self.letters
+        start = letters.find(variant)
+        while start != -1:
+            rest = letters[start + len(variant) : start + len(variant) + 3]
+            if (
+                rest[:1] not in {"", " "}
+                and rest[:2] not in {"s", "s "}
+                and rest not in {"es", "es "}
+            ):
+                return True
+            before = letters[max(0, start - 4) : start]
+            space = before.rfind(" ")
+            if space == -1 and start > 3:
+                return True  # 前面到詞首超過 3 個字母，不是否定字首
+            if before[space + 1 :] not in _NEGATION_PREFIXES:
+                return True
+            start = letters.find(variant, start + 1)
+        return False
 
     def knows_token(self, token: str) -> bool:
         """`InputVocabulary.knows_token`，每一段改用 `knows_word`。"""
