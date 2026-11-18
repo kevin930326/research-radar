@@ -1,5 +1,5 @@
 """LLM 閘門測試共用的小工具：在 tmp 資料夾寫 prompt 檔並暫時登記、讀真的 `config/models.yaml`；
-另有造論文（含成員看不到的論文）與論文頁路由的組法（Story 3.6）。
+另有造論文（含成員看不到的論文）與論文頁路由的組法（Story 3.6）、文獻庫路由的組法（Story 3.16）。
 
 prompt 的內容全部是測試自己編的（不是正式的 prompt）。登記寫進 `radar/domain/prompt_hashes.py`
 的登記表（policy 只認那裡的雜湊），`tests/conftest.py` 每個測試結束都會還原。
@@ -41,6 +41,7 @@ from radar.domain.policy import CloudPolicy
 from radar.domain.pricing import ModelsConfig
 from radar.domain.prompts import PROMPT_FILE_PATTERN, parse_prompt_file
 from radar.domain.scope import ScopeSettings
+from radar.entrypoints.api.library import LibraryRoutes, build_library_routes
 from radar.entrypoints.api.papers import PaperRoutes, build_paper_routes
 from radar.repo.db import Database
 from radar.repo.papers import upsert_by_external_id
@@ -234,6 +235,11 @@ def paper_routes(
         build_client_config(),
         lambda: now,
     )
+
+
+def library_routes(database: Database) -> LibraryRoutes:
+    """和正式的 `main()` 同一個組法的文獻庫路由（期刊用真的 `config/journals.yaml`）。"""
+    return build_library_routes(database, paper_page_setup().journals)
 
 
 def execute(db: TestDatabase, sql: str, *params: object) -> list[tuple[Any, ...]]:

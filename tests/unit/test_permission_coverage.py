@@ -54,7 +54,7 @@ from radar.entrypoints.api.problems import PROBLEM_MEDIA_TYPE, ApiProblemError
 from radar.entrypoints.api.web import mount_web
 from radar.entrypoints.bootstrap import Database
 from radar.entrypoints.logging_config import configure_logging
-from tests.llm_support import paper_routes
+from tests.llm_support import library_routes, paper_routes
 from tests.permissions.cases import REGISTRY
 from tests.permissions.framework import (
     CANARY,
@@ -114,6 +114,10 @@ def test_openapi_lists_the_current_endpoints() -> None:
         Endpoint("GET", "/api/v1/papers/{paper_id}"),
         Endpoint("GET", "/api/v1/display-names"),
         Endpoint("GET", "/api/v1/client-config"),
+        Endpoint("GET", "/api/v1/library"),
+        Endpoint("PUT", "/api/v1/library/{paper_id}"),
+        Endpoint("DELETE", "/api/v1/library/{paper_id}"),
+        Endpoint("POST", "/api/v1/library/{paper_id}/restore"),
     }
 
 
@@ -128,6 +132,7 @@ def test_development_assembly_has_the_same_endpoints_as_openapi() -> None:
             cast(Database, object()), settings, pick_member_identity, lambda: datetime.now(UTC)
         ),
         paper_routes=paper_routes(cast(Database, object())),
+        library_routes=library_routes(cast(Database, object())),
     )
 
     assert endpoints_in_openapi(app.openapi()) == endpoints_in_openapi(_committed_openapi())

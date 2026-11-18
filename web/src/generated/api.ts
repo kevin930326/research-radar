@@ -11,6 +11,9 @@ import type {
   FakeLoginOptionsResponse,
   FakeLoginResultResponse,
   Healthz200,
+  LibraryItemResponse,
+  LibraryPageResponse,
+  ListLibraryParams,
   MemberResponse,
   PaperPageResponse,
   ProblemDetails
@@ -494,4 +497,220 @@ export const clientConfig = async ( options?: RequestInit): Promise<clientConfig
 
   const data: clientConfigResponse['data'] = body ? JSON.parse(body) : {}
   return { data, status: res.status, headers: res.headers } as clientConfigResponse
+}
+
+
+
+export type listLibraryResponse200 = {
+  data: LibraryPageResponse
+  status: 200
+}
+
+export type listLibraryResponseDefault = {
+  data: ProblemDetails
+  status: Exclude<HTTPStatusCodes, 200>
+}
+
+export type listLibraryResponseSuccess = (listLibraryResponse200) & {
+  headers: Headers;
+};
+export type listLibraryResponseError = (listLibraryResponseDefault) & {
+  headers: Headers;
+};
+
+export type listLibraryResponse = (listLibraryResponseSuccess | listLibraryResponseError)
+
+export const getListLibraryUrl = (params?: ListLibraryParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/v1/library?${stringifiedParams}` : `/api/v1/library`
+}
+
+/**
+ * 自己的文獻庫的一頁（一頁的篇數見 `client-config`）；`cursor` 是上一頁的 `next_cursor`，
+ * 格式不對 422，沒登入 401。
+ * @summary List Library
+ */
+export const listLibrary = async (params?: ListLibraryParams, options?: RequestInit): Promise<listLibraryResponse> => {
+
+  const res = await fetch(getListLibraryUrl(params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: listLibraryResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as listLibraryResponse
+}
+
+
+
+export type addLibraryItemResponse200 = {
+  data: LibraryItemResponse
+  status: 200
+}
+
+export type addLibraryItemResponseDefault = {
+  data: ProblemDetails
+  status: Exclude<HTTPStatusCodes, 200>
+}
+
+export type addLibraryItemResponseSuccess = (addLibraryItemResponse200) & {
+  headers: Headers;
+};
+export type addLibraryItemResponseError = (addLibraryItemResponseDefault) & {
+  headers: Headers;
+};
+
+export type addLibraryItemResponse = (addLibraryItemResponseSuccess | addLibraryItemResponseError)
+
+export const getAddLibraryItemUrl = (paperId: string,) => {
+
+
+
+
+  return `/api/v1/library/${paperId}`
+}
+
+/**
+ * 把一篇看得到的論文加進自己的文獻庫；已經在就回原本那一筆。看不到、不存在、ID 不是 UUID
+ * 都回同一個 404，沒登入 401；`Origin` 缺少或不是本站 403 `origin_rejected`。
+ * @summary Add Library Item
+ */
+export const addLibraryItem = async (paperId: string, options?: RequestInit): Promise<addLibraryItemResponse> => {
+
+  const res = await fetch(getAddLibraryItemUrl(paperId),
+  {
+    ...options,
+    method: 'PUT'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: addLibraryItemResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as addLibraryItemResponse
+}
+
+
+
+export type removeLibraryItemResponse200 = {
+  data: LibraryItemResponse
+  status: 200
+}
+
+export type removeLibraryItemResponseDefault = {
+  data: ProblemDetails
+  status: Exclude<HTTPStatusCodes, 200>
+}
+
+export type removeLibraryItemResponseSuccess = (removeLibraryItemResponse200) & {
+  headers: Headers;
+};
+export type removeLibraryItemResponseError = (removeLibraryItemResponseDefault) & {
+  headers: Headers;
+};
+
+export type removeLibraryItemResponse = (removeLibraryItemResponseSuccess | removeLibraryItemResponseError)
+
+export const getRemoveLibraryItemUrl = (paperId: string,) => {
+
+
+
+
+  return `/api/v1/library/${paperId}`
+}
+
+/**
+ * 把一篇移出自己的文獻庫，回移出前的那一筆；不在自己的文獻庫回 404，沒登入 401；`Origin`
+ * 缺少或不是本站 403 `origin_rejected`。
+ * @summary Remove Library Item
+ */
+export const removeLibraryItem = async (paperId: string, options?: RequestInit): Promise<removeLibraryItemResponse> => {
+
+  const res = await fetch(getRemoveLibraryItemUrl(paperId),
+  {
+    ...options,
+    method: 'DELETE'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: removeLibraryItemResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as removeLibraryItemResponse
+}
+
+
+
+export type restoreLibraryItemResponse200 = {
+  data: LibraryItemResponse
+  status: 200
+}
+
+export type restoreLibraryItemResponseDefault = {
+  data: ProblemDetails
+  status: Exclude<HTTPStatusCodes, 200>
+}
+
+export type restoreLibraryItemResponseSuccess = (restoreLibraryItemResponse200) & {
+  headers: Headers;
+};
+export type restoreLibraryItemResponseError = (restoreLibraryItemResponseDefault) & {
+  headers: Headers;
+};
+
+export type restoreLibraryItemResponse = (restoreLibraryItemResponseSuccess | restoreLibraryItemResponseError)
+
+export const getRestoreLibraryItemUrl = (paperId: string,) => {
+
+
+
+
+  return `/api/v1/library/${paperId}/restore`
+}
+
+/**
+ * 復原最近一次移出的那一篇（原本的加入方式與時間）；已經又在文獻庫就回現在那一筆，那筆
+ * 封存照樣用掉。自己沒有移出過回 404，沒登入 401；`Origin` 缺少或不是本站 403
+ * `origin_rejected`。
+ * @summary Restore Library Item
+ */
+export const restoreLibraryItem = async (paperId: string, options?: RequestInit): Promise<restoreLibraryItemResponse> => {
+
+  const res = await fetch(getRestoreLibraryItemUrl(paperId),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: restoreLibraryItemResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as restoreLibraryItemResponse
 }

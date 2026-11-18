@@ -24,6 +24,11 @@ from radar.config import (
 from radar.domain.contracts import build_client_config, build_display_names
 from radar.entrypoints.api.app import create_app
 from radar.entrypoints.api.auth import AuthRoutes, build_auth_routes, install_auth_routes
+from radar.entrypoints.api.library import (
+    LibraryRoutes,
+    build_library_routes,
+    install_library_routes,
+)
 from radar.entrypoints.api.papers import PaperRoutes, build_paper_routes, install_paper_routes
 from radar.entrypoints.api.web import mount_web
 from radar.entrypoints.bootstrap import (
@@ -42,9 +47,15 @@ log = structlog.get_logger(__name__)
 WEB_DIST = Path("web/dist")
 
 
-def install_api_routes(app: FastAPI, *, auth_routes: AuthRoutes, paper_routes: PaperRoutes) -> None:
-    """把全部 API 路由裝到 `app` 上：登入路由、論文頁路由（Story 3.6）。一定要在 `mount_web` 之前
-    呼叫。
+def install_api_routes(
+    app: FastAPI,
+    *,
+    auth_routes: AuthRoutes,
+    paper_routes: PaperRoutes,
+    library_routes: LibraryRoutes,
+) -> None:
+    """把全部 API 路由裝到 `app` 上：登入路由、論文頁路由（Story 3.6）、文獻庫路由（Story 3.16）。
+    一定要在 `mount_web` 之前呼叫。
 
     正式組裝（下面的 `main`）與輸出 `openapi.json`（`openapi.py`）都只經這個函式裝路由，所以兩邊的
     端點清單一定相同；換人測試的登記表又和 `openapi.json` 比對，新的端點沒登記就失敗（ADR-0047）。
@@ -53,6 +64,7 @@ def install_api_routes(app: FastAPI, *, auth_routes: AuthRoutes, paper_routes: P
     # 經模組層級的名稱呼叫（測試會把 install_auth_routes 換掉，確認 main() 走到組裝這一步）。
     install_auth_routes(app, auth_routes)
     install_paper_routes(app, paper_routes, auth_routes)
+    install_library_routes(app, library_routes, auth_routes)
 
 
 def _utc_now() -> datetime:
@@ -91,8 +103,8 @@ def main() -> int:
         return 1
 
     app = create_app(readiness_check=partial(check_readiness, probes.ping, probes.schema_state))
-    # 全部 API 路由只經 install_api_routes 裝（openapi.json 也用它，端點清單一致）；登入與論文頁
-    # 路由用就緒檢查的同一個連線池。一定要在 mount_web 之前裝（install_*_routes 會檢查）。
+    # 全部 API 路由只經 install_api_routes 裝（openapi.json 也用它，端點清單一致）；登入、論文頁與
+    # 文獻庫路由用就緒檢查的同一個連線池。一定要在 mount_web 之前裝（install_*_routes 會檢查）。
     install_api_routes(
         app,
         auth_routes=build_auth_routes(
@@ -105,6 +117,7 @@ def main() -> int:
             build_client_config(),
             _utc_now,
         ),
+        library_routes=build_library_routes(probes.database, paper_setup.journals),
     )
     # 頁面殼另外掛、不經 create_app 的 web_dist 參數：關機的整合測試會把 create_app 換成只收
     # readiness_check 的版本、再加自己的路由；分開掛，那些路由才排在「其餘路徑」之前。

@@ -17,6 +17,8 @@ from enum import StrEnum
 from types import MappingProxyType
 from typing import Final
 
+from radar.domain.viewer import MemberViewer
+
 _IDENTIFIER: Final = re.compile(r"[a-z][a-z0-9_]*")
 
 
@@ -105,6 +107,32 @@ def system_audit_event(
     return NewAuditEvent(
         actor_role=AuditActorRole.SYSTEM,
         actor_member_id=None,
+        action=action,
+        target_type=target_type,
+        target_id=target_id,
+        detail={} if detail is None else detail,
+    )
+
+
+def member_audit_event(
+    actor: MemberViewer,
+    *,
+    action: str,
+    target_type: str,
+    target_id: uuid.UUID | None,
+    detail: Mapping[str, object] | None = None,
+) -> NewAuditEvent:
+    """某位成員（經網站的請求）做的事：管理者記 `admin`，其他記 `member`（Story 3.16）。
+
+    Raises:
+        TypeError: `actor` 不是 `MemberViewer`。
+        ValueError: 見 `NewAuditEvent`。
+    """
+    if not isinstance(actor, MemberViewer):
+        raise TypeError("actor 要是 MemberViewer")
+    return NewAuditEvent(
+        actor_role=AuditActorRole.ADMIN if actor.is_admin else AuditActorRole.MEMBER,
+        actor_member_id=actor.member_id,
         action=action,
         target_type=target_type,
         target_id=target_id,

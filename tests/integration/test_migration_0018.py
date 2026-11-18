@@ -116,7 +116,7 @@ def test_downgrade_to_0017_and_upgrade_again(db: TestDatabase) -> None:
 
     migrate(db)
 
-    assert db.revisions() == {"0019"}
+    assert db.revisions() == {"0020"}
     assert "abstract_source" in _columns(db)
     check = _alembic(db, "check")
     assert check.returncode == 0, check.stdout + check.stderr

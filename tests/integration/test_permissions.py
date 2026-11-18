@@ -7,9 +7,8 @@
   （沒豁免）；B 的回應（本文與標頭）與這個請求期間的日誌（送出前清空，以 request ID 確認接到了），
   都不能出現金絲雀字串，也不能出現 A 的 session token。
 - 換人測試（`run_cross_member_case`）：沒有豁免的端點，同一份請求 B 送要得到 404 或空清單，A 送
-  （對照）要拿得到，兩次都要打到登記的端點。目前的端點都豁免（理由寫在登記表），所以這一組現在沒有
-  用例；論文頁（Story 3.6）因為還沒有「A 看得到、B 看不到」的論文而先豁免（ADR-0048），3.16 接上
-  文獻庫後就會跑。
+  （對照）要拿得到，兩次都要打到登記的端點。Story 3.16 起有用例：論文頁（A 文獻庫裡的私人論文）與
+  文獻庫的四個端點；其他端點豁免（理由寫在登記表）。
 資料全是測試自己編的（`*@example.com`、假名字）。
 """
 
@@ -29,7 +28,7 @@ from radar.entrypoints.logging_config import configure_logging
 from radar.repo.db import Database
 from radar.services.members import allow_member
 from tests.database import TestDatabase, migrate
-from tests.llm_support import execute, paper_routes
+from tests.llm_support import execute, library_routes, paper_routes
 from tests.permissions.cases import REGISTRY
 from tests.permissions.framework import (
     CANARY_EMAIL,
@@ -84,6 +83,7 @@ def context(db: TestDatabase, capsys: pytest.CaptureFixture[str]) -> PermissionC
         app,
         auth_routes=build_auth_routes(database, settings, pick_member_identity, lambda: NOW),
         paper_routes=paper_routes(database, now=NOW),
+        library_routes=library_routes(database),
     )
     login_client = TestClient(app, base_url="https://testserver")
     owner = _log_in(login_client, database, CANARY_EMAIL, "測試甲")
