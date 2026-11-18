@@ -102,6 +102,9 @@ def test_client_config_gives_the_library_page_size() -> None:
     )
     with pytest.raises(ValidationError):
         ClientConfig(timezone="Asia/Taipei", library_page_size=0, paper_list_page_size=20)
+    # 找論文清單的每頁篇數也不能是 0（Story 3.13 審查 T8）。
+    with pytest.raises(ValidationError):
+        ClientConfig(timezone="Asia/Taipei", library_page_size=50, paper_list_page_size=0)
 
 
 # --- 下一頁的位置 --------------------------------------------------------------------------------

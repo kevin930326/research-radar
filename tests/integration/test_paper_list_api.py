@@ -25,6 +25,7 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 from httpx2 import Response
+from sqlalchemy import text
 
 from radar.adapters.fake.login import pick_member_identity
 from radar.domain.auth_settings import AuthSettings, Environment
@@ -36,9 +37,11 @@ from radar.domain.viewer import SystemViewer
 from radar.entrypoints.api.app import create_app
 from radar.entrypoints.api.auth import SESSION_COOKIE, build_auth_routes
 from radar.entrypoints.api.main import install_api_routes
+from radar.repo import paper_list as paper_list_repo
 from radar.repo.db import Database
 from radar.repo.library import create_library_item
 from radar.repo.papers import upsert_by_external_id
+from radar.services import paper_list as paper_list_service
 from radar.services.members import allow_member
 from tests.database import TestDatabase, migrate
 from tests.integration.test_effective_views import fix, insert_classification
@@ -275,6 +278,25 @@ def test_paging_45_papers_gives_20_20_5_without_gaps_or_repeats(
     assert listed == [uuid.UUID(str(row[0])) for row in full] == expected_order(made)
 
 
+def test_paging_exactly_40_papers_gives_20_20_without_an_empty_page(
+    db: TestDatabase, database: Database, api: Api
+) -> None:
+    # 總數剛好是一頁的倍數（Story 3.13 審查 T3）：第二頁滿 20 篇、沒有下一頁，不會多一頁空的。
+    published = make_snapshot(db, 1)
+    made = [
+        (make_paper(database, db, n, snapshot_id=published, year=2020 - n % 3), 2020 - n % 3)
+        for n in range(40)
+    ]
+
+    pages = api.walk()
+
+    assert [len(page["items"]) for page in pages] == [20, 20]
+    assert [page["total"] for page in pages] == [40, 40]
+    assert pages[0]["next_cursor"] is not None
+    assert pages[-1]["next_cursor"] is None
+    assert [paper_id for page in pages for paper_id in _ids(page)] == expected_order(made)
+
+
 def test_lab_paging_crosses_into_papers_without_a_year(
     db: TestDatabase, database: Database, api: Api
 ) -> None:
@@ -420,6 +442,30 @@ def test_this_week_is_the_current_published_snapshot(
     assert body["snapshot"] == {"number": 2, "as_of": AS_OF_JSON}
 
 
+def test_this_week_also_filters_lab_and_personal(
+    db: TestDatabase, database: Database, api: Api
+) -> None:
+    # 本週新增在 `lab`、`personal` 一樣只看目前已發佈的快照（Story 3.13 審查 T5）。
+    older = make_snapshot(db, 1)
+    current = make_snapshot(db, 2)
+    old_tracked = make_paper(database, db, 1, snapshot_id=older)
+    new_tracked = make_paper(database, db, 2, snapshot_id=current)
+    old_outside = make_paper(
+        database, db, 3, snapshot_id=older, issn_l=OUTSIDE, origin=PaperOrigin.EXPANSION
+    )
+    new_outside = make_paper(
+        database, db, 4, snapshot_id=current, issn_l=OUTSIDE, origin=PaperOrigin.EXPANSION
+    )
+    put_in_library(database, api.owner_id, old_tracked)
+    put_in_library(database, api.owner_id, new_outside)
+
+    assert api.ids([("scope", "lab")]) == {old_tracked, new_tracked, old_outside, new_outside}
+    assert api.ids([("scope", "lab"), ("this_week", "true")]) == {new_tracked, new_outside}
+    assert api.ids([("scope", "personal")]) == {old_tracked, new_outside}
+    assert api.ids([("scope", "personal"), ("this_week", "true")]) == {new_outside}
+    assert api.ids([("scope", "personal"), ("this_week", "true")], token=api.other_token) == set()
+
+
 def test_this_week_without_a_published_snapshot_is_empty(
     db: TestDatabase, database: Database, api: Api
 ) -> None:
@@ -502,6 +548,13 @@ def test_scopes(db: TestDatabase, database: Database, api: Api) -> None:
         [("scope", "all")],
         [("journal", "misq")] * 51,
         [("year", "2020")] * 51,
+        # Story 3.13 審查 T6：主題、方法 51 個值，空字串，壞的布林。
+        [("topic", "erp")] * 51,
+        [("method", "survey_sem")] * 51,
+        [("journal", "")],
+        [("year", "")],
+        [("scope", "")],
+        [("has_abstract", "maybe")],
     ],
 )
 def test_invalid_values_are_422(api: Api, params: list[tuple[str, str]]) -> None:
@@ -510,6 +563,78 @@ def test_invalid_values_are_422(api: Api, params: list[tuple[str, str]]) -> None
     assert response.status_code == 422, response.text
     assert response.headers["content-type"] == "application/problem+json"
     assert response.json() == PROBLEM_422
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        [("journal", "nope")],
+        [("journal", "")],
+        [("topic", "nope")],
+        [("method", "nope")],
+        [("method", "unclassified")],
+        [("year", "2015")],
+        [("year", "10000")],
+        [("cursor", "not-a-cursor")],
+        [("journal", "misq")] * 51,
+        [("year", "2020")] * 51,
+        [("topic", "erp")] * 51,
+        [("method", "survey_sem")] * 51,
+    ],
+)
+def test_invalid_filter_values_are_422_with_no_store(
+    api: Api, params: list[tuple[str, str]]
+) -> None:
+    # 條件與 cursor 的驗證是這個端點自己做的（`ApiProblemError`），回應帶 `no-store`（Story 3.13
+    # 審查 T6）。型別錯誤（`year=abc`、`scope=`、`has_abstract=maybe`）由框架擋，不在這裡。
+    response = api.papers(params, token=api.owner_token)
+
+    assert response.status_code == 422, response.text
+    assert response.headers["cache-control"] == "no-store"
+    assert response.json() == PROBLEM_422
+
+
+# --- 同一份資料狀態（Story 3.13 審查 C1）------------------------------------------------------
+
+
+def test_one_response_reads_one_state_even_if_a_paper_is_excluded_midway(
+    db: TestDatabase, database: Database, api: Api, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 讀完這一頁的 id 之後，另一個交易把那一篇標成排除並 commit；這次回應仍是讀 id 時的那份資料
+    # 狀態：items 與 total 對得上（不會 items 有它、total 卻是 0）。讀取的交易是唯讀的
+    # REPEATABLE READ。下一次請求才看得到排除。
+    published = make_snapshot(db, 1)
+    paper_id = make_paper(database, db, 1, snapshot_id=published)
+    real_list_ids = paper_list_repo.list_paper_list_ids
+    real_count = paper_list_repo.count_paper_list
+    seen: list[tuple[str, str]] = []
+
+    def list_ids_then_exclude(*args: Any, **kwargs: Any) -> list[tuple[uuid.UUID, int | None]]:
+        found = real_list_ids(*args, **kwargs)
+        # 另一條連線（超級使用者、自動 commit），不是這次讀取的交易。
+        execute(db, "UPDATE paper SET excluded_reason = 'erratum' WHERE id = %s", paper_id)
+        return found
+
+    def count_and_record(viewer: Any, connection: Any, *args: Any, **kwargs: Any) -> int:
+        seen.append(
+            (
+                connection.execute(text("SHOW transaction_isolation")).scalar_one(),
+                connection.execute(text("SHOW transaction_read_only")).scalar_one(),
+            )
+        )
+        return real_count(viewer, connection, *args, **kwargs)
+
+    monkeypatch.setattr(paper_list_service, "list_paper_list_ids", list_ids_then_exclude)
+    monkeypatch.setattr(paper_list_service, "count_paper_list", count_and_record)
+
+    body = api.ok()
+
+    assert seen == [("repeatable read", "on")]
+    assert [uuid.UUID(item["id"]) for item in body["items"]] == [paper_id]
+    assert body["total"] == 1
+    monkeypatch.undo()
+    after = api.ok()
+    assert (after["items"], after["total"]) == ([], 0)
 
 
 def test_without_a_session_is_401(api: Api) -> None:

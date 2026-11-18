@@ -6,9 +6,13 @@
 &year=<格>`，`with_abstract` 加 `has_abstract=true`，`topic`／`method` 加 `topic=`／`method=<key>`。
 
 測試資料涵蓋：沒有摘要（含只有不是目前的摘要）、被排除、快照建立中、`first_snapshot_id` 是空的範圍內
-論文、範圍外但全實驗室看得到的、AI 分類被人修正成不同 key、同一篇多個主題、有效主題 `unclassified`、
-有方法與沒有方法、出版年比快照截至年晚一年；兩本期刊、四個年份。被排除、範圍外、還沒算數的論文也有
-分類，確定它們不會讓格子和清單其中一邊多算。資料全是測試自己編的。
+論文、範圍外但全實驗室看得到的、AI 分類被人修正成不同 key（主題一篇、方法一篇）、同一篇多個主題、
+有效主題 `unclassified`、有方法與沒有方法、出版年比快照截至年晚一年；兩本期刊、五個年份。被排除、
+範圍外、還沒算數的論文也有分類，確定它們不會讓格子和清單其中一邊多算。資料全是測試自己編的。
+
+比對是雙向的（Story 3.13 審查 T1、T2）：計數方塊的每一格要和手算的期望字典一模一樣；反過來，
+每個（期刊, 年份）× 種子用到的每個 key 都查一次清單，有篇數的格子也要剛好是那份期望字典（方塊漏算
+的格子、清單多出來的格子都會被抓到）。每一次查清單都檢查 `items` 的篇數等於 `total`。
 """
 
 import uuid
@@ -83,6 +87,10 @@ def _seed(db: TestDatabase, database: Database) -> None:
     insert_classification(db, isr_2019, ["erp", "health_it"], ["survey_sem"])
     isr_2027 = counted(7, ISR, 2027)
     insert_classification(db, isr_2027, ["health_it"])
+    # isr 2020：人把方法 experiment 改成 design_science（主題照 AI）。
+    method_fixed = counted(8, ISR, 2020)
+    insert_classification(db, method_fixed, ["e_commerce"], ["experiment"])
+    fix(database, method_fixed, TaxonomyField.METHOD, ["design_science"])
     # 不算數的：被排除、快照建立中、還沒有快照、範圍外但全實驗室看得到的（都有分類）。
     not_counted = [
         make_paper(
@@ -111,16 +119,61 @@ def _cube(database: Database, viewer: MemberViewer) -> tuple[CubeRow, ...]:
     return build_cube_rows(cells, paper_page_setup().journals, key_cells=key_cells)
 
 
-def _params(row: CubeRow) -> list[tuple[str, str]]:
-    params = [("scope", "tracked"), ("journal", row.journal), ("year", str(row.year))]
-    match row.dim:
+type Cell = tuple[str, int, CubeDim, str | None]
+
+# 手算的期望：上面種子資料的每一格（只有算數的論文；被修正掉的 AI 值不算）。
+EXPECTED: dict[Cell, int] = {
+    ("misq", 2020, CubeDim.TOTAL, None): 3,
+    ("misq", 2020, CubeDim.WITH_ABSTRACT, None): 2,
+    ("misq", 2020, CubeDim.TOPIC, "e_commerce"): 1,
+    ("misq", 2020, CubeDim.TOPIC, "erp"): 2,
+    ("misq", 2020, CubeDim.TOPIC, "health_it"): 1,
+    ("misq", 2020, CubeDim.METHOD, "experiment"): 1,
+    ("misq", 2020, CubeDim.METHOD, "survey_sem"): 2,
+    ("misq", 2021, CubeDim.TOTAL, None): 2,
+    ("misq", 2021, CubeDim.WITH_ABSTRACT, None): 1,
+    ("misq", 2021, CubeDim.TOPIC, "unclassified"): 1,
+    ("misq", 2021, CubeDim.METHOD, "design_science"): 1,
+    ("isr", 2019, CubeDim.TOTAL, None): 1,
+    ("isr", 2019, CubeDim.WITH_ABSTRACT, None): 1,
+    ("isr", 2019, CubeDim.TOPIC, "erp"): 1,
+    ("isr", 2019, CubeDim.TOPIC, "health_it"): 1,
+    ("isr", 2019, CubeDim.METHOD, "survey_sem"): 1,
+    ("isr", 2020, CubeDim.TOTAL, None): 1,
+    ("isr", 2020, CubeDim.WITH_ABSTRACT, None): 1,
+    ("isr", 2020, CubeDim.TOPIC, "e_commerce"): 1,
+    ("isr", 2020, CubeDim.METHOD, "design_science"): 1,
+    ("isr", 2027, CubeDim.TOTAL, None): 1,
+    ("isr", 2027, CubeDim.WITH_ABSTRACT, None): 1,
+    ("isr", 2027, CubeDim.TOPIC, "health_it"): 1,
+}
+# 反向查清單用：種子裡出現過的期刊、年份與 key（含只出現在不算數論文、或被修正掉的）。
+JOURNALS = ("misq", "isr")
+YEARS = (2019, 2020, 2021, 2027)
+TOPICS = ("e_commerce", "erp", "health_it", "unclassified")
+METHODS = ("design_science", "experiment", "survey_sem")
+
+
+def _cell_params(cell: Cell) -> list[tuple[str, str]]:
+    journal, year, dim, key = cell
+    params = [("scope", "tracked"), ("journal", journal), ("year", str(year))]
+    match dim:
         case CubeDim.WITH_ABSTRACT:
             params.append(("has_abstract", "true"))
         case CubeDim.TOPIC:
-            params.append(("topic", str(row.key_a)))
+            params.append(("topic", str(key)))
         case CubeDim.METHOD:
-            params.append(("method", str(row.key_a)))
+            params.append(("method", str(key)))
     return params
+
+
+def _listed(api: Api, cell: Cell) -> int:
+    """用這一格的條件查清單，回 `total`；每格都在一頁之內，`items` 的篇數要等於 `total`。"""
+    body = api.ok(_cell_params(cell))
+    assert body["next_cursor"] is None, cell
+    assert len(body["items"]) == body["total"], cell
+    assert len({item["id"] for item in body["items"]}) == body["total"], cell
+    return int(body["total"])
 
 
 def test_every_cube_cell_clicks_back_to_the_same_count(
@@ -129,30 +182,30 @@ def test_every_cube_cell_clicks_back_to_the_same_count(
     _seed(db, database)
     rows = _cube(database, MemberViewer(member_id=api.owner_id, is_admin=False))
 
-    mismatched = []
-    for row in rows:
-        body = api.ok(_params(row))
-        if body["total"] != row.n:
-            mismatched.append(
-                (row.journal, row.year, row.dim.value, row.key_a, row.n, body["total"])
-            )
+    # 方塊這一邊：每一格和手算的一模一樣（不多不少）。
+    cube = {(row.journal, row.year, row.dim, row.key_a): row.n for row in rows}
+    assert len(cube) == len(rows)
+    assert cube == EXPECTED
+
+    # 從方塊的每一格點回清單：篇數一樣（items 與 total 都是）。
+    mismatched = [
+        (*cell, n, listed) for cell, n in cube.items() if (listed := _listed(api, cell)) != n
+    ]
     assert mismatched == []
 
-    # 四種 dim 都至少檢查到一格；unclassified 與被修正後的 key 那兩格有被檢查。
-    assert {row.dim for row in rows} == {
-        CubeDim.TOTAL,
-        CubeDim.WITH_ABSTRACT,
-        CubeDim.TOPIC,
-        CubeDim.METHOD,
-    }
-    checked = {(row.journal, row.year, row.dim, row.key_a): row.n for row in rows}
-    assert checked[("misq", 2021, CubeDim.TOPIC, "unclassified")] == 1
-    assert checked[("misq", 2020, CubeDim.TOPIC, "health_it")] == 1
-    # 被修正掉的 AI 值、不算數的論文都不在格子裡（清單也查不到，上面已逐格比過）。
-    assert checked[("misq", 2020, CubeDim.TOPIC, "erp")] == 2
-    assert checked[("misq", 2020, CubeDim.TOTAL, None)] == 3
-    assert checked[("misq", 2020, CubeDim.WITH_ABSTRACT, None)] == 2
-    assert checked[("misq", 2021, CubeDim.WITH_ABSTRACT, None)] == 1
-    assert checked[("isr", 2027, CubeDim.TOPIC, "health_it")] == 1
-    assert ("misq", 2020, CubeDim.METHOD, "experiment") in checked
-    assert len(rows) >= 15
+    # 反向：每個（期刊, 年份）× 每個 key 都查一次清單，有篇數的格子剛好是期望字典。
+    candidates: list[Cell] = [
+        (journal, year, dim, key)
+        for journal in JOURNALS
+        for year in YEARS
+        for dim, keys in (
+            (CubeDim.TOTAL, (None,)),
+            (CubeDim.WITH_ABSTRACT, (None,)),
+            (CubeDim.TOPIC, TOPICS),
+            (CubeDim.METHOD, METHODS),
+        )
+        for key in keys
+    ]
+    assert set(EXPECTED) <= set(candidates)
+    found = {cell: n for cell in candidates if (n := _listed(api, cell)) > 0}
+    assert found == EXPECTED

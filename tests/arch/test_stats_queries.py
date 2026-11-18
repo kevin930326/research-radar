@@ -25,7 +25,9 @@ SQL 註解 `--`、`/* */` 先去掉）：
 
 **登記的例外只有一個**：`radar/repo/paper_list.py` 的 `count_paper_list`（`LIST_COUNT_HOME`，Story
 3.13）。規則 1、3、4 對這一個（模組, 函式）放行，同一個模組別的函式照樣檢查；它也不算進規則 4 的
-「`list_cube_counts` 剛好一個」。
+「`list_cube_counts` 剛好一個」。放行有條件：它的字串只准數整份清單，不准有 `GROUP BY`、`HAVING`、
+視窗函式（`OVER (`），也不准有 `count(` 以外的彙總函式（`sum(`、`avg(`、`min(`、`max(`、
+`array_agg(` 這類）；有就照樣報（Story 3.13 審查 S3）。
 
 每條規則都用故意寫錯的假原始碼證明抓得到，也用正當的寫法證明不會誤擋。
 """
@@ -84,6 +86,14 @@ _WHERE_END = re.compile(
     r"\b(?:GROUP|HAVING|ORDER|LIMIT|OFFSET|WINDOW|FOR|RETURNING)\b|;", re.IGNORECASE
 )
 _STRING = re.compile(r"'(?:[^']|'')*'")
+# 登記的例外（`LIST_COUNT_HOME`）不准出現的寫法：分組、視窗函式、`count(` 以外的彙總函式。
+_NOT_A_LIST_COUNT = re.compile(
+    r"\b(?:sum|avg|min|max|array_agg|string_agg|json_agg|jsonb_agg|json_object_agg"
+    r"|jsonb_object_agg|bool_and|bool_or|every|bit_and|bit_or|bit_xor|stddev\w*|var_pop|var_samp"
+    r"|variance|percentile_cont|percentile_disc|mode|count_\w+|\w+_agg)\s*\("
+    r"|\bOVER\s*\(|\bGROUP\s+BY\b|\bHAVING\b",
+    re.IGNORECASE,
+)
 # 分類的表或欄位：名稱含 classification、topic、method（AD-19 另外四種計數都要碰到其中一種）。
 _CLASSIFICATION = re.compile(
     r"(?<![\w$])[A-Za-z_]*(?:classification|topic|method)\w*", re.IGNORECASE
@@ -284,6 +294,24 @@ def _paper_reads(literal: str) -> list[str]:
     return found
 
 
+# --- 登記的例外只准數整份清單 ---------------------------------------------------------------------
+
+
+def _list_count_problems(relative: str, function: str | None, literal: str) -> list[str]:
+    """登記的例外（`LIST_COUNT_HOME`）的字串裡不是「數整份清單」的寫法（見模組說明的例外一段）。"""
+    found = sorted(
+        {
+            " ".join(match.group(0).split())
+            for match in _NOT_A_LIST_COUNT.finditer(_blank_strings(literal))
+        }
+    )
+    return [
+        f"{_where(relative, function)}：登記的例外只准用 count( 數整份清單，不准 {sql}"
+        f"（{_short(literal)}）"
+        for sql in found
+    ]
+
+
 # --- 1. 統計模組以外不彙總 counted_paper ---------------------------------------------------------
 
 
@@ -295,6 +323,7 @@ def counted_paper_problems(sources: Mapping[str, str]) -> list[str]:
             continue
         for literal, function in _literals(source):
             if (relative, function) == LIST_COUNT_HOME:
+                problems += _list_count_problems(relative, function, literal)
                 continue
             if _COUNTED_PAPER.search(literal) and _AGGREGATE.search(literal):
                 problems.append(
@@ -384,6 +413,7 @@ def paper_aggregate_problems(sources: Mapping[str, str]) -> list[str]:
             continue
         for literal, function in _literals(source):
             if (relative, function) == LIST_COUNT_HOME:
+                problems += _list_count_problems(relative, function, literal)
                 continue
             if _paper_reads(literal) and _counts_papers(literal):
                 problems.append(
@@ -459,6 +489,7 @@ def cube_count_problems(sources: Mapping[str, str]) -> list[str]:
     for relative, source in sorted(sources.items()):
         for literal, function in _literals(source):
             if (relative, function) == LIST_COUNT_HOME:
+                problems += _list_count_problems(relative, function, literal)
                 continue
             for found in _row_counts(literal):
                 if (relative, function) == CUBE_COUNT_HOME:
@@ -933,3 +964,42 @@ def test_list_count_exception_does_not_count_as_the_cube_total() -> None:
     assert cube_count_problems(sources) == [
         "radar/repo/stats.py.list_cube_counts：找不到數 counted_paper 全部篇數的計數"
     ]
+
+
+def test_list_count_exception_still_catches_grouping_and_other_aggregates() -> None:
+    # 放行有條件（Story 3.13 審查 S3）：`count_paper_list` 寫了 GROUP BY、HAVING、視窗函式，或
+    # `count(` 以外的彙總，三條規則照樣報；只用 `count(*)` 數整份清單的不報（上面兩個測試）。
+    stats = (
+        "def list_cube_counts(viewer, c):\n"
+        '    return f"SELECT c.publication_year, count(*) FROM counted_paper AS c WHERE {c}"\n'
+    )
+    bad = {
+        "grouped": (
+            'f"SELECT listed.publication_year, count(*) FROM counted_paper AS listed'
+            ' WHERE {c} GROUP BY listed.publication_year"'
+        ),
+        "having": 'f"SELECT count(*) FROM paper AS listed WHERE {c} HAVING count(*) > 1"',
+        "summed": 'f"SELECT sum(listed.citations) FROM counted_paper AS listed WHERE {c}"',
+        "maxed": 'f"SELECT count(*), max(listed.publication_year) FROM paper AS listed WHERE {c}"',
+        "windowed": 'f"SELECT count(*) OVER (PARTITION BY 1) FROM counted_paper AS listed"',
+        "array": 'f"SELECT array_agg(listed.id) FROM paper AS listed WHERE {c}"',
+    }
+    for name, literal in bad.items():
+        sources = {
+            "radar/repo/stats.py": stats,
+            "radar/repo/paper_list.py": f"def count_paper_list(viewer, c):\n    return {literal}\n",
+        }
+        found = [
+            *counted_paper_problems(sources),
+            *paper_aggregate_problems(sources),
+            *cube_count_problems(sources),
+        ]
+        assert found, name
+        assert all(
+            problem.startswith("radar/repo/paper_list.py.count_paper_list：登記的例外只准")
+            for problem in found
+        ), (name, found)
+        # 三條規則都有自己報（不只其中一條）。
+        assert counted_paper_problems(sources), name
+        assert paper_aggregate_problems(sources), name
+        assert cube_count_problems(sources), name

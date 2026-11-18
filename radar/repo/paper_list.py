@@ -4,9 +4,14 @@
   `paper` 出發，加上「沒有被排除」（`excluded_reason IS NULL`），`lab` 用
   `visibility.visible_lab_papers`、`personal` 要在自己的文獻庫
   （`visibility.visible_library_items`）。三種都再接 `visibility.visible_papers(viewer)`。
-- 條件：期刊、年份多值是「或」（`= ANY`）；每個主題、每個方法各一個 `EXISTS`（多值是「且」），
-  「論文有這個 key」用 `repo/paper_filters.CLASSIFICATION_KEYS`（和計數方塊的 `topic`、`method`
-  格同一個片段）；有摘要＝有 `is_current` 的摘要（和計數方塊的 `with_abstract` 同一個定義）；
+- 條件：期刊、年份多值是「或」（`= ANY`）；主題、方法多值是「且」：每個欄位只接一次
+  `repo/paper_filters.CLASSIFICATION_KEYS`（和計數方塊的 `topic`、`method` 格同一個片段），
+  `key = ANY(:keys)`，依論文分組、`HAVING count(*) = 給的值的個數`（片段對同一篇同一個 key 只有
+  一列，所以數到的個數就是符合的 key 數），結果包成 `ARRAY(...)`，論文 `id = ANY(那個陣列)`：
+  子查詢不接外面的論文，PostgreSQL 只算一次（InitPlan），再用主鍵找論文。原本每個值各一個
+  `EXISTS`，每多一個值整個有效分類就多算一次（3 個主題＋2 個方法、一萬篇，一個請求約 1.2 秒；
+  改寫後約 0.17 秒；審查 S1，ADR-0050）；有摘要＝有 `is_current` 的摘要（和計數方塊的
+  `with_abstract` 同一個定義）；
   本週新增＝`first_snapshot_id` 是目前已發佈的快照（沒有快照時沒有結果）。
 - 排序 `publication_year DESC NULLS LAST, id DESC`，keyset 分頁；出版年是 NULL 的那一段排在最後。
 - 一頁的 id 與總數是兩個函式（同一個交易、兩句查詢），條件由同一個私有函式組。
@@ -30,13 +35,19 @@ _ALIAS: Final = "listed"
 _ORDER: Final = f" ORDER BY {_ALIAS}.publication_year DESC NULLS LAST, {_ALIAS}.id DESC"
 
 
-def _key_condition(field: TaxonomyField, param: str) -> str:
-    """論文的有效分類在 `field` 有 `:param` 這個 key。"""
+def _keys_condition(field: TaxonomyField, param: str) -> str:
+    """論文的有效分類在 `field` 同時有 `:param`（key 的陣列，不重複）裡的每一個 key（「且」）；
+    `:{param}_count` 是陣列的長度。
+
+    寫成 `id = ANY(ARRAY(子查詢))`、不寫 `id IN (子查詢)`：`IN` 的寫法規劃器把 `HAVING` 估成 1 列，
+    選了巢狀迴圈、一再重算整個有效分類（一萬篇要 20 秒以上，量過）；`ARRAY(...)` 一定只算一次。
+    """
     return (
-        f"EXISTS (SELECT 1 FROM ({CLASSIFICATION_KEYS}) AS classification_key"
-        f" WHERE classification_key.paper_id = {_ALIAS}.id"
-        f" AND classification_key.field = '{TaxonomyField(field).value}'"
-        f" AND classification_key.key = :{param})"
+        f"{_ALIAS}.id = ANY(ARRAY(SELECT classification_key.paper_id"
+        f" FROM ({CLASSIFICATION_KEYS}) AS classification_key"
+        f" WHERE classification_key.field = '{TaxonomyField(field).value}'"
+        f" AND classification_key.key = ANY(:{param})"
+        f" GROUP BY classification_key.paper_id HAVING count(*) = :{param}_count))"
     )
 
 
@@ -67,12 +78,14 @@ def _conditions(
     if filters.years:
         parts.append(f"{_ALIAS}.publication_year = ANY(:years)")
         params["years"] = list(filters.years)
-    for index, key in enumerate(filters.topics):
-        parts.append(_key_condition(TaxonomyField.TOPIC, f"topic_{index}"))
-        params[f"topic_{index}"] = key
-    for index, key in enumerate(filters.methods):
-        parts.append(_key_condition(TaxonomyField.METHOD, f"method_{index}"))
-        params[f"method_{index}"] = key
+    for field, param, keys in (
+        (TaxonomyField.TOPIC, "topics", filters.topics),
+        (TaxonomyField.METHOD, "methods", filters.methods),
+    ):
+        if keys:  # 已去重（`PaperListFilters`），個數就是要同時符合的 key 數
+            parts.append(_keys_condition(field, param))
+            params[param] = list(keys)
+            params[f"{param}_count"] = len(keys)
     if filters.has_abstract is not None:
         current = (
             "EXISTS (SELECT 1 FROM paper_abstract AS listed_abstract"
