@@ -1,5 +1,5 @@
 """計數方塊的列（`domain/contracts.py`）與 `build_cube_rows`（`domain/cube.py`）
-（Story 1.10、ADR-0011）。
+（Story 1.10、ADR-0011）；`topic`、`method` 格（`CountedKeyCell`，Story 3.13）。
 """
 
 from typing import Any
@@ -8,7 +8,7 @@ import pytest
 from pydantic import ValidationError
 
 from radar.domain.contracts import CubeDim, CubeRow
-from radar.domain.cube import CountedCell, UnknownJournalError, build_cube_rows
+from radar.domain.cube import CountedCell, CountedKeyCell, UnknownJournalError, build_cube_rows
 from radar.domain.domain_config import Journal, JournalsConfig
 from radar.domain.papers import AbstractSource
 
@@ -174,3 +174,77 @@ def test_unknown_issn_ls_are_all_listed() -> None:
 
     assert caught.value.issn_ls == ("1111-1111", "2222-2222")
     assert "1111-1111、2222-2222" in str(caught.value)
+
+
+# --- topic、method 格（Story 3.13）-------------------------------------------------------------
+
+
+def test_key_rows_follow_total_and_with_abstract_topic_then_method() -> None:
+    cells = [
+        CountedCell(MISQ_ISSN, 2020, OPENALEX, 3),
+        CountedCell(MISQ_ISSN, 2021, None, 1),
+        CountedCell(ISR_ISSN, 2020, OPENALEX, 2),
+    ]
+    # 輸入順序打亂；同一格重複的加總。
+    key_cells = [
+        CountedKeyCell(MISQ_ISSN, 2020, CubeDim.METHOD, "survey_sem", 2),
+        CountedKeyCell(ISR_ISSN, 2020, CubeDim.TOPIC, "erp", 1),
+        CountedKeyCell(MISQ_ISSN, 2020, CubeDim.TOPIC, "unclassified", 1),
+        CountedKeyCell(MISQ_ISSN, 2020, CubeDim.TOPIC, "erp", 1),
+        CountedKeyCell(MISQ_ISSN, 2020, CubeDim.TOPIC, "erp", 1),
+        CountedKeyCell(MISQ_ISSN, 2020, CubeDim.METHOD, "experiment", 1),
+        CountedKeyCell(MISQ_ISSN, 2020, CubeDim.TOPIC, "e_commerce", 1),
+    ]
+
+    rows = build_cube_rows(cells, JOURNALS, key_cells=key_cells)
+
+    assert [(row.journal, row.year, row.dim.value, row.key_a, row.n) for row in rows] == [
+        ("misq", 2020, "total", None, 3),
+        ("misq", 2020, "with_abstract", None, 3),
+        # "C" 定序：底線（0x5F）排在小寫字母前面，所以 e_commerce 在 erp 前面。
+        ("misq", 2020, "topic", "e_commerce", 1),
+        ("misq", 2020, "topic", "erp", 2),
+        ("misq", 2020, "topic", "unclassified", 1),
+        ("misq", 2020, "method", "experiment", 1),
+        ("misq", 2020, "method", "survey_sem", 2),
+        ("misq", 2021, "total", None, 1),
+        ("misq", 2021, "with_abstract", None, 0),
+        ("isr", 2020, "total", None, 2),
+        ("isr", 2020, "with_abstract", None, 2),
+        ("isr", 2020, "topic", "erp", 1),
+    ]
+    assert all(row.key_b is None for row in rows)
+
+
+def test_without_key_cells_nothing_changes() -> None:
+    cells = [CountedCell(MISQ_ISSN, 2020, OPENALEX, 3)]
+
+    assert build_cube_rows(cells, JOURNALS) == build_cube_rows(cells, JOURNALS, key_cells=())
+
+
+@pytest.mark.parametrize(
+    "dim",
+    [CubeDim.TOTAL, CubeDim.WITH_ABSTRACT, CubeDim.PENDING_CLASSIFICATION, CubeDim.TOPIC_PAIR],
+)
+def test_key_cells_only_take_topic_and_method(dim: CubeDim) -> None:
+    with pytest.raises(ValueError, match="topic 或 method"):
+        CountedKeyCell(MISQ_ISSN, 2020, dim, "erp", 1)
+
+
+def test_key_cell_dim_is_normalized() -> None:
+    cell = CountedKeyCell(MISQ_ISSN, 2020, "method", "experiment", 1)  # type: ignore[arg-type]
+
+    assert cell.dim is CubeDim.METHOD
+
+
+def test_unknown_issn_ls_in_key_cells_are_listed_too() -> None:
+    cells = [CountedCell(MISQ_ISSN, 2020, OPENALEX, 1), CountedCell("2222-2222", 2020, None, 1)]
+    key_cells = [
+        CountedKeyCell("1111-1111", 2020, CubeDim.TOPIC, "erp", 1),
+        CountedKeyCell(MISQ_ISSN, 2020, CubeDim.TOPIC, "erp", 1),
+    ]
+
+    with pytest.raises(UnknownJournalError) as caught:
+        build_cube_rows(cells, JOURNALS, key_cells=key_cells)
+
+    assert caught.value.issn_ls == ("1111-1111", "2222-2222")

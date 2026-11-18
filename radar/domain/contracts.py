@@ -37,6 +37,7 @@ from radar.domain.domain_config import JournalsConfig
 from radar.domain.judgments import SummaryField
 from radar.domain.library import LIBRARY_PAGE_SIZE
 from radar.domain.llm_schemas import EvidenceType, SupportLevel
+from radar.domain.paper_list import PAPER_LIST_PAGE_SIZE
 from radar.domain.paper_page import PaperPageFacts
 from radar.domain.paper_rows import PAPER_ROW_AUTHOR_LIMIT, PaperRowFacts
 from radar.domain.papers import AbstractSource, PaperOrigin
@@ -788,15 +789,22 @@ class ClientConfig(BaseModel):
 
     - `timezone`：畫面上的日期換成哪個時區（IANA 名稱）。
     - `library_page_size`：文獻庫清單一頁幾篇（Story 3.16）。
+    - `paper_list_page_size`：找論文清單一頁幾篇（Story 3.13）。
     """
 
     model_config = _FROZEN
 
     timezone: _Text
     library_page_size: int = Field(ge=1, strict=True)
+    paper_list_page_size: int = Field(ge=1, strict=True)
 
 
 def build_client_config() -> ClientConfig:
     """前端的設定值：時區是資料截止日用的那一個（`domain/snapshot.DATA_TIMEZONE`）；文獻庫一頁的
-    篇數是 `domain/library.LIBRARY_PAGE_SIZE`。"""
-    return ClientConfig(timezone=DATA_TIMEZONE.key, library_page_size=LIBRARY_PAGE_SIZE)
+    篇數是 `domain/library.LIBRARY_PAGE_SIZE`，找論文清單一頁的篇數是
+    `domain/paper_list.PAPER_LIST_PAGE_SIZE`。"""
+    return ClientConfig(
+        timezone=DATA_TIMEZONE.key,
+        library_page_size=LIBRARY_PAGE_SIZE,
+        paper_list_page_size=PAPER_LIST_PAGE_SIZE,
+    )

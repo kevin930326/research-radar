@@ -4,6 +4,9 @@
 「有摘要」只看目前的那一筆、三種讀者的計數相同（`PublicViewer` 的 EXISTS 條件在真的 PostgreSQL
 上可執行）、`radar_app` 不能經 view 寫入。
 
+`list_cube_key_counts`（Story 3.13）：用有效分類（人修正過的值優先）、一篇多個主題各算一格、
+`unclassified` 是一格、沒有分類與沒有方法的論文不產生那一種的格、範圍外與被排除的不算。
+
 論文經正式的 `upsert_by_external_id` 寫入；快照、`first_snapshot_id` 與不是 current 的摘要用擁有者
 角色直接寫（只在測試裡）。每個測試一個全新、已遷移的資料庫。
 """
@@ -16,15 +19,18 @@ from typing import Any
 import psycopg
 import pytest
 
-from radar.domain.cube import CountedCell
+from radar.domain.contracts import CubeDim
+from radar.domain.cube import CountedCell, CountedKeyCell
 from radar.domain.papers import AbstractSource, PaperOrigin, ParsedPaper
 from radar.domain.scope import ScopeSettings
+from radar.domain.taxonomy import TaxonomyField
 from radar.domain.viewer import MemberViewer, PublicViewer, SystemViewer
 from radar.repo.db import Database
 from radar.repo.papers import upsert_by_external_id
 from radar.repo.snapshots import find_latest_published_snapshot
-from radar.repo.stats import list_cube_counts
+from radar.repo.stats import list_cube_counts, list_cube_key_counts
 from tests.database import APP_ROLE, OWNER_ROLE, TestDatabase, migrate
+from tests.integration.test_effective_views import fix, insert_classification
 
 T1 = datetime(2026, 11, 1, 3, 0, tzinfo=UTC)
 AS_OF = datetime(2026, 11, 16, 2, 30, tzinfo=UTC)
@@ -256,3 +262,60 @@ def test_latest_published_snapshot_is_none_without_published(
 
     with database.transaction() as connection:
         assert find_latest_published_snapshot(SystemViewer(), connection) is None
+
+
+# --- 計數方塊的 topic、method 格（Story 3.13）------------------------------------------------
+
+
+def test_key_counts_use_effective_classification(
+    stats_db: TestDatabase, database: Database, papers: Papers
+) -> None:
+    # counted（2020）：AI 給 erp＋e_commerce、survey_sem；人把主題改成 health_it（方法照 AI）。
+    insert_classification(stats_db, papers.counted, ["e_commerce", "erp"], ["survey_sem"])
+    fix(database, papers.counted, TaxonomyField.TOPIC, ["health_it"])
+    # no_current（2021）：有效主題 unclassified、沒有方法。
+    insert_classification(stats_db, papers.no_current, ["unclassified"])
+    # 被排除、範圍外、快照建立中的論文有分類也不算。
+    for paper_id in (papers.excluded, papers.out_of_scope, papers.on_building):
+        insert_classification(stats_db, paper_id, ["erp"], ["experiment"])
+    # unassigned 沒有分類以外，本來就不在 counted_paper。
+
+    with database.transaction() as connection:
+        cells = list_cube_key_counts(MEMBER, connection)
+
+    assert cells == [
+        CountedKeyCell(TRACKED_ISSN, 2020, CubeDim.TOPIC, "health_it", 1),
+        CountedKeyCell(TRACKED_ISSN, 2020, CubeDim.METHOD, "survey_sem", 1),
+        CountedKeyCell(TRACKED_ISSN, 2021, CubeDim.TOPIC, "unclassified", 1),
+    ]
+
+
+def test_key_counts_count_each_topic_once_per_paper(
+    stats_db: TestDatabase, database: Database, papers: Papers
+) -> None:
+    insert_classification(stats_db, papers.counted, ["e_commerce", "erp"], ["experiment"])
+    # 人工修正成兩個方法：各算一格；AI 原本沒有方法。
+    insert_classification(stats_db, papers.no_current, ["erp"])
+    fix(database, papers.no_current, TaxonomyField.METHOD, ["survey_sem", "experiment"])
+
+    with database.transaction() as connection:
+        system = list_cube_key_counts(SystemViewer(), connection)
+        public = list_cube_key_counts(PublicViewer(), connection)
+
+    assert (
+        system
+        == public
+        == [
+            CountedKeyCell(TRACKED_ISSN, 2020, CubeDim.TOPIC, "e_commerce", 1),
+            CountedKeyCell(TRACKED_ISSN, 2020, CubeDim.TOPIC, "erp", 1),
+            CountedKeyCell(TRACKED_ISSN, 2020, CubeDim.METHOD, "experiment", 1),
+            CountedKeyCell(TRACKED_ISSN, 2021, CubeDim.TOPIC, "erp", 1),
+            CountedKeyCell(TRACKED_ISSN, 2021, CubeDim.METHOD, "experiment", 1),
+            CountedKeyCell(TRACKED_ISSN, 2021, CubeDim.METHOD, "survey_sem", 1),
+        ]
+    )
+
+
+def test_key_counts_without_classification_are_empty(database: Database, papers: Papers) -> None:
+    with database.transaction() as connection:
+        assert list_cube_key_counts(MEMBER, connection) == []

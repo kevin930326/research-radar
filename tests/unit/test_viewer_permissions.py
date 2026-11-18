@@ -14,7 +14,7 @@ from radar.domain.permissions import (
     require,
 )
 from radar.domain.viewer import MemberViewer, PublicViewer, SystemViewer, Viewer
-from radar.repo.visibility import visible_papers, visible_to_system_only
+from radar.repo.visibility import visible_lab_papers, visible_papers, visible_to_system_only
 
 OWNER_ID = uuid.UUID("018f0000-0000-7000-8000-0000000000a1")
 OTHER_ID = uuid.UUID("018f0000-0000-7000-8000-0000000000b2")
@@ -173,3 +173,32 @@ def test_system_only_condition() -> None:
 def test_system_only_rejects_everyone_else(viewer: object) -> None:
     with pytest.raises(TypeError, match="SystemViewer"):
         visible_to_system_only(viewer)  # type: ignore[arg-type]
+
+
+# --- visible_lab_papers（Story 3.13 的 lab 範圍）------------------------------------------------
+
+
+def test_lab_papers_are_lab_visible_and_visible() -> None:
+    # 成員：lab_visible 且（lab_visible 或自己的文獻庫）＝只剩 lab_visible；私人論文不算。
+    assert visible_lab_papers(MEMBER, alias="p") == (
+        '("p".lab_visible AND ("p".lab_visible OR EXISTS (SELECT 1 FROM library_item AS'
+        ' visible_library WHERE visible_library.paper_id = "p".id'
+        f" AND visible_library.owner_id = '{OTHER_ID}'::uuid)))"
+    )
+    assert visible_lab_papers(SYSTEM, alias="p") == '("p".lab_visible AND TRUE)'
+    assert visible_lab_papers(PUBLIC, alias="p") == (
+        '("p".lab_visible AND EXISTS (SELECT 1 FROM counted_paper AS visible_counted'
+        ' WHERE visible_counted.id = "p".id))'
+    )
+
+
+@pytest.mark.parametrize("alias", ["visible_counted", "visible_library", "P", "a;b", "1p", ""])
+@pytest.mark.parametrize("viewer", [MEMBER, SYSTEM, PUBLIC])
+def test_lab_papers_check_the_alias(viewer: Viewer, alias: str) -> None:
+    with pytest.raises(ValueError, match="別名"):
+        visible_lab_papers(viewer, alias=alias)
+
+
+def test_lab_papers_reject_unknown_viewers() -> None:
+    with pytest.raises(TypeError):
+        visible_lab_papers(object(), alias="p")  # type: ignore[arg-type]

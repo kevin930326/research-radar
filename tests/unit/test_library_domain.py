@@ -97,9 +97,11 @@ def test_page_holds_at_most_one_page() -> None:
 
 
 def test_client_config_gives_the_library_page_size() -> None:
-    assert build_client_config() == ClientConfig(timezone="Asia/Taipei", library_page_size=50)
+    assert build_client_config() == ClientConfig(
+        timezone="Asia/Taipei", library_page_size=50, paper_list_page_size=20
+    )
     with pytest.raises(ValidationError):
-        ClientConfig(timezone="Asia/Taipei", library_page_size=0)
+        ClientConfig(timezone="Asia/Taipei", library_page_size=0, paper_list_page_size=20)
 
 
 # --- 下一頁的位置 --------------------------------------------------------------------------------

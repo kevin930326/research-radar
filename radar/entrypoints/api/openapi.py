@@ -6,8 +6,8 @@
 - 路由用和正式組裝同一個 `install_api_routes` 裝，所以端點清單和正式的 api 一樣。
 - 只在開了假登入時才有的路由也列出來（這裡把假登入打開）：`openapi.json` 是全部端點的清單，
   換人測試的登記表拿它比對，不能因為環境設定漏掉端點。
-- 不連資料庫、不讀設定：登入、論文頁與文獻庫路由的函式換成不會被呼叫的替身（只用來產生文件）；
-  顯示名稱是空的（回應的形狀和內容無關）。
+- 不連資料庫、不讀設定：登入、論文頁、文獻庫與找論文清單路由的函式換成不會被呼叫的替身（只用來
+  產生文件）；顯示名稱是空的（回應的形狀和內容無關）。
 - 輸出固定：縮排 2、中文不跳脫、結尾換行；同一份程式每次輸出一樣，CI 才能用 `git diff` 比對。
 """
 
@@ -23,12 +23,14 @@ from radar.domain.auth import AuthenticatedMember, FakeLoginRequest, MemberSumma
 from radar.domain.auth_settings import FakeLoginMode
 from radar.domain.contracts import DisplayNames, build_client_config
 from radar.domain.library import LibraryCursor, LibraryEntry, LibraryPage
+from radar.domain.paper_list import PaperListCursor, PaperListFilters, PaperListPage, PaperListQuery
 from radar.domain.paper_page import PaperPage
 from radar.domain.viewer import MemberViewer
 from radar.entrypoints.api.app import create_app
 from radar.entrypoints.api.auth import AuthRoutes, FakeLoginRoutes
 from radar.entrypoints.api.library import LibraryRoutes
 from radar.entrypoints.api.main import install_api_routes
+from radar.entrypoints.api.paper_list import PaperListRoutes
 from radar.entrypoints.api.papers import PaperRoutes
 
 
@@ -72,6 +74,16 @@ def _journal_key(_issn_l: str | None) -> str | None:
     _not_for_requests()
 
 
+def _list_papers(
+    _viewer: MemberViewer, _filters: PaperListFilters, _after: PaperListCursor | None
+) -> PaperListPage:
+    _not_for_requests()
+
+
+def _parse_paper_list(_query: PaperListQuery) -> PaperListFilters:
+    _not_for_requests()
+
+
 def build_schema_app() -> FastAPI:
     """組一個只用來產生文件的 app：路由和正式的一樣，而且假登入的路由也在。"""
     app = create_app(readiness_check=_not_ready)
@@ -97,6 +109,9 @@ def build_schema_app() -> FastAPI:
             remove=_change_library,
             restore=_change_library,
             journal_key=_journal_key,
+        ),
+        paper_list_routes=PaperListRoutes(
+            list_page=_list_papers, parse_filters=_parse_paper_list, journal_key=_journal_key
         ),
     )
     return app

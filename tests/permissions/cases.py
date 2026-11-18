@@ -18,7 +18,7 @@ from radar.domain.library import AddedVia
 from radar.domain.viewer import MemberViewer, SystemViewer
 from radar.repo.library import create_library_item
 from radar.services.library import remove_library_item
-from tests.llm_support import create_hidden_paper
+from tests.llm_support import create_hidden_paper, execute
 from tests.permissions.framework import (
     CANARY,
     EndpointRegistry,
@@ -175,3 +175,24 @@ def _restore_library_item(ctx: PermissionContext) -> EndpointRequest:
     owner = MemberViewer(member_id=uuid.UUID(ctx.owner.member_id), is_admin=False)
     assert remove_library_item(owner, ctx.extras["database"], paper_id) is not None
     return EndpointRequest(path_params={"paper_id": str(paper_id)})
+
+
+# --- 找論文清單（Story 3.13）---------------------------------------------------------------------
+
+
+@REGISTRY.case("GET", "/api/v1/papers")
+def _paper_list(ctx: PermissionContext) -> EndpointRequest:
+    # A 的私人論文（標題有金絲雀）在 A 的文獻庫：A 的 `personal` 清單有它；B 的 `personal` 是空清單
+    # （total 0、沒有下一頁）。發佈一個快照：空清單的 `snapshot` 要是物件（框架不收 null）。
+    _private_paper_in_owner_library(ctx)
+    test_database = ctx.extras["test_database"]
+    ((run_id,),) = execute(
+        test_database, "INSERT INTO weekly_run (status) VALUES ('published') RETURNING id"
+    )
+    execute(
+        test_database,
+        "INSERT INTO snapshot (number, weekly_run_id, status, as_of)"
+        " VALUES (1, %s, 'published', '2026-11-16T02:30:00Z')",
+        run_id,
+    )
+    return EndpointRequest(query={"scope": "personal"})

@@ -29,6 +29,11 @@ from radar.entrypoints.api.library import (
     build_library_routes,
     install_library_routes,
 )
+from radar.entrypoints.api.paper_list import (
+    PaperListRoutes,
+    build_paper_list_routes,
+    install_paper_list_routes,
+)
 from radar.entrypoints.api.papers import PaperRoutes, build_paper_routes, install_paper_routes
 from radar.entrypoints.api.web import mount_web
 from radar.entrypoints.bootstrap import (
@@ -53,9 +58,10 @@ def install_api_routes(
     auth_routes: AuthRoutes,
     paper_routes: PaperRoutes,
     library_routes: LibraryRoutes,
+    paper_list_routes: PaperListRoutes,
 ) -> None:
-    """把全部 API 路由裝到 `app` 上：登入路由、論文頁路由（Story 3.6）、文獻庫路由（Story 3.16）。
-    一定要在 `mount_web` 之前呼叫。
+    """把全部 API 路由裝到 `app` 上：登入路由、論文頁路由（Story 3.6）、文獻庫路由（Story 3.16）、
+    找論文清單路由（Story 3.13）。一定要在 `mount_web` 之前呼叫。
 
     正式組裝（下面的 `main`）與輸出 `openapi.json`（`openapi.py`）都只經這個函式裝路由，所以兩邊的
     端點清單一定相同；換人測試的登記表又和 `openapi.json` 比對，新的端點沒登記就失敗（ADR-0047）。
@@ -65,6 +71,7 @@ def install_api_routes(
     install_auth_routes(app, auth_routes)
     install_paper_routes(app, paper_routes, auth_routes)
     install_library_routes(app, library_routes, auth_routes)
+    install_paper_list_routes(app, paper_list_routes, auth_routes)
 
 
 def _utc_now() -> datetime:
@@ -103,8 +110,9 @@ def main() -> int:
         return 1
 
     app = create_app(readiness_check=partial(check_readiness, probes.ping, probes.schema_state))
-    # 全部 API 路由只經 install_api_routes 裝（openapi.json 也用它，端點清單一致）；登入、論文頁與
-    # 文獻庫路由用就緒檢查的同一個連線池。一定要在 mount_web 之前裝（install_*_routes 會檢查）。
+    # 全部 API 路由只經 install_api_routes 裝（openapi.json 也用它，端點清單一致）；登入、論文頁、
+    # 文獻庫與找論文清單路由用就緒檢查的同一個連線池。一定要在 mount_web 之前裝（install_*_routes
+    # 會檢查）。
     install_api_routes(
         app,
         auth_routes=build_auth_routes(
@@ -118,6 +126,7 @@ def main() -> int:
             _utc_now,
         ),
         library_routes=build_library_routes(probes.database, paper_setup.journals),
+        paper_list_routes=build_paper_list_routes(probes.database, paper_setup.journals, taxonomy),
     )
     # 頁面殼另外掛、不經 create_app 的 web_dist 參數：關機的整合測試會把 create_app 換成只收
     # readiness_check 的版本、再加自己的路由；分開掛，那些路由才排在「其餘路徑」之前。

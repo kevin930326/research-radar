@@ -23,6 +23,10 @@ SQL 註解 `--`、`/* */` 先去掉）：
    `topic_pair`、`method`）要 `JOIN` 分類的表，或在 `WHERE` 寫分類的條件（例如
    `NOT EXISTS (SELECT 1 FROM <分類表> …)`），才不是全部篇數；接別的表、加別的條件都還是。
 
+**登記的例外只有一個**：`radar/repo/paper_list.py` 的 `count_paper_list`（`LIST_COUNT_HOME`，Story
+3.13）。規則 1、3、4 對這一個（模組, 函式）放行，同一個模組別的函式照樣檢查；它也不算進規則 4 的
+「`list_cube_counts` 剛好一個」。
+
 每條規則都用故意寫錯的假原始碼證明抓得到，也用正當的寫法證明不會誤擋。
 """
 
@@ -37,6 +41,12 @@ STATS_MODULES = frozenset(
     {"radar/repo/stats.py", "radar/repo/relations.py", "radar/repo/keyword_stats.py"}
 )
 CUBE_COUNT_HOME = ("radar/repo/stats.py", "list_cube_counts")
+# 找論文清單的總數（Story 3.13）：清單要給 `total`（Conventions「API」），而且 `tracked` 要從
+# `counted_paper` 查、`lab`／`personal` 要讀 `paper`（ADR-0011「點數字列出論文」）。它數的是清單
+# 本身，不是計數方塊；和計數方塊的每一格對得上由 `tests/integration/test_paper_list_click_back.py`
+# 守著。
+# 只放行這一個（模組, 函式），不拆字串、不在 Python 數筆數繞過。
+LIST_COUNT_HOME = ("radar/repo/paper_list.py", "count_paper_list")
 PAPERS_MODULE = "radar.repo.papers"
 
 _PLACEHOLDER = "\x00"
@@ -284,6 +294,8 @@ def counted_paper_problems(sources: Mapping[str, str]) -> list[str]:
         if relative in STATS_MODULES:
             continue
         for literal, function in _literals(source):
+            if (relative, function) == LIST_COUNT_HOME:
+                continue
             if _COUNTED_PAPER.search(literal) and _AGGREGATE.search(literal):
                 problems.append(
                     f"{_where(relative, function)}：引用 counted_paper 又做彙總"
@@ -371,6 +383,8 @@ def paper_aggregate_problems(sources: Mapping[str, str]) -> list[str]:
         if not relative.startswith("radar/repo/") or relative in STATS_MODULES:
             continue
         for literal, function in _literals(source):
+            if (relative, function) == LIST_COUNT_HOME:
+                continue
             if _paper_reads(literal) and _counts_papers(literal):
                 problems.append(
                     f"{_where(relative, function)}：讀 paper 又數篇數（{_short(literal)}），"
@@ -444,6 +458,8 @@ def cube_count_problems(sources: Mapping[str, str]) -> list[str]:
     at_home = 0
     for relative, source in sorted(sources.items()):
         for literal, function in _literals(source):
+            if (relative, function) == LIST_COUNT_HOME:
+                continue
             for found in _row_counts(literal):
                 if (relative, function) == CUBE_COUNT_HOME:
                     at_home += 1
@@ -498,6 +514,16 @@ def test_cube_total_is_counted_exactly_once() -> None:
         for count in _row_counts(text)
     ]
     assert found == ["count(*)"]
+
+
+def test_list_count_exception_is_really_used() -> None:
+    # 例外不是空放著：`count_paper_list` 真的數 `counted_paper`（tracked）與 `paper`
+    # （lab、personal）。
+    relative, function = LIST_COUNT_HOME
+    literals = [text for text, owner in _literals(_radar_sources()[relative]) if owner == function]
+
+    assert any(_row_counts(text) for text in literals)
+    assert any(_paper_reads(text) and _counts_papers(text) for text in literals)
 
 
 # --- 假原始碼證明抓得到 -----------------------------------------------------------------------
@@ -862,3 +888,48 @@ def test_strip_comments_keeps_strings_and_nested_blocks() -> None:
     sql = "SELECT '--x', \"a/*b\" /* 1 /* 2 */ 3 */ FROM t -- z\nWHERE '/*' = '*/'"
 
     assert _strip_comments(sql) == "SELECT '--x', \"a/*b\"   FROM t  \nWHERE '/*' = '*/'"
+
+
+def test_list_count_exception_covers_only_count_paper_list() -> None:
+    """只有 `paper_list.count_paper_list` 放行；同一個模組別的函式數篇數，規則 1、3、4 照樣抓；
+    `list_cube_counts` 仍是唯一數 `counted_paper` 全部篇數的地方。"""
+    sources = {
+        "radar/repo/stats.py": (
+            "def list_cube_counts(viewer, c):\n"
+            '    return f"SELECT c.publication_year, count(*) FROM counted_paper AS c WHERE {c}"\n'
+        ),
+        "radar/repo/paper_list.py": (
+            "def count_paper_list(viewer, c):\n"
+            '    a = f"SELECT count(*) FROM counted_paper AS listed WHERE {c}"\n'
+            '    return a, f"SELECT count(*) FROM paper AS listed WHERE {c}"\n'
+            "def list_paper_list_ids(viewer, c):\n"
+            '    return f"SELECT count(*) FROM counted_paper AS listed WHERE {c}"\n'
+            "def count_more(viewer, c):\n"
+            '    return f"SELECT count(*) FROM paper AS listed WHERE {c}"\n'
+        ),
+    }
+
+    assert [p.split("：")[0] for p in counted_paper_problems(sources)] == [
+        "radar/repo/paper_list.py.list_paper_list_ids"
+    ]
+    assert [p.split("：")[0] for p in paper_aggregate_problems(sources)] == [
+        "radar/repo/paper_list.py.count_more"
+    ]
+    assert [p.split("：")[0] for p in cube_count_problems(sources)] == [
+        "radar/repo/paper_list.py.list_paper_list_ids"
+    ]
+
+
+def test_list_count_exception_does_not_count_as_the_cube_total() -> None:
+    # 只有清單的總數、沒有 `list_cube_counts` 的計數：仍報「找不到」，例外不能頂替它。
+    sources = {
+        "radar/repo/stats.py": 'def list_cube_counts(viewer, c):\n    return "SELECT 1"\n',
+        "radar/repo/paper_list.py": (
+            "def count_paper_list(viewer, c):\n"
+            '    return f"SELECT count(*) FROM counted_paper AS listed WHERE {c}"\n'
+        ),
+    }
+
+    assert cube_count_problems(sources) == [
+        "radar/repo/stats.py.list_cube_counts：找不到數 counted_paper 全部篇數的計數"
+    ]

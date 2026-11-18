@@ -14,7 +14,9 @@ import type {
   LibraryItemResponse,
   LibraryPageResponse,
   ListLibraryParams,
+  ListPapersParams,
   MemberResponse,
+  PaperListResponse,
   PaperPageResponse,
   ProblemDetails
 } from './model';
@@ -712,4 +714,72 @@ export const restoreLibraryItem = async (paperId: string, options?: RequestInit)
 
   const data: restoreLibraryItemResponse['data'] = body ? JSON.parse(body) : {}
   return { data, status: res.status, headers: res.headers } as restoreLibraryItemResponse
+}
+
+
+
+export type listPapersResponse200 = {
+  data: PaperListResponse
+  status: 200
+}
+
+export type listPapersResponseDefault = {
+  data: ProblemDetails
+  status: Exclude<HTTPStatusCodes, 200>
+}
+
+export type listPapersResponseSuccess = (listPapersResponse200) & {
+  headers: Headers;
+};
+export type listPapersResponseError = (listPapersResponseDefault) & {
+  headers: Headers;
+};
+
+export type listPapersResponse = (listPapersResponseSuccess | listPapersResponseError)
+
+export const getListPapersUrl = (params?: ListPapersParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+    const explodeParameters = ["journal","year","topic","method"];
+
+    if (Array.isArray(value) && explodeParameters.includes(key)) {
+      value.forEach((v) => {
+        normalizedParams.append(key, v === null ? 'null' : String(v));
+      });
+      return;
+    }
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/v1/papers?${stringifiedParams}` : `/api/v1/papers`
+}
+
+/**
+ * 依條件列出論文的一頁（一頁的篇數見 `client-config`）。期刊、年份給多個值是「或」，主題、
+ * 方法給多個值是「且」，不同欄位之間是「且」；`cursor` 是上一頁的 `next_cursor`。條件不合法
+ * 422，沒登入 401。
+ * @summary List Papers
+ */
+export const listPapers = async (params?: ListPapersParams, options?: RequestInit): Promise<listPapersResponse> => {
+
+  const res = await fetch(getListPapersUrl(params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: listPapersResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as listPapersResponse
 }

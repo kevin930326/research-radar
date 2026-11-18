@@ -46,6 +46,7 @@ from tests.llm_support import (
     create_paper,
     execute,
     library_routes,
+    paper_list_routes,
     paper_routes,
 )
 from tests.permissions.framework import CANARY
@@ -79,6 +80,7 @@ class Api:
             auth_routes=build_auth_routes(database, settings, pick_member_identity, lambda: NOW),
             paper_routes=paper_routes(database, now=NOW),
             library_routes=library_routes(database),
+            paper_list_routes=paper_list_routes(database),
         )
         self.client = TestClient(app, base_url="https://testserver")
         self.owner_id, self.owner_token = self._log_in(database, OWNER_EMAIL, "測試甲")
