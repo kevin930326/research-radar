@@ -16,10 +16,16 @@
   - 空字串或只有空白：一律擋下；編不成 UTF-8 的文字（例如單獨的代理字元）也擋下。
 - 新增來源時，`clear_for_cloud` 的 `match` 不寫規則就過不了 mypy（`assert_never`）。
 - `join_cloud_safe_texts`：把幾段各自放行過的文字用空白接成一段（向量化的「標題＋空行＋摘要」）。
+
+示範站可用（ADR-0007 第 5 點、ADR-0052）也在這裡判定：`is_demo_eligible` 是全專案唯一的判定，
+`openalex_license` 把 OpenAlex 的授權字串對到 `ContentLicense`。
 """
 
 import itertools
+import unicodedata
 import weakref
+from collections.abc import Collection, Iterable
+from dataclasses import dataclass
 from enum import StrEnum
 from typing import Final, NoReturn, TypeIs, assert_never, final
 
@@ -28,6 +34,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from radar.domain import prompt_hashes
 from radar.domain.errors import ErrorCode
 from radar.domain.fingerprints import prompt_sha256
+from radar.domain.identifiers import InvalidIdentifierError, normalize_openalex_id
 from radar.domain.prompt_format import split_prompt_file
 
 
@@ -68,6 +75,99 @@ class ContentLicense(StrEnum):
 CLOUD_CLEARED_LICENSES: Final[frozenset[ContentLicense]] = frozenset(
     {ContentLicense.CC_BY, ContentLicense.CC_BY_SA, ContentLicense.CC0}
 )
+
+# --- 示範站可用（ADR-0007 第 5 點、ADR-0052） -------------------------------------------------
+
+# 示範站可以放完整內容的授權。和 `CLOUD_CLEARED_LICENSES` 現在是同一組值，但是兩個不同的決定
+# （送雲端 vs. 公開轉載），之後可能分開改，所以各寫一份。
+DEMO_ELIGIBLE_LICENSES: Final[frozenset[ContentLicense]] = frozenset(
+    {ContentLicense.CC_BY, ContentLicense.CC_BY_SA, ContentLicense.CC0}
+)
+
+# OpenAlex 的授權字串和 `ContentLicense` 寫法不同的：OpenAlex 把 CC0 與公眾領域併成一個
+# `public-domain`（官方授權清單的顯示名稱是「public domain (CC0)」，ADR-0052 有出處）。
+_OPENALEX_LICENSE_ALIASES: Final[dict[str, ContentLicense]] = {
+    "public-domain": ContentLicense.CC0,
+}
+# OpenAlex 不會給、本專案自己補的值：OpenAlex 字串剛好是這兩個也當不明。
+_PROJECT_ONLY_LICENSES: Final[frozenset[ContentLicense]] = frozenset(
+    {ContentLicense.PAYWALLED, ContentLicense.UNKNOWN}
+)
+
+
+def openalex_license(value: str | None) -> ContentLicense:
+    """OpenAlex 的授權原字串（`primary_location.license`）→ `ContentLicense`。
+
+    完全相同的寫法才算（不改大小寫、不去空白）；`public-domain` 當 CC0；沒有、看不懂的
+    （例如 `mit`、`publisher-specific-oa`）一律 `UNKNOWN`。
+    """
+    if value is None:
+        return ContentLicense.UNKNOWN
+    alias = _OPENALEX_LICENSE_ALIASES.get(value)
+    if alias is not None:
+        return alias
+    try:
+        license = ContentLicense(value)
+    except ValueError:
+        return ContentLicense.UNKNOWN
+    return ContentLicense.UNKNOWN if license in _PROJECT_ONLY_LICENSES else license
+
+
+def normalize_publisher_name(value: str) -> str:
+    """出版社名稱比對前的正規化：NFKC、`casefold`、連續空白縮成一個、去頭尾空白。"""
+    return " ".join(unicodedata.normalize("NFKC", value).casefold().split())
+
+
+@dataclass(frozen=True)
+class PublisherExclusions:
+    """示範站不放完整內容的出版社（`config/demo_publishers.yaml`）。
+
+    `ids` 是正規化的 OpenAlex ID（例如 `P4310320990`），`names` 是 `normalize_publisher_name`
+    過的名稱。由 `DemoPublishersConfig.exclusions()` 建立。
+    """
+
+    ids: frozenset[str]
+    names: frozenset[str]
+
+    def matches(self, publisher_ids: Iterable[str], publisher_names: Iterable[str]) -> bool:
+        """任一個 ID 或名稱對上就算（排除方向，多對上只會更保守）。
+
+        `publisher_ids` 經 `normalize_openalex_id` 比；看不懂的 ID 照原字串（轉大寫）比。
+        """
+        for value in publisher_ids:
+            try:
+                normalized = normalize_openalex_id(value)
+            except InvalidIdentifierError:
+                normalized = value.strip().upper()
+            if normalized in self.ids:
+                return True
+        return any(normalize_publisher_name(name) in self.names for name in publisher_names)
+
+
+def is_demo_eligible(
+    license: str | None,
+    publisher_ids: Collection[str],
+    publisher_names: Collection[str],
+    excluded: PublisherExclusions | None,
+) -> bool:
+    """這篇論文能不能在示範站放完整內容。全專案只有這個函式做這個判定（ADR-0007 第 5 點）。
+
+    - `license`：出版社自己那一版（OpenAlex `primary_location.license`）的授權原字串。
+    - `publisher_ids`／`publisher_names`：`primary_location.source` 的出版社 ID 與名稱（含
+      lineage）。
+    - `excluded`：排除清單；None＝清單沒有載入（例如測試沒帶），一律 False。
+
+    只有授權對到 `DEMO_ELIGIBLE_LICENSES`、出版社欄位至少有一個值、而且沒有任何 ID 或名稱在
+    排除清單裡，才是 True。授權沒有或看不懂、沒有出版社欄位（無法確認不是被排除的出版社）都是
+    False。
+    """
+    if excluded is None:
+        return False
+    if openalex_license(license) not in DEMO_ELIGIBLE_LICENSES:
+        return False
+    if not publisher_ids and not publisher_names:
+        return False
+    return not excluded.matches(publisher_ids, publisher_names)
 
 
 class CloudPolicy(BaseModel):

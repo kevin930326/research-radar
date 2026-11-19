@@ -261,3 +261,14 @@ def test_lost_write_lock_prints_reason_and_rerun_hint(
         assert "s3cret-APP" not in text
         assert "db.example" not in text
     assert "重新解析完成" not in result.stdout
+
+
+@pytest.mark.usefixtures("env")
+def test_reparse_passes_the_demo_publisher_exclusions(calls: dict[str, Any]) -> None:
+    # Story 3.7a：reparse 依 config/demo_publishers.yaml 重算 demo_eligible（ADR-0052）。
+    result = runner.invoke(cli.app, ["reparse"])
+
+    assert result.exit_code == 0, result.output
+    exclusions = calls["reparse"]["scope"].demo_publishers
+    assert exclusions is not None
+    assert "ieee" in exclusions.names

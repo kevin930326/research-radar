@@ -89,11 +89,12 @@ def test_models_are_frozen() -> None:
 def test_missing_files_each_get_a_problem(tmp_path: Path) -> None:
     problems = _load(tmp_path)
 
-    assert len(problems) == 4
+    assert len(problems) == 5
     assert problems[0].startswith("journals.yaml：找不到檔案")
     assert problems[1].startswith("openalex.yaml：找不到檔案")
     assert problems[2].startswith("exclusion_rules.yaml：找不到檔案")
     assert problems[3].startswith("keyword_sources.yaml：找不到檔案")
+    assert problems[4].startswith("demo_publishers.yaml：找不到檔案")
 
 
 def test_invalid_yaml(config_copy: Path) -> None:

@@ -1,22 +1,25 @@
-"""領域設定的型別（AD-18）：`config/` 下的四個檔。
+"""領域設定的型別（AD-18）：`config/` 下的五個檔。
 
 - `journals.yaml`：追蹤的期刊（`JournalsConfig`）。
 - `openalex.yaml`：OpenAlex 的呼叫設定（`OpenAlexConfig`）。
 - `exclusion_rules.yaml`：標記非研究文章的排除規則（`ExclusionRulesConfig`，PRD FR-8）。
 - `keyword_sources.yaml`：目前用哪個關鍵字來源（`KeywordSourcesConfig`，ADR-0016）。
+- `demo_publishers.yaml`：示範站不放完整內容的出版社（`DemoPublishersConfig`，ADR-0052）。
 
 檔案只由 `radar/config.py` 讀（YAML safe load、重複的鍵也算錯），讀進來後用這裡的模型驗證；
 api、worker 啟動時與 CLI 每個指令執行前都驗證一次，錯了就不啟動。
 """
 
+import dataclasses
 from decimal import Decimal
 from typing import Self
 from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from radar.domain.identifiers import normalize_issn_l
+from radar.domain.identifiers import InvalidIdentifierError, normalize_issn_l, normalize_openalex_id
 from radar.domain.papers import KeywordSource
+from radar.domain.policy import PublisherExclusions, normalize_publisher_name
 from radar.domain.scope import ScopeSettings
 
 _FROZEN = ConfigDict(frozen=True, extra="forbid")
@@ -189,8 +192,61 @@ class KeywordSourcesConfig(BaseModel):
     active: KeywordSource
 
 
+class DemoExcludedPublisher(BaseModel):
+    """一家示範站不放完整內容的出版社：OpenAlex 的出版社 ID 或名稱，任一個對上就排除。
+
+    `id` 可以是 None（還沒查證）；`name` 用 OpenAlex `host_organization_name` 的完整寫法，比對前
+    做 `normalize_publisher_name`。`note` 寫來源或為什麼列（只給人看）。
+    """
+
+    model_config = _FROZEN
+
+    id: str | None
+    name: str = Field(min_length=1, max_length=300)
+    note: str = Field(min_length=1, max_length=500)
+
+    @field_validator("id", mode="before")
+    @classmethod
+    def _normalize_id(cls, value: object) -> object:
+        # 只處理字串；其他型別交給 pydantic 回報。
+        if not isinstance(value, str):
+            return value
+        try:
+            normalized = normalize_openalex_id(value)
+        except InvalidIdentifierError:
+            raise ValueError("要是 OpenAlex 的出版社 ID（P 開頭）") from None
+        if not normalized.startswith("P"):
+            raise ValueError("要是 OpenAlex 的出版社 ID（P 開頭）")
+        return normalized
+
+    @field_validator("name", "note")
+    @classmethod
+    def _not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("不能是空白")
+        return value
+
+
+class DemoPublishersConfig(BaseModel):
+    """`config/demo_publishers.yaml`：示範站不放完整內容的出版社（ADR-0007 第 5 點、ADR-0052）。
+
+    清單至少一筆（Kevin 2026-11-14 決定先放 IEEE；整個清單不見等於全部放行，所以不收空清單）。
+    """
+
+    model_config = _FROZEN
+
+    excluded: tuple[DemoExcludedPublisher, ...] = Field(min_length=1)
+
+    def exclusions(self) -> PublisherExclusions:
+        """`is_demo_eligible` 用的排除清單（ID 與正規化過的名稱）。"""
+        return PublisherExclusions(
+            ids=frozenset(entry.id for entry in self.excluded if entry.id is not None),
+            names=frozenset(normalize_publisher_name(entry.name) for entry in self.excluded),
+        )
+
+
 class DomainConfig(BaseModel):
-    """四個領域設定檔合在一起。"""
+    """五個領域設定檔合在一起。"""
 
     model_config = _FROZEN
 
@@ -198,3 +254,14 @@ class DomainConfig(BaseModel):
     openalex: OpenAlexConfig
     exclusion_rules: ExclusionRulesConfig
     keyword_sources: KeywordSourcesConfig
+    demo_publishers: DemoPublishersConfig
+
+    def scope_settings(self) -> ScopeSettings:
+        """寫入論文用的設定：追蹤範圍（`journals.yaml`）＋示範站排除的出版社。
+
+        正式的寫入路徑（每週更新、reparse）一律用這個，不用 `JournalsConfig.scope_settings()`
+        （那個不帶排除清單，寫入的論文一律不算示範站可用）。
+        """
+        return dataclasses.replace(
+            self.journals.scope_settings(), demo_publishers=self.demo_publishers.exclusions()
+        )

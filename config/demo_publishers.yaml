@@ -1,0 +1,31 @@
+# 示範站不放完整內容的出版社（AD-18 領域設定；api、worker、CLI 啟動時由 radar/config.py 驗證，
+# 錯了就不啟動）。ADR-0007 第 5 點、ADR-0052。
+#
+# 這些出版社的論文就算是 CC BY，也不算「示範站可用」（paper.demo_eligible 是 false），
+# 不會進 view demo_full_paper：示範站上只有書目與分類標籤。
+#
+# - id：OpenAlex 的出版社 ID（P 開頭，例如 P4310320990；也可以寫 https://openalex.org/P…）。
+#   還沒查證就寫 null。
+# - name：OpenAlex host_organization_name 的完整寫法。比對前兩邊都做同一個正規化：NFKC、
+#   不分大小寫、連續空白縮成一個、去頭尾空白。
+# - note：為什麼列、出處（只給人看）。
+# - 比對：論文「出版社自己那一版」（primary_location.source）的出版社 ID 與名稱，含上層出版社
+#   （host_organization_lineage、host_organization_lineage_names）；任一個 ID 或名稱對上就排除。
+#   同一家可以寫好幾筆（不同寫法的名稱各一筆）。排除方向多對上只會更保守。
+# - excluded 至少一筆。
+#
+# 清單改了之後，已經存下的 demo_eligible 不會自己變：要跑 `radar reparse` 重算（ADR-0052）。
+#
+# [ASSUMPTION] 下面的 ID 與名稱都還沒用 OpenAlex 的實際資料查證（這一輪不准連 OpenAlex，官方
+# 文件也沒寫 IEEE 的 ID）。Kevin 補資料後用唯讀查詢核對資料庫裡 IEEE 論文實際的 publisher_ids、
+# publisher_names，再把 id 補上、名稱改成實際的寫法。
+excluded:
+  - id: null
+    name: Institute of Electrical and Electronics Engineers
+    note: Kevin 2026-11-14 決定；Kevin 回 IEEE 的信承諾示範站不顯示 IEEE 的全文與摘要。名稱未經 OpenAlex 資料查證。
+  - id: null
+    name: IEEE
+    note: 同上，縮寫寫法。名稱未經 OpenAlex 資料查證。
+  - id: null
+    name: IEEE Computer Society
+    note: 同上，IEEE 底下的學會出版品。名稱未經 OpenAlex 資料查證。

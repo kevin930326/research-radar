@@ -54,6 +54,7 @@ from radar.domain.papers import (
     UpsertResult,
     check_storable_text,
 )
+from radar.domain.policy import is_demo_eligible
 from radar.domain.processing import ProcessingFacts
 from radar.domain.scope import ScopeSettings, is_in_scope
 from radar.domain.trial_runs import TrialCandidate
@@ -65,7 +66,7 @@ from radar.repo.visibility import visible_papers, visible_to_system_only
 log = structlog.get_logger(__name__)
 
 # --- 表的定義（`alembic check` 拿來和資料庫比對；遷移 0003 建表、0005 加欄位與兩張表、0007 加
-# `first_snapshot_id`、0009 加 `source_changed_at`） -----------------------------------------
+# `first_snapshot_id`、0009 加 `source_changed_at`、0021 加授權、出版社、`demo_eligible`） -----
 
 _EMPTY_TEXT_ARRAY = text("'{}'::text[]")
 
@@ -101,6 +102,13 @@ paper_table = Table(
     # 由遷移 0009 加（Story 1.11）：寫入時 `source_hash` 變了的最後時間；NULL＝寫入以來沒變過。
     # 只由 `_update_existing` 寫（ADR-0028）。
     Column("source_changed_at", DateTime(timezone=True)),
+    # 由遷移 0021 加（Story 3.7a、ADR-0052）：出版社自己那一版（OpenAlex `primary_location`）的
+    # 授權原字串、出版社 ID 與名稱（含 lineage），以及由 `domain/policy.is_demo_eligible` 算好的
+    # 「示範站可用」。都只由 `upsert_by_external_id` 寫；都不算進 `source_hash`。
+    Column("primary_license", Text),
+    Column("publisher_ids", ARRAY(Text), nullable=False, server_default=_EMPTY_TEXT_ARRAY),
+    Column("publisher_names", ARRAY(Text), nullable=False, server_default=_EMPTY_TEXT_ARRAY),
+    Column("demo_eligible", Boolean, nullable=False, server_default=text("false")),
     CheckConstraint(
         "origin IN ('tracked', 'expansion', 'import', 'manual')",
         name="origin",
@@ -115,6 +123,9 @@ paper_table = Table(
     ),
     CheckConstraint(
         "source_hash IS NULL OR source_hash ~ '^[0-9a-f]{64}$'", name="source_hash_format"
+    ),
+    CheckConstraint(
+        "primary_license IS NULL OR primary_license <> ''", name="primary_license_not_empty"
     ),
 )
 
@@ -691,6 +702,8 @@ def upsert_by_external_id(
 
     `in_scope` 由 `is_in_scope` 算；`lab_visible`＝原本的值 OR `in_scope` OR `origin` 是
     `expansion`；`origin` 只在新增時寫；`excluded_reason` 由呼叫端明確決定、整欄覆寫。
+    `demo_eligible` 由 `is_demo_eligible` 算（授權、出版社、`scope.demo_publishers`；ADR-0052），
+    和授權、出版社欄位在 CREATED／UPDATED 時一起整欄覆寫；STALE 時都不寫。
 
     CREATED／UPDATED 時一併寫摘要（`_write_abstract`）：有摘要就「有就更新、沒有才新增」這個
     來源的那一列，沒有摘要就刪掉這個來源的那一列，接著重新決定這篇的 `is_current`。
@@ -721,6 +734,9 @@ def upsert_by_external_id(
 
     ids = paper.external_ids()
     in_scope = is_in_scope(paper.journal_issn_l, paper.publication_year, scope)
+    demo_eligible = is_demo_eligible(
+        paper.primary_license, paper.publisher_ids, paper.publisher_names, scope.demo_publishers
+    )
     values: dict[str, object] = {
         "title": paper.title,
         "publication_year": paper.publication_year,
@@ -739,6 +755,10 @@ def upsert_by_external_id(
         "referenced_works": list(paper.referenced_works),
         "cited_by_count": paper.cited_by_count,
         "source_hash": paper.source_hash,
+        "primary_license": paper.primary_license,
+        "publisher_ids": list(paper.publisher_ids),
+        "publisher_names": list(paper.publisher_names),
+        "demo_eligible": demo_eligible,
     }
 
     owners = _find_owners(connection, ids)
@@ -835,12 +855,15 @@ def _insert_new(
                     "INSERT INTO paper (origin, title, publication_year, journal_issn_l,"
                     " in_scope, excluded_reason, lab_visible, openalex_fetched_at,"
                     " work_type, is_retracted, volume, issue, first_page, last_page,"
-                    " authors, referenced_works, cited_by_count, source_hash)"
+                    " authors, referenced_works, cited_by_count, source_hash,"
+                    " primary_license, publisher_ids, publisher_names, demo_eligible)"
                     " VALUES (:origin, :title, :publication_year, :journal_issn_l, :in_scope,"
                     " :excluded_reason, :shares_with_lab, :fetched_at,"
                     " :work_type, :is_retracted, :volume, :issue, :first_page, :last_page,"
                     " CAST(:authors AS text[]), CAST(:referenced_works AS text[]),"
-                    " :cited_by_count, :source_hash)"
+                    " :cited_by_count, :source_hash,"
+                    " :primary_license, CAST(:publisher_ids AS text[]),"
+                    " CAST(:publisher_names AS text[]), :demo_eligible)"
                     " RETURNING id"
                 ),
                 {**values, "origin": origin.value},
@@ -866,7 +889,7 @@ def _update_existing(
 
     鎖論文時一起讀舊的 `source_hash`：要寫的不同（含舊的是 NULL）就把 `source_changed_at` 設成
     `clock_timestamp()`、結果的 `source_changed` 為真；相同就保留原值（ADR-0028）。被引用次數、
-    關鍵字不在指紋裡，只改它們不算變動。
+    關鍵字、授權、出版社、`demo_eligible` 不在指紋裡，只改它們不算變動（照樣更新，不讓 AI 重做）。
 
     用 `clock_timestamp()`（這一句執行的時間）不用 `now()`（交易開始的時間）：這一句在拿到論文的
     列鎖之後才執行。等著每週套用放鎖的寫入，記下的時間會晚於那次快照的 `as_of`（也是
@@ -903,6 +926,10 @@ def _update_existing(
             " source_hash = :source_hash,"
             " source_changed_at = CASE WHEN :source_changed THEN clock_timestamp()"
             " ELSE source_changed_at END,"
+            " primary_license = :primary_license,"
+            " publisher_ids = CAST(:publisher_ids AS text[]),"
+            " publisher_names = CAST(:publisher_names AS text[]),"
+            " demo_eligible = :demo_eligible,"
             " updated_at = now()"
             " WHERE id = :id"
         ),

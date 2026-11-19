@@ -27,6 +27,7 @@ from radar.domain.papers import (
     AbstractSource,
     ParsedKeyword,
     ParsedPaper,
+    check_storable_text,
 )
 from radar.domain.parsers import ParseError
 
@@ -53,6 +54,13 @@ def parse_openalex_work(content: bytes, *, fetched_at: datetime) -> ParsedPaper:
       缺號）；沒有或還原後是空的就是 None。有摘要時 `abstract_source`＝`openalex`。
     - `referenced_works`←正規化的 W 開頭 ID，去重複、保持順序；`cited_by_count`。
     - `keywords`←（`id` 的最後一段, `display_name`），同一個 key 只留第一個。
+    - `primary_license`←`primary_location.license`（去頭尾空白，看不懂的字串也照存）；
+      `publisher_ids`←`primary_location.source.host_organization`＋`host_organization_lineage`
+      （正規化的 OpenAlex ID，看不懂的照原字串）；`publisher_names`←`host_organization_name`＋
+      `host_organization_lineage_names`。只看 `primary_location`，不看 `best_oa_location`、
+      `locations`（ADR-0052）。這三個欄位只拿來判定示範站可用，所以**不丟 `ParseError`**：
+      型別不對、空白、存不進資料庫的值當作沒有（判定一律往「不可用」那邊走），不會讓一篇
+      論文因為這幾個欄位而整篇解析失敗。
 
     Raises:
         ParseError: 看不懂（訊息只有欄位路徑與原因，不含內容值）。
@@ -109,6 +117,9 @@ def _parse(content: bytes, fetched_at: datetime) -> ParsedPaper:
         "referenced_works": _referenced_works(work),
         "cited_by_count": _optional(work, "cited_by_count", int, "cited_by_count"),
         "keywords": _keywords(work),
+        "primary_license": _primary_license(work),
+        "publisher_ids": _publisher_values(work, _PUBLISHER_ID_KEYS, _publisher_id),
+        "publisher_names": _publisher_values(work, _PUBLISHER_NAME_KEYS, _publisher_name),
     }
     try:
         return ParsedPaper.model_validate(values)
@@ -175,6 +186,72 @@ def _journal_issn_l(work: Mapping[str, Any]) -> str | None:
     path = "primary_location.source.issn_l"
     issn_l = _optional(source, "issn_l", str, path)
     return None if issn_l is None else _identifier(issn_l, path, normalize_issn_l)
+
+
+def _primary_source(work: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    location = _optional(work, "primary_location", dict, "primary_location")
+    if location is None:
+        return None
+    return _optional(location, "source", dict, "primary_location.source")
+
+
+def _storable(value: object) -> str | None:
+    """字串去頭尾空白；不是字串、空白、存不進資料庫的回 None（寬鬆讀取，不丟錯）。"""
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    if not stripped:
+        return None
+    try:
+        check_storable_text(stripped, "出版社或授權")
+    except ValueError:
+        return None
+    return stripped
+
+
+def _primary_license(work: Mapping[str, Any]) -> str | None:
+    location = _optional(work, "primary_location", dict, "primary_location")
+    if location is None:
+        return None
+    return _storable(location.get("license"))
+
+
+# （直屬的欄位, lineage 的欄位）
+_PUBLISHER_ID_KEYS = ("host_organization", "host_organization_lineage")
+_PUBLISHER_NAME_KEYS = ("host_organization_name", "host_organization_lineage_names")
+
+
+def _publisher_id(value: object) -> str | None:
+    text = _storable(value)
+    if text is None:
+        return None
+    try:
+        return normalize_openalex_id(text)
+    except InvalidIdentifierError:
+        return text
+
+
+def _publisher_name(value: object) -> str | None:
+    return _storable(value)
+
+
+def _publisher_values(
+    work: Mapping[str, Any],
+    keys: tuple[str, str],
+    clean: Callable[[object], str | None],
+) -> tuple[str, ...]:
+    """直屬的值在最前面，接著 lineage；去重複、保持順序；看不懂的值略過（不丟錯）。"""
+    source = _primary_source(work)
+    if source is None:
+        return ()
+    direct, lineage = source.get(keys[0]), source.get(keys[1])
+    candidates = [direct, *(lineage if isinstance(lineage, list) else [])]
+    seen: dict[str, None] = {}
+    for candidate in candidates:
+        cleaned = clean(candidate)
+        if cleaned is not None:
+            seen.setdefault(cleaned, None)
+    return tuple(seen)
 
 
 def _authors(work: Mapping[str, Any]) -> tuple[str, ...]:
