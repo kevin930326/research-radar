@@ -80,9 +80,9 @@ ADR-0003 已經定了大方向：`pg_dump` 18、age 加密、上傳 R2 的 `back
     - `COMMIT` 前、只在 `--shared-only`：成員資料（`RR001`，見第 10 點）；
     - `COMMIT` 前、最後一項：目標資料庫沒有別的用戶端連著（`RR005`，審查第 2 輪 R2）。`pg_stat_activity` 裡同一個資料庫（`datname = current_database()`）、不是自己（`pid <> pg_backend_pid()`）、有登入角色（`usesysid IS NOT NULL`，自動清理這類背景程序沒有）、類型是 `client backend` 或看不到類型（NULL）的連線，有一條就退回。還原用的 `radar_owner` 不是超級使用者、也沒有 `pg_read_all_stats`：別的角色的連線它看得到 `datname`、`pid`、`usesysid`，`backend_type` 是 NULL（在 PostgreSQL 18 的測試資料庫上確認過），所以 NULL 也算。同一個交易會沿用第一次讀到的 `pg_stat_activity` 快照，讀之前先 `pg_stat_clear_snapshot()`。`radar restore` 交給 `psql` 之前先關掉自己連線池裡閒著的連線（不然自己那條也算）。
 
-    轉送時逐行檢查 `psql` 會收到的 SQL（審查 C1）：照 `psql` 的斷句方式追蹤引號、`$tag$`、註解、`BEGIN ATOMIC` 與 COPY 區段（`COPY … FROM stdin;` 到單獨一行 `\.`）；COPY 資料以外遇到交易控制語句（`BEGIN`、`COMMIT`、`ROLLBACK`、`END`、`ABORT`、`SAVEPOINT`、`RELEASE`、`START`／`PREPARE TRANSACTION`）或 `\restrict`／`\unrestrict` 以外的 `psql` 指令，就在那一行送出前殺掉 `psql`、不送 `COMMIT`，丟出「這份備份含有會自己 commit 的內容」。送 `COMMIT` 前也要確認腳本停在一句話的結尾。
+    轉送時逐行檢查 `psql` 會收到的 SQL（審查 C1）：照 `psql` 的斷句方式追蹤引號、`$tag$`、註解、`BEGIN ATOMIC` 與 COPY 區段（`COPY … FROM stdin;` 到單獨一行 `\.`）；COPY 資料以外遇到交易控制語句（`BEGIN`、`COMMIT`、`ROLLBACK`、`END`、`ABORT`、`SAVEPOINT`、`RELEASE`、`START`／`PREPARE TRANSACTION`）或 `\restrict`／`\unrestrict` 以外的 `psql` 指令，就在那一行送出前殺掉 `psql`、不送 `COMMIT`，丟出「這份備份含有會自己 commit 的內容」。送 `COMMIT` 前也要確認腳本停在一句話的結尾。這段檢查是防意外用的，不是安全防線（Kevin 2026-11-19 決定）；已知抓不到的寫法與理由見「已知限制」。
 
-    行尾照 PostgreSQL 18 的 `psql` 與後端掃描器（審查第 2 輪 R1）：`psql` 只用 LF 分行（`fgets`），轉送也只用 LF 切；`--` 註解在 CR 或 LF 結束（`scan.l`／`psqlscan.l` 的 `newline [\n\r]`），CR 後面同一行的內容當 SQL 檢查；COPY 資料只在整行剛好是 `\.` 加 LF 或 CRLF 時結束（`copy.c` 的 `handleCopyIn`）。和 `psql` 可能讀得不一樣的寫法一律停下、不猜：NUL 位元組；還沒看到 `SET standard_conforming_strings = on;` 之前，一般字串裡引號前面有奇數個反斜線（`standard_conforming_strings` 被關掉時 `\'` 是跳脫），或反斜線前面是非 ASCII 字元（SJIS 這類編碼）——看到之後的下一行起照 on 的規則讀，改這個設定的其他寫法一律停下（審查第 3 輪 Q1，見已知限制）；`E'…'` 裡非 ASCII 字元後面接反斜線；`COPY … FROM stdin` 後面有選項、`COPY BINARY`、COPY 那一行分號後面還有東西；不是整行的 `\restrict`／`\unrestrict 金鑰`（`psql` 在 `\\` 之後會把同一行剩下的當 SQL）。`COPY … FROM STDOUT` 也當成讀 COPY 資料（文法裡 STDIN、STDOUT 都代表用戶端）；數字或 `$1` 後面緊接的識別字和數字算同一個記號（`1E'…'` 的 `'` 是一般字串，和 PostgreSQL 18 一樣）。
+    行尾照 PostgreSQL 18 的 `psql` 與後端掃描器（審查第 2 輪 R1）：`psql` 只用 LF 分行（`fgets`），轉送也只用 LF 切；`--` 註解在 CR 或 LF 結束（`scan.l`／`psqlscan.l` 的 `newline [\n\r]`），CR 後面同一行的內容當 SQL 檢查；COPY 資料只在整行剛好是 `\.` 加 LF 或 CRLF 時結束（`copy.c` 的 `handleCopyIn`）。下面這些和 `psql` 可能讀得不一樣的寫法停下、不猜（不是全部，已知漏掉的寫法見「已知限制」）：NUL 位元組；還沒看到 `SET standard_conforming_strings = on;` 之前，一般字串裡引號前面有奇數個反斜線（`standard_conforming_strings` 被關掉時 `\'` 是跳脫），或反斜線前面是非 ASCII 字元（SJIS 這類編碼）——看到之後的下一行起照 on 的規則讀，改這個設定的其他寫法停下（審查第 3 輪 Q1；雙引號寫的 `"set_config"`、`UPDATE pg_settings` 這類寫法抓不到，見已知限制）；`E'…'` 裡非 ASCII 字元後面接反斜線；`COPY … FROM stdin` 後面有選項、`COPY BINARY`、COPY 那一行分號後面還有東西；不是整行的 `\restrict`／`\unrestrict 金鑰`（`psql` 在 `\\` 之後會把同一行剩下的當 SQL）。`COPY … FROM STDOUT` 也當成讀 COPY 資料（文法裡 STDIN、STDOUT 都代表用戶端）；數字或 `$1` 後面緊接的識別字和數字算同一個記號（`1E'…'` 的 `'` 是一般字串，和 PostgreSQL 18 一樣）。
 
     `radar restore --expect-mode {full,shared-only}`（選用，審查 S8）：有給而和清單的模式不同，就在讀目標之前拒絕；沒給時行為不變。備份的 Alembic 版本不是這個映像的 `migrations/` 認得的 revision（備份比映像新）也在讀目標之前拒絕（只讀遷移腳本，不連資料庫）。
 
@@ -109,7 +109,7 @@ ADR-0003 已經定了大方向：`pg_dump` 18、age 加密、上傳 R2 的 `back
 - 「讀到結尾才確認成功」讓殘檔問題交給 S3 的分段上傳本身：沒呼叫完成上傳之前，鍵不會出現。
 - 釘版本加封存庫：每次建置裝的是同一個版本，升級要改 Dockerfile 的版本號，PR 看得到。
 - Debian 的 age 由 apt 驗簽章，和其他系統套件同一條路，不用另外寫下載、驗雜湊、分架構的步驟。
-- 還原用 Python 轉送，才能在 `COMMIT` 前插入檢查，並在任何一邊失敗時確定不 `COMMIT`（交易在 `psql` 結束時自動退回），不靠事後刪除。
+- 還原用 Python 轉送，才能在 `COMMIT` 前插入檢查，並在任何一邊失敗時確定不 `COMMIT`（交易在 `psql` 結束時自動退回），不靠事後刪除。前提是備份本身沒有漏過轉送檢查的 `COMMIT`：`pg_restore` 的正常輸出不會有，特製的備份做得到（見「已知限制」）。
 - 歸類由 schema 體檢守著：之後的 Story 新增資料表沒歸類，CI 就失敗，不會默默把成員資料帶到試用主機。
 
 ## 取捨
@@ -121,6 +121,8 @@ ADR-0003 已經定了大方向：`pg_dump` 18、age 加密、上傳 R2 的 `back
 - CI 每次多裝兩個套件，checks job 多花約幾十秒的 Actions 分鐘數。
 
 ## 已知限制／抓不到的情況
+
+下面說的「整個退回」「不會留下半套」，都以備份裡沒有漏過轉送檢查的 `COMMIT` 為前提（`pg_restore` 的正常輸出不會有；特製的備份做得到，見「轉送檢查已知抓不到、或會誤拒的寫法」）。
 
 - 本機（Mac）沒有 `pg_dump`、age，真的工具的往返測試（`tests/integration/test_backup_restore.py`）只在 CI 跑。本機用替身跑服務層的整合測試（`tests/integration/test_backup_service.py`），映像只驗工具版本。
 - 只有函式或型別、沒有 relation 的資料庫算「空的」；還原時會在同一個交易裡撞名而整個退回，不會留下半套。
@@ -134,7 +136,14 @@ ADR-0003 已經定了大方向：`pg_dump` 18、age 加密、上傳 R2 的 `back
 - **子交易裡建的 relation 會被拒絕**（審查第 2 輪 R3，不改程式）：「都是這個交易建的」是用主交易的 ID 比對（`pg_class.xmin` 等於 `pg_current_xact_id()`）。子交易（`SAVEPOINT`、PL/pgSQL 的 `EXCEPTION` 區塊）裡建或改的 relation，`xmin` 是子交易的 ID，會被當成別人建的而整個退回——錯在「拒絕還原」這個安全的方向。`pg_restore` 的輸出沒有子交易（轉送器也拒絕 `SAVEPOINT`），只有特製的備份會碰到。另外 `xmin` 是那一列最後一次被改的交易、不是建立者：別人建的表在我們的交易裡被改過，`xmin` 會變成我們的；正常的 `pg_restore` 輸出不會改它沒建的表（撞名時 `CREATE` 就先失敗），只有特製的備份做得到。
 - **只因成員加入才存在的 `paper` 列**（審查 S3）：成員手動加入或上傳時建的 `paper` 列沒有成員欄位，`--shared-only` 會帶出去（標題、作者這些書目資料，不含成員是誰）。見「要 Kevin 決定」第 7 項。
 - **備份不能證明是誰做的**（審查 S7）：age 的公鑰不是秘密，拿到公鑰的人都能做一份格式正確的加密檔。只還原自己剛做、自己解密的檔。
-- **轉送檢查是照 `psql` 斷句方式寫的近似**（審查 C1、第 2 輪 R1）：只處理 `pg_restore` 會輸出的寫法（引號、`$tag$`、巢狀註解、`BEGIN ATOMIC`、COPY 區段），行尾照 PostgreSQL 18（見第 12 點）；`\if` 這類 `psql` 指令一律拒絕；`psql` 的 `:變數` 代換沒有模擬（`pg_restore` 的輸出不會有；能用的只有 `psql` 自己預設的變數，例如版本、資料庫名稱，`\set` 這類改變數的指令會被拒絕）。編碼只照 UTF-8 看：備份的 SQL 把 `client_encoding` 改成 SJIS 這類編碼時，會讓 `psql` 斷句不同的寫法（反斜線緊接在非 ASCII 字元後面）一律停下，其他情況照 UTF-8 判斷。一般字串裡的反斜線（審查第 3 輪 Q1）：看到 `pg_restore` 開頭的 `SET standard_conforming_strings = on;` 之前，引號前有奇數個反斜線就停下；那一句之後的下一行起照 on 的規則讀（反斜線是一般字元，`'C:\'` 這類註解、預設值可以還原）。之後任何可能改掉這個設定的寫法（設成 on 以外的值、`SET LOCAL`、`SET SESSION`、`RESET`、`RESET ALL`、`SET` 用雙引號名稱、`pg_restore` 那一行 `set_config('search_path', '', false)` 以外的 `set_config`）一律停下；還原途中被執行的使用者函式自己改這個設定，靜態檢查看不到（`pg_restore` 的輸出不會在頂層呼叫使用者函式，只有特製的備份做得到）。交易裡的 `RR003`、`RR004`、`RR005` 是第二道。
+- **轉送檢查是照 `psql` 斷句方式寫的近似**（審查 C1、第 2 輪 R1）：只處理 `pg_restore` 會輸出的寫法（引號、`$tag$`、巢狀註解、`BEGIN ATOMIC`、COPY 區段），行尾照 PostgreSQL 18（見第 12 點）；`\if` 這類 `psql` 指令一律拒絕；`psql` 的 `:變數` 代換沒有模擬（`pg_restore` 的輸出不會有；能用的只有 `psql` 自己預設的變數，例如版本、資料庫名稱，`\set` 這類改變數的指令會被拒絕）。編碼只照 UTF-8 看：備份的 SQL 把 `client_encoding` 改成 SJIS 這類編碼時，會讓 `psql` 斷句不同的寫法（反斜線緊接在非 ASCII 字元後面）一律停下，其他情況照 UTF-8 判斷。一般字串裡的反斜線（審查第 3 輪 Q1）：看到 `pg_restore` 開頭的 `SET standard_conforming_strings = on;` 之前，引號前有奇數個反斜線就停下；那一句之後的下一行起照 on 的規則讀（反斜線是一般字元，`'C:\'` 這類註解、預設值可以還原）。之後可能改掉這個設定的寫法（設成 on 以外的值、`SET LOCAL`、`SET SESSION`、`RESET`、`RESET ALL`、`SET` 用雙引號名稱、`pg_restore` 那一行 `set_config('search_path', '', false)` 以外、沒加雙引號的 `set_config`）停下；加了雙引號的 `"set_config"`、`UPDATE pg_settings` 這類寫法抓不到（見下一條）；還原途中被執行的使用者函式自己改這個設定，靜態檢查看不到（`pg_restore` 的輸出不會在頂層呼叫使用者函式，只有特製的備份做得到）。交易裡的 `RR001`、`RR003`、`RR004`、`RR005` 是第二道，但只在沒有提早 commit 時有用：漏掉的 `COMMIT` 一旦執行，它前面的內容已經寫進資料庫，之後的每一句也各自 commit；這幾項檢查最多讓還原報錯，擋不回來。
+- **轉送檢查已知抓不到、或會誤拒的寫法**（Codex 第三次複查與 2026-11-19 的文件審查；Claude 對過程式，並用同樣的寫法在記憶體裡跑過轉送檢查，結果和下面一致；Kevin 2026-11-19 決定接受，程式不改）。列出的是審查找到的，不是全部：
+  - **雙引號的 `"set_config"` 繞得過檢查**：只有沒加引號的名稱會被比對，雙引號裡的內容當成名稱整段跳過。`SELECT pg_catalog."set_config"('standard_conforming_strings', 'off', false);` 會通過；之後資料庫照 off 讀一般字串（`\'` 是跳脫），轉送檢查還照 on 讀，例如下一行 `SELECT '\'; SELECT '; COMMIT; --';`，轉送檢查把 `COMMIT` 當成字串內容，資料庫卻會執行它。
+  - **`E'…'` 的跨行接續字串會漏掉 `COMMIT`**：PostgreSQL 把只隔著換行的兩段字串接成同一段，第二段沿用第一段 `E'…'` 的跳脫規則；轉送檢查把第二段當一般字串讀。例如 `SELECT E'a'` 換行後接 `'\'; SELECT '; COMMIT; --';`，轉送檢查看不到 `COMMIT`，資料庫會執行它。
+  - **用 `UPDATE pg_settings` 改這個設定也抓不到**：`UPDATE pg_catalog.pg_settings SET setting = 'off' WHERE name = 'standard_conforming_strings';` 的設定名稱在字串裡、也沒有 `set_config` 這個詞，會通過；PostgreSQL 對 `pg_settings` 的 UPDATE 等於呼叫 `set_config`，效果和第一項一樣。
+  - **名為 `set_config`、`standard_conforming_strings` 的名稱會被誤拒**：`$…$` 以外出現沒加引號的 `set_config` 或 `standard_conforming_strings`（表、欄位、view 或預設值裡的函式呼叫）都會整份拒絕還原，例如 `CREATE TABLE public.set_config (id integer);`、`CREATE TABLE public.t (set_config text);`，都沒有改設定。錯誤訊息會寫「會自己 commit 的內容」，其實是這個原因。錯在「拒絕還原」這個方向；現在的遷移沒有這兩個名稱。
+  - 前三種只有特製的備份做得到（`pg_restore` 不會這樣寫）。
+- **轉送檢查不是安全防線**（Kevin 2026-11-19 決定）：它防的是意外，例如之後拿掉 `--no-large-objects`、或用別的方式做出帶了大型物件的備份時，大型物件自己寫的 `BEGIN`／`COMMIT`；不是防有心人特製的備份檔。要讓特製的備份檔被還原，得讓 Kevin 拿這份檔來還原（age 的公鑰不是秘密，誰都能做出格式正確的檔，見上面「備份不能證明是誰做的」），或能改 R2 `backup/` 的內容；這樣的人本來就能在備份裡放任何 SQL，還原時對目標資料庫做擁有者角色能做的任何事，轉送檢查擋不了，也不打算擋。備份檔可不可信，靠的是 R2 `backup/` 的寫入權限，以及只還原自己做、自己解密的檔；age 的私鑰只保護內容不外流，不證明是誰做的。漏過轉送檢查時，`psql` 的反斜線指令（例如在主機上執行 shell 的 `\!`）照 PostgreSQL 18 的設計仍由 `pg_restore` 18 寫在開頭的 `\restrict`（每次隨機的金鑰）擋住，影響只限目標資料庫；這一點只照設計推論，沒有用真的 `psql` 驗證過，改還原方式時要重看。
 - **`pg_dump` 開始輸出之後卡住沒有上限**（審查第 2 輪 O3）：開始輸出前有 `DUMP_START_TIMEOUT_SECONDS`；開始之後（例如連線斷了卻沒有斷線的訊號）`pg_dump` 與上傳會一直等。不會留下不完整的備份（上傳沒完成就沒有鍵），但指令不會自己結束，要手動停。7.5 排程備份時可以在外面加整體的時限。
 - **逾時後讀輸入的背景執行緒還卡著**（審查第 3 輪 P2，不改程式）：讀檔頭或轉送輸入逾時後，讀標準輸入的背景執行緒（daemon）可能還卡在讀取；`radar restore` 結束時 Python 可能印出 fatal error 之類的訊息。不影響資料：逾時時 `psql` 已經被停掉、沒有送 `COMMIT`，目標沒有被寫入或整個交易已退回。
 - **PGDG 的相依套件沒釘版本、`pgdg.list` 沒設優先順序**（審查 I1）：只釘了 `postgresql-client-18`、`libpq5`，它們拉進來的其他套件跟當下的套件庫走；PGDG 有同名套件時 apt 會照版本高低挑。
@@ -223,6 +232,7 @@ ADR-0003 已經定了大方向：`pg_dump` 18、age 加密、上傳 R2 的 `back
 - 設 R2 的 lifecycle 時加「清掉沒完成的分段上傳」（7.5）。
 - Epic 6 上傳上線前處理只因成員加入的 `paper` 列（「要 Kevin 決定」第 7 項）。
 - 想驗映像裡的工具時，在 CI 的 image job 用建好的映像跑一次 `pg_dump --version`、`age --version`（審查 I3）。
+- Story 7.5（每晚備份）之前，評估能不能改用資料庫內建的還原方式，拿掉自己寫的 SQL 斷句檢查：它要跟著 `psql` 的斷句規則追，維護成本高，也已經有抓不到的寫法（見「已知限制」）。評估時一併看「考慮過的選項」乙當時沒選的原因（不能在 `COMMIT` 前插入檢查、輸入讀到一半斷掉時不能確定不 commit）；換方式能拿掉的是自己寫的斷句檢查與維護成本，特製的備份仍可能提早 commit，這部分照「轉送檢查不是安全防線」的決定處理。
 
 ## 名詞
 

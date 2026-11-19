@@ -980,5 +980,6 @@
 - **`backend_type`（連線類型）**：`pg_stat_activity` 的一欄，寫這一列是一般的用戶端連線（`client backend`）還是自動清理這類背景程序；不是超級使用者時，看別的角色的連線這一欄是空的。
 - **`pg_stat_clear_snapshot()`**：PostgreSQL 函式；同一個交易裡 `pg_stat_activity` 會沿用第一次讀到的樣子，呼叫它之後再讀才是當下的樣子。
 - **NUL 位元組**：值是 0 的位元組；`psql` 讀到它就把那一行剩下的部分丟掉，所以還原轉送遇到它就停下。
-- **`set_config`**：PostgreSQL 的函式，用一句 `SELECT` 改連線的設定（和 `SET` 一樣）；還原轉送只准 `pg_restore` 自己寫的那一行 `set_config('search_path', '', false)`，其他的一律停下（ADR-0051）。
+- **`set_config`**：PostgreSQL 的函式，用一句 `SELECT` 改連線的設定（和 `SET` 一樣）；還原轉送只准 `pg_restore` 自己寫的那一行 `set_config('search_path', '', false)`，其他沒加雙引號的會停下；寫成 `"set_config"` 的抓不到（ADR-0051 已知限制）。
 - **資料庫的健康檢查（`pg_isready`）**：Docker 每隔幾秒連一下資料庫，確認它還活著；剛好撞上還原的最後檢查時，會被當成「別的程式連著」而退回，直接重跑即可。
+- **字串的跨行接續**：PostgreSQL 把只隔著換行的兩段字串 `'a'`、`'b'` 當成同一段 `'ab'`；前一段是 `E'…'` 時，後一段也照 `E'…'` 的跳脫規則讀，像兩張便條釘在一起就算同一張。
