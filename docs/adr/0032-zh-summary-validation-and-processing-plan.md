@@ -385,7 +385,7 @@
 
 ### 沒放的與原因
 
-- MICMAC、VIKOR：Kevin 先前決定不放（全名拿不準，見 2026-11-18 更新「決定」一節第 3 點）。
+- MICMAC、VIKOR：Kevin 先前決定不放（全名拿不準，見「2026-11-18 更新：通用縮寫的允許清單與整欄說明存成空值」的「決定」一節第 3 點）。
 - GloVe 的 `global vectorization`：不是通用寫法，登記了會放太寬。
 - B2C：摘要寫的是 `B-to-C`，要登記的「全名」就是 `B to C`，太短，過不了設定檔的長度下限。
 - SDT 只寫 `self determination`（沒有 theory）：會放太寬。
@@ -399,7 +399,7 @@
 
 `elastic compute cloud`、`structural equation analysis`、`online to offline`、`full consistency method`、`additive ratio assessment` 這幾個全名比較短，但都是專有寫法：摘要出現 `Amazon Elastic Compute Cloud` 時本來就該寫 EC2；`structural equation analysis` 就是 SEM 的意思；`full consistency method`、`additive ratio assessment` 是特定多準則方法的名字，一般句子很難剛好連續出現這幾個詞。只有部分詞（`elastic compute`、`structural equation` 不帶 analysis／modeling、`online offline`、`moving average` 不帶 autoregressive、`ratio assessment`）都照樣擋（有測試）。結論：放過編造的風險低，和第一批的 `peer to peer`、`business to business` 同級（全名本身就是依據，模型寫錯對應時抓不到）。
 
-已知漏網（有測試固定現在的行為）：
+已知漏網（`from online to offline channels` → O2O、一般說法的 `elastic compute cloud` → EC2、VARMA → ARMA 與 VAR 有測試固定現在的行為；`online to offline ratio`、seasonal ARMA、ARIMA 三項是實驗確認，沒有寫成測試）：
 - `online to offline` 不是只有 O2O 一個意思：`from online to offline channels`、`online to offline ratio` 這種方向／比例的一般說法也會讓 O2O 過，和 `peer to peer comparison` 同類。要不要拿掉 O2O 由 Kevin 決定。
 - 一般說法裡的 `elastic compute cloud`（例如 `We rent an elastic compute cloud`）也讓 EC2 過。
 - `vector autoregressive moving average`（VARMA）會讓 ARMA 與 VAR 都放行、`seasonal autoregressive moving average` 會讓 ARMA 放行，模型把 VARMA 寫成 ARMA 或 VAR 時抓不到；`autoregressive integrated moving average`（ARIMA）不會讓 ARMA 過。
