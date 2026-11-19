@@ -364,18 +364,18 @@
 
 ### 發生什麼事
 
-2026-11-18 晚上用真金鑰重跑 424 篇被拒收的論文，救回 334 篇、剩 90 篇。逐篇看剩下的，約 11 篇只要把縮寫加進 `config/zh_summary_acronyms.yaml` 就能救（摘要有全名、輸出寫了通用縮寫）。放行條件不變：縮寫在清單裡，而且標題或摘要有它登記的全名。
+2026-11-18 晚上用真金鑰重跑 424 篇被拒收的論文，救回 334 篇、剩 90 篇。逐篇看剩下的，約 11 篇只要把縮寫加進 `config/zh_summary_acronyms.yaml` 就能救（摘要有全名、輸出寫了通用縮寫；這是顧問估的數字）。其中 ISM 那篇原本就不是被 ISM 擋，真正原因可能是破折號後面的 DEMATEL（見下面「兩個樣式」的破折號）。放行條件不變：縮寫在清單裡，而且標題或摘要有它登記的全名。
 
 ### 加了哪些（`version` 1 → 2）
 
 - ARMA：`autoregressive moving average`
 - GARCH：`generalized autoregressive conditional heteroscedasticity`、`generalized autoregressive conditional heteroskedasticity`、`generalised autoregressive conditional heteroscedasticity`、`generalised autoregressive conditional heteroskedasticity`
 - PVAR：`panel vector autoregression`
-- ISM：`interpretive structural modeling`（`modelling` 靠最後一個詞的詞形變化涵蓋，有測試）
+- ISM：`interpretive structural modeling`（`modelling` 靠最後一個詞的詞形變化涵蓋，有測試）。ISM 的全名首字母就是 ism，原本就靠首字母規則放行；加這一筆只是讓清單完整，救不回任何論文。
 - FUCOM：`full consistency method`
 - MACONT：`mixed aggregation by comprehensive normalization technique`、`mixed aggregation by comprehensive normalisation technique`
 - ARAS：`additive ratio assessment`
-- MARCOS：`measurement of alternatives and ranking according to compromise solution`、`measurement of alternatives and ranking according to the compromise solution`、`measurement alternatives and ranking according to the compromise solution`、`measurement alternatives and ranking based on the compromise solution`、`measurement of alternatives and ranking based on the compromise solution`
+- MARCOS：`measurement of alternatives and ranking according to compromise solution`、`measurement alternatives and ranking according to compromise solution`、`measurement of alternatives and ranking according to the compromise solution`、`measurement alternatives and ranking according to the compromise solution`、`measurement alternatives and ranking based on the compromise solution`、`measurement of alternatives and ranking based on the compromise solution`
 - FDEMATEL：`fuzzy decision making trial and evaluation laboratory`
 - EC2：`elastic compute cloud`
 - O2O：`online to offline`
@@ -385,7 +385,7 @@
 
 ### 沒放的與原因
 
-- MICMAC、VIKOR：Kevin 先前決定 E（全名拿不準，不放）。
+- MICMAC、VIKOR：Kevin 先前決定不放（全名拿不準，見 2026-11-18 更新「決定」一節第 3 點）。
 - GloVe 的 `global vectorization`：不是通用寫法，登記了會放太寬。
 - B2C：摘要寫的是 `B-to-C`，要登記的「全名」就是 `B to C`，太短，過不了設定檔的長度下限。
 - SDT 只寫 `self determination`（沒有 theory）：會放太寬。
@@ -393,11 +393,16 @@
 ### 兩個樣式的實際行為（照現在的程式，沒有改）
 
 - **U+2010 連字號**（`online‐to‐offline`）：檢查用副本把 U+2010 換成一般連字號，對得上 `online to offline`，輸出 `O2O` 放行。
-- **全名前後緊接破折號（U+2014，沒有空白）**：例如 `Interpretive Structural Modeling—Decision Making Trial and Evaluation Laboratory`。破折號在檢查用副本裡是連字號。破折號**前面**的全名（ISM）放行（全名結尾後面接連字號不影響）；破折號**後面**的全名（DEMATEL）擋下，和既有取捨「全名開頭的詞前面接連字號」一樣偏保守。破折號兩邊有空白（`Modeling — Decision`）時兩個都放行。摘要本身寫了 `(ISM-DEMATEL)` 時縮寫本來就在輸入裡，不靠清單。
+- **全名前後緊接破折號（U+2014，沒有空白）**：例如 `Interpretive Structural Modeling—Decision Making Trial and Evaluation Laboratory`。破折號在檢查用副本裡是連字號。破折號**前面**的全名（ISM）放行（全名結尾後面接連字號不影響）；破折號**後面**的全名（DEMATEL）擋下，和既有取捨「全名開頭的詞前面接連字號」一樣偏保守。U+2011～U+2013（含 en dash `–`）、U+2212、U+FF0D、U+FE63 的行為和 U+2014 一樣（檢查用副本裡都是連字號；2026-11-19 用同一句實驗確認）。破折號兩邊有空白（`Modeling — Decision`）時兩個都放行。摘要本身寫了 `(ISM-DEMATEL)` 時縮寫本來就在輸入裡，不靠清單。
 
 ### 短全名的評估
 
-`elastic compute cloud`、`structural equation analysis`、`online to offline`、`full consistency method`、`additive ratio assessment` 這幾個全名比較短，但都是專有寫法：摘要出現 `Amazon Elastic Compute Cloud` 時本來就該寫 EC2；`structural equation analysis` 就是 SEM 的意思；`online to offline` 在資管摘要裡只有 O2O 一個意思；`full consistency method`、`additive ratio assessment` 是特定多準則方法的名字，一般句子很難剛好連續出現這幾個詞。只有部分詞（`elastic compute`、`structural equation` 不帶 analysis／modeling、`online offline`、`moving average` 不帶 autoregressive、`ratio assessment`）都照樣擋（有測試）。結論：放過編造的風險低，和第一批的 `peer to peer`、`business to business` 同級（全名本身就是依據，模型寫錯對應時抓不到）。
+`elastic compute cloud`、`structural equation analysis`、`online to offline`、`full consistency method`、`additive ratio assessment` 這幾個全名比較短，但都是專有寫法：摘要出現 `Amazon Elastic Compute Cloud` 時本來就該寫 EC2；`structural equation analysis` 就是 SEM 的意思；`full consistency method`、`additive ratio assessment` 是特定多準則方法的名字，一般句子很難剛好連續出現這幾個詞。只有部分詞（`elastic compute`、`structural equation` 不帶 analysis／modeling、`online offline`、`moving average` 不帶 autoregressive、`ratio assessment`）都照樣擋（有測試）。結論：放過編造的風險低，和第一批的 `peer to peer`、`business to business` 同級（全名本身就是依據，模型寫錯對應時抓不到）。
+
+已知漏網（有測試固定現在的行為）：
+- `online to offline` 不是只有 O2O 一個意思：`from online to offline channels`、`online to offline ratio` 這種方向／比例的一般說法也會讓 O2O 過，和 `peer to peer comparison` 同類。要不要拿掉 O2O 由 Kevin 決定。
+- 一般說法裡的 `elastic compute cloud`（例如 `We rent an elastic compute cloud`）也讓 EC2 過。
+- `vector autoregressive moving average`（VARMA）會讓 ARMA 與 VAR 都放行、`seasonal autoregressive moving average` 會讓 ARMA 放行，模型把 VARMA 寫成 ARMA 或 VAR 時抓不到；`autoregressive integrated moving average`（ARIMA）不會讓 ARMA 過。
 
 ### 生效方式
 

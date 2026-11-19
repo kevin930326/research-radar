@@ -6,6 +6,7 @@ tmp 的空資料夾。不讀秘密、不連線。
 """
 
 import json
+import re
 import shutil
 from pathlib import Path
 from typing import Any
@@ -74,13 +75,17 @@ def test_every_broken_file_is_listed_together(config: Path, tmp_path: Path) -> N
 
 
 @pytest.mark.parametrize(
-    ("old", "new"),
-    [("version: 2\n", "version: 0\n"), ("acronyms:\n", "acronyms: [\n")],
+    ("pattern", "new"),
+    [(r"^version: \d+$", "version: 0"), (r"^acronyms:$", "acronyms: [")],
     ids=["version_0", "not_yaml"],
 )
-def test_broken_acronym_list_is_reported(config: Path, old: str, new: str) -> None:
+def test_broken_acronym_list_is_reported(config: Path, pattern: str, new: str) -> None:
     # 縮寫允許清單和 zh_summary.yaml 一起讀（load_zh_summary_rules），壞了也拒絕啟動。
-    _replace(config / "zh_summary_acronyms.yaml", old, new)
+    # 用正規式改壞，不依賴現在的版本號（清單升版不必改這個測試）。
+    path = config / "zh_summary_acronyms.yaml"
+    text, count = re.subn(pattern, new, path.read_text(encoding="utf-8"), flags=re.MULTILINE)
+    assert count == 1, pattern
+    path.write_text(text, encoding="utf-8")
 
     with pytest.raises(ConfigError) as caught:
         check_ai_config(PROMPTS)

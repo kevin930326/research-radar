@@ -308,6 +308,11 @@ def test_title_counts_as_input() -> None:
             "MARCOS",
         ),
         (
+            "We rank firms with measurement alternatives and ranking according to compromise "
+            "solution.",
+            "MARCOS",
+        ),
+        (
             "We rank firms with measurement alternatives and ranking according to the "
             "compromise solution.",
             "MARCOS",
@@ -443,6 +448,29 @@ def test_em_dash_right_before_a_full_name_blocks_its_acronym() -> None:
 )
 def test_short_full_names_in_an_abstract_mean_the_acronym(abstract: str, acronym: str) -> None:
     assert _method(_uses(acronym), abstract) == _uses(acronym)
+
+
+@pytest.mark.parametrize(
+    ("abstract", "acronyms"),
+    [
+        # 已知漏網，ADR-0032 2026-11-19 更新：方向的一般說法也對得上 online to offline，和
+        # peer to peer comparison 同類；要不要拿掉 O2O 由 Kevin 決定。
+        ("Consumers migrate from online to offline channels.", ("O2O",)),
+        # 已知漏網，ADR-0032 2026-11-19 更新：一般說法裡的 elastic compute cloud 也讓 EC2 過。
+        ("We rent an elastic compute cloud for the experiments.", ("EC2",)),
+        # 已知漏網，ADR-0032 2026-11-19 更新：VARMA 的全名讓 ARMA 與 VAR 都過。
+        ("We estimate a vector autoregressive moving average model.", ("ARMA", "VAR")),
+    ],
+)
+def test_known_gaps_short_full_names_in_general_wording(
+    abstract: str, acronyms: tuple[str, ...]
+) -> None:
+    # 固定現在的行為：這些不是想要的放行，但照 TASK 不改程式，先寫成已知漏網。
+    allowed = ExtendedVocabulary.build(check_copy(abstract), REAL_RULES.acronym_full_names())
+
+    for acronym in acronyms:
+        assert acronym in allowed.acronyms
+        assert _method(_uses(acronym), abstract) == _uses(acronym)
 
 
 # --- 必備反例：仍然擋得住編造 -------------------------------------------------------------------
