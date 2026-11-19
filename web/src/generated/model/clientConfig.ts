@@ -10,10 +10,13 @@
  *
  * - `timezone`：畫面上的日期換成哪個時區（IANA 名稱）。
  * - `library_page_size`：文獻庫清單一頁幾篇（Story 3.16）。
+ * - `paper_list_page_size`：找論文清單一頁幾篇（Story 3.13）。
  */
 export interface ClientConfig {
   /** @minLength 1 */
   timezone: string;
   /** @minimum 1 */
   library_page_size: number;
+  /** @minimum 1 */
+  paper_list_page_size: number;
 }

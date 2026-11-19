@@ -49,7 +49,14 @@ _VIEW_READ = re.compile(
 )
 # 准讀三個有效值 view 的模組。view 不接可見範圍：之後新增讀取者時加進這裡，並在查詢裡接上
 # `repo/visibility.py` 的可見條件（`visible_papers`）。
-VIEW_READERS = frozenset({"radar/repo/ai_blocks.py"})
+VIEW_READERS = frozenset(
+    {
+        "radar/repo/ai_blocks.py",
+        # 「論文的有效分類 key」的共用片段（Story 3.13）：計數方塊（`repo/stats.py`）與找論文清單
+        # （`repo/paper_list.py`）都從它組，兩邊都接 `visible_papers`。
+        "radar/repo/paper_filters.py",
+    }
+)
 # 反向檢查：view 的全名出現在字串裡任何位置；或 `effective_` 後面沒有接英數字（字串結尾、f-string
 # 的佔位字元、空白），代表後半段是組出來的。
 _VIEW_MENTION = re.compile(
@@ -269,3 +276,89 @@ def test_view_read_scanner_catches_reads_outside_the_allowlist() -> None:
         "radar/repo/h_suffix_fstring.py",
         "radar/repo/i_sqlalchemy.py",
     ], problems
+
+
+# --- 共用片段 `repo/paper_filters.CLASSIFICATION_KEYS` 的使用者（Story 3.13）----------------------
+#
+# `paper_filters.py` 在 `VIEW_READERS` 裡；別的模組 import 它的片段就能讀
+# `effective_classification`，字串裡卻看不到 view 的名稱（上面的反向檢查抓不到）。所以使用者另外列
+# 一份允許清單：每一個都要在自己的查詢裡接上 `visible_papers`（view 不接可見範圍）。新增使用者時
+# 加進這裡並檢查這一點。
+PAPER_FILTERS_MODULE = "radar.repo.paper_filters"
+PAPER_FILTERS_NAME = "CLASSIFICATION_KEYS"
+PAPER_FILTERS_USERS = frozenset({"radar/repo/stats.py", "radar/repo/paper_list.py"})
+
+
+def _module_of(relative: str) -> str:
+    return relative.removesuffix(".py").removesuffix("/__init__").replace("/", ".")
+
+
+def _uses_paper_filters(relative: str, source: str) -> bool:
+    """原始碼 import `radar.repo.paper_filters`（任何寫法，含相對 import），或用到
+    `CLASSIFICATION_KEYS` 這個名稱。"""
+    module = _module_of(relative)
+    package = module if relative.endswith("__init__.py") else module.rpartition(".")[0]
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Import):
+            if any(
+                alias.name == PAPER_FILTERS_MODULE
+                or alias.name.startswith(f"{PAPER_FILTERS_MODULE}.")
+                for alias in node.names
+            ):
+                return True
+        elif isinstance(node, ast.ImportFrom):
+            if node.level == 0:
+                base = node.module or ""
+            else:
+                parts = package.split(".")
+                root = ".".join(parts[: len(parts) - (node.level - 1)])
+                base = f"{root}.{node.module}" if node.module else root
+            targets = {base, *(f"{base}.{alias.name}" for alias in node.names)}
+            if PAPER_FILTERS_MODULE in targets:
+                return True
+        elif (isinstance(node, ast.Name) and node.id == PAPER_FILTERS_NAME) or (
+            isinstance(node, ast.Attribute) and node.attr == PAPER_FILTERS_NAME
+        ):
+            return True
+    return False
+
+
+def paper_filters_users(sources: Mapping[str, str]) -> set[str]:
+    """`sources`（相對路徑 → 原始碼）裡用到共用片段的模組（`paper_filters.py` 自己不算）。"""
+    return {
+        relative
+        for relative, source in sources.items()
+        if relative != "radar/repo/paper_filters.py" and _uses_paper_filters(relative, source)
+    }
+
+
+def test_only_allowed_modules_use_the_classification_keys_fragment() -> None:
+    assert paper_filters_users(_radar_sources()) == PAPER_FILTERS_USERS
+
+
+def test_paper_filters_scanner_catches_extra_importers() -> None:
+    sources = {
+        "radar/repo/stats.py": "from radar.repo.paper_filters import CLASSIFICATION_KEYS",
+        "radar/repo/paper_list.py": "from radar.repo.paper_filters import CLASSIFICATION_KEYS",
+        "radar/repo/a_from.py": "from radar.repo.paper_filters import CLASSIFICATION_KEYS as K",
+        "radar/repo/b_module.py": "from radar.repo import paper_filters",
+        "radar/repo/c_import.py": "import radar.repo.paper_filters as f",
+        "radar/repo/d_relative.py": "from .paper_filters import CLASSIFICATION_KEYS",
+        "radar/repo/e_relative_module.py": "from . import paper_filters",
+        "radar/services/f_attr.py": "def f(m):\n    return m.CLASSIFICATION_KEYS",
+        # 不算：別的模組、docstring 與註解裡提到。
+        "radar/repo/other.py": "from radar.repo.papers import x\n# CLASSIFICATION_KEYS",
+        "radar/repo/doc.py": '"""用 radar.repo.paper_filters 的 CLASSIFICATION_KEYS"""',
+    }
+
+    assert paper_filters_users(sources) == {
+        "radar/repo/stats.py",
+        "radar/repo/paper_list.py",
+        "radar/repo/a_from.py",
+        "radar/repo/b_module.py",
+        "radar/repo/c_import.py",
+        "radar/repo/d_relative.py",
+        "radar/repo/e_relative_module.py",
+        "radar/services/f_attr.py",
+    }
+    assert paper_filters_users(sources) != PAPER_FILTERS_USERS

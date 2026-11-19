@@ -454,6 +454,136 @@
           }
         }
       }
+    },
+    "/api/v1/papers": {
+      "get": {
+        "summary": "List Papers",
+        "description": "依條件列出論文的一頁（一頁的篇數見 `client-config`）。期刊、年份給多個值是「或」，主題、\n方法給多個值是「且」，不同欄位之間是「且」；`cursor` 是上一頁的 `next_cursor`。條件不合法\n422，沒登入 401。",
+        "operationId": "list_papers",
+        "parameters": [
+          {
+            "name": "journal",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "title": "Journal"
+            }
+          },
+          {
+            "name": "year",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "integer"
+              },
+              "title": "Year"
+            }
+          },
+          {
+            "name": "topic",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "title": "Topic"
+            }
+          },
+          {
+            "name": "method",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "title": "Method"
+            }
+          },
+          {
+            "name": "has_abstract",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Has Abstract"
+            }
+          },
+          {
+            "name": "this_week",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false,
+              "title": "This Week"
+            }
+          },
+          {
+            "name": "scope",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/PaperListScope",
+              "default": "tracked"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaperListResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "錯誤（RFC 9457）",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -612,16 +742,22 @@
             "type": "integer",
             "minimum": 1.0,
             "title": "Library Page Size"
+          },
+          "paper_list_page_size": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Paper List Page Size"
           }
         },
         "additionalProperties": false,
         "type": "object",
         "required": [
           "timezone",
-          "library_page_size"
+          "library_page_size",
+          "paper_list_page_size"
         ],
         "title": "ClientConfig",
-        "description": "前端要用的設定值（AD-18）。\n\n- `timezone`：畫面上的日期換成哪個時區（IANA 名稱）。\n- `library_page_size`：文獻庫清單一頁幾篇（Story 3.16）。"
+        "description": "前端要用的設定值（AD-18）。\n\n- `timezone`：畫面上的日期換成哪個時區（IANA 名稱）。\n- `library_page_size`：文獻庫清單一頁幾篇（Story 3.16）。\n- `paper_list_page_size`：找論文清單一頁幾篇（Story 3.13）。"
       },
       "ConstructItem": {
         "properties": {
@@ -1316,6 +1452,63 @@
         ],
         "title": "PaperBiblio",
         "description": "論文的書目與狀態標記需要的欄位。\n\n- `journal` 是設定檔的期刊代號（不是追蹤的期刊時是 null，這時看 `journal_issn_l`）。\n- `doi`、`openalex_id` 是正規化後的寫法；一篇有好幾個時是最早記上的那一個。\n- `doi_url`、`openalex_url` 和它們一起有值或一起是 null。"
+      },
+      "PaperListResponse": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/PaperRow"
+            },
+            "type": "array",
+            "title": "Items"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          },
+          "total": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Total"
+          },
+          "snapshot": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SnapshotRef"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "items",
+          "next_cursor",
+          "total",
+          "snapshot"
+        ],
+        "title": "PaperListResponse",
+        "description": "找論文清單的一頁（照出版年新到舊，沒有出版年的在最後）：這一頁的論文列、下一頁的位置（沒有\n下一頁是 null）、符合條件的總篇數、目前已發佈的快照（一個都還沒發佈時是 null）。"
+      },
+      "PaperListScope": {
+        "type": "string",
+        "enum": [
+          "tracked",
+          "lab",
+          "personal"
+        ],
+        "title": "PaperListScope",
+        "description": "清單從哪一群論文找。"
       },
       "PaperOrigin": {
         "type": "string",

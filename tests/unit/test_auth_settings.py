@@ -516,6 +516,7 @@ def test_api_main_mounts_web_after_the_auth_routes(
         "/api/v1/display-names",
         "/api/v1/client-config",
         "/api/v1/library",
+        "/api/v1/papers",
     ):
         paper_route = client.get(path)
         assert paper_route.status_code == 401, path

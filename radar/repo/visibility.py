@@ -67,6 +67,21 @@ def visible_papers(viewer: Viewer, *, alias: str = "paper") -> str:
             raise TypeError(f"不認得的讀者身分：{type(viewer).__name__}")
 
 
+def visible_lab_papers(viewer: Viewer, *, alias: str) -> str:
+    """`viewer` 看得到、而且全實驗室都看得到（`lab_visible`）的論文的 SQL 條件（找論文清單的 `lab`
+    範圍，Story 3.13）。`alias` 是查詢裡 `paper` 表的名稱或別名。
+
+    ＝`lab_visible` 且 `visible_papers(viewer, alias=alias)`：成員自己文獻庫裡的私人論文不算；訪客
+    只剩 `counted_paper` 裡的；系統是全部 `lab_visible` 的論文。
+
+    Raises:
+        ValueError: `alias` 不是小寫識別字，或和可見條件子查詢裡的別名相同（同 `visible_papers`）。
+        TypeError: `viewer` 不是三種讀者身分之一。
+    """
+    visible = visible_papers(viewer, alias=alias)  # 別名與讀者身分在這裡檢查
+    return f'("{alias}".lab_visible AND {visible})'
+
+
 def visible_library_items(viewer: Viewer, *, alias: str = "library_item") -> str:
     """`viewer` 看得到的文獻庫的筆（`library_item`）的 SQL 條件，`alias` 是查詢裡這張表的名稱
     或別名。

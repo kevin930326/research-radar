@@ -159,6 +159,23 @@ class Database:
             yield connection
 
     @contextmanager
+    def read_only_snapshot_transaction(self) -> Iterator[Connection]:
+        """開一個**唯讀**、REPEATABLE READ 的交易：裡面每一句都讀同一份資料狀態（交易第一句拿到的
+        快照），中間別的交易 commit 的改動看不到。
+
+        給「一次回應要分好幾句讀、彼此要對得上」的讀取用（例如找論文清單的 id、總數、論文列，
+        Story 3.13 審查 C1）。只能讀：寫入會被 PostgreSQL 拒絕（`read_only_sql_transaction`）。
+        寫入路徑不要用：`repo/papers.upsert_by_external_id` 靠 READ COMMITTED 每句重新拿快照，
+        改成 REPEATABLE READ 會失效。
+
+        隔離層級與唯讀用交易的第一句 `SET TRANSACTION` 設，只在這個交易有效，連線還回連線池時不用
+        還原。區塊正常結束就 commit（唯讀，沒有東西要寫），丟出例外就退回。
+        """
+        with self._engine.begin() as connection:
+            connection.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"))
+            yield connection
+
+    @contextmanager
     def transaction_with_lock_timeout(self, lock_timeout_ms: int) -> Iterator[Connection]:
         """同 `transaction()` 開一個交易，一開始 `SET LOCAL lock_timeout`（只在這個交易有效）。
 

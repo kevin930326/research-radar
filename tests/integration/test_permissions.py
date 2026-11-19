@@ -28,7 +28,7 @@ from radar.entrypoints.logging_config import configure_logging
 from radar.repo.db import Database
 from radar.services.members import allow_member
 from tests.database import TestDatabase, migrate
-from tests.llm_support import execute, library_routes, paper_routes
+from tests.llm_support import execute, library_routes, paper_list_routes, paper_routes
 from tests.permissions.cases import REGISTRY
 from tests.permissions.framework import (
     CANARY_EMAIL,
@@ -84,6 +84,7 @@ def context(db: TestDatabase, capsys: pytest.CaptureFixture[str]) -> PermissionC
         auth_routes=build_auth_routes(database, settings, pick_member_identity, lambda: NOW),
         paper_routes=paper_routes(database, now=NOW),
         library_routes=library_routes(database),
+        paper_list_routes=paper_list_routes(database),
     )
     login_client = TestClient(app, base_url="https://testserver")
     owner = _log_in(login_client, database, CANARY_EMAIL, "測試甲")
