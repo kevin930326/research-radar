@@ -4,8 +4,8 @@
 呼叫端拒絕啟動：
 
 - prompt 檔與 `domain/prompt_hashes.py` 的登記（`registry_problems`）。
-- `models.yaml`、`budget.yaml`、`zh_summary.yaml`、`taxonomy.yaml`（含雜湊登記）、
-  `context_values.yaml`（含雜湊登記）、`llm_batches.yaml`。
+- `models.yaml`、`budget.yaml`、`zh_summary.yaml`（含 `zh_summary_acronyms.yaml`）、
+  `taxonomy.yaml`（含雜湊登記）、`context_values.yaml`（含雜湊登記）、`llm_batches.yaml`。
 
 只讀設定檔與 prompt 檔，不讀秘密、不連線；訊息只有檔名、欄位路徑與原因。api 不接（之後由主對話
 決定）。
