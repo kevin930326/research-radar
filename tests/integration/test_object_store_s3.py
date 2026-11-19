@@ -428,3 +428,70 @@ def test_unavailable_error_carries_no_exception_chain_at_all(
     printed = "".join(traceback.format_exception(caught.value))
     assert "ObjectStoreUnavailableError" in printed
     assert HOST not in printed
+
+
+# --- 串流上傳（Story 3.18 的備份）---------------------------------------------------------------
+
+
+class _Chunks:
+    """`read(size)` 一段一段吐出 `total` 個位元組；`fail_after` 有給時讀到那裡就丟例外。"""
+
+    def __init__(self, total: int, *, fail_after: int | None = None) -> None:
+        self._left = total
+        self._sent = 0
+        self._fail_after = fail_after
+
+    def read(self, size: int = -1, /) -> bytes:
+        if self._fail_after is not None and self._sent >= self._fail_after:
+            raise RuntimeError("backup tool failed")
+        n = self._left if size < 0 else min(size, self._left)
+        self._left -= n
+        self._sent += n
+        return b"x" * n
+
+
+def test_put_stream_uploads_in_parts_with_content_type(client: Any) -> None:
+    store = S3ObjectStore(client, BUCKET, attempts=3)
+    total = 9 * 1024 * 1024  # 超過一段（8 MiB），走分段上傳
+
+    store.put_stream("backup/full.age", _Chunks(total), content_type="application/octet-stream")
+
+    head = client.head_object(Bucket=BUCKET, Key="backup/full.age")
+    assert head["ContentLength"] == total
+    assert head["ContentType"] == "application/octet-stream"
+
+
+def test_put_stream_failing_mid_way_leaves_no_key_and_no_open_upload(client: Any) -> None:
+    store = S3ObjectStore(client, BUCKET, attempts=3)
+    stream = _Chunks(20 * 1024 * 1024, fail_after=8 * 1024 * 1024)
+
+    with pytest.raises(RuntimeError, match="backup tool failed"):
+        store.put_stream("backup/half.age", stream, content_type="application/octet-stream")
+
+    assert client.list_objects_v2(Bucket=BUCKET, Prefix="backup/").get("KeyCount") == 0
+    assert client.list_multipart_uploads(Bucket=BUCKET).get("Uploads", []) == []
+
+
+def test_put_stream_s3_error_is_not_retried_and_hides_the_host(client: Any) -> None:
+    store = S3ObjectStore(client, BUCKET, attempts=3)
+    seen = _fail_first(client, "PutObject", [(503, "SlowDown")])
+
+    with pytest.raises(ObjectStoreUnavailableError) as caught:
+        store.put_stream("backup/small.age", _Chunks(10), content_type="application/octet-stream")
+
+    assert seen == ["PUT"]
+    assert "amazonaws" not in str(caught.value)
+    assert caught.value.__cause__ is None
+
+
+def test_put_stream_failing_at_the_end_of_a_small_stream_leaves_no_key(client: Any) -> None:
+    """Story 3.18 審查 T3：小於一段（單次 PutObject）、讀到結尾才丟例外（`pg_dump` 一開始就失敗
+    時多半走這條）：例外原樣往上丟，`backup/` 沒有鍵。"""
+    store = S3ObjectStore(client, BUCKET, attempts=3)
+    stream = _Chunks(10, fail_after=10)
+
+    with pytest.raises(RuntimeError, match="backup tool failed"):
+        store.put_stream("backup/small.age", stream, content_type="application/octet-stream")
+
+    assert client.list_objects_v2(Bucket=BUCKET, Prefix="backup/").get("KeyCount") == 0
+    assert client.list_multipart_uploads(Bucket=BUCKET).get("Uploads", []) == []

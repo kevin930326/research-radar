@@ -15,13 +15,18 @@
   traceback 會印出來。
 - 等待與次數的預設值和 `Settings` 的 `object_store_*` 一致；正式程式由 `bootstrap.py` 從設定傳入。
 - 讀不到的鍵丟 `ObjectNotFoundError`。
+- `put_stream`（備份檔，Story 3.18）邊讀邊分段上傳、不重試；讀串流時丟出的例外原樣往上丟，
+  boto3 會放棄這次分段上傳，bucket 裡不留這個鍵。
 """
 
 from collections.abc import Callable
+from io import Reader
 from typing import Any
 
 import boto3
 import stamina
+from boto3.exceptions import S3UploadFailedError
+from boto3.s3.transfer import TransferConfig
 from botocore.config import Config
 from botocore.exceptions import (
     BotoCoreError,
@@ -36,6 +41,15 @@ from botocore.exceptions import (
 
 from radar.adapters.heartbeat import parse_retry_after
 from radar.domain.storage_keys import ObjectNotFoundError
+
+# `put_stream` 的分段大小與並行數：一次只在記憶體放一段（容器有 mem_limit，AD-17）。
+STREAM_PART_BYTES = 8 * 1024 * 1024
+_STREAM_TRANSFER = TransferConfig(
+    multipart_threshold=STREAM_PART_BYTES,
+    multipart_chunksize=STREAM_PART_BYTES,
+    max_concurrency=1,
+    use_threads=False,
+)
 
 # 這些錯誤碼不論狀態碼都值得再試一次（S3／R2 的節流與暫時性錯誤）。
 RETRYABLE_ERROR_CODES = frozenset(
@@ -162,6 +176,30 @@ class S3ObjectStore:
                 Bucket=self._bucket, Key=key, Body=data, ContentType=content_type
             )
         )
+
+    def put_stream(self, key: str, stream: Reader[bytes], *, content_type: str) -> None:
+        """邊讀 `stream` 邊上傳（超過一段時分段上傳）。不重試：串流讀過就回不去。
+
+        `stream.read` 丟出的例外原樣往上丟（例如備份的子程序失敗）；boto3 在完成上傳之前放棄這次
+        分段上傳，bucket 裡不留這個鍵。
+
+        Raises:
+            ObjectStoreUnavailableError: 上傳失敗（S3 的錯誤回應或連線錯誤）；不帶原本的例外
+                （訊息可能含端點網址）。
+        """
+        error: Exception
+        try:
+            self._client.upload_fileobj(
+                stream,
+                self._bucket,
+                key,
+                ExtraArgs={"ContentType": content_type},
+                Config=_STREAM_TRANSFER,
+            )
+            return
+        except (S3UploadFailedError, ClientError, BotoCoreError) as exc:
+            error = ObjectStoreUnavailableError(type(exc).__name__, retried=False)
+        raise error from None
 
     def get(self, key: str) -> bytes:
         """讀出整個物件（讀到一半斷掉也重試）。

@@ -12,6 +12,21 @@ COPY radar/entrypoints/api/security_headers.json /radar/entrypoints/api/security
 COPY web/ ./
 RUN npm run build:member
 
+# 備份與還原（Story 3.18、ADR-0051）：PostgreSQL 官方套件庫（PGDG）的簽章金鑰。在這一段下載並驗
+# 指紋（gpg 只裝在這一段，不進最後的映像），最後一段只複製驗過的金鑰檔。不執行任何下載來的腳本。
+# 指紋直接寫在 RUN 裡（不用建置參數，建置時換不掉）；和 .github/workflows/ci.yml 的同一個值，
+# tests/arch/test_structure.py 檢查兩邊一樣。
+FROM python:3.14-slim-trixie AS pgdg-key
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends ca-certificates curl gnupg \
+    && rm -rf /var/lib/apt/lists/*
+RUN curl --fail --silent --show-error --location --proto '=https' \
+        --output /pgdg.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+    && gpg --show-keys --with-colons /pgdg.asc > /pgdg-keys.txt \
+    && test "$(grep -c '^pub:' /pgdg-keys.txt)" = 1 \
+    && test "$(awk -F: '$1 == "fpr" { print $10; exit }' /pgdg-keys.txt)" \
+        = "B97B0AFCAA1A47F044F244A07FCC7D46ACCC4CF8"
+
 FROM python:3.14-slim-trixie AS build
 COPY --from=uv /uv /bin/uv
 ENV UV_COMPILE_BYTECODE=1 \
@@ -33,8 +48,24 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 FROM python:3.14-slim-trixie
 RUN groupadd --system --gid 10001 radar \
     && useradd --system --uid 10001 --gid radar --no-create-home radar
+# radar backup／restore 用的系統工具（Story 3.18、ADR-0051，Kevin 2026-11-18 同意只加這兩個）：
+# - PostgreSQL 18 的用戶端（pg_dump、pg_restore、psql）：PGDG 的封存套件庫（舊的小版本也一直留著，
+#   釘住的版本不會因為新版發佈而消失）。只裝用戶端，不裝伺服器。
+# - age：Debian trixie 官方套件庫。
+# 版本都釘住；升級時改這裡的版本號（ADR-0051）。
+COPY --from=pgdg-key /pgdg.asc /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc
+RUN echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc]" \
+        "https://apt-archive.postgresql.org/pub/repos/apt trixie-pgdg-archive main" \
+        > /etc/apt/sources.list.d/pgdg.list \
+    && apt-get update \
+    && apt-get install --yes --no-install-recommends \
+        postgresql-client-18=18.7-1.pgdg13+2 \
+        libpq5=18.7-1.pgdg13+2 \
+        age=1.2.1-1+b5 \
+    && rm -rf /var/lib/apt/lists/*
 COPY --from=build /app/.venv /app/.venv
-ENV PATH=/app/.venv/bin:$PATH \
+# /usr/lib/postgresql/18/bin 放在 /usr/bin 前面：直接用 18 版的執行檔，不經 Debian 的版本選擇包裝。
+ENV PATH=/app/.venv/bin:/usr/lib/postgresql/18/bin:$PATH \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1
 WORKDIR /app

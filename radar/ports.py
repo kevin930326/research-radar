@@ -5,6 +5,7 @@
 """
 
 from collections.abc import Iterator, Sequence
+from io import Reader
 from typing import Protocol
 
 from radar.domain.llm import (
@@ -164,6 +165,14 @@ class ObjectStore(Protocol):
 
     def put(self, key: str, data: bytes, *, content_type: str) -> None:
         """寫入（同一個鍵已經有東西就覆寫）。"""
+        ...
+
+    def put_stream(self, key: str, stream: Reader[bytes], *, content_type: str) -> None:
+        """邊讀 `stream` 邊寫入，不先整個讀進記憶體（備份檔，Story 3.18）。
+
+        `stream.read` 丟出例外時整個寫入作廢，這個鍵不會出現（不留半個檔）。串流讀過就回不去，
+        所以不重試。
+        """
         ...
 
     def get(self, key: str) -> bytes:

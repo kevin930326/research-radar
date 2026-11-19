@@ -1,5 +1,6 @@
 """目錄照架構文件的 Structural Seed（`web/` 留到 Epic 3）。"""
 
+import re
 from pathlib import Path
 
 import pytest
@@ -127,3 +128,69 @@ def test_dockerfile_always_rebuilds_the_project_package() -> None:
     ]
     assert len(install_project) == 1, install_project
     assert "--reinstall-package radar" in install_project[0]
+
+
+def test_backup_files_are_ignored() -> None:
+    # Story 3.18：加密備份（*.age）與傾印（*.dump）不進 repo（ADR-0051）。
+    lines = (ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
+    assert "*.age" in lines
+    assert "*.dump" in lines
+
+
+def test_image_adds_only_pinned_backup_clients() -> None:
+    """Story 3.18（ADR-0051）：只加 PG 18 用戶端與 age，版本釘住、金鑰驗指紋、不裝伺服器。"""
+    dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+    final_stage = dockerfile.rsplit("\nFROM ", 1)[1]
+
+    assert re.search(r"postgresql-client-18=\S+", final_stage)
+    assert re.search(r"libpq5=\S+", final_stage)
+    assert re.search(r"\bage=\S+", final_stage)
+    assert not re.search(r"\bpostgresql-18\b", final_stage)  # 伺服器套件
+    assert "--no-install-recommends" in final_stage
+    assert "gnupg" not in final_stage
+    assert "curl" not in final_stage
+    assert "| sh" not in dockerfile
+    assert "|sh" not in dockerfile
+    # 審查 T7：真的有比對指紋的那一行，指紋寫死在 RUN 裡（沒有建置參數可以換掉）。
+    assert _dockerfile_fingerprint(dockerfile) is not None
+    assert "ARG PGDG" not in dockerfile
+    assert "--build-arg" not in dockerfile
+    path = re.search(r"ENV PATH=(\S+)", final_stage)
+    assert path is not None
+    assert path.group(1).index("/usr/lib/postgresql/18/bin") < path.group(1).index("$PATH")
+
+
+# 驗 PGDG 金鑰指紋的那一行：取 gpg 輸出第一個 fpr 的第 10 欄，和寫死的 40 碼比對。
+_FINGERPRINT_CHECK = re.compile(
+    r"test \"\$\(awk -F: '\$1 == \"fpr\" \{ print \$10; exit \}' /pgdg-keys\.txt\)\" \\\n"
+    r"\s*= \"([0-9A-F]{40})\""
+)
+
+
+def _dockerfile_fingerprint(dockerfile: str) -> str | None:
+    match = _FINGERPRINT_CHECK.search(dockerfile)
+    return match.group(1) if match else None
+
+
+def test_ci_checks_the_same_pgdg_fingerprint_as_the_image() -> None:
+    """審查 T7：CI 裝 PG 18 用戶端時驗的指紋和 Dockerfile 的一樣，而且 CI 真的拿它來比對。"""
+    dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+    workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    ci = re.findall(r"PGDG_SIGNER_FPR: ([0-9A-F]{40})\n", workflow)
+
+    assert ci == [_dockerfile_fingerprint(dockerfile)]
+    assert '= "${PGDG_SIGNER_FPR}"' in workflow
+
+
+def test_age_private_key_files_are_ignored() -> None:
+    # 審查 I5：搬家文件建議的私鑰檔名（放在 repo 以外；萬一放進來也不會被 commit）。
+    lines = (ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
+    assert "*.agekey" in lines
+
+
+def test_no_setting_holds_an_age_private_key() -> None:
+    # 主機上只放公鑰（ADR-0051）：設定裡沒有私鑰或 identity 檔的欄位。
+    for model in (Settings, MigrationSettings):
+        for name in model.model_fields:
+            assert "identity" not in name, name
+            assert "private" not in name, name

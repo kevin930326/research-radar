@@ -5,6 +5,7 @@ from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationInfo, field_validator
 
+from radar.domain.backup import check_age_recipient
 from radar.domain.jobs import WORKER_HEARTBEAT_SECONDS
 from radar.domain.policy import CloudPolicy
 from radar.domain.weekly_run import DEFAULT_MAX_FAILURES
@@ -169,6 +170,10 @@ class Settings(BaseModel):
     # 也當秘密處理（不印、不寫進日誌與錯誤訊息）。模型、維度、額度等設定在 config/embeddings.yaml。
     cloudflare_account_id: SecretStr | None = Field(default=None, min_length=1)
     cloudflare_api_token: SecretStr | None = Field(default=None, min_length=1)
+    # `radar backup` 加密用的 age 公鑰（`age1…`，Story 3.18、AD-28、ADR-0051）。只放公鑰：解密用
+    # 的私鑰不放主機、不進 repo，程式裡也沒有它的設定。沒設時 `radar backup` 直接失敗，不會改成
+    # 不加密。
+    backup_age_recipient: str | None = None
 
     @property
     def cloud_policy(self) -> CloudPolicy:
@@ -258,6 +263,11 @@ class Settings(BaseModel):
     @classmethod
     def _check_database_url(cls, value: SecretStr) -> SecretStr:
         return check_database_url(value)
+
+    @field_validator("backup_age_recipient")
+    @classmethod
+    def _check_backup_age_recipient(cls, value: str | None) -> str | None:
+        return None if value is None else check_age_recipient(value)
 
     @field_validator("*")
     @classmethod
