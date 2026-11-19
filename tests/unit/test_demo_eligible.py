@@ -130,6 +130,43 @@ def test_one_usable_name_among_broken_ones_is_enough() -> None:
     assert is_demo_eligible("cc-by", ("not an id!",), ("  ", "Open"), TEST_EXCLUSIONS) is True
 
 
+# 看不見的字元（Unicode 類別 Cf、Cc）：零寬空白、BOM、軟連字號、零寬連接符、控制字元。
+_INVISIBLE = ["\u200b", "\ufeff", "\u00ad", "\u200d", "\u2060", "\x00", "\x7f"]
+
+
+@pytest.mark.parametrize(
+    "names",
+    [
+        ("\u200b",),
+        ("\ufeff",),
+        ("\u00ad",),
+        ("\u200b\ufeff\u00ad",),
+        (" \u200b ", "\u2060\x7f"),
+    ],
+)
+def test_name_of_only_invisible_characters_is_not_eligible(names: tuple[str, ...]) -> None:
+    # ADR-0052 第 4、5 點：只有看不見的字元的名稱正規化後是空的，不算有名稱。
+    assert all(normalize_publisher_name(name) == "" for name in names)
+    assert is_demo_eligible("cc-by", (), names, TEST_EXCLUSIONS) is False
+    assert is_demo_eligible("cc-by", ("P9000000001",), names, TEST_EXCLUSIONS) is False
+
+
+@pytest.mark.parametrize("mark", _INVISIBLE)
+def test_excluded_name_with_invisible_characters_still_matches(mark: str) -> None:
+    for name in (
+        f"{EXCLUDED_PUBLISHER_NAME}{mark}",
+        f"{mark}{EXCLUDED_PUBLISHER_NAME}",
+        EXCLUDED_PUBLISHER_NAME.replace(" ", f" {mark}", 1),
+    ):
+        assert normalize_publisher_name(name) == normalize_publisher_name(EXCLUDED_PUBLISHER_NAME)
+        assert is_demo_eligible("cc-by", (), ("Open", name), TEST_EXCLUSIONS) is False
+
+
+def test_invisible_characters_do_not_glue_words_but_whitespace_controls_still_split() -> None:
+    assert normalize_publisher_name("IEEE\nComputer\tSociety") == "ieee computer society"
+    assert normalize_publisher_name("IEEE\u200b") == "ieee"
+
+
 def test_missing_exclusion_list_is_not_eligible() -> None:
     assert is_demo_eligible("cc-by", ("P1",), ("Open",), None) is False
 
@@ -215,6 +252,11 @@ _EXCLUDED_NAME_FORMS = [
     EXCLUDED_PUBLISHER_NAME.replace(" ", "   "),
     EXCLUDED_PARENT_NAME,
     EXCLUDED_PARENT_NAME.swapcase(),
+    # 夾雜看不見的字元（零寬空白、BOM、軟連字號、控制字元）。
+    f"{EXCLUDED_PUBLISHER_NAME}\u200b",
+    f"\ufeff{EXCLUDED_PUBLISHER_NAME}",
+    EXCLUDED_PUBLISHER_NAME.replace(" ", " \u00ad"),
+    f"\u200d{EXCLUDED_PARENT_NAME.upper()}\x00",
 ]
 
 
@@ -275,6 +317,7 @@ def test_property_true_needs_allowed_license_and_publisher_not_excluded(
         assert openalex_license(license) in DEMO_ELIGIBLE_LICENSES
         assert ids or names
         assert any(name.strip() for name in names)
+        assert any(normalize_publisher_name(name) for name in names)
         assert not TEST_EXCLUSIONS.matches(ids, names)
     assert is_demo_eligible(license, ids, names, None) is False
 
@@ -334,6 +377,16 @@ def test_parser_valid_publisher_id_without_name_is_not_eligible() -> None:
 
     assert paper.publisher_ids == ("P9000000001",)
     assert paper.publisher_names == ()
+    assert _eligible(paper) is False
+
+
+@pytest.mark.parametrize("invisible", ["\u200b", "\ufeff", "\u00ad", " \u200b\u00ad "])
+def test_parser_name_of_only_invisible_characters_is_not_eligible(invisible: str) -> None:
+    # 解析器照存（去頭尾空白後不是空的），判定時正規化成空字串，一樣不可用。
+    paper = _parse(publisher_id=None, publisher_name=invisible, lineage_names=[invisible])
+
+    assert paper.primary_license == "cc-by"
+    assert paper.publisher_ids == ()
     assert _eligible(paper) is False
 
 
@@ -401,6 +454,8 @@ def test_real_config_excludes_ieee_names() -> None:
         exclusions.names
     )
     assert normalize_publisher_name("IEEE") in exclusions.names
+    assert is_demo_eligible("cc-by", (), ("IEEE\u200b",), exclusions) is False
+    assert is_demo_eligible("cc-by", (), ("\ufeffI\u00adEEE",), exclusions) is False
     assert config.scope_settings().demo_publishers == exclusions
     assert config.journals.scope_settings().demo_publishers is None
     assert (

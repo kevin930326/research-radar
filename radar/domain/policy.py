@@ -113,9 +113,22 @@ def openalex_license(value: str | None) -> ContentLicense:
     return ContentLicense.UNKNOWN if license in _PROJECT_ONLY_LICENSES else license
 
 
+# 看不見的字元：格式字元（零寬空白、BOM、軟連字號等）與控制字元。
+_INVISIBLE_CATEGORIES = frozenset({"Cf", "Cc"})
+
+
 def normalize_publisher_name(value: str) -> str:
-    """出版社名稱比對前的正規化：NFKC、`casefold`、連續空白縮成一個、去頭尾空白。"""
-    return " ".join(unicodedata.normalize("NFKC", value).casefold().split())
+    """出版社名稱比對前的正規化（排除清單與論文的名稱都走這裡）。
+
+    依序：NFKC → 拿掉看不見的字元（Unicode 類別 `Cf`、`Cc`；本身算空白的控制字元如 `\t`、`\n`
+    留給下一步當空白）→ `casefold` → 連續空白縮成一個、去頭尾空白。只有看不見的字元的名稱會變成
+    空字串（ADR-0052 第 5 點）。
+    """
+    text = unicodedata.normalize("NFKC", value)
+    text = "".join(
+        ch for ch in text if ch.isspace() or unicodedata.category(ch) not in _INVISIBLE_CATEGORIES
+    )
+    return " ".join(text.casefold().split())
 
 
 @dataclass(frozen=True)
