@@ -3,7 +3,7 @@
 `ParsedPaper` 是寫進論文資料的唯一形狀：`repo.papers.upsert_by_external_id` 只收它。
 Story 1.5 定了識別碼、標題、期刊、出版年；Story 1.7 加了作者、卷期頁碼、類型、撤稿標記、
 摘要與來源、引用清單、被引用次數、關鍵字，以及指紋 `source_hash`（AD-25，算法在
-`domain/fingerprints.py`）。新欄位都有預設值。
+`domain/fingerprints.py`）；Story 3.7a 加了授權與出版社（ADR-0052，不算進指紋）。新欄位都有預設值。
 """
 
 import dataclasses
@@ -149,6 +149,13 @@ class ParsedPaper(BaseModel):
     cited_by_count: Annotated[int, Field(strict=True, ge=0, le=MAX_INT4)] | None = None
     # 同一個 `key` 只能出現一次。
     keywords: tuple[ParsedKeyword, ...] = ()
+    # 以下由 Story 3.7a 加（ADR-0052），都有預設值，都不算進 `source_hash`：
+    # 出版社自己那一版（OpenAlex `primary_location`）的授權原字串（看不懂的也照存；沒有＝None），
+    # 以及那一版的出版社 ID（正規化的 OpenAlex ID，看不懂的照原字串）與名稱，各自含 lineage、
+    # 去重複、保持順序（直屬的出版社在最前面）。兩個都是空的＝沒有出版社欄位。
+    primary_license: str | None = None
+    publisher_ids: tuple[str, ...] = ()
+    publisher_names: tuple[str, ...] = ()
 
     @field_validator("doi")
     @classmethod
@@ -184,10 +191,18 @@ class ParsedPaper(BaseModel):
     def _clean_authors(cls, value: tuple[str, ...]) -> tuple[str, ...]:
         return tuple(_clean_text(author, "作者") for author in value)
 
-    @field_validator("volume", "issue", "first_page", "last_page", "abstract")
+    @field_validator("volume", "issue", "first_page", "last_page", "abstract", "primary_license")
     @classmethod
     def _clean_optional_text(cls, value: str | None, info: ValidationInfo) -> str | None:
         return None if value is None else _clean_text(value, str(info.field_name))
+
+    @field_validator("publisher_ids", "publisher_names")
+    @classmethod
+    def _clean_publishers(cls, value: tuple[str, ...], info: ValidationInfo) -> tuple[str, ...]:
+        cleaned: dict[str, None] = {}
+        for item in value:
+            cleaned.setdefault(_clean_text(item, str(info.field_name)), None)
+        return tuple(cleaned)
 
     @field_validator("referenced_works")
     @classmethod

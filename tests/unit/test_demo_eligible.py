@@ -1,0 +1,612 @@
+"""示範站可用的判定（Story 3.7a、ADR-0052）：`openalex_license`、`is_demo_eligible`、
+`config/demo_publishers.yaml`、解析出的授權與出版社、新欄位不進 `source_hash`。
+"""
+
+import shutil
+from datetime import UTC, datetime
+from pathlib import Path
+
+import pytest
+from hypothesis import given
+from hypothesis import strategies as st
+from pydantic import ValidationError
+
+from radar.config import ConfigError, load_domain_config
+from radar.domain.domain_config import DemoPublishersConfig
+from radar.domain.papers import ParsedPaper
+from radar.domain.parsers.openalex import parse_openalex_work
+from radar.domain.policy import (
+    DEMO_ELIGIBLE_LICENSES,
+    ContentLicense,
+    PublisherExclusions,
+    is_demo_eligible,
+    normalize_publisher_name,
+    openalex_license,
+)
+from tests.demo_works import (
+    EXCLUDED_PARENT_NAME,
+    EXCLUDED_PUBLISHER_ID,
+    EXCLUDED_PUBLISHER_NAME,
+    OPEN_PUBLISHER_ID,
+    OPEN_PUBLISHER_NAME,
+    TEST_EXCLUSIONS,
+    demo_work,
+    demo_work_bytes,
+)
+
+ROOT = Path(__file__).resolve().parents[2]
+FETCHED_AT = datetime(2026, 11, 20, 3, 0, tzinfo=UTC)
+ISSN = "1471-7727"
+
+
+def _parse(**kwargs: object) -> ParsedPaper:
+    return parse_openalex_work(
+        demo_work_bytes(demo_work(1, issn_l=ISSN, **kwargs)),  # type: ignore[arg-type]
+        fetched_at=FETCHED_AT,
+    )
+
+
+def _eligible(paper: ParsedPaper, excluded: PublisherExclusions | None = TEST_EXCLUSIONS) -> bool:
+    return is_demo_eligible(
+        paper.primary_license, paper.publisher_ids, paper.publisher_names, excluded
+    )
+
+
+# --- openalex_license ----------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("cc-by", ContentLicense.CC_BY),
+        ("cc-by-sa", ContentLicense.CC_BY_SA),
+        ("cc0", ContentLicense.CC0),
+        ("public-domain", ContentLicense.CC0),
+        ("cc-by-nc", ContentLicense.CC_BY_NC),
+        ("cc-by-nd", ContentLicense.CC_BY_ND),
+        ("cc-by-nc-sa", ContentLicense.CC_BY_NC_SA),
+        ("cc-by-nc-nd", ContentLicense.CC_BY_NC_ND),
+        ("other-oa", ContentLicense.OTHER_OA),
+        ("publisher-specific-oa", ContentLicense.UNKNOWN),
+        ("mit", ContentLicense.UNKNOWN),
+        ("CC-BY", ContentLicense.UNKNOWN),
+        ("paywalled", ContentLicense.UNKNOWN),
+        ("unknown", ContentLicense.UNKNOWN),
+        ("weird", ContentLicense.UNKNOWN),
+        (None, ContentLicense.UNKNOWN),
+    ],
+)
+def test_openalex_license_mapping(value: str | None, expected: ContentLicense) -> None:
+    assert openalex_license(value) is expected
+
+
+# --- is_demo_eligible -----------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("license", "expected"),
+    [
+        ("cc-by", True),
+        ("cc-by-sa", True),
+        ("public-domain", True),
+        ("cc-by-nc", False),
+        ("cc-by-nd", False),
+        ("cc-by-nc-nd", False),
+        ("other-oa", False),
+        ("weird", False),
+        (None, False),
+    ],
+)
+def test_only_three_licenses_are_eligible(license: str | None, expected: bool) -> None:
+    assert is_demo_eligible(license, ("P1",), ("Open",), TEST_EXCLUSIONS) is expected
+
+
+def test_no_publisher_fields_is_not_eligible() -> None:
+    assert is_demo_eligible("cc-by", (), (), TEST_EXCLUSIONS) is False
+
+
+@pytest.mark.parametrize(
+    ("ids", "names"),
+    [
+        # 只有看不懂的 ID：排除清單目前只靠名稱，比不到不代表不是被排除的出版社。
+        (("not an id!",), ()),
+        # 只有看得懂的 ID、不在排除清單裡：一樣沒有名稱可以比。
+        (("P9000000001",), ()),
+        (("https://openalex.org/P9000000001", "P9000000077"), ()),
+        # 名稱全部壞掉（空字串、只有空白、全形空白、正規化後是空的）。
+        (("P9000000001",), ("",)),
+        (("P9000000001",), ("   ", "\t\n")),
+        ((), ("\u3000", " \u00a0 ")),
+    ],
+)
+def test_publisher_without_a_usable_name_is_not_eligible(
+    ids: tuple[str, ...], names: tuple[str, ...]
+) -> None:
+    # ADR-0052 第 4 點：至少要有一個正規化後不是空的出版社名稱，才可能是 True。
+    assert is_demo_eligible("cc-by", ids, names, TEST_EXCLUSIONS) is False
+
+
+def test_one_usable_name_among_broken_ones_is_enough() -> None:
+    assert is_demo_eligible("cc-by", ("not an id!",), ("  ", "Open"), TEST_EXCLUSIONS) is True
+
+
+# 看不見的字元（Unicode 類別 Cf、Cc）：零寬空白、BOM、軟連字號、零寬連接符、控制字元。
+_INVISIBLE = ["\u200b", "\ufeff", "\u00ad", "\u200d", "\u2060", "\x00", "\x7f"]
+
+
+@pytest.mark.parametrize(
+    "names",
+    [
+        ("\u200b",),
+        ("\ufeff",),
+        ("\u00ad",),
+        ("\u200b\ufeff\u00ad",),
+        (" \u200b ", "\u2060\x7f"),
+    ],
+)
+def test_name_of_only_invisible_characters_is_not_eligible(names: tuple[str, ...]) -> None:
+    # ADR-0052 第 4、5 點：只有看不見的字元的名稱正規化後是空的，不算有名稱。
+    assert all(normalize_publisher_name(name) == "" for name in names)
+    assert is_demo_eligible("cc-by", (), names, TEST_EXCLUSIONS) is False
+    assert is_demo_eligible("cc-by", ("P9000000001",), names, TEST_EXCLUSIONS) is False
+
+
+@pytest.mark.parametrize("mark", _INVISIBLE)
+def test_excluded_name_with_invisible_characters_still_matches(mark: str) -> None:
+    for name in (
+        f"{EXCLUDED_PUBLISHER_NAME}{mark}",
+        f"{mark}{EXCLUDED_PUBLISHER_NAME}",
+        EXCLUDED_PUBLISHER_NAME.replace(" ", f" {mark}", 1),
+    ):
+        assert normalize_publisher_name(name) == normalize_publisher_name(EXCLUDED_PUBLISHER_NAME)
+        assert is_demo_eligible("cc-by", (), ("Open", name), TEST_EXCLUSIONS) is False
+
+
+def test_separators_between_words_are_ignored_so_glued_words_still_match() -> None:
+    # PR #108 第 3 輪：比對鍵只留字母與數字，字與字之間用什麼隔開（或黏在一起）都得到同一個鍵。
+    key = normalize_publisher_name("IEEE Computer Society")
+    assert key == "ieeecomputersociety"
+    assert normalize_publisher_name("IEEE\nComputer\tSociety") == key
+    assert normalize_publisher_name("IEEE\u200bComputer\u200bSociety") == key
+    assert normalize_publisher_name("IEEE-Computer Society") == key
+    assert normalize_publisher_name("IEEEComputerSociety") == key
+    assert normalize_publisher_name("IEEE\u200b") == "ieee"
+    assert normalize_publisher_name("I.E.E.E.") == "ieee"
+
+
+# 只有這些字元的名稱正規化後是空的：韓文填充字、異體字選擇符、組字連接符、點字空白、私用區、
+# 標點與符號。
+_NO_LETTERS_OR_DIGITS = [
+    "\u3164",
+    "\uffa0",
+    "\u115f",
+    "\u1160",
+    "\ufe0f",
+    "\ufe00",
+    "\U000e0100",
+    "\u034f",
+    "\u2800",
+    "\ue000",
+    "\U000f0000",
+    "\u17b4",
+    "\u180b",
+    "...",
+    "- / &",
+    "\u00a9\u00ae",
+    "\u3164\u2800\ufe0f\u034f",
+]
+
+
+@pytest.mark.parametrize("name", _NO_LETTERS_OR_DIGITS)
+def test_name_without_letters_or_digits_is_not_eligible(name: str) -> None:
+    assert normalize_publisher_name(name) == ""
+    assert is_demo_eligible("cc-by", (), (name,), TEST_EXCLUSIONS) is False
+    assert is_demo_eligible("cc-by", ("P9000000001",), (name, " "), TEST_EXCLUSIONS) is False
+
+
+# 夾在排除名稱前後或字中間也不影響比對的字元（字母與數字以外的都拿掉）。
+_IGNORED_MARKS = [
+    "\u3164",
+    "\uffa0",
+    "\u115f",
+    "\u1160",
+    "\ufe0f",
+    "\U000e0100",
+    "\u034f",
+    "\u2800",
+    "\ue000",
+    "\u180e",
+    "\x01",
+    ".",
+    "-",
+]
+
+
+@pytest.mark.parametrize("mark", _IGNORED_MARKS)
+def test_excluded_name_with_ignored_characters_still_matches(mark: str) -> None:
+    key = normalize_publisher_name(EXCLUDED_PUBLISHER_NAME)
+    for name in (
+        f"{EXCLUDED_PUBLISHER_NAME}{mark}",
+        f"{mark}{EXCLUDED_PUBLISHER_NAME}",
+        EXCLUDED_PUBLISHER_NAME.replace(" ", mark),
+        EXCLUDED_PUBLISHER_NAME.replace("E", f"E{mark}", 1),
+    ):
+        assert normalize_publisher_name(name) == key
+        assert is_demo_eligible("cc-by", (), ("Open", name), TEST_EXCLUSIONS) is False
+
+
+def test_missing_exclusion_list_is_not_eligible() -> None:
+    assert is_demo_eligible("cc-by", ("P1",), ("Open",), None) is False
+
+
+@pytest.mark.parametrize(
+    ("ids", "names"),
+    [
+        (("P9000000002",), ()),
+        (("https://openalex.org/p9000000002",), ()),
+        ((), ("Excluded Engineering Society",)),
+        ((), ("  excluded   ENGINEERING society ",)),
+        (("P1",), ("Open", EXCLUDED_PARENT_NAME)),
+    ],
+)
+def test_any_excluded_id_or_name_excludes(ids: tuple[str, ...], names: tuple[str, ...]) -> None:
+    assert is_demo_eligible("cc-by", ids, names, TEST_EXCLUSIONS) is False
+
+
+# 判定為 True 時授權只可能是這幾個字面值（寫死，不拿實作的 `openalex_license` 當答案）。
+# `cc0` 不是 OpenAlex 會給的值（官方清單是 `public-domain`），但 `openalex_license` 認得它是 CC0。
+_ALLOWED_LICENSE_STRINGS = frozenset({"cc-by", "cc-by-sa", "public-domain", "cc0"})
+# 和允許值很像、但一律不算的寫法：大小寫、版本號、NC／ND、前後空白、底線。
+_NEAR_LICENSES = [
+    "cc-by-4.0",
+    "CC-BY",
+    "Cc-By",
+    "CC0",
+    "cc-by-nc",
+    "cc-by-nd",
+    "cc-by-nc-sa",
+    "cc-by-nc-nd",
+    " cc-by",
+    "cc-by ",
+    " cc-by-sa ",
+    "cc_by",
+    "public domain",
+    "public-domain ",
+    "other-oa",
+    "publisher-specific-oa",
+]
+_LICENSES = st.one_of(
+    st.none(),
+    st.sampled_from(sorted(_ALLOWED_LICENSE_STRINGS)),
+    st.sampled_from(_NEAR_LICENSES),
+    st.text(max_size=20),
+)
+_IDS = st.lists(
+    st.one_of(st.sampled_from(["P1", "P9000000002", "W5"]), st.text(min_size=1, max_size=12)),
+    max_size=4,
+).map(tuple)
+_NAMES = st.lists(
+    st.one_of(
+        st.sampled_from(["Open", EXCLUDED_PUBLISHER_NAME, EXCLUDED_PARENT_NAME.upper()]),
+        st.text(min_size=1, max_size=20),
+    ),
+    max_size=4,
+).map(tuple)
+
+
+@given(license=_LICENSES, ids=_IDS, names=_NAMES, excluded_id=st.booleans())
+def test_property_excluded_publisher_is_never_eligible(
+    license: str | None, ids: tuple[str, ...], names: tuple[str, ...], excluded_id: bool
+) -> None:
+    # 不管授權與其他出版社值怎麼組合：只要摻進一個排除清單裡的 ID 或名稱，一定是 False。
+    if excluded_id:
+        ids = (*ids, "P9000000002")
+    else:
+        names = (*names, EXCLUDED_PUBLISHER_NAME)
+    assert is_demo_eligible(license, ids, names, TEST_EXCLUSIONS) is False
+
+
+# 排除清單裡的值的各種寫法：URL、小寫、大小寫與空白不同的名稱、上層出版社名稱。
+_EXCLUDED_ID_FORMS = [
+    "P9000000002",
+    "p9000000002",
+    EXCLUDED_PUBLISHER_ID,
+    "https://openalex.org/p9000000002",
+]
+_EXCLUDED_NAME_FORMS = [
+    EXCLUDED_PUBLISHER_NAME,
+    EXCLUDED_PUBLISHER_NAME.upper(),
+    f"  {EXCLUDED_PUBLISHER_NAME.lower()}  ",
+    EXCLUDED_PUBLISHER_NAME.replace(" ", "   "),
+    EXCLUDED_PARENT_NAME,
+    EXCLUDED_PARENT_NAME.swapcase(),
+    # 夾雜看不見的字元（零寬空白、BOM、軟連字號、控制字元）。
+    f"{EXCLUDED_PUBLISHER_NAME}\u200b",
+    f"\ufeff{EXCLUDED_PUBLISHER_NAME}",
+    EXCLUDED_PUBLISHER_NAME.replace(" ", " \u00ad"),
+    f"\u200d{EXCLUDED_PARENT_NAME.upper()}\x00",
+    # 字母與數字以外的都不影響：異體字選擇符、韓文填充字、點字空白、私用區、標點、黏在一起。
+    f"{EXCLUDED_PUBLISHER_NAME}\ufe0f",
+    f"\u3164{EXCLUDED_PUBLISHER_NAME}\u2800",
+    EXCLUDED_PUBLISHER_NAME.replace(" ", "\u200b"),
+    EXCLUDED_PUBLISHER_NAME.replace(" ", ""),
+    EXCLUDED_PUBLISHER_NAME.replace(" ", "-"),
+    ".".join(EXCLUDED_PARENT_NAME.replace(" ", "")),
+    f"\ue000{EXCLUDED_PARENT_NAME}\u034f",
+]
+
+
+@given(
+    license=_LICENSES,
+    ids=_IDS,
+    names=_NAMES,
+    excluded_id=st.one_of(st.none(), st.sampled_from(_EXCLUDED_ID_FORMS)),
+    excluded_name=st.one_of(st.none(), st.sampled_from(_EXCLUDED_NAME_FORMS)),
+    id_position=st.integers(min_value=0, max_value=4),
+    name_position=st.integers(min_value=0, max_value=4),
+)
+def test_property_excluded_value_in_any_form_and_position_is_never_eligible(
+    license: str | None,
+    ids: tuple[str, ...],
+    names: tuple[str, ...],
+    excluded_id: str | None,
+    excluded_name: str | None,
+    id_position: int,
+    name_position: int,
+) -> None:
+    # 排除值用非標準寫法、放在直屬（第一個）或 lineage 的任何位置，一樣一定是 False。
+    if excluded_id is None and excluded_name is None:
+        excluded_name = EXCLUDED_PUBLISHER_NAME
+    if excluded_id is not None:
+        ids = (*ids[:id_position], excluded_id, *ids[id_position:])
+    if excluded_name is not None:
+        names = (*names[:name_position], excluded_name, *names[name_position:])
+    assert is_demo_eligible(license, ids, names, TEST_EXCLUSIONS) is False
+
+
+@given(license=_LICENSES, ids=_IDS)
+def test_property_ids_without_names_are_never_eligible(
+    license: str | None, ids: tuple[str, ...]
+) -> None:
+    # 只有出版社 ID、沒有名稱：不管 ID 看不看得懂、在不在排除清單，一定是 False
+    # （ADR-0052 第 4 點）。
+    assert is_demo_eligible(license, ids, (), TEST_EXCLUSIONS) is False
+
+
+@given(license=_LICENSES, ids=_IDS, names=_NAMES)
+def test_property_license_outside_the_three_is_never_eligible(
+    license: str | None, ids: tuple[str, ...], names: tuple[str, ...]
+) -> None:
+    result = is_demo_eligible(license, ids, names, TEST_EXCLUSIONS)
+    if license not in _ALLOWED_LICENSE_STRINGS:
+        assert result is False
+
+
+@given(license=_LICENSES, ids=_IDS, names=_NAMES)
+def test_property_true_needs_allowed_license_and_publisher_not_excluded(
+    license: str | None, ids: tuple[str, ...], names: tuple[str, ...]
+) -> None:
+    # True 的必要條件：三種授權之一（寫死的字面值）、有出版社欄位、至少一個不是空白的名稱、
+    # 沒有任何值在排除清單裡；而且拿掉排除清單（None）一律 False。
+    if is_demo_eligible(license, ids, names, TEST_EXCLUSIONS):
+        assert license in _ALLOWED_LICENSE_STRINGS
+        assert openalex_license(license) in DEMO_ELIGIBLE_LICENSES
+        assert ids or names
+        assert any(name.strip() for name in names)
+        assert any(normalize_publisher_name(name) for name in names)
+        assert not TEST_EXCLUSIONS.matches(ids, names)
+    assert is_demo_eligible(license, ids, names, None) is False
+
+
+# --- 解析 ------------------------------------------------------------------------------------
+
+
+def test_parser_reads_primary_license_and_publisher() -> None:
+    paper = _parse(lineage=[OPEN_PUBLISHER_ID, "https://openalex.org/P9000000077"])
+
+    assert paper.primary_license == "cc-by"
+    assert paper.publisher_ids == ("P9000000001", "P9000000077")
+    assert paper.publisher_names == (OPEN_PUBLISHER_NAME,)
+    assert _eligible(paper) is True
+
+
+def test_parser_ignores_best_oa_and_other_locations() -> None:
+    paper = _parse(license=None, best_oa_license="cc-by", other_location_licenses=("cc-by",))
+
+    assert paper.primary_license is None
+    assert _eligible(paper) is False
+
+
+def test_parser_keeps_unknown_license_strings() -> None:
+    paper = _parse(license="  publisher-specific-oa ")
+
+    assert paper.primary_license == "publisher-specific-oa"
+    assert _eligible(paper) is False
+
+
+@pytest.mark.parametrize("bad", [5, True, ["cc-by"], {"x": 1}, "", "   ", "a\x00b"])
+def test_parser_is_lenient_with_license_shapes(bad: object) -> None:
+    assert _parse(license=bad).primary_license is None
+
+
+def test_parser_is_lenient_with_publisher_shapes() -> None:
+    paper = _parse(publisher_id=5, publisher_name="  ", lineage="P1", lineage_names=[3, "Group"])
+
+    assert paper.publisher_ids == ()
+    assert paper.publisher_names == ("Group",)
+
+
+def test_parser_keeps_unreadable_publisher_ids_as_text() -> None:
+    assert _parse(publisher_id="not an id!", lineage=[]).publisher_ids == ("not an id!",)
+
+
+def test_parser_without_primary_location_has_no_license_or_publisher() -> None:
+    paper = _parse(primary=False, best_oa_license="cc-by")
+
+    assert paper.primary_license is None
+    assert (paper.publisher_ids, paper.publisher_names) == ((), ())
+    assert _eligible(paper) is False
+
+
+def test_parser_valid_publisher_id_without_name_is_not_eligible() -> None:
+    paper = _parse(publisher_name=None, lineage_names=[])
+
+    assert paper.publisher_ids == ("P9000000001",)
+    assert paper.publisher_names == ()
+    assert _eligible(paper) is False
+
+
+@pytest.mark.parametrize(
+    "invisible", ["\u200b", "\ufeff", "\u00ad", " \u200b\u00ad ", "\u3164", "\ufe0f\u2800", "..."]
+)
+def test_parser_name_of_only_invisible_characters_is_not_eligible(invisible: str) -> None:
+    # 解析器照存（去頭尾空白後不是空的），判定時正規化成空字串，一樣不可用。
+    paper = _parse(publisher_id=None, publisher_name=invisible, lineage_names=[invisible])
+
+    assert paper.primary_license == "cc-by"
+    assert paper.publisher_ids == ()
+    assert _eligible(paper) is False
+
+
+def test_parser_without_source_has_no_publisher() -> None:
+    paper = _parse(source=False)
+
+    assert (paper.publisher_ids, paper.publisher_names) == ((), ())
+    assert _eligible(paper) is False
+
+
+def test_parser_excluded_publisher_via_lineage_name() -> None:
+    paper = _parse(
+        publisher_id="https://openalex.org/P9000000055",
+        publisher_name="Some Imprint",
+        lineage_names=["Some Imprint", EXCLUDED_PARENT_NAME],
+    )
+
+    assert _eligible(paper) is False
+
+
+def test_parser_excluded_publisher_by_id_or_name() -> None:
+    assert _eligible(_parse(publisher_id=EXCLUDED_PUBLISHER_ID, publisher_name="X")) is False
+    assert _eligible(_parse(publisher_id=None, publisher_name=EXCLUDED_PUBLISHER_NAME)) is False
+
+
+def test_license_and_publisher_are_not_in_source_hash() -> None:
+    base = _parse()
+    changed = _parse(license="cc-by-nc", publisher_id=EXCLUDED_PUBLISHER_ID, publisher_name="Other")
+
+    assert (base.primary_license, base.publisher_ids) != (
+        changed.primary_license,
+        changed.publisher_ids,
+    )
+    assert base.source_hash == changed.source_hash
+
+
+def test_new_fields_default_to_nothing() -> None:
+    paper = ParsedPaper(
+        source="openalex",
+        fetched_at=FETCHED_AT,
+        doi="10.1/a",
+        openalex_id=None,
+        title="t",
+        journal_issn_l=None,
+        publication_year=None,
+    )
+
+    assert (paper.primary_license, paper.publisher_ids, paper.publisher_names) == (None, (), ())
+
+
+def test_new_fields_survive_the_staging_json_roundtrip() -> None:
+    paper = _parse()
+
+    assert ParsedPaper.model_validate_json(paper.model_dump_json()) == paper
+
+
+# --- 設定檔 ----------------------------------------------------------------------------------
+
+
+def test_real_config_excludes_ieee_names() -> None:
+    config = load_domain_config({"RADAR_CONFIG_DIR": str(ROOT / "config")})
+    exclusions = config.demo_publishers.exclusions()
+
+    assert normalize_publisher_name("Institute of Electrical and Electronics Engineers") in (
+        exclusions.names
+    )
+    assert normalize_publisher_name("IEEE") in exclusions.names
+    assert is_demo_eligible("cc-by", (), ("IEEE\u200b",), exclusions) is False
+    assert is_demo_eligible("cc-by", (), ("\ufeffI\u00adEEE",), exclusions) is False
+    for name in (
+        "IEEE\ufe0f",
+        "IEEE\u3164",
+        "IEEE\u2800",
+        "IEEE\ue000",
+        "I.E.E.E.",
+        "IEEE\u200bComputer\u200bSociety",
+        "IEEE-Computer Society",
+        "Institute\u2060of Electrical and Electronics Engineers",
+        "IEEE\x01Computer Society",
+        "IEEE\u180eComputer Society",
+    ):
+        assert is_demo_eligible("cc-by", (), (name,), exclusions) is False, name
+    assert config.scope_settings().demo_publishers == exclusions
+    assert config.journals.scope_settings().demo_publishers is None
+    assert (
+        is_demo_eligible(
+            "cc-by", (), ("Institute of Electrical and Electronics Engineers",), exclusions
+        )
+        is False
+    )
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        {"excluded": []},
+        {"excluded": [{"id": None, "name": " ", "note": "x"}]},
+        {"excluded": [{"id": None, "name": "...", "note": "x"}]},
+        {"excluded": [{"id": None, "name": "\u200b\u3164", "note": "x"}]},
+        {"excluded": [{"id": "W123", "name": "A", "note": "x"}]},
+        {"excluded": [{"id": "not an id!", "name": "A", "note": "x"}]},
+        {"excluded": [{"id": None, "name": "A"}]},
+        {"excluded": [{"id": None, "name": "A", "note": "x", "extra": 1}]},
+    ],
+)
+def test_demo_publishers_config_rejects_bad_entries(data: object) -> None:
+    with pytest.raises(ValidationError):
+        DemoPublishersConfig.model_validate(data)
+
+
+def test_demo_publishers_config_normalizes_ids() -> None:
+    config = DemoPublishersConfig.model_validate(
+        {"excluded": [{"id": "https://openalex.org/p42", "name": "A", "note": "x"}]}
+    )
+
+    assert config.exclusions() == PublisherExclusions(
+        ids=frozenset({"P42"}), names=frozenset({"a"})
+    )
+
+
+def test_demo_publishers_names_with_the_same_key_are_not_an_error() -> None:
+    config = DemoPublishersConfig.model_validate(
+        {
+            "excluded": [
+                {"id": None, "name": "IEEE Computer Society", "note": "x"},
+                {"id": None, "name": "IEEE-Computer\u200bSociety", "note": "x"},
+                {"id": None, "name": "I.E.E.E.", "note": "x"},
+                {"id": None, "name": "IEEE", "note": "x"},
+            ]
+        }
+    )
+
+    assert config.exclusions().names == frozenset({"ieeecomputersociety", "ieee"})
+
+
+def test_broken_demo_publishers_file_is_reported(tmp_path: Path) -> None:
+    target = tmp_path / "config"
+    shutil.copytree(ROOT / "config", target)
+    (target / "demo_publishers.yaml").write_text("excluded: []\n", encoding="utf-8")
+
+    with pytest.raises(ConfigError) as caught:
+        load_domain_config({"RADAR_CONFIG_DIR": str(target)})
+
+    [problem] = caught.value.problems
+    assert problem.startswith("demo_publishers.yaml：excluded：")

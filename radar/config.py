@@ -13,6 +13,7 @@ from radar.domain.auth_settings import AuthSettings, auth_settings_problems
 from radar.domain.budget import BudgetConfig
 from radar.domain.context_values import ContextValues, context_values_registry_problems
 from radar.domain.domain_config import (
+    DemoPublishersConfig,
     DomainConfig,
     ExclusionRulesConfig,
     JournalsConfig,
@@ -167,6 +168,7 @@ JOURNALS_FILE = "journals.yaml"
 OPENALEX_FILE = "openalex.yaml"
 EXCLUSION_RULES_FILE = "exclusion_rules.yaml"
 KEYWORD_SOURCES_FILE = "keyword_sources.yaml"
+DEMO_PUBLISHERS_FILE = "demo_publishers.yaml"
 # OQ-02 的基準篇數：只有 `radar weekly-run report` 讀；不放進 DomainConfig，api、worker 不讀。
 IMPORT_BASELINE_FILE = "import_baseline.yaml"
 # 模型與價格（AD-8、ADR-0009）：只有要呼叫 LLM 的指令與工作讀（`load_models_config`）。
@@ -197,9 +199,9 @@ def config_dir(environ: Mapping[str, str] | None = None) -> Path:
 
 def load_domain_config(environ: Mapping[str, str] | None = None) -> DomainConfig:
     """讀 `RADAR_CONFIG_DIR` 下的 `journals.yaml`、`openalex.yaml`、`exclusion_rules.yaml`、
-    `keyword_sources.yaml` 並驗證。
+    `keyword_sources.yaml`、`demo_publishers.yaml` 並驗證。
 
-    四個檔的問題一起回報，每條寫成「檔名：欄位路徑：原因」（例如
+    五個檔的問題一起回報，每條寫成「檔名：欄位路徑：原因」（例如
     `journals.yaml：journals.2.issn_l：…`）；缺檔、不是合法 YAML、同一個 mapping 的鍵寫兩次
     也各有一條。
 
@@ -216,12 +218,16 @@ def load_domain_config(environ: Mapping[str, str] | None = None) -> DomainConfig
     keyword_sources = _load_yaml_model(
         directory, KEYWORD_SOURCES_FILE, KeywordSourcesConfig, problems
     )
+    demo_publishers = _load_yaml_model(
+        directory, DEMO_PUBLISHERS_FILE, DemoPublishersConfig, problems
+    )
     if (
         problems
         or journals is None
         or openalex is None
         or exclusion_rules is None
         or keyword_sources is None
+        or demo_publishers is None
     ):
         raise ConfigError(problems)
     return DomainConfig(
@@ -229,6 +235,7 @@ def load_domain_config(environ: Mapping[str, str] | None = None) -> DomainConfig
         openalex=openalex,
         exclusion_rules=exclusion_rules,
         keyword_sources=keyword_sources,
+        demo_publishers=demo_publishers,
     )
 
 

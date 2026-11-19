@@ -252,7 +252,8 @@ def register_tasks(app: procrastinate.App, parts: WorkerParts, settings: Setting
 
     def load_scope() -> ScopeSettings:
         # 執行時才讀 config/journals.yaml：抓完後才改設定也照新的追蹤範圍算 in_scope。
-        return load_domain_config().journals.scope_settings()
+        # 一起帶 config/demo_publishers.yaml 的排除清單，寫入時算 demo_eligible（ADR-0052）。
+        return load_domain_config().scope_settings()
 
     def enter_setup(stack: ExitStack) -> WeeklyFetchSetup:
         # 執行時才讀領域設定、建 OpenAlex 與物件儲存的 adapter：改 config/journals.yaml 不用重開

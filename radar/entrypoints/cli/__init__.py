@@ -311,7 +311,8 @@ def reparse() -> None:
             SystemViewer(),
             database,
             store,
-            scope=domain_config.journals.scope_settings(),
+            # 帶示範站排除的出版社：reparse 依新的清單重算 demo_eligible（ADR-0052）。
+            scope=domain_config.scope_settings(),
             exclusion_rules=domain_config.exclusion_rules,
         )
     except WeeklyUpdateInProgressError as exc:

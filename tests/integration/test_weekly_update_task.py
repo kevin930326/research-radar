@@ -27,6 +27,7 @@ from radar.domain.raw_records import RawRecord, RawSource
 from radar.domain.settings import Settings
 from radar.entrypoints.bootstrap import build_worker
 from tests.database import APP_ROLE, OWNER_ROLE, ROOT, TestDatabase, migrate
+from tests.demo_works import demo_work, demo_work_bytes
 from tests.openalex_cassette import cassette_work, work_bytes
 
 OBJECT_STORE = {
@@ -310,6 +311,41 @@ def test_a_journal_added_only_in_journals_yaml_is_imported(
         (f"New journal study {number}", NEW_ISSN, True, snapshot_id) for number in range(1, 4)
     ]
     assert _status(weekly_db, run_id) == "published"
+
+
+def test_weekly_update_marks_demo_eligible_with_the_real_exclusion_list(
+    weekly_db: TestDatabase, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Story 3.7a：照正式的 register_tasks 跑（第一次匯入也是這條路），讀正式的
+    # config/demo_publishers.yaml：CC BY 的編的出版社算可用；名稱是 IEEE 的 CC BY 不算。
+    issn = "1471-7727"
+    fetched_at = datetime(2026, 11, 16, 2, 0, tzinfo=UTC)
+    works = [
+        demo_work(1, issn_l=issn),
+        demo_work(2, issn_l=issn, publisher_id=None, publisher_name="IEEE"),
+    ]
+    records = [
+        RawRecord(RawSource.OPENALEX, f"W8{n:08d}", demo_work_bytes(work), fetched_at)
+        for n, work in enumerate(works, start=1)
+    ]
+    source = FakePaperSource({issn: [records]})
+    task = _task(weekly_db, monkeypatch, ROOT / "config")
+    monkeypatch.setattr(
+        worker_tasks, "build_paper_source", lambda *_: contextlib.nullcontext(source)
+    )
+    monkeypatch.setattr(worker_tasks, "build_object_store", lambda *_: FakeObjectStore())
+    run_id, _before = _fetching_run(weekly_db)
+
+    task(weekly_run_id=str(run_id))
+
+    with weekly_db.connect(APP_ROLE) as connection:
+        papers = connection.execute(
+            "SELECT title, primary_license, demo_eligible FROM paper ORDER BY title"
+        ).fetchall()
+    assert papers == [
+        ("Made up demo study 1", "cc-by", True),
+        ("Made up demo study 2", "cc-by", False),
+    ]
 
 
 BAD_HOST = "bad host!.abc123account.r2.example"

@@ -127,6 +127,12 @@ NEW_FILE_BREAKAGES = {
         "active: crossref",
         "keyword_sources.yaml：active：",
     ),
+    "demo_publishers": (
+        "demo_publishers.yaml",
+        "name: IEEE\n",
+        "name: '   '\n",
+        "demo_publishers.yaml：excluded.1.name：",
+    ),
 }
 
 
