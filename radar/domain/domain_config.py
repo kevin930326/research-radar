@@ -201,7 +201,8 @@ class DemoExcludedPublisher(BaseModel):
     """一家示範站不放完整內容的出版社：OpenAlex 的出版社 ID 或名稱，任一個對上就排除。
 
     `id` 可以是 None（還沒查證）；`name` 用 OpenAlex `host_organization_name` 的完整寫法，比對前
-    做 `normalize_publisher_name`。`note` 寫來源或為什麼列（只給人看）。
+    做 `normalize_publisher_name`（只比字母與數字；兩筆名稱得到同一個鍵不算錯，合併成一筆）。
+    `note` 寫來源或為什麼列（只給人看）。
     """
 
     model_config = _FROZEN
@@ -229,6 +230,14 @@ class DemoExcludedPublisher(BaseModel):
     def _not_blank(cls, value: str) -> str:
         if not value.strip():
             raise ValueError("不能是空白")
+        return value
+
+    @field_validator("name")
+    @classmethod
+    def _has_letters_or_digits(cls, value: str) -> str:
+        # 比對只看字母與數字（ADR-0052 第 5 點）；一個都沒有的名稱什麼都對不上，當成寫錯。
+        if not normalize_publisher_name(value):
+            raise ValueError("至少要有一個字母或數字")
         return value
 
 

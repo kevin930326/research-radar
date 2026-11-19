@@ -989,3 +989,4 @@
 - **上層出版社（lineage）**：OpenAlex 記的出版社上下層關係，從自己一路到最上層的集團，像族譜；排除清單比對時連上層一起看。
 - **`demo_eligible`（示範站可用）**：論文入庫時由 `is_demo_eligible` 算好存下的是非值：授權是 CC BY、CC BY-SA 或 CC0、至少要有一個出版社名稱（只有 ID 不夠），而且出版社不在排除清單；排除清單改了要跑 `radar reparse` 重算。
 - **`demo_full_paper`**：資料庫的 view，列出示範站可以放完整內容的論文（計入統計、示範站可用、有目前用的摘要、摘要來源允許公開）。
+- **出版社名稱比對鍵（`normalize_publisher_name`）**：比對排除清單時，出版社名稱只留字母與數字（大小寫、空白、標點、看不見的字元都拿掉）得到的字串，像只看車牌號碼不看車漆；`IEEE Computer Society` 和 `IEEE-ComputerSociety` 同一個鍵，寧可多排除。

@@ -6,8 +6,10 @@
 #
 # - id：OpenAlex 的出版社 ID（P 開頭，例如 P4310320990；也可以寫 https://openalex.org/P…）。
 #   還沒查證就寫 null。
-# - name：OpenAlex host_organization_name 的完整寫法。比對前兩邊都做同一個正規化：NFKC、
-#   不分大小寫、連續空白縮成一個、去頭尾空白。
+# - name：OpenAlex host_organization_name 的完整寫法。比對時兩邊都只比字母與數字（同
+#   normalize_publisher_name，ADR-0052 第 5 點）：大小寫、空白、標點、看不見的字元都不影響，
+#   例如 IEEE Computer Society、IEEE-Computer Society、IEEEComputerSociety 算同一個名稱，
+#   I.E.E.E. 等於 IEEE。名稱至少要有一個字母或數字。
 # - note：為什麼列、出處（只給人看）。
 # - 比對：論文「出版社自己那一版」（primary_location.source）的出版社 ID 與名稱，含上層出版社
 #   （host_organization_lineage、host_organization_lineage_names）；任一個 ID 或名稱對上就排除。

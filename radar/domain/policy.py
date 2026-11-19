@@ -113,22 +113,23 @@ def openalex_license(value: str | None) -> ContentLicense:
     return ContentLicense.UNKNOWN if license in _PROJECT_ONLY_LICENSES else license
 
 
-# 看不見的字元：格式字元（零寬空白、BOM、軟連字號等）與控制字元。
-_INVISIBLE_CATEGORIES = frozenset({"Cf", "Cc"})
+# 韓文填充字：Unicode 類別是 Lo（字母），但畫面上看不見，另外拿掉。
+_HANGUL_FILLERS: Final[frozenset[str]] = frozenset({"\u115f", "\u1160", "\u3164", "\uffa0"})
 
 
 def normalize_publisher_name(value: str) -> str:
-    """出版社名稱比對前的正規化（排除清單與論文的名稱都走這裡）。
+    """出版社名稱的比對鍵（排除清單與論文的名稱都走這裡）：只比字母與數字。
 
-    依序：NFKC → 拿掉看不見的字元（Unicode 類別 `Cf`、`Cc`；本身算空白的控制字元如 `\t`、`\n`
-    留給下一步當空白）→ `casefold` → 連續空白縮成一個、去頭尾空白。只有看不見的字元的名稱會變成
-    空字串（ADR-0052 第 5 點）。
+    依序：NFKC → `casefold` → 只留 Unicode 類別以 `L`（字母）或 `N`（數字）開頭的字元，其他
+    （空白、標點、格式與控制字元、組字符號、私用區、未指派、符號等）全部拿掉 → 再拿掉看不見的
+    韓文填充字（U+115F、U+1160、U+3164、U+FFA0）。所以 `IEEE Computer Society`、
+    `IEEE-Computer Society`、`I.E.E.E.`、字與字之間夾零寬空白的寫法都得到同一個鍵；結果是空字串
+    ＝沒有名稱（ADR-0052 第 5 點）。寧可多排除：鍵變寬只會讓排除變多、可用變少。
     """
-    text = unicodedata.normalize("NFKC", value)
-    text = "".join(
-        ch for ch in text if ch.isspace() or unicodedata.category(ch) not in _INVISIBLE_CATEGORIES
+    text = unicodedata.normalize("NFKC", value).casefold()
+    return "".join(
+        ch for ch in text if unicodedata.category(ch)[0] in ("L", "N") and ch not in _HANGUL_FILLERS
     )
-    return " ".join(text.casefold().split())
 
 
 @dataclass(frozen=True)
