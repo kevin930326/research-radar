@@ -7,7 +7,7 @@ baseline_revision: '58697050a61895e63331351056ce0e25e7ecb9c4'
 review_loop_iteration: 0
 followup_review_recommended: false
 context:
-  - '{project-root}/docs/runs/epic-3e/brief-demo-eligible.md'
+  - '{project-root}/docs/adr/0052-demo-eligible-license-and-publisher.md'
   - '{project-root}/docs/adr/0007-demo-static-snapshot.md'
 warnings: ['oversized']
 deferred: []
@@ -61,11 +61,11 @@ deferred: []
 - `policy.py`、`scope.py`、`papers.py`、`parsers/openalex.py` -- 判定與解析。
 - `repo/papers.py` + 遷移 0021 -- 寫入與 view。
 - 兩個 entrypoint -- 帶排除清單。
-- 測試：`tests/unit/test_demo_eligible.py`（含 Hypothesis）、`tests/unit/test_openalex_parser_license.py`、`tests/integration/test_demo_full_paper.py`（view 八種情況、授權變了不算變動、reparse 補欄位）、設定檔測試、CLI 帶排除清單。
+- 測試：`tests/unit/test_demo_eligible.py`（含 Hypothesis）、`tests/integration/test_demo_full_paper.py`（view 八種情況、授權變了不算變動、reparse 補欄位）、設定檔測試、CLI 帶排除清單。
 - 文件：ADR-0052、ADR-0007 第 5 點與更新行、glossary。
 
 **Acceptance Criteria:**
-- 見 `docs/runs/epic-3e/brief-demo-eligible.md` 全部驗收條件。
+- 見 PR #108 說明的「驗收條件與證據」表（規格檔只在本機的工作資料夾，不在 repo）。
 
 ## Spec Change Log
 
