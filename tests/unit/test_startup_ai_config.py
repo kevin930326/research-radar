@@ -73,6 +73,32 @@ def test_every_broken_file_is_listed_together(config: Path, tmp_path: Path) -> N
     assert any(p.startswith("prompt 登記：") for p in problems)
 
 
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [("version: 2\n", "version: 0\n"), ("acronyms:\n", "acronyms: [\n")],
+    ids=["version_0", "not_yaml"],
+)
+def test_broken_acronym_list_is_reported(config: Path, old: str, new: str) -> None:
+    # 縮寫允許清單和 zh_summary.yaml 一起讀（load_zh_summary_rules），壞了也拒絕啟動。
+    _replace(config / "zh_summary_acronyms.yaml", old, new)
+
+    with pytest.raises(ConfigError) as caught:
+        check_ai_config(PROMPTS)
+
+    problems = caught.value.problems
+    assert any(p.startswith("zh_summary_acronyms.yaml：") for p in problems), problems
+
+
+def test_missing_acronym_list_is_reported(config: Path) -> None:
+    (config / "zh_summary_acronyms.yaml").unlink()
+
+    with pytest.raises(ConfigError) as caught:
+        check_ai_config(PROMPTS)
+
+    problems = caught.value.problems
+    assert any(p.startswith("zh_summary_acronyms.yaml：找不到檔案") for p in problems), problems
+
+
 def test_taxonomy_and_context_values_hash_registry_is_checked(config: Path) -> None:
     # 升了版卻沒登記雜湊。
     _replace(config / "taxonomy.yaml", "version: 2\n", "version: 99\n")

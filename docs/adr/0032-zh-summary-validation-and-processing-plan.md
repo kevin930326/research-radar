@@ -359,3 +359,46 @@
   - 輸入同時有 `1.5 months` 與三月時，「追蹤期為 1.5 至 3 月」會過（3 月的位置對得上三月，1.5 是輸入的數字）。
 - **前面是一般的詞或數字時（審查 V5）**：上一節的「剩下的漏網是前面是一般的詞時」也包含前面是數字：`1.2 times 10-3% points` 讓「10%」對得上；乘號漏寫的 `1.2 10-3% points` 讓「10%」、`1.2 10 -3% points` 讓「3 個百分點」對得上。
 - **偏保守的誤擋（審查 V4；修改前也擋）**：「1 月份 - 3 月份」「12 月底 - 3 月」「7 月中 - 8 月中」「50 年代末 - 60 年代初」（`-` 前面不是緊接「月」「年代」）；空白千分位範圍 `1 200 – 1 500`、`1 200–1 500` 的後半（1500 不當新規則的起點）。
+
+## 2026-11-19 更新：縮寫清單第二批
+
+### 發生什麼事
+
+2026-11-18 晚上用真金鑰重跑 424 篇被拒收的論文，救回 334 篇、剩 90 篇。逐篇看剩下的，約 11 篇只要把縮寫加進 `config/zh_summary_acronyms.yaml` 就能救（摘要有全名、輸出寫了通用縮寫）。放行條件不變：縮寫在清單裡，而且標題或摘要有它登記的全名。
+
+### 加了哪些（`version` 1 → 2）
+
+- ARMA：`autoregressive moving average`
+- GARCH：`generalized autoregressive conditional heteroscedasticity`、`generalized autoregressive conditional heteroskedasticity`、`generalised autoregressive conditional heteroscedasticity`、`generalised autoregressive conditional heteroskedasticity`
+- PVAR：`panel vector autoregression`
+- ISM：`interpretive structural modeling`（`modelling` 靠最後一個詞的詞形變化涵蓋，有測試）
+- FUCOM：`full consistency method`
+- MACONT：`mixed aggregation by comprehensive normalization technique`、`mixed aggregation by comprehensive normalisation technique`
+- ARAS：`additive ratio assessment`
+- MARCOS：`measurement of alternatives and ranking according to compromise solution`、`measurement of alternatives and ranking according to the compromise solution`、`measurement alternatives and ranking according to the compromise solution`、`measurement alternatives and ranking based on the compromise solution`、`measurement of alternatives and ranking based on the compromise solution`
+- FDEMATEL：`fuzzy decision making trial and evaluation laboratory`
+- EC2：`elastic compute cloud`
+- O2O：`online to offline`
+- 既有縮寫多登記一種寫法：SEM 加 `structural equation analysis`；DEMATEL 加 `decision making trial evaluation laboratory`。
+
+全名包著另一筆全名的（PVAR 包 VAR、FDEMATEL 包 DEMATEL），輸入有長的全名時兩個縮寫都會過：輸入真的有兩個全名，是想要的；反過來只有短的全名時，長的縮寫照樣擋（有測試）。
+
+### 沒放的與原因
+
+- MICMAC、VIKOR：Kevin 先前決定 E（全名拿不準，不放）。
+- GloVe 的 `global vectorization`：不是通用寫法，登記了會放太寬。
+- B2C：摘要寫的是 `B-to-C`，要登記的「全名」就是 `B to C`，太短，過不了設定檔的長度下限。
+- SDT 只寫 `self determination`（沒有 theory）：會放太寬。
+
+### 兩個樣式的實際行為（照現在的程式，沒有改）
+
+- **U+2010 連字號**（`online‐to‐offline`）：檢查用副本把 U+2010 換成一般連字號，對得上 `online to offline`，輸出 `O2O` 放行。
+- **全名前後緊接破折號（U+2014，沒有空白）**：例如 `Interpretive Structural Modeling—Decision Making Trial and Evaluation Laboratory`。破折號在檢查用副本裡是連字號。破折號**前面**的全名（ISM）放行（全名結尾後面接連字號不影響）；破折號**後面**的全名（DEMATEL）擋下，和既有取捨「全名開頭的詞前面接連字號」一樣偏保守。破折號兩邊有空白（`Modeling — Decision`）時兩個都放行。摘要本身寫了 `(ISM-DEMATEL)` 時縮寫本來就在輸入裡，不靠清單。
+
+### 短全名的評估
+
+`elastic compute cloud`、`structural equation analysis`、`online to offline`、`full consistency method`、`additive ratio assessment` 這幾個全名比較短，但都是專有寫法：摘要出現 `Amazon Elastic Compute Cloud` 時本來就該寫 EC2；`structural equation analysis` 就是 SEM 的意思；`online to offline` 在資管摘要裡只有 O2O 一個意思；`full consistency method`、`additive ratio assessment` 是特定多準則方法的名字，一般句子很難剛好連續出現這幾個詞。只有部分詞（`elastic compute`、`structural equation` 不帶 analysis／modeling、`online offline`、`moving average` 不帶 autoregressive、`ratio assessment`）都照樣擋（有測試）。結論：放過編造的風險低，和第一批的 `peer to peer`、`business to business` 同級（全名本身就是依據，模型寫錯對應時抓不到）。
+
+### 生效方式
+
+這份清單不算進輸入指紋、改了不必升 prompt 版本。已經被拒收的論文要用 `radar runs retry` 重跑才會用新清單（Kevin 手動做）。
