@@ -209,7 +209,7 @@ def test_display_names_and_client_config() -> None:
         "topics": [{"key": "erp", "name": "企業資源規劃"}],
         "methods": [{"key": "survey", "name": "問卷調查"}],
     }
-    assert config.json() == {"timezone": "Asia/Taipei"}
+    assert config.json() == {"timezone": "Asia/Taipei", "library_page_size": 50}
     assert names.headers["cache-control"] == config.headers["cache-control"] == "no-store"
 
 

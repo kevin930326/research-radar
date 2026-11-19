@@ -6,6 +6,7 @@
  */
 
 export * from './abstractSource.ts';
+export * from './addedVia.ts';
 export * from './aiBlockState.ts';
 export * from './classificationBlock.ts';
 export * from './classificationContent.ts';
@@ -23,11 +24,15 @@ export * from './fullTextLinks.ts';
 export * from './healthz200.ts';
 export * from './hypothesisItem.ts';
 export * from './inputKind.ts';
+export * from './libraryItemResponse.ts';
+export * from './libraryPageResponse.ts';
+export * from './listLibraryParams.ts';
 export * from './memberResponse.ts';
 export * from './paperAbstract.ts';
 export * from './paperBiblio.ts';
 export * from './paperOrigin.ts';
 export * from './paperPageResponse.ts';
+export * from './paperRow.ts';
 export * from './problemDetails.ts';
 export * from './problemDetailsCode.ts';
 export * from './provenance.ts';

@@ -52,6 +52,7 @@ from tests.llm_support import (
     create_paper,
     execute,
     insert_ledger,
+    library_routes,
     paper_page_setup,
     paper_routes,
 )
@@ -91,6 +92,7 @@ class Api:
             app,
             auth_routes=build_auth_routes(database, settings, pick_member_identity, lambda: NOW),
             paper_routes=paper_routes(database, setup=setup, now=NOW),
+            library_routes=library_routes(database),
         )
         self.client = TestClient(app, base_url="https://testserver")
         self.owner_id, self.owner_token = self._log_in(database, OWNER_EMAIL, "測試甲")
@@ -456,4 +458,4 @@ def test_display_names_and_client_config(api: Api) -> None:
         mode="json"
     )
     assert config.status_code == 200
-    assert config.json() == {"timezone": "Asia/Taipei"}
+    assert config.json() == {"timezone": "Asia/Taipei", "library_page_size": 50}

@@ -6,9 +6,14 @@
  */
 
 /**
- * 前端要用的設定值（AD-18）。`timezone`：畫面上的日期換成哪個時區（IANA 名稱）。
+ * 前端要用的設定值（AD-18）。
+ *
+ * - `timezone`：畫面上的日期換成哪個時區（IANA 名稱）。
+ * - `library_page_size`：文獻庫清單一頁幾篇（Story 3.16）。
  */
 export interface ClientConfig {
   /** @minLength 1 */
   timezone: string;
+  /** @minimum 1 */
+  library_page_size: number;
 }

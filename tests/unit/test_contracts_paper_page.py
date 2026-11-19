@@ -530,7 +530,7 @@ def test_display_names_follow_the_config_order_without_unclassified() -> None:
 
 
 def test_client_config_is_the_taipei_timezone() -> None:
-    assert _json(build_client_config()) == {"timezone": "Asia/Taipei"}
+    assert _json(build_client_config()) == {"timezone": "Asia/Taipei", "library_page_size": 50}
 
 
 @pytest.mark.parametrize(

@@ -116,8 +116,17 @@ def test_viewers_are_frozen() -> None:
 
 
 def test_member_sees_lab_visible_papers() -> None:
-    assert visible_papers(MEMBER) == '"paper".lab_visible'
-    assert visible_papers(ADMIN, alias="p") == '"p".lab_visible'
+    # Story 3.16：加上「或在自己的文獻庫」（AD-4），成員 ID 以 UUID 常值組進去。
+    assert visible_papers(MEMBER) == (
+        '("paper".lab_visible OR EXISTS (SELECT 1 FROM library_item AS visible_library'
+        ' WHERE visible_library.paper_id = "paper".id'
+        f" AND visible_library.owner_id = '{OTHER_ID}'::uuid))"
+    )
+    assert visible_papers(ADMIN, alias="p") == (
+        '("p".lab_visible OR EXISTS (SELECT 1 FROM library_item AS visible_library'
+        ' WHERE visible_library.paper_id = "p".id'
+        f" AND visible_library.owner_id = '{OTHER_ID}'::uuid))"
+    )
 
 
 def test_system_sees_everything_and_public_sees_counted_papers() -> None:
@@ -136,6 +145,13 @@ def test_alias_cannot_be_the_subquery_alias(viewer: Viewer) -> None:
     # 和 EXISTS 子查詢裡的別名相同時，條件會變成「自己等於自己」而永遠成立。
     with pytest.raises(ValueError, match="visible_counted"):
         visible_papers(viewer, alias="visible_counted")
+
+
+@pytest.mark.parametrize("viewer", [PUBLIC, MEMBER, SYSTEM])
+def test_alias_cannot_be_the_library_subquery_alias(viewer: Viewer) -> None:
+    # 成員分支的 EXISTS 子查詢用 visible_library（Story 3.16）：外面的別名也不能是它。
+    with pytest.raises(ValueError, match="visible_library"):
+        visible_papers(viewer, alias="visible_library")
 
 
 @pytest.mark.parametrize("alias", ["", "Paper", "p.x", 'p"', "1p", "p; DROP TABLE paper", "a" * 64])

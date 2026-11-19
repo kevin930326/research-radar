@@ -8,6 +8,9 @@
 信封（`ZhSummaryBlock`、`ClassificationBlock`、`ResearchModelBlock`）與內容、書目（`PaperBiblio`）、
 摘要（`PaperAbstract`）、全文連結（`FullTextLinks`）、顯示名稱（`DisplayNames`）、前端設定值
 （`ClientConfig`）。
+
+文獻庫（Story 3.16）定義的：論文列（`PaperRow`，3.13 的論文清單也用它）；前端設定值多一個
+`library_page_size`。
 """
 
 import uuid
@@ -32,8 +35,10 @@ from radar.domain import ai_blocks
 from radar.domain.ai_outputs import CurrentAbstract, InputKind
 from radar.domain.domain_config import JournalsConfig
 from radar.domain.judgments import SummaryField
+from radar.domain.library import LIBRARY_PAGE_SIZE
 from radar.domain.llm_schemas import EvidenceType, SupportLevel
 from radar.domain.paper_page import PaperPageFacts
+from radar.domain.paper_rows import PAPER_ROW_AUTHOR_LIMIT, PaperRowFacts
 from radar.domain.papers import AbstractSource, PaperOrigin
 from radar.domain.snapshot import DATA_TIMEZONE, Snapshot, SnapshotStatus
 from radar.domain.taxonomy import Taxonomy, TaxonomyField
@@ -658,6 +663,59 @@ class PaperBiblio(BaseModel):
         )
 
 
+class PaperRow(BaseModel):
+    """清單上的一篇論文（文獻庫、3.13 的論文清單共用）。
+
+    - `authors` 只有前 3 位，`author_count` 是全部的人數。
+    - `journal` 是設定檔的期刊代號（不是追蹤的期刊時是 null，這時看 `journal_issn_l`）。
+    - `doi` 是正規化後的寫法（一篇有好幾個時是最早記上的那一個）；`doi_url` 由它產生，和它一起有值
+      或一起是 null。
+    - `has_abstract`：有沒有目前的摘要。
+    """
+
+    model_config = _FROZEN
+
+    id: uuid.UUID
+    title: _Text
+    authors: tuple[str, ...] = Field(max_length=PAPER_ROW_AUTHOR_LIMIT)
+    author_count: int = Field(ge=0, strict=True)
+    publication_year: int | None = Field(strict=True)
+    journal: _JournalKey | None
+    journal_issn_l: str | None
+    doi: _Text | None
+    doi_url: str | None
+    has_abstract: StrictBool
+    in_scope: StrictBool
+    is_retracted: StrictBool
+
+    @model_validator(mode="after")
+    def _check(self) -> Self:
+        if self.author_count < len(self.authors):
+            raise ValueError("author_count 不能比 authors 的人數少")
+        expected = None if self.doi is None else doi_url(self.doi)
+        if self.doi_url != expected:
+            raise ValueError("doi_url 要由 doi 產生（沒有 doi 時是 null）")
+        return self
+
+    @classmethod
+    def from_facts(cls, facts: PaperRowFacts, journal_key: str | None) -> Self:
+        """`repo/paper_rows.find_paper_rows` 讀出的一列 → 回應的形狀（期刊代號由呼叫端對好）。"""
+        return cls(
+            id=facts.paper_id,
+            title=facts.title,
+            authors=facts.authors,
+            author_count=facts.author_count,
+            publication_year=facts.publication_year,
+            journal=journal_key,
+            journal_issn_l=facts.journal_issn_l,
+            doi=facts.doi,
+            doi_url=None if facts.doi is None else doi_url(facts.doi),
+            has_abstract=facts.has_abstract,
+            in_scope=facts.in_scope,
+            is_retracted=facts.is_retracted,
+        )
+
+
 class PaperAbstract(BaseModel):
     """目前的原文摘要（全站只有一筆 `is_current`，ADR-0015）與它的來源。"""
 
@@ -726,13 +784,19 @@ def build_display_names(journals: JournalsConfig, taxonomy: Taxonomy) -> Display
 
 
 class ClientConfig(BaseModel):
-    """前端要用的設定值（AD-18）。`timezone`：畫面上的日期換成哪個時區（IANA 名稱）。"""
+    """前端要用的設定值（AD-18）。
+
+    - `timezone`：畫面上的日期換成哪個時區（IANA 名稱）。
+    - `library_page_size`：文獻庫清單一頁幾篇（Story 3.16）。
+    """
 
     model_config = _FROZEN
 
     timezone: _Text
+    library_page_size: int = Field(ge=1, strict=True)
 
 
 def build_client_config() -> ClientConfig:
-    """前端的設定值：時區是資料截止日用的那一個（`domain/snapshot.DATA_TIMEZONE`）。"""
-    return ClientConfig(timezone=DATA_TIMEZONE.key)
+    """前端的設定值：時區是資料截止日用的那一個（`domain/snapshot.DATA_TIMEZONE`）；文獻庫一頁的
+    篇數是 `domain/library.LIBRARY_PAGE_SIZE`。"""
+    return ClientConfig(timezone=DATA_TIMEZONE.key, library_page_size=LIBRARY_PAGE_SIZE)

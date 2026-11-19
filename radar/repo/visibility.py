@@ -5,6 +5,7 @@
 """
 
 import re
+import uuid
 
 from radar.domain.viewer import MemberViewer, PublicViewer, SystemViewer, Viewer
 
@@ -12,32 +13,49 @@ from radar.domain.viewer import MemberViewer, PublicViewer, SystemViewer, Viewer
 _ALIAS = re.compile(r"[a-z_][a-z0-9_]{0,62}")
 # `PublicViewer` 的 EXISTS 子查詢裡 `counted_paper` 的別名；外面的別名不能和它相同。
 _COUNTED_ALIAS = "visible_counted"
+# `MemberViewer` 的 EXISTS 子查詢裡 `library_item` 的別名；外面的別名同樣不能和它相同。
+_LIBRARY_ALIAS = "visible_library"
+_SUBQUERY_ALIASES = frozenset({_COUNTED_ALIAS, _LIBRARY_ALIAS})
+
+
+def _member_literal(member_id: uuid.UUID) -> str:
+    """成員 ID 組進 SQL 的常值：先轉成標準寫法的 UUID（擋注入），再加上型別。"""
+    return f"'{uuid.UUID(str(member_id))}'::uuid"
+
+
+def _checked_alias(alias: str) -> str:
+    if not _ALIAS.fullmatch(alias):
+        raise ValueError(f"別名只能是小寫識別字：{alias!r}")
+    return alias
 
 
 def visible_papers(viewer: Viewer, *, alias: str = "paper") -> str:
     """`viewer` 看得到的論文的 SQL 條件，`alias` 是查詢裡 `paper` 表的名稱或別名。
 
-    - `MemberViewer`：`lab_visible` 為真的論文。（AD-4 的「或在這位成員的 `library_item`」
-      等 `library_item` 建好時補上。）
+    - `MemberViewer`：`lab_visible` 為真的論文，或在這位成員的文獻庫（`library_item`，Story 3.16）
+      裡的論文（AD-4）。成員 ID 以標準寫法的 UUID 常值組進去。
     - `SystemViewer`：全部。
     - `PublicViewer`：看得到的論文 ⇔ 在 `counted_paper` 裡（AD-4、AD-5）：追蹤範圍內、沒有被排除、
       已算進某個已發佈的快照。用 `EXISTS` 子查詢接，所以 `alias` 是 `paper` 表或 `counted_paper`
       都可以用（兩者的 `id` 是同一個）。
 
-    回傳的字串只由驗證過的識別字組成，不含任何值。
+    回傳的字串只由驗證過的識別字與重新組過的 UUID 常值組成，不含其他值。
 
     Raises:
-        ValueError: `alias` 不是小寫識別字，或和子查詢裡的別名 `visible_counted` 相同（內外別名
-            相同時條件永遠成立）。
+        ValueError: `alias` 不是小寫識別字，或和子查詢裡的別名（`visible_counted`、
+            `visible_library`）相同（內外別名相同時條件永遠成立）。
         TypeError: `viewer` 不是三種讀者身分之一。
     """
-    if not _ALIAS.fullmatch(alias):
-        raise ValueError(f"別名只能是小寫識別字：{alias!r}")
-    if alias == _COUNTED_ALIAS:
-        raise ValueError(f"別名不能是 {_COUNTED_ALIAS!r}（可見條件的子查詢用了這個名稱）")
+    _checked_alias(alias)
+    if alias in _SUBQUERY_ALIASES:
+        raise ValueError(f"別名不能是 {alias!r}（可見條件的子查詢用了這個名稱）")
     match viewer:
-        case MemberViewer():
-            return f'"{alias}".lab_visible'
+        case MemberViewer(member_id=member_id):
+            return (
+                f'("{alias}".lab_visible OR EXISTS (SELECT 1 FROM library_item AS {_LIBRARY_ALIAS}'
+                f' WHERE {_LIBRARY_ALIAS}.paper_id = "{alias}".id'
+                f" AND {_LIBRARY_ALIAS}.owner_id = {_member_literal(member_id)}))"
+            )
         case SystemViewer():
             return "TRUE"
         case PublicViewer():
@@ -45,6 +63,44 @@ def visible_papers(viewer: Viewer, *, alias: str = "paper") -> str:
                 f"EXISTS (SELECT 1 FROM counted_paper AS {_COUNTED_ALIAS}"
                 f' WHERE {_COUNTED_ALIAS}.id = "{alias}".id)'
             )
+        case _:
+            raise TypeError(f"不認得的讀者身分：{type(viewer).__name__}")
+
+
+def visible_library_items(viewer: Viewer, *, alias: str = "library_item") -> str:
+    """`viewer` 看得到的文獻庫的筆（`library_item`）的 SQL 條件，`alias` 是查詢裡這張表的名稱
+    或別名。
+
+    - `MemberViewer`：只有自己的（`owner_id` 是自己）。管理者也一樣：文獻庫是私人的。
+    - `SystemViewer`：全部。
+    - `PublicViewer`：沒有（`FALSE`）。
+
+    Raises:
+        ValueError: `alias` 不是小寫識別字。
+        TypeError: `viewer` 不是三種讀者身分之一。
+    """
+    return _owned_rows(viewer, _checked_alias(alias))
+
+
+def visible_deleted_records(viewer: Viewer, *, alias: str = "deleted_record") -> str:
+    """`viewer` 看得到的刪除封存（`deleted_record`）的 SQL 條件；規則和 `visible_library_items`
+    一樣（成員只看 `owner_id` 是自己的、系統全部、訪客沒有）。
+
+    Raises:
+        ValueError: `alias` 不是小寫識別字。
+        TypeError: `viewer` 不是三種讀者身分之一。
+    """
+    return _owned_rows(viewer, _checked_alias(alias))
+
+
+def _owned_rows(viewer: Viewer, alias: str) -> str:
+    match viewer:
+        case MemberViewer(member_id=member_id):
+            return f'"{alias}".owner_id = {_member_literal(member_id)}'
+        case SystemViewer():
+            return "TRUE"
+        case PublicViewer():
+            return "FALSE"
         case _:
             raise TypeError(f"不認得的讀者身分：{type(viewer).__name__}")
 

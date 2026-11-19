@@ -5,6 +5,7 @@
 - 時間：不能有 `timestamp`（不帶時區）的欄位；名稱是 `*_at` 的欄位一定是 `timestamptz`。
 - 外鍵：每個外鍵的欄位都要有索引（索引的開頭幾欄剛好是外鍵的欄位，順序不拘；
   部分索引（帶 WHERE）不算）。
+- 私人表（AD-4）：`PRIVATE_TABLES` 列的每一張表都要有 NOT NULL 的 `owner_id`（Story 3.16 起）。
 """
 
 import psycopg
@@ -222,3 +223,69 @@ def test_exception_for_missing_table_is_reported(migrated_database: TestDatabase
         problems = schema_problems(connection, exceptions)
 
     assert problems == ["no_such_table：在例外清單裡，但資料庫沒有這張表"]
+
+
+# --- 私人表的 owner_id（AD-4、Story 3.16）------------------------------------------------------
+
+# 屬於某位成員的資料表：一定要有 NOT NULL 的 `owner_id`。之後的 Story 加私人表（上傳、問答紀錄等）
+# 時加在這裡。`deleted_record` 不在這裡：系統的封存可以沒有擁有者（`owner_id` 可空）。
+PRIVATE_TABLES: dict[str, str] = {
+    "library_item": "成員的個人文獻庫（Story 3.16）",
+}
+
+OWNER_COLUMN_SQL = """
+SELECT a.attnotnull
+FROM pg_attribute a
+WHERE a.attrelid = to_regclass(%s) AND a.attname = 'owner_id' AND NOT a.attisdropped
+"""
+
+
+def private_table_problems(connection: psycopg.Connection, tables: dict[str, str]) -> list[str]:
+    """私人表沒有 `owner_id`、`owner_id` 可以是空的、或表不存在；沒有違規時是空清單。"""
+    problems: list[str] = []
+    for table in tables:
+        if connection.execute("SELECT to_regclass(%s)", (table,)).fetchone() == (None,):
+            problems.append(f"{table}：在私人表清單裡，但資料庫沒有這張表")
+            continue
+        row = connection.execute(OWNER_COLUMN_SQL, (table,)).fetchone()
+        if row is None:
+            problems.append(f"{table}：私人表要有 owner_id")
+        elif not row[0]:
+            problems.append(f"{table}：私人表的 owner_id 要是 NOT NULL")
+    return problems
+
+
+def test_private_tables_have_a_not_null_owner(migrated_database: TestDatabase) -> None:
+    assert all(reason.strip() for reason in PRIVATE_TABLES.values())
+    with migrated_database.connect(OWNER_ROLE) as connection:
+        assert private_table_problems(connection, PRIVATE_TABLES) == []
+
+
+def test_private_table_check_catches_each_violation(migrated_database: TestDatabase) -> None:
+    # 證明體檢抓得到：在交易裡建違規的表，檢查完整個退回。
+    with migrated_database.connect(OWNER_ROLE, autocommit=False) as connection:
+        try:
+            connection.execute(
+                "CREATE TABLE bad_nullable_owner"
+                " (id uuid PRIMARY KEY DEFAULT uuidv7(), owner_id uuid)"
+            )
+            connection.execute(
+                "CREATE TABLE bad_no_owner (id uuid PRIMARY KEY DEFAULT uuidv7(), member_id uuid)"
+            )
+            problems = private_table_problems(
+                connection,
+                {
+                    "library_item": "對照",
+                    "bad_nullable_owner": "測試用",
+                    "bad_no_owner": "測試用",
+                    "no_such_private_table": "測試用",
+                },
+            )
+        finally:
+            connection.rollback()
+
+    assert problems == [
+        "bad_nullable_owner：私人表的 owner_id 要是 NOT NULL",
+        "bad_no_owner：私人表要有 owner_id",
+        "no_such_private_table：在私人表清單裡，但資料庫沒有這張表",
+    ]

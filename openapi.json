@@ -289,6 +289,171 @@
           }
         }
       }
+    },
+    "/api/v1/library": {
+      "get": {
+        "summary": "List Library",
+        "description": "自己的文獻庫的一頁（一頁的篇數見 `client-config`）；`cursor` 是上一頁的 `next_cursor`，\n格式不對 422，沒登入 401。",
+        "operationId": "list_library",
+        "parameters": [
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LibraryPageResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "錯誤（RFC 9457）",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/library/{paper_id}": {
+      "put": {
+        "summary": "Add Library Item",
+        "description": "把一篇看得到的論文加進自己的文獻庫；已經在就回原本那一筆。看不到、不存在、ID 不是 UUID\n都回同一個 404，沒登入 401；`Origin` 缺少或不是本站 403 `origin_rejected`。",
+        "operationId": "add_library_item",
+        "parameters": [
+          {
+            "name": "paper_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Paper Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LibraryItemResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "錯誤（RFC 9457）",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "summary": "Remove Library Item",
+        "description": "把一篇移出自己的文獻庫，回移出前的那一筆；不在自己的文獻庫回 404，沒登入 401；`Origin`\n缺少或不是本站 403 `origin_rejected`。",
+        "operationId": "remove_library_item",
+        "parameters": [
+          {
+            "name": "paper_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Paper Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LibraryItemResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "錯誤（RFC 9457）",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/library/{paper_id}/restore": {
+      "post": {
+        "summary": "Restore Library Item",
+        "description": "復原最近一次移出的那一篇（原本的加入方式與時間）；已經在文獻庫就回現在那一筆，不動任何\n封存。自己沒有移出過回 404，沒登入 401；`Origin` 缺少或不是本站 403 `origin_rejected`。",
+        "operationId": "restore_library_item",
+        "parameters": [
+          {
+            "name": "paper_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Paper Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LibraryItemResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "錯誤（RFC 9457）",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -302,6 +467,16 @@
         ],
         "title": "AbstractSource",
         "description": "摘要的來源（`paper_abstract.source` 的 CHECK 列的就是這三個值）。"
+      },
+      "AddedVia": {
+        "type": "string",
+        "enum": [
+          "upload",
+          "shared_list",
+          "manual"
+        ],
+        "title": "AddedVia",
+        "description": "這一篇怎麼進了文獻庫（`library_item.added_via`）。"
       },
       "AiBlockState": {
         "type": "string",
@@ -432,15 +607,21 @@
             "type": "string",
             "minLength": 1,
             "title": "Timezone"
+          },
+          "library_page_size": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Library Page Size"
           }
         },
         "additionalProperties": false,
         "type": "object",
         "required": [
-          "timezone"
+          "timezone",
+          "library_page_size"
         ],
         "title": "ClientConfig",
-        "description": "前端要用的設定值（AD-18）。`timezone`：畫面上的日期換成哪個時區（IANA 名稱）。"
+        "description": "前端要用的設定值（AD-18）。\n\n- `timezone`：畫面上的日期換成哪個時區（IANA 名稱）。\n- `library_page_size`：文獻庫清單一頁幾篇（Story 3.16）。"
       },
       "ConstructItem": {
         "properties": {
@@ -842,6 +1023,66 @@
         "title": "InputKind",
         "description": "模型看的是什麼（表頭的 `input_kind`）。2.2 只做得出 `title` 與 `abstract`。"
       },
+      "LibraryItemResponse": {
+        "properties": {
+          "paper": {
+            "$ref": "#/components/schemas/PaperRow"
+          },
+          "added_via": {
+            "$ref": "#/components/schemas/AddedVia"
+          },
+          "added_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Added At"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "paper",
+          "added_via",
+          "added_at"
+        ],
+        "title": "LibraryItemResponse",
+        "description": "文獻庫的一筆：論文列、怎麼加入的、加入的時間（UTC）。"
+      },
+      "LibraryPageResponse": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/LibraryItemResponse"
+            },
+            "type": "array",
+            "title": "Items"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          },
+          "total": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Total"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "items",
+          "next_cursor",
+          "total"
+        ],
+        "title": "LibraryPageResponse",
+        "description": "文獻庫的一頁（照加入時間新到舊）：這一頁的筆、下一頁的位置（沒有下一頁是 null）、總篇數。"
+      },
       "MemberResponse": {
         "properties": {
           "member_id": {
@@ -1138,6 +1379,121 @@
         ],
         "title": "PaperPageResponse",
         "description": "論文頁的資料：書目、目前的摘要、三個 AI 區塊（同一個信封）、全文連結、快照。\n\n沒有目前的摘要時 `abstract` 是 null；一個快照都還沒發佈時 `snapshot` 是 null。"
+      },
+      "PaperRow": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Title"
+          },
+          "authors": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "maxItems": 3,
+            "title": "Authors"
+          },
+          "author_count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Author Count"
+          },
+          "publication_year": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Publication Year"
+          },
+          "journal": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 64,
+                "pattern": "^[a-z][a-z0-9_]*$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Journal"
+          },
+          "journal_issn_l": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Journal Issn L"
+          },
+          "doi": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Doi"
+          },
+          "doi_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Doi Url"
+          },
+          "has_abstract": {
+            "type": "boolean",
+            "title": "Has Abstract"
+          },
+          "in_scope": {
+            "type": "boolean",
+            "title": "In Scope"
+          },
+          "is_retracted": {
+            "type": "boolean",
+            "title": "Is Retracted"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "id",
+          "title",
+          "authors",
+          "author_count",
+          "publication_year",
+          "journal",
+          "journal_issn_l",
+          "doi",
+          "doi_url",
+          "has_abstract",
+          "in_scope",
+          "is_retracted"
+        ],
+        "title": "PaperRow",
+        "description": "清單上的一篇論文（文獻庫、3.13 的論文清單共用）。\n\n- `authors` 只有前 3 位，`author_count` 是全部的人數。\n- `journal` 是設定檔的期刊代號（不是追蹤的期刊時是 null，這時看 `journal_issn_l`）。\n- `doi` 是正規化後的寫法（一篇有好幾個時是最早記上的那一個）；`doi_url` 由它產生，和它一起有值\n  或一起是 null。\n- `has_abstract`：有沒有目前的摘要。"
       },
       "ProblemDetails": {
         "properties": {

@@ -2,7 +2,7 @@
 
 **新增端點的 Story 要在這裡加一筆**，否則 `tests/unit/test_permission_coverage.py` 失敗：
 
-- 會讀或改「某位成員的資料」的端點（例如 `GET /api/v1/library-items`、帶出私人欄位的
+- 會讀或改「某位成員的資料」的端點（例如 `GET /api/v1/library`、看得到私人論文的
   `GET /api/v1/papers/{paper_id}`）：不豁免。登記的函式先替成員 A 建好資料（整合測試的
   `ctx.extras["database"]` 是 `Database`），再回傳**一份**請求（`EndpointRequest`：路徑參數、查詢、
   本文）。框架用這一份請求，先以成員 B 的身分送（要得到 404 或空清單），再以成員 A 的身分送（對照，
@@ -12,6 +12,12 @@
   登記的函式照樣要寫（金絲雀測試用，狀態碼不是預期的就失敗）。
 """
 
+import uuid
+
+from radar.domain.library import AddedVia
+from radar.domain.viewer import MemberViewer, SystemViewer
+from radar.repo.library import create_library_item
+from radar.services.library import remove_library_item
 from tests.llm_support import create_hidden_paper
 from tests.permissions.framework import (
     CANARY,
@@ -87,25 +93,34 @@ def _fake_login(ctx: PermissionContext) -> EndpointRequest:
 # --- 論文頁（Story 3.6、ADR-0048）---------------------------------------------------------------
 
 
-@REGISTRY.case(
-    "GET",
-    "/api/v1/papers/{paper_id}",
-    exempt=(
-        "成員的可見條件現在只有 lab_visible（文獻庫等 3.16），沒有「A 看得到、B 看不到」的論文，"
-        "做不出對照；改由請求一篇看不到、帶金絲雀的論文（預期 404），另有整合測試逐欄比較看不到與"
-        "不存在的兩個 404（tests/integration/test_paper_page_api.py）。3.16 接上文獻庫後改成不豁免"
-    ),
-    status=404,
-)
-def _paper(ctx: PermissionContext) -> EndpointRequest:
-    # 金絲雀放在看不到的論文的標題與摘要：成員 B 的 404 與日誌都不能帶出它。
+def _private_paper_in_owner_library(ctx: PermissionContext) -> uuid.UUID:
+    """成員 A 的私人論文（成員看不到：成員匯入、不在追蹤範圍），標題與摘要放金絲雀，以
+    `added_via = upload` 放進 A 的文獻庫（成員自己加不了看不到的論文，所以直接呼叫 repo 的寫入
+    函式、用系統身分）。A 看得到它（在自己的文獻庫），B 看不到。"""
+    database = ctx.extras["database"]
     paper_id = create_hidden_paper(
-        ctx.extras["database"],
+        database,
         doi="10.9/canary-hidden",
         openalex_id="W987654321",
         title=f"Hidden paper {CANARY}",
         abstract=f"An abstract that only one member may read: {CANARY}.",
     )
+    with database.transaction() as connection:
+        item = create_library_item(
+            connection,
+            SystemViewer(),
+            owner_id=uuid.UUID(ctx.owner.member_id),
+            paper_id=paper_id,
+            added_via=AddedVia.UPLOAD,
+        )
+    assert item is not None
+    return paper_id
+
+
+@REGISTRY.case("GET", "/api/v1/papers/{paper_id}")
+def _paper(ctx: PermissionContext) -> EndpointRequest:
+    # Story 3.16 接上文獻庫後不再豁免：A 的私人論文在 A 的文獻庫，A 看得到、B 和不存在一樣 404。
+    paper_id = _private_paper_in_owner_library(ctx)
     return EndpointRequest(path_params={"paper_id": str(paper_id)})
 
 
@@ -127,3 +142,36 @@ def _display_names(_ctx: PermissionContext) -> EndpointRequest:
 )
 def _client_config(_ctx: PermissionContext) -> EndpointRequest:
     return EndpointRequest()
+
+
+# --- 個人文獻庫（Story 3.16）-------------------------------------------------------------------
+
+
+@REGISTRY.case("GET", "/api/v1/library")
+def _library(ctx: PermissionContext) -> EndpointRequest:
+    # A 的清單有一篇（標題有金絲雀）；B 讀到的是自己的空清單（total 0、沒有下一頁）。
+    _private_paper_in_owner_library(ctx)
+    return EndpointRequest()
+
+
+@REGISTRY.case("PUT", "/api/v1/library/{paper_id}")
+def _add_library_item(ctx: PermissionContext) -> EndpointRequest:
+    # B 看不到 A 的私人論文：加不進去、和不存在一樣 404；A 再加一次回原本那一筆（upload）。
+    paper_id = _private_paper_in_owner_library(ctx)
+    return EndpointRequest(path_params={"paper_id": str(paper_id)})
+
+
+@REGISTRY.case("DELETE", "/api/v1/library/{paper_id}")
+def _remove_library_item(ctx: PermissionContext) -> EndpointRequest:
+    # B 的文獻庫沒有這一篇：404，A 的那一筆不動；A 移出回移出前的那一筆。
+    paper_id = _private_paper_in_owner_library(ctx)
+    return EndpointRequest(path_params={"paper_id": str(paper_id)})
+
+
+@REGISTRY.case("POST", "/api/v1/library/{paper_id}/restore")
+def _restore_library_item(ctx: PermissionContext) -> EndpointRequest:
+    # 先經 services 替 A 移出（留下 A 的封存）；B 沒有這一篇的封存：404；A 復原回原本那一筆。
+    paper_id = _private_paper_in_owner_library(ctx)
+    owner = MemberViewer(member_id=uuid.UUID(ctx.owner.member_id), is_admin=False)
+    assert remove_library_item(owner, ctx.extras["database"], paper_id) is not None
+    return EndpointRequest(path_params={"paper_id": str(paper_id)})

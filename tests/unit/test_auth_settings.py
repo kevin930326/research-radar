@@ -509,8 +509,14 @@ def test_api_main_mounts_web_after_the_auth_routes(
     }
     assert fake_login.headers["content-type"] == "application/problem+json"
     assert shell not in me.text + fake_login.text
-    # 論文頁的三個端點（Story 3.6）也由 API 回應：沒登入是 401 problem，不是頁面殼。
-    for path in ("/api/v1/papers/not-a-uuid", "/api/v1/display-names", "/api/v1/client-config"):
+    # 論文頁的三個端點（Story 3.6）與文獻庫清單（Story 3.16）也由 API 回應：沒登入是 401 problem，
+    # 不是頁面殼。
+    for path in (
+        "/api/v1/papers/not-a-uuid",
+        "/api/v1/display-names",
+        "/api/v1/client-config",
+        "/api/v1/library",
+    ):
         paper_route = client.get(path)
         assert paper_route.status_code == 401, path
         assert paper_route.json()["code"] == "not_authenticated", path

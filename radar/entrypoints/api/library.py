@@ -1,0 +1,205 @@
+"""api 的個人文獻庫路由：列出、加入、移出、復原（Story 3.16、ADR-0002、ADR-0047、ADR-0048）。
+
+- 四個端點都要登入（沒登入 401 `not_authenticated`），回應都帶 `Cache-Control: no-store`；會改資料的
+  三個（PUT、DELETE、POST）由 router 的相依項檢查 `Origin`（`check_origin`）。
+- `GET /api/v1/library`：自己的文獻庫的一頁（`items`、`next_cursor`、`total`）；別人讀到的是自己的
+  （沒有就是空清單）。`cursor` 不是上一頁給的寫法 → 422 `request_invalid`。
+- `PUT /api/v1/library/{paper_id}`：加入（`added_via = manual`）；已經在就回原本那一筆。
+- `DELETE /api/v1/library/{paper_id}`：移出，回移出前的那一筆（200，不是 204：換人測試的對照要有
+  本文）。
+- `POST /api/v1/library/{paper_id}/restore`：復原最近一次移出的那一筆；已經在文獻庫就回現在那一筆、
+  不動封存。
+- 看不到、不存在、被排除、別人的、路徑參數不是 UUID：一律丟同一個
+  `ApiProblemError(not_found, headers=NO_STORE)`（ADR-0002，和論文頁同一個寫法）；路徑參數宣告成
+  字串、自己轉 UUID。
+- 這裡只做形狀轉換（論文列用 `domain/contracts.PaperRow`），不判斷看不看得到。
+- 處理函式的名稱就是 operationId（`list_library`、`add_library_item`、`remove_library_item`、
+  `restore_library_item`，全站唯一）。一定要在 `mount_web` 之前裝。
+"""
+
+import uuid
+from collections.abc import Callable
+from dataclasses import dataclass
+from functools import partial
+
+from fastapi import APIRouter, Depends, FastAPI, Request, Response
+from pydantic import BaseModel, ConfigDict, Field
+
+from radar.domain.contracts import PaperRow, UtcDateTime
+from radar.domain.domain_config import JournalsConfig
+from radar.domain.errors import ErrorCode
+from radar.domain.library import (
+    AddedVia,
+    LibraryCursor,
+    LibraryEntry,
+    LibraryPage,
+    decode_library_cursor,
+)
+from radar.domain.paper_page import journal_key_for
+from radar.domain.viewer import MemberViewer
+from radar.entrypoints.api.auth import (
+    API_V1_PREFIX,
+    NO_STORE,
+    AuthRoutes,
+    current_member,
+    origin_dependency,
+)
+from radar.entrypoints.api.problems import ApiProblemError
+from radar.entrypoints.api.web import web_mounted
+from radar.entrypoints.bootstrap import Database
+from radar.services import library as library_service
+
+type LibraryChange = Callable[[MemberViewer, uuid.UUID], LibraryEntry | None]
+
+
+@dataclass(frozen=True)
+class LibraryRoutes:
+    """文獻庫路由要用的函式（`build_library_routes` 組；測試換成假的函式）。
+
+    `add`／`remove`／`restore`：成員對 `paper_id` 做這件事，回那一筆；看不到、不在、沒有封存回
+    None。
+    `journal_key`：ISSN-L → 設定檔的期刊代號（不是追蹤的期刊回 None）。
+    """
+
+    list_page: Callable[[MemberViewer, LibraryCursor | None], LibraryPage]
+    add: LibraryChange
+    remove: LibraryChange
+    restore: LibraryChange
+    journal_key: Callable[[str | None], str | None]
+
+
+def build_library_routes(database: Database, journals: JournalsConfig) -> LibraryRoutes:
+    """用資料庫與追蹤的期刊（ISSN-L → 期刊代號）組好文獻庫路由。"""
+
+    def list_page(viewer: MemberViewer, after: LibraryCursor | None) -> LibraryPage:
+        return library_service.list_library(viewer, database, after=after)
+
+    def add(actor: MemberViewer, paper_id: uuid.UUID) -> LibraryEntry | None:
+        return library_service.add_library_item(actor, database, paper_id)
+
+    def remove(actor: MemberViewer, paper_id: uuid.UUID) -> LibraryEntry | None:
+        return library_service.remove_library_item(actor, database, paper_id)
+
+    def restore(actor: MemberViewer, paper_id: uuid.UUID) -> LibraryEntry | None:
+        return library_service.restore_library_item(actor, database, paper_id)
+
+    return LibraryRoutes(
+        list_page=list_page,
+        add=add,
+        remove=remove,
+        restore=restore,
+        journal_key=partial(journal_key_for, journals),
+    )
+
+
+class LibraryItemResponse(BaseModel):
+    """文獻庫的一筆：論文列、怎麼加入的、加入的時間（UTC）。"""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    paper: PaperRow
+    added_via: AddedVia
+    added_at: UtcDateTime
+
+
+class LibraryPageResponse(BaseModel):
+    """文獻庫的一頁（照加入時間新到舊）：這一頁的筆、下一頁的位置（沒有下一頁是 null）、總篇數。"""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    items: tuple[LibraryItemResponse, ...]
+    next_cursor: str | None
+    total: int = Field(ge=0)
+
+
+def library_item_response(
+    entry: LibraryEntry, journal_key: Callable[[str | None], str | None]
+) -> LibraryItemResponse:
+    """services 的一筆 → 回應的形狀（只轉換）。"""
+    return LibraryItemResponse(
+        paper=PaperRow.from_facts(entry.paper, journal_key(entry.paper.journal_issn_l)),
+        added_via=entry.item.added_via,
+        added_at=entry.item.added_at,
+    )
+
+
+def _not_found() -> ApiProblemError:
+    # 看不到、不存在、不在、壞 ID 都是這一個：狀態碼、本文、標頭相同。
+    return ApiProblemError(ErrorCode.NOT_FOUND, headers=NO_STORE)
+
+
+def _paper_id(value: str) -> uuid.UUID:
+    try:
+        return uuid.UUID(value)
+    except ValueError:
+        raise _not_found() from None
+
+
+def install_library_routes(app: FastAPI, routes: LibraryRoutes, auth_routes: AuthRoutes) -> None:
+    """把文獻庫路由裝到 `app` 上（登入與 `Origin` 檢查用 `auth_routes`）。一定要在 `mount_web`
+    之前呼叫。
+
+    Raises:
+        RuntimeError: 頁面殼已經掛上（之後才加的路由會被它蓋掉）。
+    """
+    if web_mounted(app):
+        raise RuntimeError("頁面殼已經掛上：API 路由要在 mount_web 之前註冊")
+
+    router = APIRouter(prefix=API_V1_PREFIX, dependencies=[Depends(origin_dependency(auth_routes))])
+
+    def change(
+        request: Request, response: Response, paper_id: str, run: LibraryChange
+    ) -> LibraryItemResponse:
+        member = current_member(request, auth_routes)
+        entry = run(member.viewer, _paper_id(paper_id))
+        if entry is None:
+            raise _not_found()
+        response.headers.update(NO_STORE)
+        return library_item_response(entry, routes.journal_key)
+
+    @router.get("/library")
+    def list_library(
+        request: Request, response: Response, cursor: str | None = None
+    ) -> LibraryPageResponse:
+        """自己的文獻庫的一頁（一頁的篇數見 `client-config`）；`cursor` 是上一頁的 `next_cursor`，
+        格式不對 422，沒登入 401。"""
+        member = current_member(request, auth_routes)
+        after = None
+        if cursor is not None:
+            try:
+                after = decode_library_cursor(cursor)
+            except ValueError:
+                raise ApiProblemError(ErrorCode.REQUEST_INVALID, headers=NO_STORE) from None
+        page = routes.list_page(member.viewer, after)
+        response.headers.update(NO_STORE)
+        return LibraryPageResponse(
+            items=tuple(library_item_response(entry, routes.journal_key) for entry in page.entries),
+            next_cursor=page.next_cursor,
+            total=page.total,
+        )
+
+    @router.put("/library/{paper_id}")
+    def add_library_item(
+        paper_id: str, request: Request, response: Response
+    ) -> LibraryItemResponse:
+        """把一篇看得到的論文加進自己的文獻庫；已經在就回原本那一筆。看不到、不存在、ID 不是 UUID
+        都回同一個 404，沒登入 401；`Origin` 缺少或不是本站 403 `origin_rejected`。"""
+        return change(request, response, paper_id, routes.add)
+
+    @router.delete("/library/{paper_id}")
+    def remove_library_item(
+        paper_id: str, request: Request, response: Response
+    ) -> LibraryItemResponse:
+        """把一篇移出自己的文獻庫，回移出前的那一筆；不在自己的文獻庫回 404，沒登入 401；`Origin`
+        缺少或不是本站 403 `origin_rejected`。"""
+        return change(request, response, paper_id, routes.remove)
+
+    @router.post("/library/{paper_id}/restore")
+    def restore_library_item(
+        paper_id: str, request: Request, response: Response
+    ) -> LibraryItemResponse:
+        """復原最近一次移出的那一篇（原本的加入方式與時間）；已經在文獻庫就回現在那一筆，不動任何
+        封存。自己沒有移出過回 404，沒登入 401；`Origin` 缺少或不是本站 403 `origin_rejected`。"""
+        return change(request, response, paper_id, routes.restore)
+
+    app.include_router(router)
