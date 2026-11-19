@@ -117,6 +117,10 @@
 #   試跑、全庫 Batch、重跑拒收同一晚進行。Kevin 當天人在外面沒記時間，時間是從對話紀錄查出來的
 #   （2026-11-16 19:31 到 2026-11-17 01:24 之間，Kevin 有訊息的時段加起來約 2～3 小時），Kevin 2026-11-17 確認
 #   「就這樣記」。真 key 那部分不是 Story、沒有估計；算倍率時這一筆的動手時間偏高估。
+# epic-2c 那一筆：中文重點檢查規則的修正（PR 96、97），不是 Story、沒有估計（estimate_h 寫 null），
+#   算倍率時不計入估計加總。自動執行 2026-11-18 07:02 開工、13:50 收尾（6 小時 48 分，含等 5 小時額度重置 46 分），
+#   晚上 Kevin 用真金鑰重跑 424 篇被拒收的中文重點 28 分鐘，合計約 7 小時。
+#   Kevin 2026-11-18 回報自己動手「大概 1 小時」。
 # 重估的倍率只用 kevin_h_low、kevin_h_high（見上面「怎麼重估」第 1 點），elapsed_h 只留著對照。
 # 這個區塊要留在 generated 上面，重跑 skill 才不會洗掉註解（2026-11-14 測過）。
 actual_hours:
@@ -124,6 +128,7 @@ actual_hours:
   - {round: "epic-2a＋epic-3a", stories: "2.1～2.7、3.1～3.2", estimate_h: 28.5, elapsed_h: 13, kevin_h_low: 1, kevin_h_high: 2, rough: true}
   - {round: "epic-2b＋epic-3b", stories: "2.8～2.13、3.3～3.5", estimate_h: 21.5, elapsed_h: 21, kevin_h_low: 2, kevin_h_high: 3, rough: true}
   - {round: "epic-3c＋真 key 全庫", stories: "3.6、3.8", estimate_h: 6, elapsed_h: 6, kevin_h_low: 2, kevin_h_high: 3, rough: true}
+  - {round: epic-2c, stories: "中文重點檢查規則修正（PR 96、97，不是 Story）", estimate_h: null, elapsed_h: 7, kevin_h_low: 1, kevin_h_high: 1, rough: true}
 
 generated: 11-14-2026 03:46
 last_updated: 11-17-2026 03:10
@@ -175,10 +180,10 @@ development_status:
   3-10-引用匯出: backlog
   3-11-修正分類: backlog
   3-12-回報中文重點錯誤: backlog
-  3-13-找論文清單的-api-篩選: review
+  3-13-找論文清單的-api-篩選: done  # PR 99 已合併
   3-14-找論文-篩選-與示範站論文清單: backlog
   3-15-資料涵蓋範圍: backlog
-  3-16-個人文獻庫的-api: review
+  3-16-個人文獻庫的-api: done  # PR 98 已合併
   3-17-加入-移出與我的文獻庫-基本版: backlog
   3-18-備份與還原指令: review
   3-19-部署到-oracle-試用主機-只有-kevin-連得進去: backlog

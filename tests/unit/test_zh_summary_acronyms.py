@@ -91,6 +91,18 @@ def test_real_list_has_the_initial_acronyms() -> None:
         "QCA",
         "P2P",
         "B2B",
+        # 2026-11-19 第二批（ADR-0032 更新）。
+        "ARMA",
+        "GARCH",
+        "PVAR",
+        "ISM",
+        "FUCOM",
+        "MACONT",
+        "ARAS",
+        "MARCOS",
+        "FDEMATEL",
+        "EC2",
+        "O2O",
     }
 
 
@@ -255,6 +267,210 @@ def test_title_counts_as_input() -> None:
     )
 
     assert content.method == _uses("DEMATEL")
+
+
+# --- 2026-11-19 第二批（ADR-0032 更新）：新登記的縮寫與全名 -----------------------------------
+
+
+@pytest.mark.parametrize(
+    ("abstract", "acronym"),
+    [
+        ("We estimate an Autoregressive Moving Average model.", "ARMA"),
+        ("We estimate an autoregressive-moving-average process.", "ARMA"),
+        ("We fit a Generalized Autoregressive Conditional Heteroskedasticity model.", "GARCH"),
+        ("We fit a generalized autoregressive conditional heteroscedasticity model.", "GARCH"),
+        ("We fit a Generalised Autoregressive Conditional Heteroscedasticity model.", "GARCH"),
+        ("We fit a generalised autoregressive conditional heteroskedasticity model.", "GARCH"),
+        ("We estimate a Panel Vector Autoregression.", "PVAR"),
+        ("We estimate a panel vector autoregressive model.", "PVAR"),
+        ("We apply Interpretive Structural Modeling.", "ISM"),
+        # 英式拼法靠最後一個詞的詞形變化涵蓋，沒有另外登記。
+        ("We apply Interpretive Structural Modelling.", "ISM"),
+        ("We apply interpretive structural models.", "ISM"),
+        ("We weight criteria with the Full Consistency Method.", "FUCOM"),
+        (
+            "We rank firms with Mixed Aggregation by Comprehensive Normalization Technique.",
+            "MACONT",
+        ),
+        (
+            "We rank firms with mixed aggregation by comprehensive normalisation technique.",
+            "MACONT",
+        ),
+        ("We rank firms with the Additive Ratio Assessment method.", "ARAS"),
+        (
+            "We rank firms with Measurement of Alternatives and Ranking according to "
+            "COmpromise Solution.",
+            "MARCOS",
+        ),
+        (
+            "We rank firms with measurement of alternatives and ranking according to the "
+            "compromise solution.",
+            "MARCOS",
+        ),
+        (
+            "We rank firms with measurement alternatives and ranking according to compromise "
+            "solution.",
+            "MARCOS",
+        ),
+        (
+            "We rank firms with measurement alternatives and ranking according to the "
+            "compromise solution.",
+            "MARCOS",
+        ),
+        (
+            "We rank firms with measurement alternatives and ranking based on the compromise "
+            "solution.",
+            "MARCOS",
+        ),
+        (
+            "We rank firms with measurement of alternatives and ranking based on the compromise "
+            "solution.",
+            "MARCOS",
+        ),
+        ("We apply the fuzzy decision-making trial and evaluation laboratory.", "FDEMATEL"),
+        ("We deploy the system on Amazon Elastic Compute Cloud.", "EC2"),
+        ("We study online-to-offline commerce.", "O2O"),
+        ("We study Online to Offline commerce.", "O2O"),
+        # 既有縮寫的新寫法。
+        ("We use structural equation analysis.", "SEM"),
+        ("We use Structural Equation Analysis.", "SEM"),
+        ("We apply the decision-making trial evaluation laboratory.", "DEMATEL"),
+        ("We apply the Decision Making Trial Evaluation Laboratory.", "DEMATEL"),
+    ],
+)
+def test_batch_two_full_names_allow_the_acronym(abstract: str, acronym: str) -> None:
+    allowed = ExtendedVocabulary.build(check_copy(abstract), REAL_RULES.acronym_full_names())
+
+    assert acronym in allowed.acronyms
+    assert _method(_uses(acronym), abstract) == _uses(acronym)
+
+
+@pytest.mark.parametrize(
+    ("abstract", "acronym"),
+    [
+        # 只有全名的一部分。
+        ("We deploy the system on elastic compute resources.", "EC2"),
+        ("We use structural equation approaches.", "SEM"),
+        ("We use structural equations.", "SEM"),
+        ("We study online offline commerce.", "O2O"),
+        ("We study offline to online commerce.", "O2O"),
+        ("We estimate a moving average model.", "ARMA"),
+        ("We estimate an autoregressive model.", "ARMA"),
+        ("We fit a conditional heteroskedasticity model.", "GARCH"),
+        ("We fit an autoregressive conditional heteroskedasticity model.", "GARCH"),
+        ("We estimate a panel regression.", "PVAR"),
+        ("We use structural modeling.", "ISM"),
+        ("We apply a consistency method.", "FUCOM"),
+        ("We apply comprehensive normalization.", "MACONT"),
+        ("We apply ratio assessment.", "ARAS"),
+        ("We rank alternatives by compromise solution.", "MARCOS"),
+        ("We use fuzzy logic for decisions.", "FDEMATEL"),
+        ("We use decision making trial evaluation.", "DEMATEL"),
+        # 只有別的縮寫的全名：VAR 的全名不讓 PVAR 過；DEMATEL 的全名不讓 FDEMATEL 過。
+        ("We estimate a vector autoregression.", "PVAR"),
+        ("We apply decision making trial and evaluation laboratory.", "FDEMATEL"),
+        ("We study peer-to-peer lending.", "O2O"),
+        ("We study business-to-business sales.", "EC2"),
+    ],
+)
+def test_batch_two_acronyms_without_a_full_name_are_rejected(abstract: str, acronym: str) -> None:
+    allowed = ExtendedVocabulary.build(check_copy(abstract), REAL_RULES.acronym_full_names())
+
+    assert acronym not in allowed.acronyms
+    assert _rejected(_uses(acronym), abstract) is UNSUPPORTED
+
+
+def test_a_longer_full_name_also_allows_the_shorter_acronym_inside_it() -> None:
+    # 全名包著另一筆的全名時，兩個縮寫都由輸入撐著（輸入真的有兩個全名）。
+    vocabulary = ExtendedVocabulary.build(
+        check_copy(
+            "We estimate a panel vector autoregression with fuzzy decision making trial "
+            "and evaluation laboratory weights."
+        ),
+        REAL_RULES.acronym_full_names(),
+    )
+
+    assert {"PVAR", "VAR", "FDEMATEL", "DEMATEL"} <= vocabulary.acronyms
+
+
+def test_u2010_hyphen_in_a_full_name_allows_the_acronym() -> None:
+    # 現在的行為，照 TASK 不改程式：U+2010 在檢查用副本裡是一般連字號，所以用 U+2010 連起來的
+    # online to offline 也對得上。
+    abstract = "We study online\u2010to\u2010offline commerce."
+
+    assert check_copy(abstract) == "We study online-to-offline commerce."
+    assert "O2O" in (
+        ExtendedVocabulary.build(check_copy(abstract), REAL_RULES.acronym_full_names()).acronyms
+    )
+    assert _method(_uses("O2O"), abstract) == _uses("O2O")
+
+
+EM_DASH_ABSTRACT = (
+    "We combine Interpretive Structural Modeling\u2014Decision Making Trial and Evaluation "
+    "Laboratory in one framework."
+)
+
+
+def test_em_dash_after_a_full_name_still_allows_its_acronym() -> None:
+    # 現在的行為，照 TASK 不改程式：破折號（U+2014）在檢查用副本裡是連字號；破折號前面那個全名
+    # （ISM）的結尾後面接連字號，照樣對得上。
+    allowed = ExtendedVocabulary.build(
+        check_copy(EM_DASH_ABSTRACT), REAL_RULES.acronym_full_names()
+    )
+
+    assert "ISM" in allowed.acronyms
+    assert _method(_uses("ISM"), EM_DASH_ABSTRACT) == _uses("ISM")
+
+
+def test_em_dash_right_before_a_full_name_blocks_its_acronym() -> None:
+    # 現在的行為，照 TASK 不改程式：全名前面緊接破折號（檢查用副本裡是連字號、沒有空白）時，和
+    # 「全名前面用連字號接著別的詞」一樣擋（偏保守，見 ADR-0032 的取捨）。破折號兩邊有空白就過。
+    allowed = ExtendedVocabulary.build(
+        check_copy(EM_DASH_ABSTRACT), REAL_RULES.acronym_full_names()
+    )
+
+    assert "DEMATEL" not in allowed.acronyms
+    assert _rejected(_uses("DEMATEL"), EM_DASH_ABSTRACT) is UNSUPPORTED
+    spaced = EM_DASH_ABSTRACT.replace("\u2014", " \u2014 ")
+    assert _method(_uses("DEMATEL"), spaced) == _uses("DEMATEL")
+
+
+@pytest.mark.parametrize(
+    ("abstract", "acronym"),
+    [
+        # 短全名出現在摘要裡時，意思就是那個縮寫：放行是對的（決定紀錄的評估）。
+        ("We host the experiment on Amazon Elastic Compute Cloud instances.", "EC2"),
+        ("Structural equation analysis supports the hypotheses.", "SEM"),
+        ("Online-to-offline platforms link web orders with stores.", "O2O"),
+        ("Criteria weights come from the full consistency method.", "FUCOM"),
+        ("Suppliers are ranked by additive ratio assessment.", "ARAS"),
+    ],
+)
+def test_short_full_names_in_an_abstract_mean_the_acronym(abstract: str, acronym: str) -> None:
+    assert _method(_uses(acronym), abstract) == _uses(acronym)
+
+
+@pytest.mark.parametrize(
+    ("abstract", "acronyms"),
+    [
+        # 已知漏網，ADR-0032 2026-11-19 更新：方向的一般說法也對得上 online to offline，和
+        # peer to peer comparison 同類；要不要拿掉 O2O 由 Kevin 決定。
+        ("Consumers migrate from online to offline channels.", ("O2O",)),
+        # 已知漏網，ADR-0032 2026-11-19 更新：一般說法裡的 elastic compute cloud 也讓 EC2 過。
+        ("We rent an elastic compute cloud for the experiments.", ("EC2",)),
+        # 已知漏網，ADR-0032 2026-11-19 更新：VARMA 的全名讓 ARMA 與 VAR 都過。
+        ("We estimate a vector autoregressive moving average model.", ("ARMA", "VAR")),
+    ],
+)
+def test_known_gaps_short_full_names_in_general_wording(
+    abstract: str, acronyms: tuple[str, ...]
+) -> None:
+    # 固定現在的行為：這些不是想要的放行，但照 TASK 不改程式，先寫成已知漏網。
+    allowed = ExtendedVocabulary.build(check_copy(abstract), REAL_RULES.acronym_full_names())
+
+    for acronym in acronyms:
+        assert acronym in allowed.acronyms
+        assert _method(_uses(acronym), abstract) == _uses(acronym)
 
 
 # --- 必備反例：仍然擋得住編造 -------------------------------------------------------------------

@@ -1,4 +1,4 @@
-version: 1
+version: 2
 
 # 中文重點的通用縮寫允許清單（PRD FR-14、ADR-0032 的「通用縮寫的允許清單與整欄說明存成空值」更新）。
 # domain 驗證（radar/domain/validators/zh_summary.py）讀這份；只經 radar/config.py 的
@@ -35,12 +35,14 @@ acronyms:
   - acronym: DEMATEL
     full_names:
       - decision making trial and evaluation laboratory
+      - decision making trial evaluation laboratory
   - acronym: VAR
     full_names:
       - vector autoregression
   - acronym: SEM
     full_names:
       - structural equation modeling
+      - structural equation analysis
   - acronym: PLS
     full_names:
       - partial least squares
@@ -130,3 +132,46 @@ acronyms:
   - acronym: B2B
     full_names:
       - business to business
+  # 2026-11-19 第二批（ADR-0032 更新）：真金鑰重跑後仍被拒收、只要加清單就能救的縮寫。
+  - acronym: ARMA
+    full_names:
+      - autoregressive moving average
+  - acronym: GARCH
+    full_names:
+      - generalized autoregressive conditional heteroscedasticity
+      - generalized autoregressive conditional heteroskedasticity
+      - generalised autoregressive conditional heteroscedasticity
+      - generalised autoregressive conditional heteroskedasticity
+  - acronym: PVAR
+    full_names:
+      - panel vector autoregression
+  - acronym: ISM
+    full_names:
+      - interpretive structural modeling
+  - acronym: FUCOM
+    full_names:
+      - full consistency method
+  - acronym: MACONT
+    full_names:
+      - mixed aggregation by comprehensive normalization technique
+      - mixed aggregation by comprehensive normalisation technique
+  - acronym: ARAS
+    full_names:
+      - additive ratio assessment
+  - acronym: MARCOS
+    full_names:
+      - measurement of alternatives and ranking according to compromise solution
+      - measurement alternatives and ranking according to compromise solution
+      - measurement of alternatives and ranking according to the compromise solution
+      - measurement alternatives and ranking according to the compromise solution
+      - measurement alternatives and ranking based on the compromise solution
+      - measurement of alternatives and ranking based on the compromise solution
+  - acronym: FDEMATEL
+    full_names:
+      - fuzzy decision making trial and evaluation laboratory
+  - acronym: EC2
+    full_names:
+      - elastic compute cloud
+  - acronym: O2O
+    full_names:
+      - online to offline

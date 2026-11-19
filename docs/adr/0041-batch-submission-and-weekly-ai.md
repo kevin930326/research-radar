@@ -77,7 +77,7 @@
 7. **工作與 sweep**：`plan_llm_batches(weekly_run_id)`（ai 佇列、鎖 `plan_llm_batches`、照一般重試）、`submit_llm_batch(batch_submission_id)`（ai 佇列、鎖 `llm_batches`、**不重試**）。sweep 登記 `batch_submission` 的 `queued`（1 小時：429 退回、排入失敗、缺金鑰留著的）與 `submitting`（30 分鐘，同選項 3-A）。規劃的工作不建 provider；送出的工作把「建 provider」當成函式（`open_provider`）交給 service，service 只在確定要送出時才呼叫（決定 5）。過期的 `submitting` 標 `needs_attention`、已結束、延後、全部對不上、搶輸這些只碰資料庫的路都不建，所以 worker 缺金鑰時也標得上 `needs_attention`（Codex 主審查第 4 條）；真的要送時缺金鑰，`ConfigError` 原樣丟出、列維持 `queued`。
 8. **月初窗口**：選項 4-A，`config/llm_batches.yaml` 的 `month_start_hold_hours`（預設 8）。
 9. **批次大小**：選項 5-A，`config/llm_batches.yaml` 的 `max_requests_per_batch`（預設 500，1～1,000）。
-10. **啟動時檢查 AI 設定**：`radar/entrypoints/startup.check_ai_config` 一次檢查 prompt 登記、`models.yaml`、`budget.yaml`、`zh_summary.yaml`、分類表、情境值清單、`llm_batches.yaml`，全部問題一起列出；worker 的 `main()` 與 CLI 的 `_root` 呼叫，有問題拒絕啟動。api 不接（不在這個 Story 的範圍，回報主對話決定）。
+10. **啟動時檢查 AI 設定**：`radar/entrypoints/startup.check_ai_config` 一次檢查 prompt 登記、`models.yaml`、`budget.yaml`、`zh_summary.yaml`（含 `zh_summary_acronyms.yaml`）、分類表、情境值清單、`llm_batches.yaml`，全部問題一起列出；worker 的 `main()` 與 CLI 的 `_root` 呼叫，有問題拒絕啟動。api 不接（不在這個 Story 的範圍，回報主對話決定）。
 11. **每週自動規劃預設關閉（提議，等 Kevin 決定）**：`config/llm_batches.yaml` 的必填欄位 `weekly_planning_enabled`，repo 裡的值是 `false`。Epic 的 Story 2.11 要求第一次整庫 AI 由 Kevin 先試跑 20 篇再手動跑，而且結果要到 2.11 才匯入得進來；這個開關沒開時，每週更新排入的規劃直接回 `DISABLED`（記 info 日誌、不寫任何列）。2.11 做完、Kevin 試跑過再改成 `true`。
 12. **互動也看 Batch 預留（Codex 主審查第 1 條）**：選項 6-A。
     - `domain/budget.BudgetStatus` 多記 Batch 預留；熔斷（`breaker_tripped`）、功能預算（`task_exhausted`）、可不可以呼叫（`allows`）、離熔斷線（`remaining_usd`）一律用「帳本＋預留」，到達即擋；`ledger_breaker_tripped` 只看帳本。沒有預留時和原本一樣。
