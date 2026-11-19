@@ -1,5 +1,6 @@
 # CI（ADR-0017）：固定檢查 → 兩種架構各自建映像並冒煙 → 合併成多架構標籤推到 GHCR。
-# 前端檢查是另一個和 checks 平行的 web job（ADR-0036）；映像的建置本身也會建前端。
+# 前端檢查是另一個和 checks 平行的 web job（ADR-0036）；瀏覽器測試是再另一個平行的 e2e job，
+# 跑在 Playwright 官方容器映像裡；映像的建置本身也會建前端。
 # - 不用任何 repo secret；推 GHCR 用內建的 github.token。
 # - 第三方 action 一律釘 40 碼 commit SHA，註解寫版本。
 # - 只有 push 事件推映像：pull_request 的 github.sha 是 GitHub 暫時產生的合併 commit。
@@ -28,7 +29,8 @@ jobs:
   checks:
     name: checks
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    # 20 分鐘在 2026-11-18 起不夠用（main 上已要 16～18 分鐘，整合測試還在增加）。
+    timeout-minutes: 30
     steps:
       - name: 取出程式碼（含完整歷史，給 gitleaks 掃）
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -125,7 +127,7 @@ jobs:
             --requirement "${RUNNER_TEMP}/requirements.txt"
 
   # 前端（Story 3.1、ADR-0036）：和 checks 平行；步驟和本機 web/ 的 npm scripts 同一組。
-  # Playwright 在 CI 跑 chromium、firefox、webkit 三種引擎（CI=true 時 playwright.config.ts 會打開）。
+  # 瀏覽器測試在下面的 e2e job。
   web:
     name: web
     runs-on: ubuntu-24.04
@@ -181,9 +183,53 @@ jobs:
         name: 建置（示範站）
         run: npm run build:demo
 
-      - id: web-playwright-install
-        name: 安裝 Playwright 的三種瀏覽器
-        run: npx playwright install --with-deps chromium firefox webkit
+
+  # 瀏覽器測試（ADR-0010）：Playwright 在 CI 跑 chromium、firefox、webkit 三種引擎
+  # （CI=true 時 playwright.config.ts 會打開），webServer 先建出帶 CSP 的成員版與示範站再測。
+  # 跑在 Playwright 官方容器映像裡：瀏覽器與它們要的系統套件都已裝好，不再用
+  # `playwright install --with-deps` 從執行機預設的 Ubuntu 鏡像站裝（2026-11-18 起那個鏡像站
+  # 每秒只有幾十 KB，這一步裝了 19 分鐘還沒裝完，撞 20 分鐘時限）。
+  # - 映像版本必須和 web/package-lock.json 的 @playwright/test 一樣（現在 1.65.0）；升級 Playwright 時
+  #   一起換這裡的標籤與 digest（digest 是多架構清單的那一個，用 docker buildx imagetools inspect 查）。
+  # - --user 1001：和執行機的使用者同一個 uid，Firefox 不能用 root 跑在別人的 HOME 底下
+  #   （Playwright 官方 CI 文件的寫法）。
+  # - 不需要 git：這個 job 只建置與跑測試；orval 一致性檢查留在 web job。
+  e2e:
+    name: e2e
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    container:
+      image: mcr.microsoft.com/playwright:v1.65.0-noble@sha256:9beb546099e11f52d62e505537914870e01a67e0e6b00ae41da4775324e73dbe
+      options: --user 1001 --ipc=host
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - name: 取出程式碼
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: 安裝 Node.js（版本照 web/.nvmrc）
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: web/.nvmrc
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - id: e2e-npm-ci
+        name: npm ci（照 package-lock.json）
+        run: npm ci --no-audit --no-fund
+
+      # 映像裡的瀏覽器是給 1.65.0 用的：有人升級了 package-lock.json 的 Playwright 卻沒換映像，
+      # 在這裡就失敗，不會等到測試找不到瀏覽器才失敗。
+      - id: e2e-playwright-version
+        name: 確認 Playwright 版本和映像一致
+        run: |
+          set -euo pipefail
+          version=$(node -p "require('./node_modules/@playwright/test/package.json').version")
+          echo "@playwright/test ${version}"
+          test "${version}" = "1.65.0"
 
       - id: web-e2e
         name: Playwright＋axe（三種引擎，帶 CSP 的建置結果）
