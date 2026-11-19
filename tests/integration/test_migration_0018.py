@@ -17,7 +17,8 @@ from radar.domain.ai_outputs import (
 )
 from radar.domain.embeddings import build_embedding_input
 from radar.domain.fingerprints import embedding_input_sha256, input_sha256
-from radar.domain.papers import AbstractSource
+from radar.domain.papers import AbstractSource, ParsedPaper
+from radar.domain.scope import ScopeSettings, is_in_scope
 from radar.domain.viewer import SystemViewer
 from radar.repo.db import Database
 from radar.repo.embeddings import (
@@ -27,7 +28,7 @@ from radar.repo.embeddings import (
 from radar.repo.papers import find_paper_llm_source
 from tests.database import TestDatabase, migrate
 from tests.integration.test_migration_0016 import _alembic, _submission
-from tests.llm_support import create_paper, execute
+from tests.llm_support import FETCHED_AT, execute
 
 
 @pytest.fixture
@@ -48,11 +49,69 @@ def _columns(db: TestDatabase) -> set[str]:
 
 
 def _paper(db: TestDatabase, n: int) -> tuple[uuid.UUID, uuid.UUID]:
-    """一篇有 OpenAlex 摘要的論文：（論文 id, 摘要列 id）。"""
-    database = Database(db.app_url, connect_timeout=5, pool_size=1)
-    paper_id = create_paper(database, doi=f"10.1/m18-{n}", openalex_id=f"W18{n}")
-    [(abstract_id,)] = execute(db, "SELECT id FROM paper_abstract WHERE paper_id = %s", paper_id)
-    return paper_id, uuid.UUID(str(abstract_id))
+    """一篇有 OpenAlex 摘要的論文：（論文 id, 摘要列 id）。
+
+    直接用 SQL 寫（一句、同一個交易），不經現在的 `upsert_by_external_id`：這裡的測試會先降到
+    0017 再準備論文，舊版 schema 沒有之後遷移加的欄位。只寫 0017 就有的欄位（0021 加的欄位在
+    新版 schema 靠預設值），內容和 `tests.llm_support.create_paper` 寫出來的相同：同一份
+    `ParsedPaper`、`tracked`、識別碼依優先序、一筆 OpenAlex 摘要且是目前用的。"""
+    paper = ParsedPaper.model_validate(
+        {
+            "source": "openalex",
+            "fetched_at": FETCHED_AT,
+            "doi": f"10.1/m18-{n}",
+            "openalex_id": f"W18{n}",
+            "title": "A study of information systems",
+            "journal_issn_l": "0276-7783",
+            "publication_year": 2025,
+            "abstract": "We study how teams adopt information systems.",
+            "abstract_source": "openalex",
+        }
+    )
+    in_scope = is_in_scope(
+        paper.journal_issn_l, paper.publication_year, ScopeSettings(frozenset({"0276-7783"}))
+    )
+    ids = paper.external_ids()
+    id_rows = ", ".join("(%s, %s, %s)" for _ in ids)
+    id_params = [
+        value
+        for index, ext in enumerate(ids)
+        for value in (index, ext.scheme.value, ext.value_norm)
+    ]
+    [(paper_id, abstract_id)] = execute(
+        db,
+        "WITH p AS (INSERT INTO paper (origin, title, publication_year, journal_issn_l, in_scope,"
+        " excluded_reason, lab_visible, openalex_fetched_at, work_type, is_retracted, volume,"
+        " issue, first_page, last_page, authors, referenced_works, cited_by_count, source_hash)"
+        " VALUES ('tracked', %s, %s, %s, %s, NULL, %s, %s, %s, %s, %s, %s, %s, %s,"
+        " CAST(%s AS text[]), CAST(%s AS text[]), %s, %s) RETURNING id),"
+        " i AS (INSERT INTO external_id (paper_id, scheme, value_norm)"
+        f" SELECT p.id, v.scheme, v.value_norm FROM p, (VALUES {id_rows})"
+        " AS v(ord, scheme, value_norm) ORDER BY v.ord),"
+        " a AS (INSERT INTO paper_abstract (paper_id, source, content, is_current)"
+        " SELECT id, %s, %s, true FROM p RETURNING paper_id, id)"
+        " SELECT paper_id, id FROM a",
+        paper.title,
+        paper.publication_year,
+        paper.journal_issn_l,
+        in_scope,
+        in_scope,
+        paper.fetched_at,
+        paper.work_type,
+        paper.is_retracted,
+        paper.volume,
+        paper.issue,
+        paper.first_page,
+        paper.last_page,
+        list(paper.authors),
+        list(paper.referenced_works),
+        paper.cited_by_count,
+        paper.source_hash,
+        *id_params,
+        paper.abstract_source.value if paper.abstract_source is not None else None,
+        paper.abstract,
+    )
+    return uuid.UUID(str(paper_id)), uuid.UUID(str(abstract_id))
 
 
 def _run(
@@ -116,7 +175,7 @@ def test_downgrade_to_0017_and_upgrade_again(db: TestDatabase) -> None:
 
     migrate(db)
 
-    assert db.revisions() == {"0020"}
+    assert db.revisions() == {"0021"}
     assert "abstract_source" in _columns(db)
     check = _alembic(db, "check")
     assert check.returncode == 0, check.stdout + check.stderr

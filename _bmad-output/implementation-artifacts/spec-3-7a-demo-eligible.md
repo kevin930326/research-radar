@@ -2,7 +2,7 @@
 title: 'Story 3.7a（暫名）：示範站可用的判定'
 type: 'feature'
 created: '2026-11-20'
-status: 'blocked'
+status: 'done'
 baseline_revision: '58697050a61895e63331351056ce0e25e7ecb9c4'
 review_loop_iteration: 0
 followup_review_recommended: false

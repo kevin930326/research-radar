@@ -16,9 +16,10 @@
 #
 # 清單改了之後，已經存下的 demo_eligible 不會自己變：要跑 `radar reparse` 重算（ADR-0052）。
 #
-# [ASSUMPTION] 下面的 ID 與名稱都還沒用 OpenAlex 的實際資料查證（這一輪不准連 OpenAlex，官方
-# 文件也沒寫 IEEE 的 ID）。Kevin 補資料後用唯讀查詢核對資料庫裡 IEEE 論文實際的 publisher_ids、
-# publisher_names，再把 id 補上、名稱改成實際的寫法。
+# Kevin 2026-11-20 已同意：先用名稱排除（id 留空）。下面的 ID 與名稱都還沒用 OpenAlex 的實際資料
+# 查證（這一輪不准連 OpenAlex，官方文件也沒寫 IEEE 的 ID）。Kevin 補資料後用唯讀查詢核對資料庫裡
+# IEEE 論文實際的 publisher_ids、publisher_names，再另開小 PR 把 id 補上、名稱改成實際的寫法；
+# 核對出 IEEE 是 0 篇之前不做 Story 3.7 的匯出（ADR-0052）。
 excluded:
   - id: null
     name: Institute of Electrical and Electronics Engineers
