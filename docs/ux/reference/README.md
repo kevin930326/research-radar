@@ -37,7 +37,11 @@
 | 10 登入、17 使用須知、18 帳號選單 | `screens/login-account.html` | 畫面（登入／使用須知（已登入））、按登入之後（成功／沒有成功／不在名單裡）、按登出之後（成功／沒有成功）；帳號選單在使用須知畫面右上的「帳號」 |
 | 11 系統首頁 | `screens/home-member.html` | 文獻庫（空的／有論文）、狀態（正常／載入中／我的文獻庫沒有載入成功） |
 | 11 系統首頁：沒有發現卡 | `screens/home-no-discovery.html` | 三格攤開／位置不變／有發現卡 |
-| 7 論文清單、12 找論文 | `screens/search.html` | 有結果／還沒搜尋／找不到／帶條件進來／篩選中／載入中／錯誤／相似沒結果／文獻庫是空的／篩選選單 |
+| 12 找論文（有搜尋框，Epic 4 起） | `screens/search.html` | 有結果／還沒搜尋／找不到／帶條件進來／篩選中／載入中／錯誤／相似沒結果／文獻庫是空的／篩選選單 |
+| 12 找論文（沒有搜尋框，Epic 3 的 Story 3.14 成員版） | `screens/search-no-box.html` | 有結果／還沒篩選／帶條件進來／篩選中／沒有結果／載入中／錯誤／篩選選單 |
+| 7 論文清單（示範站版） | `screens/papers-demo.html` | 全部／帶條件進來／篩選中／標題篩選／沒有結果／載入中／錯誤／篩選選單 |
+| 9 資料涵蓋範圍 | `screens/coverage.html` | 成員版與示範站版，各有正常／載入中／錯誤 |
+| 8 論文頁：我的筆記（還沒有 Story） | `screens/paper-notes.html` | 空的／有筆記／編輯中／儲存中／儲存失敗／超過字數上限 |
 | 13 我的文獻庫 | `screens/library.html` | 可以操作／很多篇／勾了 3 篇／沒有全文連結／超過 10 篇／擋住新分頁／移出／有我的 PDF／沒有結果／空間快滿／空的／載入中／錯誤 |
 | 14 上傳與匯入 | `screens/upload.html` | 可以操作／選好 PDF／勾了聲明／超過 100 個／空間不夠／上傳中／辨認中／網路中斷／全部完成／沒填標題／確認完／不加入／一次 25 個／要換 PDF 嗎／換的時候空間不夠／辨認完空間不夠／找不到這份 PDF／每一種狀態 |
 | 5 趨勢 | `screens/trend.html` | 正常／載入中／沒有載入成功／爆紅關鍵字遇到沒有論文的一年／有出版年是明年的論文／查到爆紅過的關鍵字／爆紅過兩次 |
@@ -48,12 +52,23 @@
 
 ## 還沒有設計稿的畫面
 
-2「60 秒示範」、3「展示問答」、4「架構與評估」、9「資料涵蓋範圍」、示範站版的論文清單與論文頁、全站共用的「找不到這一頁」「載入失敗」「沒有網路」。做到這些畫面的 Story：先停下來列為 Kevin 的決定（要不要先出設計稿），不要自己設計。已經做好的全站共用狀態（Story 3.1）維持現狀。
+2「60 秒示範」、3「展示問答」、4「架構與評估」、全站共用的「找不到這一頁」「載入失敗」「沒有網路」。做到這些畫面的 Story：先停下來列為 Kevin 的決定（要不要先出設計稿），不要自己設計。已經做好的全站共用狀態（Story 3.1）維持現狀。
+
+## 2026-11-20 新增的四張
+
+`search-no-box.html`、`papers-demo.html`、`coverage.html`、`paper-notes.html` 是 2026-11-20 畫的、Kevin 同一天看過定稿。和它們一起定的事：
+
+- 找論文的錯誤訊息用「沒有載入成功。重新整理後再試」＋「重新整理」，Epic 4 加回搜尋框之後也用這一句（`EXPERIENCE.md`「12. 找論文」已改）。`epics.md` 待確認第 14 項與 Story 4 系列的驗收條件還寫舊的「搜尋沒有成功」＋「重試」，排 Epic 4 時要一起改。
+- 找論文篩到 0 篇：用「沒有符合的論文」＋「清除篩選」，和示範站論文清單一致。
+- `coverage.html` 的頁尾（多了「資料涵蓋範圍」「使用須知」）定為全站頁尾；其他設計稿的頁尾還是舊的，之後補。
+- 我的筆記：字數上限 2,000、按「儲存」才存、放在主欄最後（原文摘要之後）。筆記的搜尋入口與刪除還沒畫。
+- `search-no-box.html` 的導覽列沿用原稿的五個連結；實際在 3.14 那個時間點放哪幾個照 AR-67。
+- 示意資料：`coverage.html` 表格的數字是編的；`papers-demo.html` 有 20 篇 2026 年的標題是編的，其餘沿用 `search.html` 的書目；`paper-notes.html` 的筆記內容是編的，論文內容沿用 `paper.html` 那一篇（出處見下面「注意」）。
 
 ## 注意
 
 - 檔案內容不要改。設計改了，就從 Artifact 重新存一份，並在 PR 說明寫是哪一天的版本。
-- 四個論文頁的設計稿（`paper.html`、`paper-ai-failed.html`、`paper-my-pdf.html`、`paper-demo.html`）用了一篇論文的英文摘要原文當示意，`docs/ux/claude-design-brief.md` 也引了前三句。這篇是 CC BY 4.0 授權（2026-11-15 向 OpenAlex 用 DOI 查過：`license: cc-by`），可以照原文使用，條件是標明出處，所以不用換成假摘要：
+- 五個論文頁的設計稿（`paper.html`、`paper-ai-failed.html`、`paper-my-pdf.html`、`paper-demo.html`、`paper-notes.html`）用了一篇論文的英文摘要原文當示意，`docs/ux/claude-design-brief.md` 也引了前三句。這篇是 CC BY 4.0 授權（2026-11-15 向 OpenAlex 用 DOI 查過：`license: cc-by`），可以照原文使用，條件是標明出處，所以不用換成假摘要：
   - Florian Schneider, Pavel Dykmann, Timm Teubner (2025). Mixed Signals: The Effects of Online Rating Discrepancy on User Trust. *Journal of Management Information Systems*, 42(3), 894–925. https://doi.org/10.1080/07421222.2025.2520178 ，授權 CC BY 4.0（https://creativecommons.org/licenses/by/4.0/）。摘要原文沒有改動。
   - 設計稿裡的中文重點、分類、研究模型是照這篇摘要手寫的示意，不是論文作者寫的。
   - `paper-demo.html` 的「只有書目」用一篇付費期刊論文示意（Venkatesh 等人 2003，MIS Quarterly），只放標題、作者、期刊、卷期頁碼、DOI，沒有摘要；畫面上的引用數是示意數字，分類是手填的示意。
