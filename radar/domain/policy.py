@@ -157,15 +157,18 @@ def is_demo_eligible(
       lineage）。
     - `excluded`：排除清單；None＝清單沒有載入（例如測試沒帶），一律 False。
 
-    只有授權對到 `DEMO_ELIGIBLE_LICENSES`、出版社欄位至少有一個值、而且沒有任何 ID 或名稱在
-    排除清單裡，才是 True。授權沒有或看不懂、沒有出版社欄位（無法確認不是被排除的出版社）都是
-    False。
+    只有授權對到 `DEMO_ELIGIBLE_LICENSES`、至少一個出版社**名稱**正規化後不是空的、而且沒有任何
+    ID 或名稱在排除清單裡，才是 True。授權沒有或看不懂、沒有可用的出版社名稱都是 False。
+
+    名稱是必要條件，只有 ID 不夠：排除清單目前只靠名稱（`config/demo_publishers.yaml` 的 `id` 都是
+    null），只有 ID（看得懂或看不懂都一樣）時無法確認不是被排除的出版社。之後排除清單補上 ID 時再
+    檢討這個條件（ADR-0052 第 4 點）。
     """
     if excluded is None:
         return False
     if openalex_license(license) not in DEMO_ELIGIBLE_LICENSES:
         return False
-    if not publisher_ids and not publisher_names:
+    if not any(normalize_publisher_name(name) for name in publisher_names):
         return False
     return not excluded.matches(publisher_ids, publisher_names)
 

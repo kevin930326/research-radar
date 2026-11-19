@@ -42,9 +42,11 @@ def demo_work(
     other_location_licenses: tuple[object, ...] = (),
     abstract: bool = True,
     source: bool = True,
+    primary: bool = True,
     year: int = 2022,
 ) -> dict[str, Any]:
-    """一篇編的 OpenAlex work（JSON 物件）。`source=False`＝`primary_location.source` 是 null。
+    """一篇編的 OpenAlex work（JSON 物件）。`source=False`＝`primary_location.source` 是 null；
+    `primary=False`＝`primary_location` 整個是 null（`locations` 裡也沒有那一份）。
 
     `lineage`／`lineage_names` 沒給時是 [直屬的值]（照 OpenAlex 的寫法，自己也在 lineage 裡）。
     """
@@ -61,13 +63,15 @@ def demo_work(
             "host_organization_lineage": _lineage(lineage, publisher_id),
             "host_organization_lineage_names": _lineage(lineage_names, publisher_name),
         }
-    primary = {
-        "is_oa": license is not None,
-        "landing_page_url": f"https://doi.org/10.9999/demo.{number}",
-        "source": primary_source,
-        "license": license,
-        "version": "publishedVersion",
-    }
+    primary_location: dict[str, Any] | None = None
+    if primary:
+        primary_location = {
+            "is_oa": license is not None,
+            "landing_page_url": f"https://doi.org/10.9999/demo.{number}",
+            "source": primary_source,
+            "license": license,
+            "version": "publishedVersion",
+        }
     best_oa = (
         None
         if best_oa_license is None
@@ -78,7 +82,7 @@ def demo_work(
             "version": "acceptedVersion",
         }
     )
-    locations = [primary]
+    locations = [primary_location] if primary_location is not None else []
     if best_oa is not None:
         locations.append(best_oa)
     locations.extend(
@@ -94,7 +98,7 @@ def demo_work(
         "type": "article",
         "authorships": [{"author": {"display_name": "Test Author"}}],
         "biblio": {"volume": "1", "issue": "1", "first_page": "1", "last_page": "9"},
-        "primary_location": primary,
+        "primary_location": primary_location,
         "best_oa_location": best_oa,
         "locations": locations,
         "abstract_inverted_index": (

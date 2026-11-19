@@ -78,7 +78,12 @@ class JournalsConfig(BaseModel):
         return journals
 
     def scope_settings(self) -> ScopeSettings:
-        """追蹤範圍的設定：這些期刊的 ISSN-L 與起始年（`domain/scope.py` 的 `is_in_scope` 用）。"""
+        """追蹤範圍的設定：這些期刊的 ISSN-L 與起始年（`domain/scope.py` 的 `is_in_scope` 用）。
+
+        **不帶示範站的排除清單**（`demo_publishers` 是 None）：拿它寫入的論文一律不算示範站可用。
+        正式的寫入路徑（每週更新、reparse）要用 `DomainConfig.scope_settings()`；這個只留給只看
+        追蹤範圍的地方與既有測試。
+        """
         return ScopeSettings(
             frozenset(journal.issn_l for journal in self.journals), start_year=self.start_year
         )

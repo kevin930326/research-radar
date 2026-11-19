@@ -105,6 +105,31 @@ def test_no_publisher_fields_is_not_eligible() -> None:
     assert is_demo_eligible("cc-by", (), (), TEST_EXCLUSIONS) is False
 
 
+@pytest.mark.parametrize(
+    ("ids", "names"),
+    [
+        # 只有看不懂的 ID：排除清單目前只靠名稱，比不到不代表不是被排除的出版社。
+        (("not an id!",), ()),
+        # 只有看得懂的 ID、不在排除清單裡：一樣沒有名稱可以比。
+        (("P9000000001",), ()),
+        (("https://openalex.org/P9000000001", "P9000000077"), ()),
+        # 名稱全部壞掉（空字串、只有空白、全形空白、正規化後是空的）。
+        (("P9000000001",), ("",)),
+        (("P9000000001",), ("   ", "\t\n")),
+        ((), ("\u3000", " \u00a0 ")),
+    ],
+)
+def test_publisher_without_a_usable_name_is_not_eligible(
+    ids: tuple[str, ...], names: tuple[str, ...]
+) -> None:
+    # ADR-0052 第 4 點：至少要有一個正規化後不是空的出版社名稱，才可能是 True。
+    assert is_demo_eligible("cc-by", ids, names, TEST_EXCLUSIONS) is False
+
+
+def test_one_usable_name_among_broken_ones_is_enough() -> None:
+    assert is_demo_eligible("cc-by", ("not an id!",), ("  ", "Open"), TEST_EXCLUSIONS) is True
+
+
 def test_missing_exclusion_list_is_not_eligible() -> None:
     assert is_demo_eligible("cc-by", ("P1",), ("Open",), None) is False
 
@@ -123,9 +148,32 @@ def test_any_excluded_id_or_name_excludes(ids: tuple[str, ...], names: tuple[str
     assert is_demo_eligible("cc-by", ids, names, TEST_EXCLUSIONS) is False
 
 
+# 判定為 True 時授權只可能是這幾個字面值（寫死，不拿實作的 `openalex_license` 當答案）。
+# `cc0` 不是 OpenAlex 會給的值（官方清單是 `public-domain`），但 `openalex_license` 認得它是 CC0。
+_ALLOWED_LICENSE_STRINGS = frozenset({"cc-by", "cc-by-sa", "public-domain", "cc0"})
+# 和允許值很像、但一律不算的寫法：大小寫、版本號、NC／ND、前後空白、底線。
+_NEAR_LICENSES = [
+    "cc-by-4.0",
+    "CC-BY",
+    "Cc-By",
+    "CC0",
+    "cc-by-nc",
+    "cc-by-nd",
+    "cc-by-nc-sa",
+    "cc-by-nc-nd",
+    " cc-by",
+    "cc-by ",
+    " cc-by-sa ",
+    "cc_by",
+    "public domain",
+    "public-domain ",
+    "other-oa",
+    "publisher-specific-oa",
+]
 _LICENSES = st.one_of(
     st.none(),
-    st.sampled_from(["cc-by", "cc-by-sa", "public-domain", "cc0", "cc-by-nc", "other-oa"]),
+    st.sampled_from(sorted(_ALLOWED_LICENSE_STRINGS)),
+    st.sampled_from(_NEAR_LICENSES),
     st.text(max_size=20),
 )
 _IDS = st.lists(
@@ -153,12 +201,66 @@ def test_property_excluded_publisher_is_never_eligible(
     assert is_demo_eligible(license, ids, names, TEST_EXCLUSIONS) is False
 
 
+# 排除清單裡的值的各種寫法：URL、小寫、大小寫與空白不同的名稱、上層出版社名稱。
+_EXCLUDED_ID_FORMS = [
+    "P9000000002",
+    "p9000000002",
+    EXCLUDED_PUBLISHER_ID,
+    "https://openalex.org/p9000000002",
+]
+_EXCLUDED_NAME_FORMS = [
+    EXCLUDED_PUBLISHER_NAME,
+    EXCLUDED_PUBLISHER_NAME.upper(),
+    f"  {EXCLUDED_PUBLISHER_NAME.lower()}  ",
+    EXCLUDED_PUBLISHER_NAME.replace(" ", "   "),
+    EXCLUDED_PARENT_NAME,
+    EXCLUDED_PARENT_NAME.swapcase(),
+]
+
+
+@given(
+    license=_LICENSES,
+    ids=_IDS,
+    names=_NAMES,
+    excluded_id=st.one_of(st.none(), st.sampled_from(_EXCLUDED_ID_FORMS)),
+    excluded_name=st.one_of(st.none(), st.sampled_from(_EXCLUDED_NAME_FORMS)),
+    id_position=st.integers(min_value=0, max_value=4),
+    name_position=st.integers(min_value=0, max_value=4),
+)
+def test_property_excluded_value_in_any_form_and_position_is_never_eligible(
+    license: str | None,
+    ids: tuple[str, ...],
+    names: tuple[str, ...],
+    excluded_id: str | None,
+    excluded_name: str | None,
+    id_position: int,
+    name_position: int,
+) -> None:
+    # 排除值用非標準寫法、放在直屬（第一個）或 lineage 的任何位置，一樣一定是 False。
+    if excluded_id is None and excluded_name is None:
+        excluded_name = EXCLUDED_PUBLISHER_NAME
+    if excluded_id is not None:
+        ids = (*ids[:id_position], excluded_id, *ids[id_position:])
+    if excluded_name is not None:
+        names = (*names[:name_position], excluded_name, *names[name_position:])
+    assert is_demo_eligible(license, ids, names, TEST_EXCLUSIONS) is False
+
+
+@given(license=_LICENSES, ids=_IDS)
+def test_property_ids_without_names_are_never_eligible(
+    license: str | None, ids: tuple[str, ...]
+) -> None:
+    # 只有出版社 ID、沒有名稱：不管 ID 看不看得懂、在不在排除清單，一定是 False
+    # （ADR-0052 第 4 點）。
+    assert is_demo_eligible(license, ids, (), TEST_EXCLUSIONS) is False
+
+
 @given(license=_LICENSES, ids=_IDS, names=_NAMES)
 def test_property_license_outside_the_three_is_never_eligible(
     license: str | None, ids: tuple[str, ...], names: tuple[str, ...]
 ) -> None:
     result = is_demo_eligible(license, ids, names, TEST_EXCLUSIONS)
-    if openalex_license(license) not in DEMO_ELIGIBLE_LICENSES:
+    if license not in _ALLOWED_LICENSE_STRINGS:
         assert result is False
 
 
@@ -166,11 +268,13 @@ def test_property_license_outside_the_three_is_never_eligible(
 def test_property_true_needs_allowed_license_and_publisher_not_excluded(
     license: str | None, ids: tuple[str, ...], names: tuple[str, ...]
 ) -> None:
-    # True 的必要條件：三種授權之一、有出版社欄位、沒有任何值在排除清單裡；而且拿掉排除清單
-    # （None）一律 False。
+    # True 的必要條件：三種授權之一（寫死的字面值）、有出版社欄位、至少一個不是空白的名稱、
+    # 沒有任何值在排除清單裡；而且拿掉排除清單（None）一律 False。
     if is_demo_eligible(license, ids, names, TEST_EXCLUSIONS):
+        assert license in _ALLOWED_LICENSE_STRINGS
         assert openalex_license(license) in DEMO_ELIGIBLE_LICENSES
         assert ids or names
+        assert any(name.strip() for name in names)
         assert not TEST_EXCLUSIONS.matches(ids, names)
     assert is_demo_eligible(license, ids, names, None) is False
 
@@ -215,6 +319,22 @@ def test_parser_is_lenient_with_publisher_shapes() -> None:
 
 def test_parser_keeps_unreadable_publisher_ids_as_text() -> None:
     assert _parse(publisher_id="not an id!", lineage=[]).publisher_ids == ("not an id!",)
+
+
+def test_parser_without_primary_location_has_no_license_or_publisher() -> None:
+    paper = _parse(primary=False, best_oa_license="cc-by")
+
+    assert paper.primary_license is None
+    assert (paper.publisher_ids, paper.publisher_names) == ((), ())
+    assert _eligible(paper) is False
+
+
+def test_parser_valid_publisher_id_without_name_is_not_eligible() -> None:
+    paper = _parse(publisher_name=None, lineage_names=[])
+
+    assert paper.publisher_ids == ("P9000000001",)
+    assert paper.publisher_names == ()
+    assert _eligible(paper) is False
 
 
 def test_parser_without_source_has_no_publisher() -> None:

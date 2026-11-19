@@ -161,6 +161,15 @@ def test_demo_full_paper_has_only_the_one_open_paper(
             snapshot,
             demo_work(8, issn_l=ISSN, source=True, publisher_id=None, publisher_name=None),
         ),
+        "openalex_kept_semantic_scholar_current": _counted(
+            demo_db, database, snapshot, demo_work(9, issn_l=ISSN)
+        ),
+        "id_without_name": _counted(
+            demo_db,
+            database,
+            snapshot,
+            demo_work(10, issn_l=ISSN, publisher_name=None, lineage_names=[]),
+        ),
     }
     # 摘要來源是 Semantic Scholar 的那篇：寫入函式只寫 OpenAlex 的摘要，這裡直接插一筆目前用的。
     _owner(
@@ -169,17 +178,34 @@ def test_demo_full_paper_has_only_the_one_open_paper(
         " VALUES (%s, 'semantic_scholar', 'Made up abstract.', true)",
         papers["semantic_scholar_abstract"],
     )
+    # 兩筆摘要：OpenAlex 那筆留著但不是目前用的，目前用的是 Semantic Scholar（不在 view，也不會
+    # 因為多一筆摘要而多出一列）。
+    _owner(
+        demo_db,
+        "UPDATE paper_abstract SET is_current = false WHERE paper_id = %s",
+        papers["openalex_kept_semantic_scholar_current"],
+    )
+    _owner(
+        demo_db,
+        "INSERT INTO paper_abstract (paper_id, source, content, is_current)"
+        " VALUES (%s, 'semantic_scholar', 'Made up abstract.', true)",
+        papers["openalex_kept_semantic_scholar_current"],
+    )
 
     eligible = {name for name, paper_id in papers.items() if _paper_row(demo_db, paper_id)[3]}
-    in_view = {row[0] for row in _rows(demo_db, "SELECT id FROM demo_full_paper")}
+    view_rows = [row[0] for row in _rows(demo_db, "SELECT id FROM demo_full_paper")]
+    in_view = set(view_rows)
 
     assert in_view == {papers["open"]}
+    # 一篇論文在 view 裡最多一列（`paper_abstract` 每篇最多一筆 `is_current`，部分唯一索引）。
+    assert len(view_rows) == len(in_view)
     # 授權與出版社判定過關的：自己這篇，以及另外因為其他條件（摘要、統計、摘要來源）出局的四篇。
     assert eligible == {
         "open",
         "no_abstract",
         "excluded_not_counted",
         "semantic_scholar_abstract",
+        "openalex_kept_semantic_scholar_current",
     }
     assert _paper_row(demo_db, papers["open"]) == (
         "cc-by",
@@ -189,6 +215,8 @@ def test_demo_full_paper_has_only_the_one_open_paper(
     )
     assert _paper_row(demo_db, papers["only_best_oa_cc_by"])[0] is None
     assert _paper_row(demo_db, papers["no_publisher"])[1:] == ([], [], False)
+    # 只有出版社 ID、沒有名稱：排除清單目前只靠名稱，無法確認，不算可用（ADR-0052 第 4 點）。
+    assert _paper_row(demo_db, papers["id_without_name"])[1:] == (["P9000000001"], [], False)
 
 
 def test_view_is_read_only_for_the_app_role(demo_db: TestDatabase) -> None:
@@ -203,8 +231,9 @@ def test_view_is_read_only_for_the_app_role(demo_db: TestDatabase) -> None:
     assert (insert, update, delete, select) == (False, False, False, True)
 
 
-def test_existing_rows_start_not_eligible(demo_db: TestDatabase) -> None:
-    # 遷移 0021 的預設值：還沒補資料之前一篇都不算可用、沒有授權與出版社。
+def test_column_defaults_start_not_eligible(demo_db: TestDatabase) -> None:
+    # 遷移 0021 的預設值：還沒補資料之前一篇都不算可用、沒有授權與出版社（遷移前就在的列另見
+    # `test_migration_0021.py`）。
     [(default_eligible, default_ids, default_names)] = _rows(
         demo_db,
         "SELECT"

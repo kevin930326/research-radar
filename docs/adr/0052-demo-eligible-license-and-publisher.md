@@ -2,7 +2,7 @@
 
 - 狀態：提議（等 Kevin 在 PR 確認）
 - 日期：2026-11-20
-- 對應：ADR-0007 第 5 點（2026-11-19 改寫）；ADR-0022（解析與 reparse）；ADR-0028（變動偵測）；ADR-0029（`ContentLicense`）；PRD FR-7、FR-42；架構文件 AD-20；addendum AR-12；Story 3.7a（暫名，規格在 `docs/runs/epic-3e/brief-demo-eligible.md`）
+- 對應：ADR-0007 第 5 點（2026-11-19 改寫）；ADR-0022（解析與 reparse）；ADR-0028（變動偵測）；ADR-0029（`ContentLicense`）；PRD FR-7、FR-42；架構文件 AD-20；addendum AR-12；Story 3.7a（暫名，驗收條件見 PR #108 說明）
 
 ## 背景
 
@@ -42,18 +42,23 @@ Kevin 2026-11-19 決定：授權只看**出版社自己那一版**（OpenAlex �
 
 1. **欄位怎麼存（遷移 0021）**：`paper` 加
    - `primary_license text`：`primary_location.license` 的原字串（去頭尾空白），看不懂的字串也照存；NULL＝沒有。CHECK 不是空字串。
-   - `publisher_ids text[] NOT NULL DEFAULT '{}'`：`primary_location.source.host_organization` 接著 `host_organization_lineage`，正規化成 `P…`（看不懂的照原字串），去重複、保持順序。
+   - `publisher_ids text[] NOT NULL DEFAULT '{}'`：`primary_location.source.host_organization` 接著 `host_organization_lineage`，正規化的 OpenAlex ID（通常是出版社 `P…`；`host_organization` 是機構時也可能是 `I…`，照存；看不懂的照原字串），去重複、保持順序。
    - `publisher_names text[] NOT NULL DEFAULT '{}'`：`host_organization_name` 接著 `host_organization_lineage_names`。
    - `demo_eligible boolean NOT NULL DEFAULT false`：既有的列都是 false，補資料之前一篇都不算可用。
    - 四欄都不算進 `source_hash`（`SOURCE_HASH_VERSION` 不動）。
 2. **解析**（`domain/parsers/openalex.py`）：只看 `primary_location`，不看 `best_oa_location`、`locations`。這三類欄位只拿來判定示範站，**解析時寬鬆**：型別不對、空白、存不進資料庫的值當作沒有，不丟 `ParseError`（ADR-0022「看不懂就丟錯」的例外，Kevin 2026-11-20 已同意；理由：這幾個欄位壞掉不該讓整篇論文進不了資料庫；當作沒有，判定一律往「不可用」走）。
 3. **授權對照**（`domain/policy.openalex_license`）：沿用 `ContentLicense`。字串完全相同才算（不改大小寫）；OpenAlex 把 CC0 與公眾領域併成 `public-domain`（官方授權清單顯示名稱「public domain (CC0)」），對到 `CC0`；其他（`mit`、`apache-2-0`、`gpl-*`、`isc`、`publisher-specific-oa`、看不懂的、沒有）一律 `UNKNOWN`。`public-domain` 對到 CC0、算可用：Kevin 2026-11-20 已同意。
-4. **判定**（`domain/policy.is_demo_eligible`，全專案唯一）：授權在 `DEMO_ELIGIBLE_LICENSES`（CC BY、CC BY-SA、CC0）、出版社欄位至少一個值、而且沒有任何 ID 或名稱在排除清單裡，才是 True。**沒有出版社欄位＝False**（無法確認不是被排除的出版社，寧可不放；Kevin 2026-11-20 已同意）。排除清單沒有載入（`ScopeSettings.demo_publishers` 是 None）也是 False。
+4. **判定**（`domain/policy.is_demo_eligible`，全專案唯一）：授權在 `DEMO_ELIGIBLE_LICENSES`（CC BY、CC BY-SA、CC0）、**至少一個出版社名稱正規化後不是空的**、而且沒有任何 ID 或名稱在排除清單裡，才是 True。**沒有出版社欄位＝False**（無法確認不是被排除的出版社，寧可不放；Kevin 2026-11-20 已同意）。排除清單沒有載入（`ScopeSettings.demo_publishers` 是 None）也是 False。
+   - **名稱是必要條件，只有 ID 不夠**（PR #108 審查後加）：排除清單目前只靠名稱（設定檔的 `id` 都是 null），只有出版社 ID（看得懂或看不懂都一樣）、或名稱全部是空白時，比不到名稱不代表不是 IEEE，一律 False。這比 Kevin 同意的「沒有出版社欄位＝不可用」更嚴，只會讓可用的變少（**保守方向，列給 Kevin 確認**）。之後排除清單補上實際的 ID 時再檢討這個條件。
 5. **排除清單** `config/demo_publishers.yaml`：每筆 `id`（OpenAlex 出版社 ID，可以是 null）、`name`（`host_organization_name` 的完整寫法）、`note`；至少一筆。名稱比對前兩邊都做 NFKC、`casefold`、連續空白縮成一個、去頭尾空白。檔案壞掉或不見時，api、worker、CLI 的啟動檢查列出問題、不啟動（和其他領域設定檔一樣）。
 6. **寫入**：`demo_eligible` 只由 `repo/papers.upsert_by_external_id` 寫，值只由 `is_demo_eligible` 算。三條寫入路徑（每週更新、第一次匯入＝第一次每週更新、`radar reparse`）都經這個函式；排除清單放在它本來就收的 `ScopeSettings`（`demo_publishers`；Kevin 2026-11-20 已同意），正式路徑用 `DomainConfig.scope_settings()` 建（worker 的 `load_scope`、`radar reparse`）。CREATED、UPDATED 時四欄整欄覆寫，STALE 不寫。
 7. **變動偵測不改（ADR-0028）**：授權或出版社變了、`source_hash` 沒變時，四欄照樣更新，但 `source_changed_at` 不動、`source_changed` 是 False，不會讓向量化或 AI 工作重做。
 8. **view `demo_full_paper`**：`counted_paper` ∩ `demo_eligible` ∩ 有目前用的摘要（`paper_abstract.is_current`）∩ 摘要來源允許公開。**「摘要來源允許公開」只在這個 view 定義**：只有 `openalex`（Semantic Scholar 還沒有書面授權；`uploaded_pdf` 永遠不是目前的摘要）。欄位明列、撤掉應用程式角色的寫入權限。
 9. **排除清單改了之後**：已經存下的 `demo_eligible` 不會自己變，要跑 `radar reparse` 重算（reparse 用存下的原始資料，不連 OpenAlex）。授權、出版社欄位同理：遷移後的第一次補資料也是跑 `radar reparse`。
+   - **例外：reparse 沒有重寫到的論文保留舊值**。reparse 只重寫「最新原始資料讀得到、解析得了、ID 對得上、而且不是 STALE」的論文；原始資料不見、解析失敗、ID 對不上或 STALE 的論文照 ADR-0022 維持舊資料，`demo_eligible` 也維持舊清單算出來的值。第一次補資料不受影響（遷移後全部是 false，不會留下舊的 true）；只有「之後排除清單再改」時，這些論文可能留著已經不該有的 true。
+   - **核對查詢**：每次改排除清單、跑完 reparse 之後，以及 Story 3.7 匯出之前，Kevin 用唯讀查詢確認「`demo_eligible` 為 true 的論文裡，存下的出版社名稱（正規化後）或 ID 對到排除清單的」是 0 篇。查詢本身寫在 PR #108 說明的 Kevin 手動步驟。
+   - 程式要不要補（例如 reparse 結束時用存下的欄位對沒重寫到的論文再判一次，只往 false 改）：會多一個寫 `demo_eligible` 的地方，和第 6 點衝突，**列為 Story 3.7 開工前 Kevin 要決定的事**。
+10. **部署與退版**：部署（遷移 0021＋重建 api、worker）要在沒有進行中的每週更新時做。舊程式抓到、還沒套用的暫存列沒有授權與出版社欄位，新程式套用時會把那幾篇寫成沒有授權、沒有出版社、`demo_eligible = false`（只會往不可用錯，再跑一次 reparse 就補回來）。退回舊版程式前要先確認暫存區是空的：新程式寫的暫存列有舊程式不認得的欄位，舊程式讀不進來，那次每週更新會一直失敗。
 
 ## 理由
 
@@ -73,6 +78,8 @@ Kevin 2026-11-19 決定：授權只看**出版社自己那一版**（OpenAlex �
 ## 已知限制
 
 - **IEEE 的 ID 與名稱都沒有經過 OpenAlex 實際資料查證；Kevin 2026-11-20 已同意先用名稱排除（`id` 留空），補資料後由 Kevin 跑核對查詢，再另開小 PR 把實際 ID 與名稱補上。核對出 IEEE 是 0 篇（被算成可用的 IEEE 論文）之前不做 3.7 匯出。** 這一輪不准連 OpenAlex；OpenAlex 放在 GitHub 的官方文件（見下面出處）沒有寫 IEEE 的出版社 ID 或 `host_organization_name` 的寫法。設定檔先寫三筆名稱（Institute of Electrical and Electronics Engineers、IEEE、IEEE Computer Society），`id` 都是 null。Kevin 補資料後用唯讀查詢核對資料庫裡 IEEE 期刊論文實際的 `publisher_ids`、`publisher_names`，把 ID 補上、名稱改成實際寫法。補上之前，名稱寫法對不上的 IEEE 論文**可能被算成可用**：補資料後、匯出（Story 3.7）之前一定要核對。
+- **只有出版社 ID、沒有名稱的論文一律不可用**（第 4 點）：排除清單補上 ID 之前，這類論文就算授權是 CC BY 也不放。保守方向，等 Kevin 確認。
+- **排除清單再改時，reparse 沒重寫到的論文可能留著舊的 true**（第 9 點）：靠核對查詢擋，程式的補法等 Kevin 決定。
 - `public-domain` 當 CC0：OpenAlex 的官方清單把兩者併成一個值，分不開；公眾領域的作品本來就可以轉載。
 - 授權字串大小寫不同（例如 `CC-BY`）當不明：OpenAlex 文件寫的是小寫短碼。
 
