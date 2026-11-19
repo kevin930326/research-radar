@@ -28,7 +28,8 @@ jobs:
   checks:
     name: checks
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    # 20 分鐘在 2026-11-18 起不夠用（main 上已要 16～18 分鐘，整合測試還在增加）。
+    timeout-minutes: 30
     steps:
       - name: 取出程式碼（含完整歷史，給 gitleaks 掃）
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -181,9 +182,28 @@ jobs:
         name: 建置（示範站）
         run: npm run build:demo
 
+      # --with-deps 會用 apt 裝瀏覽器要的系統套件（約 125 MB）。執行機的 apt 從鏡像站清單
+      # （/etc/apt/apt-mirrors.txt，sources 用 mirror+file:）挑站，第一優先是
+      # us-east-2.ec2.archive.ubuntu.com；2026-11-18 起從那裡下載只有 113 KB/s，這一步裝了 18 分鐘，
+      # 撞 20 分鐘時限。apt 只在「連不上」時才換下一個站，「很慢」不會換，所以把 Ubuntu 官方主站
+      # 改成 priority:1，原本清單裡的站照原來的順序排在後面當備用（沒寫 priority 的站，apt 會隨機排）。
+      # 只換 Ubuntu 官方的站，套件仍由 apt 用 Ubuntu 的金鑰驗簽；逾時與重試沿用執行機本來的設定。
       - id: web-playwright-install
         name: 安裝 Playwright 的三種瀏覽器
-        run: npx playwright install --with-deps chromium firefox webkit
+        run: |
+          set -euo pipefail
+          mirrors=/etc/apt/apt-mirrors.txt
+          if [ -f "${mirrors}" ]; then
+            # 主站已在清單裡的話不重複（http 與 https 都算）。
+            awk 'BEGIN { print "http://archive.ubuntu.com/ubuntu/\tpriority:1"; n = 1 }
+                 $1 != "" && $1 !~ /^#/ && $1 !~ /^https?:\/\/archive\.ubuntu\.com\// { n++; print $1 "\tpriority:" n }' \
+              "${mirrors}" > "${RUNNER_TEMP}/apt-mirrors.txt"
+            sudo install --mode 0644 "${RUNNER_TEMP}/apt-mirrors.txt" "${mirrors}"
+            cat "${mirrors}"
+          else
+            echo "::warning::找不到 ${mirrors}，鏡像站順序沒有改，照執行機預設的來源安裝"
+          fi
+          npx playwright install --with-deps chromium firefox webkit
 
       - id: web-e2e
         name: Playwright＋axe（三種引擎，帶 CSP 的建置結果）
