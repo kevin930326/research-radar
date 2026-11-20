@@ -7,4 +7,6 @@ export const datasource: DataSource = {
   session: null,
   // 示範站的論文頁是 Story 3.9（讀 radar export-demo 匯出的靜態檔）。
   papers: null,
+  // 示範站沒有個人的文獻庫（State Patterns「全站共用」：示範站的後端功能不存在）。
+  library: null,
 };

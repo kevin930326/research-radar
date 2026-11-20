@@ -1,5 +1,5 @@
 {
-  "_comment": "找論文（Story 3.14）的假清單：自己編的標題、作者與 DOI（10.5555 是測試用的 DOI 前綴），不是真的論文。e2e/api-mock.ts 與 scripts/mock-api.mjs 共用。row 是 API 回的一列；topics、methods（沒寫是沒有方法）、this_week、lab、personal 是替身用來篩選的欄位（API 不回）。 前三列（本週新增的前 3 篇）的 ID 用論文頁假資料裡的三篇（normal、no-abstract、all-failed），站內連結檢查點標題時落在真的有的論文頁。",
+  "_comment": "找論文（Story 3.14）的假清單：自己編的標題、作者與 DOI（10.5555 是測試用的 DOI 前綴），不是真的論文。e2e/api-mock.ts 與 scripts/mock-api.mjs 共用。row 是 API 回的一列；topics、methods（沒寫是沒有方法）、this_week、lab、personal 是替身用來篩選的欄位（API 不回）。 前三列（本週新增的前 3 篇）的 ID 用論文頁假資料裡的三篇（normal、no-abstract、all-failed），站內連結檢查點標題時落在真的有的論文頁。 row.in_my_library（Story 3.17）照 personal 寫（在我的文獻庫裡的才是 true）；替身會照目前的文獻庫重算。我的文獻庫一開始是 personal 的那兩列（第 2、3 列：論文頁假資料的 no-abstract、all-failed，站內連結檢查從我的文獻庫點標題時落在真的有的論文頁；normal 不在文獻庫）。",
   "snapshot": {
     "number": 12,
     "as_of": "2026-11-11T17:30:00Z"
@@ -25,14 +25,15 @@
         "doi_url": "https://doi.org/10.5555/fake.0001",
         "has_abstract": true,
         "in_scope": true,
-        "is_retracted": false
+        "is_retracted": false,
+        "in_my_library": false
       },
       "topics": [
         "supply_chain"
       ],
       "this_week": true,
       "lab": false,
-      "personal": true
+      "personal": false
     },
     {
       "row": {
@@ -49,7 +50,8 @@
         "doi_url": "https://doi.org/10.5555/fake.0002",
         "has_abstract": true,
         "in_scope": true,
-        "is_retracted": false
+        "is_retracted": false,
+        "in_my_library": true
       },
       "topics": [
         "e_commerce",
@@ -57,7 +59,7 @@
       ],
       "this_week": true,
       "lab": false,
-      "personal": false,
+      "personal": true,
       "methods": [
         "experiment"
       ]
@@ -77,14 +79,15 @@
         "doi_url": "https://doi.org/10.5555/fake.0003",
         "has_abstract": true,
         "in_scope": true,
-        "is_retracted": false
+        "is_retracted": false,
+        "in_my_library": true
       },
       "topics": [
         "it_project_management"
       ],
       "this_week": true,
       "lab": true,
-      "personal": false
+      "personal": true
     },
     {
       "row": {
@@ -101,7 +104,8 @@
         "doi_url": "https://doi.org/10.5555/fake.0004",
         "has_abstract": true,
         "in_scope": true,
-        "is_retracted": false
+        "is_retracted": false,
+        "in_my_library": false
       },
       "topics": [
         "e_commerce",
@@ -126,7 +130,8 @@
         "doi_url": "https://doi.org/10.5555/fake.0005",
         "has_abstract": false,
         "in_scope": true,
-        "is_retracted": false
+        "is_retracted": false,
+        "in_my_library": false
       },
       "topics": [
         "ai_data_analytics"
@@ -150,7 +155,8 @@
         "doi_url": "https://doi.org/10.5555/fake.0006",
         "has_abstract": true,
         "in_scope": true,
-        "is_retracted": false
+        "is_retracted": false,
+        "in_my_library": false
       },
       "topics": [
         "erp"
@@ -177,7 +183,8 @@
         "doi_url": "https://doi.org/10.5555/fake.0007",
         "has_abstract": true,
         "in_scope": true,
-        "is_retracted": false
+        "is_retracted": false,
+        "in_my_library": false
       },
       "topics": [],
       "this_week": false,
@@ -199,7 +206,8 @@
         "doi_url": "https://doi.org/10.5555/fake.0008",
         "has_abstract": true,
         "in_scope": true,
-        "is_retracted": false
+        "is_retracted": false,
+        "in_my_library": false
       },
       "topics": [
         "e_commerce",
@@ -224,7 +232,8 @@
         "doi_url": null,
         "has_abstract": true,
         "in_scope": true,
-        "is_retracted": false
+        "is_retracted": false,
+        "in_my_library": false
       },
       "topics": [
         "it_project_management"
@@ -248,7 +257,8 @@
         "doi_url": "https://doi.org/10.5555/fake.0010",
         "has_abstract": false,
         "in_scope": true,
-        "is_retracted": false
+        "is_retracted": false,
+        "in_my_library": false
       },
       "topics": [
         "e_commerce",
@@ -276,14 +286,15 @@
         "doi_url": "https://doi.org/10.5555/fake.0011",
         "has_abstract": true,
         "in_scope": true,
-        "is_retracted": false
+        "is_retracted": false,
+        "in_my_library": false
       },
       "topics": [
         "ai_data_analytics"
       ],
       "this_week": false,
       "lab": false,
-      "personal": true
+      "personal": false
     },
     {
       "row": {
@@ -300,7 +311,8 @@
         "doi_url": "https://doi.org/10.5555/fake.0012",
         "has_abstract": true,
         "in_scope": true,
-        "is_retracted": false
+        "is_retracted": false,
+        "in_my_library": false
       },
       "topics": [
         "erp"
@@ -324,7 +336,8 @@
         "doi_url": "https://doi.org/10.5555/fake.0013",
         "has_abstract": true,
         "in_scope": true,
-        "is_retracted": false
+        "is_retracted": false,
+        "in_my_library": false
       },
       "topics": [
         "supply_chain"
@@ -348,7 +361,8 @@
         "doi_url": "https://doi.org/10.5555/fake.0014",
         "has_abstract": true,
         "in_scope": true,
-        "is_retracted": false
+        "is_retracted": false,
+        "in_my_library": false
       },
       "topics": [],
       "this_week": false,
@@ -373,7 +387,8 @@
         "doi_url": "https://doi.org/10.5555/fake.0015",
         "has_abstract": false,
         "in_scope": true,
-        "is_retracted": false
+        "is_retracted": false,
+        "in_my_library": false
       },
       "topics": [
         "it_project_management"
@@ -397,7 +412,8 @@
         "doi_url": "https://doi.org/10.5555/fake.0016",
         "has_abstract": true,
         "in_scope": true,
-        "is_retracted": false
+        "is_retracted": false,
+        "in_my_library": false
       },
       "topics": [
         "e_commerce",
@@ -422,7 +438,8 @@
         "doi_url": "https://doi.org/10.5555/fake.0017",
         "has_abstract": true,
         "in_scope": true,
-        "is_retracted": false
+        "is_retracted": false,
+        "in_my_library": false
       },
       "topics": [
         "ai_data_analytics"
@@ -446,7 +463,8 @@
         "doi_url": null,
         "has_abstract": true,
         "in_scope": true,
-        "is_retracted": false
+        "is_retracted": false,
+        "in_my_library": false
       },
       "topics": [
         "erp"
@@ -473,7 +491,8 @@
         "doi_url": "https://doi.org/10.5555/fake.0019",
         "has_abstract": true,
         "in_scope": true,
-        "is_retracted": false
+        "is_retracted": false,
+        "in_my_library": false
       },
       "topics": [
         "supply_chain"
@@ -497,7 +516,8 @@
         "doi_url": "https://doi.org/10.5555/fake.0020",
         "has_abstract": false,
         "in_scope": true,
-        "is_retracted": false
+        "is_retracted": false,
+        "in_my_library": false
       },
       "topics": [
         "e_commerce",
@@ -522,12 +542,13 @@
         "doi_url": "https://doi.org/10.5555/fake.0021",
         "has_abstract": true,
         "in_scope": true,
-        "is_retracted": false
+        "is_retracted": false,
+        "in_my_library": false
       },
       "topics": [],
       "this_week": false,
       "lab": true,
-      "personal": true
+      "personal": false
     },
     {
       "row": {
@@ -544,7 +565,8 @@
         "doi_url": "https://doi.org/10.5555/fake.0022",
         "has_abstract": true,
         "in_scope": true,
-        "is_retracted": false
+        "is_retracted": false,
+        "in_my_library": false
       },
       "topics": [
         "e_commerce",
@@ -572,7 +594,8 @@
         "doi_url": "https://doi.org/10.5555/fake.0023",
         "has_abstract": true,
         "in_scope": true,
-        "is_retracted": false
+        "is_retracted": false,
+        "in_my_library": false
       },
       "topics": [
         "ai_data_analytics"
@@ -596,7 +619,8 @@
         "doi_url": "https://doi.org/10.5555/fake.0024",
         "has_abstract": true,
         "in_scope": true,
-        "is_retracted": false
+        "is_retracted": false,
+        "in_my_library": false
       },
       "topics": [
         "erp"
@@ -620,7 +644,8 @@
         "doi_url": "https://doi.org/10.5555/fake.0025",
         "has_abstract": false,
         "in_scope": true,
-        "is_retracted": false
+        "is_retracted": false,
+        "in_my_library": false
       },
       "topics": [
         "supply_chain"
@@ -644,7 +669,8 @@
         "doi_url": "https://doi.org/10.5555/fake.0026",
         "has_abstract": true,
         "in_scope": true,
-        "is_retracted": false
+        "is_retracted": false,
+        "in_my_library": false
       },
       "topics": [
         "e_commerce",
@@ -669,7 +695,8 @@
         "doi_url": null,
         "has_abstract": true,
         "in_scope": true,
-        "is_retracted": false
+        "is_retracted": false,
+        "in_my_library": false
       },
       "topics": [
         "it_project_management"
@@ -693,7 +720,8 @@
         "doi_url": "https://doi.org/10.5555/fake.0028",
         "has_abstract": true,
         "in_scope": true,
-        "is_retracted": false
+        "is_retracted": false,
+        "in_my_library": false
       },
       "topics": [],
       "this_week": false,
@@ -715,7 +743,8 @@
         "doi_url": "https://doi.org/10.5555/fake.0029",
         "has_abstract": true,
         "in_scope": true,
-        "is_retracted": false
+        "is_retracted": false,
+        "in_my_library": false
       },
       "topics": [
         "ai_data_analytics"
@@ -739,7 +768,8 @@
         "doi_url": "https://doi.org/10.5555/fake.0030",
         "has_abstract": false,
         "in_scope": true,
-        "is_retracted": false
+        "is_retracted": false,
+        "in_my_library": false
       },
       "topics": [
         "erp"

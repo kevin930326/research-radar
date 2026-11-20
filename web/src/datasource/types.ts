@@ -3,6 +3,8 @@
 import type {
   ClientConfig,
   DisplayNames,
+  LibraryItemResponse,
+  LibraryPageResponse,
   ListPapersParams,
   MemberResponse,
   PaperListResponse,
@@ -102,10 +104,50 @@ export interface PaperSource {
   list(filters: PaperListFilters, limit: number, previous?: PaperList | null): Promise<PaperListResult>;
 }
 
+/**
+ * 我的文獻庫的清單（`GET /api/v1/library`，Story 3.16）：API 的回應形狀（這一頁的筆、下一頁的 cursor、總篇數），
+ * 加上 `pending`：已經讀到、但超過要求的篇數而沒放進 `items` 的筆（同 `PaperList`）。
+ */
+export interface LibraryList extends LibraryPageResponse {
+  pending: LibraryItemResponse[];
+}
+
+/** 文獻庫的一筆（論文列、怎麼加入的、加入時間）。 */
+export type LibraryItem = LibraryItemResponse;
+
+/**
+ * 列出我的文獻庫的結果：`found`（`items` 最多到要求的篇數）／`signedOut`（401）。
+ * 其他錯誤丟出例外，畫面顯示 State Patterns「13. 我的文獻庫」的「錯誤」。
+ */
+export type LibraryListResult = { kind: "found"; list: LibraryList } | { kind: "signedOut" };
+
+/**
+ * 加入、移出、復原一篇的結果（Story 3.16 的三個端點）：
+ * - `done`：成功，`item` 是後端回的那一筆（加入、復原是現在那一筆；移出是移出前那一筆）。
+ * - `notFound`：看不到、不存在、不在文獻庫、沒有可以復原的（後端回同一個 404）。
+ * - `signedOut`：沒登入或登入過期（401）。
+ * 其他錯誤（網路、伺服器錯誤）丟出例外。
+ */
+export type LibraryChangeResult = { kind: "done"; item: LibraryItem } | { kind: "notFound" } | { kind: "signedOut" };
+
+/** 我的文獻庫（只有成員版有；示範站沒有文獻庫）。 */
+export interface LibrarySource {
+  /** 依加入時間新到舊列出，一頁一頁往下讀到有 `limit` 篇或沒有下一頁；給了 `previous` 就接著讀（「再載入」）。 */
+  list(limit: number, previous?: LibraryList | null): Promise<LibraryListResult>;
+  /** 加入（冪等：已經在了回原本那一筆）。`paperId` 由呼叫端先確認是 UUID。 */
+  add(paperId: string): Promise<LibraryChangeResult>;
+  /** 移出。 */
+  remove(paperId: string): Promise<LibraryChangeResult>;
+  /** 復原剛移出的那一篇（回到原本那一筆）。 */
+  restore(paperId: string): Promise<LibraryChangeResult>;
+}
+
 export interface DataSource {
   siteKind(): SiteKind;
   /** 成員版的登入狀態；示範站是 null（示範站的後端功能不存在，State Patterns「全站共用」）。 */
   session: MemberSession | null;
   /** 論文頁的資料；示範站在 Story 3.9 才有，現在是 null。 */
   papers: PaperSource | null;
+  /** 我的文獻庫（Story 3.17）；示範站沒有，是 null。 */
+  library: LibrarySource | null;
 }

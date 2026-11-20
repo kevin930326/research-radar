@@ -72,8 +72,10 @@ test.describe("desktop nav bar", () => {
   test("has only the brand and the account button", async ({ page }) => {
     await openNotice(page, DESKTOP);
     const header = page.locator("header");
-    await expect(header.getByRole("link")).toHaveCount(2);
+    // 品牌、找論文、我的文獻庫（Story 3.17；AR-67：其他連結還沒做）。
+    await expect(header.getByRole("link")).toHaveCount(3);
     await expect(header.getByRole("link").first()).toHaveAttribute("href", "/search");
+    await expect(header.getByRole("link").nth(2)).toHaveAttribute("href", "/library");
     await expect(header.getByRole("button", { name: ACCOUNT })).toBeVisible();
     await expect(header.getByRole("button", { name: MENU })).toBeHidden();
   });

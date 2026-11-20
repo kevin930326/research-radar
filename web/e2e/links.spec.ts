@@ -3,6 +3,7 @@
 // 之後每個 Story 都要通過。
 import { errors } from "@playwright/test";
 
+import { createApiState } from "./api-mock.ts";
 import { TEXT } from "./expected.ts";
 import { expect, test } from "./fixtures.ts";
 import { expectDocumentResponsesOk, expectValidLanding, recordDocumentResponses } from "./landing.ts";
@@ -15,9 +16,14 @@ const BUTTON_NAVIGATION_WAIT_MS = 1_000;
 
 for (const site of SITES) {
   for (const path of [...site.pages, MISSING_PATH]) {
-    test(`${site.name} ${path}: no link or button leads to not found`, async ({ page }) => {
+    test(`${site.name} ${path}: no link or button leads to not found`, async ({ page, apiMock }) => {
       const responses = recordDocumentResponses(page);
       const open = async () => {
+        // 每次重開這一頁前把替身的文獻庫重設回一開始的樣子（E1，Kevin 2026-11-20）：上一輪點過的「加入我的文獻庫」
+        // 「移出」（Story 3.17）會改替身裡的文獻庫，不重設的話重開後按鈕數就變了。
+        const fresh = createApiState();
+        apiMock.libraryIds = fresh.libraryIds;
+        apiMock.libraryRemoved = fresh.libraryRemoved;
         responses.length = 0;
         await page.goto(`${site.baseURL}${path}`);
         // 頁面殼本身也要回 2xx（「找不到這一頁」也是頁面殼，由瀏覽器裡的路由顯示）。

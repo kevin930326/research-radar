@@ -144,13 +144,30 @@ test.describe("search: states", () => {
   });
 
   test("an empty library without conditions has nothing to clear", async ({ page, apiMock }) => {
-    // 審查 S1-8：沒有條件時「清除篩選」按了沒反應，所以不放（「你的文獻庫還沒有論文」是 Story 3.17）。
+    // 審查 S1-8：沒有條件時「清除篩選」按了沒反應，所以不放。Story 3.17：文獻庫是空的時，訊息條是
+    // 「你的文獻庫還沒有論文」＋「改找所有追蹤期刊」（State Patterns「12. 找論文」；「上傳或匯入」是 Epic 6）。
     apiMock.listRows = LIST_FIXTURES.rows.filter((entry) => !entry.personal);
     await openSearch(page, "?scope=personal");
-    const zero = page.locator("[data-state='zero']");
-    await expect(zero).toContainText(text("search:search.empty.noMatch"));
-    await expect(zero.getByRole("link")).toHaveCount(0);
+    const empty = page.locator("[data-state='library-empty']");
+    await expect(empty).toContainText(text("search:search.empty.library"));
+    await expect(empty.getByRole("link")).toHaveCount(1);
+    await expect(empty.getByRole("link")).toHaveText(text("search:search.empty.toTracked"));
+    await expect(page.locator("[data-state='zero']")).toHaveCount(0);
     await expect(page.locator("[data-clear-all]")).toHaveCount(0);
+  });
+
+  test("an empty library (the list itself complete): the library message, no zero bar, nothing to clear", async ({ page, apiMock }) => {
+    // 審查 F6：文獻庫真的是空的（替身的文獻庫沒有論文），清單的假資料一列都不刪。
+    apiMock.libraryIds = [];
+    expect(apiMock.listRows).toEqual(LIST_FIXTURES.rows);
+    await openSearch(page, "?scope=personal");
+    const empty = page.locator("[data-state='library-empty']");
+    await expect(empty).toContainText(text("search:search.empty.library"));
+    await expect(empty.getByRole("link")).toHaveCount(1);
+    await expect(empty.getByRole("link")).toHaveText(text("search:search.empty.toTracked"));
+    await expect(page.locator("[data-state='zero']")).toHaveCount(0);
+    await expect(page.locator("[data-clear-all]")).toHaveCount(0);
+    await expect(rows(page)).toHaveCount(0);
   });
 
   test("loading shows the skeleton until the list arrives", async ({ page, apiMock }) => {
@@ -509,24 +526,50 @@ test.describe("search: page shape", () => {
     await expect(page.locator("main form")).toHaveCount(0);
     await expect(page.locator("main").getByRole("heading", { level: 2 })).toHaveText(foundText(total));
     await expect(page.locator("main").getByText(text("search:search.results.byYear"), { exact: true })).toBeVisible();
-    // 起始狀態沒有例句：只有標題、「看全部 N 篇」與論文列的連結，沒有按鈕。
+    // 起始狀態沒有例句：只有標題、「看全部 N 篇」與論文列的連結；按鈕只有論文列的「加入我的文獻庫」（Story 3.17）。
     await openSearch(page);
     const start = page.locator("[data-state='start']");
     await expect(rows(page)).toHaveCount(START_ROWS);
-    await expect(start.getByRole("button")).toHaveCount(0);
+    // 按鈕數從假資料算（E1，Kevin 2026-11-20）：起始的 3 篇裡不在我的文獻庫的那幾篇，各一個「加入我的文獻庫」。
+    const startNotInLibrary = filterListRows(LIST_FIXTURES.rows, new URLSearchParams("this_week=true"))!
+      .slice(0, START_ROWS)
+      .filter((entry) => !entry.personal).length;
+    expect(startNotInLibrary).toBe(1);
+    await expect(start.getByRole("button")).toHaveCount(startNotInLibrary);
+    await expect(start.getByRole("button")).toHaveText(Array(startNotInLibrary).fill(text("search:search.row.add")));
     const rowLinks = await start.locator("[data-paper-row]").getByRole("link").count();
     await expect(start.getByRole("link")).toHaveCount(rowLinks + 1);
     await expect(page.getByRole("textbox")).toHaveCount(0);
   });
 
   test("each row: the title opens the paper page, the right side has only the full-text link in a new tab", async ({ page }) => {
-    // 驗收條件第一段（審查 H-M4）：標題連到論文頁；右側只有「開啟全文」（「加入我的文獻庫」是 Story 3.17）。
+    // 驗收條件第一段（審查 H-M4）：標題連到論文頁；右側的連結只有「開啟全文」。Story 3.17：右側多了
+    // 「加入我的文獻庫」按鈕（已加入的是「● 已加入」，不能按）。
     await openSearch(page, "?topic=e_commerce");
     await expect(rows(page)).toHaveCount(expectedTotal("topic=e_commerce"));
+    // 已加入與否從假資料判斷（E1，Kevin 2026-11-20），不從畫面讀；兩種列都至少要有一列。
+    const personal = new Set(LIST_FIXTURES.rows.filter((entry) => entry.personal).map((entry) => entry.row.id));
+    const expectedIds = filterListRows(LIST_FIXTURES.rows, new URLSearchParams("topic=e_commerce"))!.map((entry) => entry.row.id);
+    expect(expectedIds.filter((id) => personal.has(id)).length).toBeGreaterThan(0);
+    expect(expectedIds.filter((id) => !personal.has(id)).length).toBeGreaterThan(0);
+    // 畫面上的列和預期的完全一樣（順序照 API），兩種列才真的都在畫面上（審查 F5）。
+    expect(await rows(page).evaluateAll((elements) => elements.map((element) => element.getAttribute("data-paper-row")))).toEqual(expectedIds);
     const all = await rows(page).all();
     for (const row of all) {
       const id = await row.getAttribute("data-paper-row");
-      await expect(row.getByRole("button")).toHaveCount(0);
+      expect(expectedIds).toContain(id);
+      const added = row.locator("[data-library='added']");
+      if (personal.has(id!)) {
+        await expect(added).toHaveCount(1);
+        await expect(added).toHaveText(text("search:search.row.added"));
+        // 「●」：字前面一個不念出來的圓點（審查 F20）。
+        await expect(added.locator("span[aria-hidden='true']")).toHaveCount(1);
+        await expect(row.getByRole("button")).toHaveCount(0);
+      } else {
+        await expect(added).toHaveCount(0);
+        await expect(row.getByRole("button")).toHaveCount(1);
+        await expect(row.getByRole("button")).toHaveText(text("search:search.row.add"));
+      }
       const links = row.getByRole("link");
       const titleLink = row.locator("h3").getByRole("link");
       await expect(titleLink).toHaveAttribute("href", `/papers/${id}`);

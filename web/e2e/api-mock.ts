@@ -5,6 +5,12 @@
 // （自己編的假論文，scripts/mock-api.mjs 也用同一份）。
 // Story 3.14 加上找論文的兩個端點（/api/v1/papers 清單、/api/v1/client-config）：資料來自 fixtures/paper-list.json
 // （自己編的假清單，scripts/mock-api.mjs 也用同一份），依網址參數篩選、用位移當 cursor 分頁。
+// Story 3.17 加上我的文獻庫的四個端點（GET /api/v1/library、PUT／DELETE /api/v1/library/{id}、
+// POST /api/v1/library/{id}/restore）：每位成員各有自己的文獻庫與封存（state.libraries，依成員 ID 分開；審查 F4），
+// 找論文的清單與論文頁的 in_my_library、範圍「我的文獻庫」都照目前登入那一位的算。第一位測試成員（MEMBERS[0]，
+// 預設登入的那一位）的文獻庫一開始是假清單裡 personal 的那幾列，測試用 state.libraryIds／libraryRemoved 讀寫；
+// 其他成員一開始是空的。復原照 ADR-0049：已經在文獻庫 → 200、不動封存；不在 → 用最新一筆封存寫回原本的加入時間
+// （回到原本的位置）；沒有封存 → 404（審查 F13）。
 // 其他 /api/ 路徑不處理（交給後面的 route 或預設行為）。
 import type { Page, Route } from "@playwright/test";
 
@@ -12,6 +18,8 @@ import type {
   DisplayNames,
   ClientConfig,
   FakeLoginBody,
+  LibraryItemResponse,
+  LibraryPageResponse,
   FakeLoginMode,
   FakeLoginOptionsResponse,
   FakeLoginResultResponse,
@@ -60,7 +68,11 @@ const START_YEAR = 2016;
  * 範圍 lab／personal 只留標了的列；依年份新到舊。年份早於追蹤範圍、不認得的期刊／主題／方法代號是 null（422，
  * ADR-0050 第 10 點；認得的是論文頁假資料的顯示名稱）。
  */
-export function filterListRows(rows: readonly ListFixtureRow[], query: URLSearchParams): ListFixtureRow[] | null {
+export function filterListRows(
+  rows: readonly ListFixtureRow[],
+  query: URLSearchParams,
+  library?: readonly string[],
+): ListFixtureRow[] | null {
   const journals = query.getAll("journal");
   const years = query.getAll("year").map(Number);
   const topics = query.getAll("topic");
@@ -81,9 +93,70 @@ export function filterListRows(rows: readonly ListFixtureRow[], query: URLSearch
         topics.every((topic) => (topic === "unclassified" ? entry.topics.length === 0 : entry.topics.includes(topic))) &&
         methods.every((method) => (entry.methods ?? []).includes(method)) &&
         (query.get("this_week") !== "true" || entry.this_week) &&
-        (scope === "tracked" || (scope === "lab" ? entry.lab : entry.personal)),
+        (scope === "tracked" || (scope === "lab" ? entry.lab : (library?.includes(entry.row.id) ?? entry.personal))),
     )
     .sort((a, b) => (b.row.publication_year ?? 0) - (a.row.publication_year ?? 0));
+}
+
+/** 論文頁假資料的一篇換成論文列（加入我的文獻庫時用；論文頁的論文不一定在假清單裡）。 */
+function rowFromPage(page: PaperPageResponse): PaperRow {
+  const paper = page.paper;
+  return {
+    id: paper.id,
+    title: paper.title,
+    authors: paper.authors.slice(0, 3),
+    author_count: paper.authors.length,
+    publication_year: paper.publication_year,
+    journal: paper.journal,
+    journal_issn_l: paper.journal_issn_l,
+    doi: paper.doi,
+    doi_url: paper.doi_url,
+    has_abstract: page.abstract !== null,
+    in_scope: paper.in_scope,
+    is_retracted: paper.is_retracted,
+    in_my_library: false,
+  };
+}
+
+/** 文獻庫的一筆：先找假清單，再找論文頁假資料；都沒有是 undefined（後端回 404）。 */
+export function libraryItem(rows: readonly ListFixtureRow[], id: string, addedAt = INITIAL_ADDED_AT): LibraryItemResponse | undefined {
+  const fromList = rows.find((entry) => entry.row.id === id)?.row;
+  const fromPage = PAPER_FIXTURES.papers[id]?.page;
+  const row = fromList ?? (fromPage === undefined ? undefined : rowFromPage(fromPage));
+  if (row === undefined) return undefined;
+  return { paper: { ...row, in_my_library: true }, added_via: "manual", added_at: addedAt };
+}
+
+/** 文獻庫的一頁（依加入時間新到舊）：cursor 是位移（「o50」）。 */
+export function libraryPage(rows: readonly ListFixtureRow[], records: readonly LibraryRecord[], cursor: string | null, pageSize: number): LibraryPageResponse {
+  const offset = cursor !== null && /^o\d+$/.test(cursor) ? Number(cursor.slice(1)) : 0;
+  const items = records.slice(offset, offset + pageSize).flatMap((record) => libraryItem(rows, record.id, record.addedAt) ?? []);
+  const next = offset + pageSize < records.length ? `o${offset + pageSize}` : null;
+  return { items, next_cursor: next, total: records.length };
+}
+
+/** 文獻庫的一筆（論文 ID＋加入時間）；封存裡的也是這個形狀（復原時寫回原本的加入時間）。 */
+export interface LibraryRecord {
+  id: string;
+  addedAt: string;
+}
+
+/** 一位成員的文獻庫（依加入時間新到舊）與封存（依移出的先後，最新的在最後）。 */
+export interface MemberLibrary {
+  items: LibraryRecord[];
+  removed: LibraryRecord[];
+}
+
+/** 一開始就在文獻庫的那幾篇的加入時間：第 i 篇早 i 小時（新的在前）。 */
+const INITIAL_ADDED_AT = "2026-11-01T00:00:00.000Z";
+function initialRecords(ids: readonly string[]): LibraryRecord[] {
+  return ids.map((id, index) => ({ id, addedAt: new Date(Date.parse(INITIAL_ADDED_AT) - index * 3_600_000).toISOString() }));
+}
+
+/** 依加入時間新到舊放進去（復原時回到原本的位置）。 */
+function insertRecord(items: readonly LibraryRecord[], record: LibraryRecord): LibraryRecord[] {
+  const index = items.findIndex((entry) => entry.addedAt < record.addedAt);
+  return index < 0 ? [...items, record] : [...items.slice(0, index), record, ...items.slice(index)];
 }
 
 /** 篩選後的一頁：cursor 是位移（「o20」）。 */
@@ -148,11 +221,40 @@ export interface ApiMockState {
   list: "ok" | "failed" | "expired";
   /** 找論文：設了就等它 resolve 才回清單（看載入中的骨架、「載入中…」）。 */
   listGate: Promise<void> | null;
+  /** client-config 回的設定（預設是 fixtures/paper-list.json 的；測試可以換一頁幾篇）。 */
+  clientConfig: ClientConfig;
   /** 找論文的假清單（預設是 fixtures/paper-list.json 的每一列；測試可以換成別的）。 */
   listRows: ListFixtureRow[];
+  /** 每位成員的文獻庫與封存（成員 ID → 那一位的）。沒有的成員是空的。 */
+  libraries: Record<string, MemberLibrary>;
+  /**
+   * 第一位測試成員（MEMBERS[0]）文獻庫裡的論文 ID（新加入的在前）。預設是假清單裡 personal 的那幾列。
+   * 指定時照順序給加入時間（第 i 篇早 i 小時），封存不動。
+   */
+  libraryIds: string[];
+  /** 第一位測試成員的封存（移出過、可以復原的；最新的在最後）。 */
+  libraryRemoved: LibraryRecord[];
+  /** 加入時間用的時鐘（每加入一篇往後 1 秒）。 */
+  libraryClock: number;
+  /** 文獻庫清單：成功／伺服器錯誤（500）／登入過期（401）。 */
+  library: "ok" | "failed" | "expired";
+  /** 文獻庫清單：設了就等它 resolve 才回（看載入中的骨架）。 */
+  libraryGate: Promise<void> | null;
+  /** 加入、移出、復原：成功／伺服器錯誤（500）／登入過期（401）。 */
+  libraryChange: "ok" | "failed" | "expired";
+  /** 加入、移出、復原：設了就等它 resolve 才回（看送出中）。 */
+  libraryChangeGate: Promise<void> | null;
   /** 收到的請求（依序）。 */
   requests: ApiRequest[];
 }
+
+/** 這位成員的文獻庫（沒有就建一個空的）。 */
+export function libraryOf(state: ApiMockState, memberId: string): MemberLibrary {
+  state.libraries[memberId] ??= { items: [], removed: [] };
+  return state.libraries[memberId];
+}
+
+const FIRST_MEMBER_ID = "00000000-0000-4000-8000-00000000000a";
 
 export function createApiState(): ApiMockState {
   return {
@@ -170,7 +272,31 @@ export function createApiState(): ApiMockState {
     displayNames: "ok",
     list: "ok",
     listGate: null,
+    clientConfig: LIST_FIXTURES.clientConfig,
     listRows: LIST_FIXTURES.rows,
+    libraries: {
+      [FIRST_MEMBER_ID]: {
+        items: initialRecords(LIST_FIXTURES.rows.filter((entry) => entry.personal).map((entry) => entry.row.id)),
+        removed: [],
+      },
+    },
+    get libraryIds(): string[] {
+      return libraryOf(this, FIRST_MEMBER_ID).items.map((record) => record.id);
+    },
+    set libraryIds(ids: string[]) {
+      libraryOf(this, FIRST_MEMBER_ID).items = initialRecords(ids);
+    },
+    get libraryRemoved(): LibraryRecord[] {
+      return [...libraryOf(this, FIRST_MEMBER_ID).removed];
+    },
+    set libraryRemoved(records: LibraryRecord[]) {
+      libraryOf(this, FIRST_MEMBER_ID).removed = [...records];
+    },
+    libraryClock: 0,
+    library: "ok",
+    libraryGate: null,
+    libraryChange: "ok",
+    libraryChangeGate: null,
     requests: [],
   };
 }
@@ -251,30 +377,88 @@ export async function installApiMock(page: Page, state: ApiMockState): Promise<v
     if (method === "GET" && path === "/api/v1/client-config") {
       state.requests.push({ method, path, body });
       if (state.member === null) return problem(route, 401, "not_authenticated");
-      return json(route, LIST_FIXTURES.clientConfig);
+      return json(route, state.clientConfig);
     }
     if (method === "GET" && path === "/api/v1/papers") {
       state.requests.push({ method, path: `${path}${url.search}`, body });
-      await state.listGate;
-      if (state.member === null || state.list === "expired") return problem(route, 401, "not_authenticated");
-      if (state.list === "failed") return problem(route, 500, "internal_error");
-      const rows = filterListRows(state.listRows, url.searchParams);
-      if (rows === null) return problem(route, 422, "request_invalid");
+      // 接到請求時就照這時登入的那一位、這時的文獻庫算好回應（伺服器在這時讀資料庫）；閘門只延遲送出（審查 G2、G3）。
+      const asker = state.member;
+      const mine = asker === null ? [] : libraryOf(state, asker.member_id).items.map((record) => record.id);
+      const rows = filterListRows(state.listRows, url.searchParams, mine);
       const pageSize = LIST_FIXTURES.clientConfig.paper_list_page_size;
-      return json(route, listPage(rows, url.searchParams.get("cursor"), pageSize, LIST_FIXTURES.snapshot));
+      const page = rows === null ? null : listPage(rows, url.searchParams.get("cursor"), pageSize, LIST_FIXTURES.snapshot);
+      const answer = page === null ? null : { ...page, items: page.items.map((row) => ({ ...row, in_my_library: mine.includes(row.id) })) };
+      await state.listGate;
+      if (asker === null || state.list === "expired") return problem(route, 401, "not_authenticated");
+      if (state.list === "failed") return problem(route, 500, "internal_error");
+      if (answer === null) return problem(route, 422, "request_invalid");
+      return json(route, answer);
+    }
+    if (method === "GET" && path === "/api/v1/library") {
+      state.requests.push({ method, path: `${path}${url.search}`, body });
+      // 同上：接到請求時就照這時的成員與文獻庫算好（審查 G2）。
+      const asker = state.member;
+      const answer =
+        asker === null
+          ? null
+          : libraryPage(state.listRows, libraryOf(state, asker.member_id).items, url.searchParams.get("cursor"), state.clientConfig.library_page_size);
+      await state.libraryGate;
+      if (answer === null || state.library === "expired") return problem(route, 401, "not_authenticated");
+      if (state.library === "failed") return problem(route, 500, "internal_error");
+      return json(route, answer);
+    }
+    const libraryMatch = /^\/api\/v1\/library\/([^/]+)(\/restore)?$/.exec(path);
+    if (libraryMatch !== null && (method === "PUT" || method === "DELETE" || (method === "POST" && libraryMatch[2] !== undefined))) {
+      state.requests.push({ method, path, body });
+      // 請求是誰送的，看接到時的 cookie（審查 G2）；閘門放行後才寫（看送出中）。
+      const asker = state.member;
+      await state.libraryChangeGate;
+      if (asker === null || state.libraryChange === "expired") return problem(route, 401, "not_authenticated");
+      if (state.libraryChange === "failed") return problem(route, 500, "internal_error");
+      const id = decodeURIComponent(libraryMatch[1]!);
+      if (libraryItem(state.listRows, id) === undefined) return problem(route, 404, "not_found");
+      const library = libraryOf(state, asker.member_id);
+      const current = library.items.find((record) => record.id === id);
+      const respond = (record: LibraryRecord) => json(route, libraryItem(state.listRows, id, record.addedAt));
+      if (method === "PUT") {
+        if (current !== undefined) return respond(current);
+        state.libraryClock += 1;
+        const added = { id, addedAt: new Date(Date.parse("2026-11-10T00:00:00.000Z") + state.libraryClock * 1000).toISOString() };
+        library.items = insertRecord(library.items, added);
+        return respond(added);
+      }
+      if (method === "DELETE") {
+        if (current === undefined) return problem(route, 404, "not_found");
+        library.items = library.items.filter((record) => record !== current);
+        library.removed = [...library.removed, current];
+        // 回移出前的那一筆（和後端一樣）。
+        return respond(current);
+      }
+      // 復原（ADR-0049）：已經在文獻庫 → 回現在那一筆、不動封存；不在 → 用最新一筆封存、寫回原本的加入時間。
+      if (current !== undefined) return respond(current);
+      const latest = library.removed.findLastIndex((record) => record.id === id);
+      if (latest < 0) return problem(route, 404, "not_found");
+      const record = library.removed[latest]!;
+      library.removed = library.removed.filter((_, index) => index !== latest);
+      library.items = insertRecord(library.items, record);
+      return respond(record);
     }
     if (method === "GET" && path.startsWith("/api/v1/papers/")) {
       state.requests.push({ method, path, body });
+      // 接到請求時就記下是誰、這時的文獻庫（審查 G2）。
+      const asker = state.member;
+      const library = asker === null ? [] : [...libraryOf(state, asker.member_id).items];
       await state.paperGate;
-      if (state.member === null) return problem(route, 401, "not_authenticated");
-      const own = state.paperByMember[state.member.member_id];
+      if (asker === null) return problem(route, 401, "not_authenticated");
+      const own = state.paperByMember[asker.member_id];
       if (own !== undefined) return json(route, own);
+      const mine = (page: PaperPageResponse) => ({ ...page, in_my_library: library.some((record) => record.id === page.paper.id) });
       let id = decodeURIComponent(path.slice("/api/v1/papers/".length));
       const error = PAPER_FIXTURES.errors[id];
       if (error !== undefined) return problem(route, error.status, ERROR_CODES[error.status] ?? "internal_error");
       id = PAPER_FIXTURES.slow[id]?.of ?? id;
       const entry = PAPER_FIXTURES.papers[id];
-      return entry === undefined ? problem(route, 404, "not_found") : json(route, entry.page);
+      return entry === undefined ? problem(route, 404, "not_found") : json(route, mine(entry.page));
     }
     if (method === "POST" && path === "/api/v1/auth/logout") {
       state.requests.push({ method, path, body });

@@ -5,6 +5,9 @@
 - 不濾被排除的文章：要不要列由呼叫端的條件決定（文獻庫裡的一篇照列）。
 - DOI 取最早記上的那一個（`external_id.created_at, id`），和論文頁的 `find_paper_page_facts` 一樣；
   `has_abstract` 看有沒有 `is_current` 的摘要；作者只取前 `PAPER_ROW_AUTHOR_LIMIT` 位＋總人數。
+- `in_my_library`（Story 3.17、ADR-0053）：這篇在不在 `viewer` 自己的文獻庫，由
+  `visibility.visible_in_own_library` 組成同一句查詢裡的一欄（整頁一句，不是每篇一句）；
+  系統與訪客一律假。
 """
 
 import uuid
@@ -16,7 +19,7 @@ from sqlalchemy import Connection, text
 from radar.domain.identifiers import IdentifierScheme
 from radar.domain.paper_rows import PAPER_ROW_AUTHOR_LIMIT, PaperRowFacts
 from radar.domain.viewer import Viewer
-from radar.repo.visibility import visible_papers
+from radar.repo.visibility import visible_in_own_library, visible_papers
 
 # 一次最多讀幾篇（清單一頁的量級；呼叫端分頁）。
 _MAX_IDS: Final = 500
@@ -36,6 +39,7 @@ def find_paper_rows(
     if len(ids) > _MAX_IDS:
         raise ValueError(f"一次最多讀 {_MAX_IDS} 篇")
     visible = visible_papers(viewer, alias="paper")
+    mine = visible_in_own_library(viewer, alias="paper")
     if not ids:
         return {}
     rows = (
@@ -51,7 +55,8 @@ def find_paper_rows(
                 "  WHERE d.paper_id = paper.id AND d.scheme = :doi"
                 "  ORDER BY d.created_at, d.id LIMIT 1) AS doi,"
                 " EXISTS (SELECT 1 FROM paper_abstract AS a"
-                "  WHERE a.paper_id = paper.id AND a.is_current) AS has_abstract"
+                "  WHERE a.paper_id = paper.id AND a.is_current) AS has_abstract,"
+                f" {mine} AS in_my_library"
                 f" FROM paper WHERE {visible} AND paper.id = ANY(:ids)"
             ),
             {"ids": ids, "doi": IdentifierScheme.DOI.value},
@@ -71,6 +76,7 @@ def find_paper_rows(
             has_abstract=row["has_abstract"],
             in_scope=row["in_scope"],
             is_retracted=row["is_retracted"],
+            in_my_library=row["in_my_library"],
         )
         for row in rows
     }

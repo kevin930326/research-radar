@@ -16,6 +16,7 @@ import type { ZhSummaryBlock } from './zhSummaryBlock.ts';
  * 論文頁的資料：書目、目前的摘要、三個 AI 區塊（同一個信封）、全文連結、快照。
  *
  * 沒有目前的摘要時 `abstract` 是 null；一個快照都還沒發佈時 `snapshot` 是 null。
+ * `in_my_library`：這篇在不在**目前登入的成員自己**的文獻庫（Story 3.17、ADR-0053）。
  */
 export interface PaperPageResponse {
   paper: PaperBiblio;
@@ -25,4 +26,5 @@ export interface PaperPageResponse {
   research_model: ResearchModelBlock;
   full_text_links: FullTextLinks;
   snapshot: SnapshotRef | null;
+  in_my_library: boolean;
 }

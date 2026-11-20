@@ -24,6 +24,8 @@ class PaperPageFacts:
     - `doi`、`openalex_id`：正規化後的值；一篇有好幾個時是最早記上的那一個（`created_at, id`），
       沒有是 None。
     - `abstract`：目前的摘要；沒有是 None。
+    - `in_my_library`：這篇在不在讀的人自己的文獻庫（Story 3.17、ADR-0053）；系統與訪客讀時一律假。
+      預設假：沒有算的地方不會說成「在」。
 
     Raises:
         ValueError: `authors` 不是字串的 tuple、被引用次數是負的。
@@ -45,6 +47,7 @@ class PaperPageFacts:
     doi: str | None
     openalex_id: str | None
     abstract: CurrentAbstract | None
+    in_my_library: bool = False
 
     def __post_init__(self) -> None:
         if not isinstance(self.authors, tuple) or not all(

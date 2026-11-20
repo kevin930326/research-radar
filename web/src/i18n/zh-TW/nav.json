@@ -12,7 +12,8 @@
       "close": "關閉選單"
     },
     "links": {
-      "search": "找論文"
+      "search": "找論文",
+      "library": "我的文獻庫"
     }
   }
 }

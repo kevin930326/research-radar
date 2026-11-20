@@ -49,13 +49,19 @@
       "loading": "載入中"
     },
     "empty": {
-      "noMatch": "沒有符合的論文"
+      "noMatch": "沒有符合的論文",
+      "library": "你的文獻庫還沒有論文",
+      "toTracked": "改找所有追蹤期刊"
     },
     "mobile": {
       "filter": "篩選",
       "filterCount": "篩選 · {{count}}",
       "close": "關閉",
       "apply": "看 {{count}} 篇"
+    },
+    "row": {
+      "add": "加入我的文獻庫",
+      "added": "已加入"
     }
   }
 }

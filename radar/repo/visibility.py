@@ -82,6 +82,36 @@ def visible_lab_papers(viewer: Viewer, *, alias: str) -> str:
     return f'("{alias}".lab_visible AND {visible})'
 
 
+def visible_in_own_library(viewer: Viewer, *, alias: str = "paper") -> str:
+    """「這篇論文在 `viewer` 自己的文獻庫裡」的 SQL 布林運算式（Story 3.17、ADR-0053），`alias` 是
+    查詢裡 `paper` 表的名稱或別名。放在 SELECT 裡當一欄，和外面的查詢一起算（一句算整頁，不是每篇
+    一句）。
+
+    - `MemberViewer`：`EXISTS` 子查詢，只看 `owner_id` 是自己的那一筆（管理者也一樣）。
+    - `SystemViewer`、`PublicViewer`：`FALSE`。系統與訪客沒有「自己的文獻庫」；不能沿用
+      `visible_library_items` 的「系統看得到全部」，否則「任何人加過」會被當成「在我的文獻庫」，
+      經示範站匯出等系統身分的路徑把別人的文獻庫狀態帶出去（ADR-0050 第 100 行）。
+
+    Raises:
+        ValueError: `alias` 不是小寫識別字，或和子查詢裡的別名相同。
+        TypeError: `viewer` 不是三種讀者身分之一。
+    """
+    _checked_alias(alias)
+    if alias in _SUBQUERY_ALIASES:
+        raise ValueError(f"別名不能是 {alias!r}（可見條件的子查詢用了這個名稱）")
+    match viewer:
+        case MemberViewer(member_id=member_id):
+            return (
+                f"EXISTS (SELECT 1 FROM library_item AS {_LIBRARY_ALIAS}"
+                f' WHERE {_LIBRARY_ALIAS}.paper_id = "{alias}".id'
+                f" AND {_LIBRARY_ALIAS}.owner_id = {_member_literal(member_id)})"
+            )
+        case SystemViewer() | PublicViewer():
+            return "FALSE"
+        case _:
+            raise TypeError(f"不認得的讀者身分：{type(viewer).__name__}")
+
+
 def visible_library_items(viewer: Viewer, *, alias: str = "library_item") -> str:
     """`viewer` 看得到的文獻庫的筆（`library_item`）的 SQL 條件，`alias` 是查詢裡這張表的名稱
     或別名。

@@ -128,6 +128,7 @@ def test_paper_reads_as_the_session_member_and_returns_the_page() -> None:
         "research_model",
         "full_text_links",
         "snapshot",
+        "in_my_library",
     }
     assert body["paper"]["doi_url"] == "https://doi.org/10.1/abc"
     assert body["paper"]["journal"] == "misq"

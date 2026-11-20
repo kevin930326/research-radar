@@ -2,7 +2,7 @@
 import { queryOptions, type QueryClient } from "@tanstack/react-query";
 
 import { datasource } from "../datasource";
-import type { PaperList, PaperListFilters, PaperSource } from "../datasource/types";
+import type { LibraryList, LibrarySource, PaperList, PaperListFilters, PaperResult, PaperSource } from "../datasource/types";
 import { MAX_SHOWN } from "../pages/search-filters";
 
 /** 成員版才有的論文讀取函式；示範站的論文頁是 Story 3.9。 */
@@ -71,4 +71,72 @@ export function paperListQuery(queryClient: QueryClient, filters: PaperListFilte
     staleTime: LIST_STALE_MS,
     gcTime: LIST_GC_MS,
   });
+}
+
+// --- 我的文獻庫（Story 3.17）-----------------------------------------------------------------------
+
+/** 成員版才有的文獻庫讀寫函式；示範站沒有文獻庫。 */
+export function librarySource(): LibrarySource {
+  const source = datasource.library;
+  if (source === null) {
+    throw new Error("library source is only available in the member build");
+  }
+  return source;
+}
+
+/**
+ * 我的文獻庫的清單（要 `limit` 篇）。規則同 `paperListQuery`：快取裡有篇數不同的一份就接著讀（「再載入」）。
+ * 每次打開這一頁都重讀（`refetchOnMount: "always"`）；頁面開著的時候不自動重讀（切回視窗、重新連線都不讀）：
+ * 移出的那一列要留在原地顯示「已移出」＋「復原」，離開頁面後才消失（State Patterns「13. 我的文獻庫」）。
+ */
+export function libraryListQuery(queryClient: QueryClient, limit: number) {
+  return queryOptions({
+    queryKey: ["library", limit],
+    queryFn: () => {
+      let previous: LibraryList | null = null;
+      const size = (list: LibraryList) => list.items.length + list.pending.length;
+      for (const [queryKey, data] of queryClient.getQueriesData<{ kind: string; list?: LibraryList }>({
+        queryKey: ["library"],
+      })) {
+        if (queryKey[1] === limit || data?.kind !== "found" || data.list === undefined) continue;
+        if (previous === null || size(data.list) > size(previous)) previous = data.list;
+      }
+      return librarySource().list(previous === null ? Math.min(limit, MAX_SHOWN) : limit, previous);
+    },
+    retry: false,
+    staleTime: Infinity,
+    refetchOnMount: "always",
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
+  });
+}
+
+/**
+ * 加入或移出之後，快取裡這一篇的「在不在我的文獻庫」跟著改：論文頁、找論文的清單（每一份）。
+ * 找論文的清單正在讀的（「再載入」、重讀）先取消：那一份是改之前讀的（伺服器那一頁也可能在寫入生效前讀），
+ * 讀完會把「已加入」蓋回去（審查 F10）。改完之後，畫面正在用的清單重讀一次，以伺服器為準
+ * （範圍是我的文獻庫的那幾份篇數也會變）；沒在用的標成過期，下次打開時重讀。文獻庫清單在下次打開時本來就會重讀。
+ * `stillCurrent`：等取消的這段期間可能換了人（登出、登入過期、換人登入），寫快取前再問一次；回 false 就什麼都不寫、
+ * 回 false（審查 G1）。回 true 表示寫了。
+ */
+export async function markInLibrary(
+  queryClient: QueryClient,
+  paperId: string,
+  inLibrary: boolean,
+  stillCurrent: () => boolean = () => true,
+): Promise<boolean> {
+  await queryClient.cancelQueries({ queryKey: ["paper-list"] });
+  if (!stillCurrent()) return false;
+  queryClient.setQueryData<PaperResult>(["papers", paperId], (data) =>
+    data?.kind === "found" ? { ...data, page: { ...data.page, in_my_library: inLibrary } } : data,
+  );
+  const mark = (rows: PaperList["items"]) =>
+    rows.map((row) => (row.id === paperId ? { ...row, in_my_library: inLibrary } : row));
+  queryClient.setQueriesData<{ kind: string; list?: PaperList }>({ queryKey: ["paper-list"] }, (data) =>
+    data?.kind === "found" && data.list !== undefined
+      ? { ...data, list: { ...data.list, items: mark(data.list.items), pending: mark(data.list.pending) } }
+      : data,
+  );
+  void queryClient.invalidateQueries({ queryKey: ["paper-list"], refetchType: "active" });
+  return true;
 }

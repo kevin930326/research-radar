@@ -1,0 +1,35 @@
+{
+  "library": {
+    "page": {
+      "title": "我的文獻庫"
+    },
+    "list": {
+      "count": "{{count}} 篇",
+      "loading": "載入中",
+      "select": "選取：{{title}}"
+    },
+    "actions": {
+      "open": "開啟選取的全文（{{count}} 篇）",
+      "opened": "已開啟 {{count}} 篇",
+      "max": "一次最多開 10 篇",
+      "cancel": "取消選取"
+    },
+    "notes": {
+      "skipped": "{{count}} 篇沒有全文連結，已跳過",
+      "blocked": "瀏覽器擋住了新分頁。請允許這個網站開新分頁，或直接點下面的連結",
+      "mobile": "手機一次開不了多個分頁，請從下面一篇一篇點開"
+    },
+    "row": {
+      "remove": "移出",
+      "removed": "已移出",
+      "restore": "復原"
+    },
+    "empty": {
+      "message": "你的文獻庫還沒有論文",
+      "fromPaper": "在論文頁按「加入我的文獻庫」"
+    },
+    "error": {
+      "message": "沒有載入成功"
+    }
+  }
+}

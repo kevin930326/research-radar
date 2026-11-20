@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, FastAPI, Request, Response
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, StrictBool
 
 from radar.domain.contracts import (
     ClassificationBlock,
@@ -78,6 +78,7 @@ class PaperPageResponse(BaseModel):
     """論文頁的資料：書目、目前的摘要、三個 AI 區塊（同一個信封）、全文連結、快照。
 
     沒有目前的摘要時 `abstract` 是 null；一個快照都還沒發佈時 `snapshot` 是 null。
+    `in_my_library`：這篇在不在**目前登入的成員自己**的文獻庫（Story 3.17、ADR-0053）。
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -89,6 +90,7 @@ class PaperPageResponse(BaseModel):
     research_model: ResearchModelBlock
     full_text_links: FullTextLinks
     snapshot: SnapshotRef | None
+    in_my_library: StrictBool
 
 
 def paper_page_response(page: PaperPage) -> PaperPageResponse:
@@ -102,6 +104,7 @@ def paper_page_response(page: PaperPage) -> PaperPageResponse:
         research_model=ResearchModelBlock.from_block(page.research_model),
         full_text_links=FullTextLinks.from_facts(facts),
         snapshot=None if page.snapshot is None else SnapshotRef.from_snapshot(page.snapshot),
+        in_my_library=facts.in_my_library,
     )
 
 

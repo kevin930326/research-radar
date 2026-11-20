@@ -6,6 +6,12 @@
 // 畫面上沒有切換列。
 // Story 3.14 加上找論文的兩個端點（/api/v1/papers 清單、/api/v1/client-config）：資料來自
 // e2e/fixtures/paper-list.json（自己編的假清單，和 e2e 共用），依網址參數篩選、用位移當 cursor 分頁。
+// Story 3.17 加上我的文獻庫的四個端點（GET /api/v1/library、PUT／DELETE /api/v1/library/{id}、
+// POST /api/v1/library/{id}/restore）：每位成員各有自己的文獻庫與封存（依成員 ID 分開；審查 F4）。
+// 第一位假成員一開始是清單裡 personal 的那幾列，其他人一開始是空的；依加入時間新到舊。
+// 找論文的 in_my_library、範圍「我的文獻庫」、論文頁的 in_my_library 都照目前登入那一位的算。
+// 復原照 ADR-0049：已經在文獻庫 → 200、不動封存；不在 → 用最新一筆封存寫回原本的加入時間（回到原本的位置）；
+// 沒有封存 → 404（審查 F13）。
 // 畫面是真正的建置結果；這支只代替後端，不是給測試用的（Playwright 測試用 e2e/api-mock.ts 的 page.route）。
 //
 // 用法（在 web/ 底下，先 npm run build:member）：
@@ -41,8 +47,20 @@
 //                                                        再換條件看錯誤：資料日期那一行留著）
 //   http://127.0.0.1:4180/__mock?listTotal=126           清單回報的總篇數改成這個數字（設計稿比對時對齊設計稿的數字；
 //                                                        0 是不改）
+//   http://127.0.0.1:4180/__mock?library=failed          我的文獻庫的清單：ok／failed（「錯誤」）／expired（401）
+//   http://127.0.0.1:4180/__mock?libraryDelay=600000     我的文獻庫的清單要等幾毫秒（看載入中的骨架）
+//   http://127.0.0.1:4180/__mock?libraryEmpty=1          文獻庫清空（看「空的」；0 是回到一開始的那幾篇）
+//   http://127.0.0.1:4180/__mock?libraryTotal=128        文獻庫清單回報的總篇數改成這個數字（設計稿比對用；0 是不改）
+//   http://127.0.0.1:4180/__mock?libraryChange=failed    加入、移出、復原：ok／failed（伺服器錯誤）／expired（401）
+//   http://127.0.0.1:4180/__mock?select=1,3,6            打開我的文獻庫時自動勾這幾列（從 0 數；設計稿比對看「勾了 3 篇」
+//                                                        等狀態，比對工具只能點文字，點不到勾選框；select= 是不勾）
+//   http://127.0.0.1:4180/__mock?removeRow=0             打開我的文獻庫時自動按這一列的「移出」（-1 是不按）
+//   http://127.0.0.1:4180/__mock?blockPopups=1           讓瀏覽器「擋住新分頁」（window.open 一律回 null）
+//   http://127.0.0.1:4180/__mock?libraryHang=1           文獻庫清單的請求在瀏覽器裡一直不回、也不送出（看載入中的骨架；
+//                                                        libraryDelay 會讓比對工具等不到「網路安靜」）
+//   select、removeRow、blockPopups、libraryHang 是在頁面殼裡多載入一支 /__mock/inject.js（只有這支替身會送，正式建置沒有）。
 // 參數可以一起給；回傳目前的情境（JSON）。
-/* global process, URL, setTimeout */
+/* global process, URL, setTimeout, Buffer */
 import { randomUUID } from "node:crypto";
 import { readFileSync, statSync } from "node:fs";
 import { createServer } from "node:http";
@@ -113,8 +131,45 @@ const scenario = {
   listDelayAfter: 0,
   listTotal: 0,
   listFailAfter: 0,
+  library: "ok",
+  libraryDelay: 0,
+  libraryTotal: 0,
+  libraryChange: "ok",
+  select: "",
+  removeRow: -1,
+  blockPopups: 0,
+  libraryHang: 0,
   alwaysSignedIn: args.signedIn,
 };
+/** 第一位假成員一開始在文獻庫裡的（清單裡 personal 的那幾列）。 */
+const INITIAL_LIBRARY = LIST.rows.filter((entry) => entry.personal).map((entry) => entry.row.id);
+const INITIAL_ADDED_AT = Date.parse("2026-11-01T00:00:00.000Z");
+/** 一開始就在的那幾篇的加入時間：第 i 篇早 i 小時（新的在前）。 */
+function initialRecords(ids) {
+  return ids.map((id, index) => ({ id, addedAt: new Date(INITIAL_ADDED_AT - index * 3_600_000).toISOString() }));
+}
+/** 成員 ID → { items：文獻庫（依加入時間新到舊）, removed：封存（最新的在最後） }。 */
+let libraries = new Map();
+/** 加入時間用的時鐘（每加入一篇往後 1 秒）。 */
+let libraryClock = 0;
+function resetLibraries(empty) {
+  libraries = new Map([[MEMBERS[0].member_id, { items: empty ? [] : initialRecords(INITIAL_LIBRARY), removed: [] }]]);
+}
+resetLibraries(false);
+/** 這位成員的文獻庫（沒有就建一個空的）。 */
+function libraryOf(member) {
+  if (!libraries.has(member.member_id)) libraries.set(member.member_id, { items: [], removed: [] });
+  return libraries.get(member.member_id);
+}
+/** 這位成員文獻庫裡的論文 ID。 */
+function libraryIdsOf(member) {
+  return libraryOf(member).items.map((record) => record.id);
+}
+/** 依加入時間新到舊放進去（復原時回到原本的位置）。 */
+function insertRecord(items, record) {
+  const index = items.findIndex((entry) => entry.addedAt < record.addedAt);
+  return index < 0 ? [...items, record] : [...items.slice(0, index), record, ...items.slice(index)];
+}
 /** 收過幾次清單請求（listDelayAfter 用）。 */
 let listRequests = 0;
 /** 有效的 session token → 成員。 */
@@ -210,8 +265,16 @@ async function api(req, res, path, query) {
     return paperList(req, res, query);
   }
   if (req.method === "GET" && path.startsWith("/api/v1/papers/")) {
-    if (currentMember(req) === null) return problem(res, 401, "not_authenticated");
-    return paper(res, decodeURIComponent(path.slice("/api/v1/papers/".length)));
+    const member = currentMember(req);
+    if (member === null) return problem(res, 401, "not_authenticated");
+    return paper(res, decodeURIComponent(path.slice("/api/v1/papers/".length)), member);
+  }
+  if (req.method === "GET" && path === "/api/v1/library") {
+    return libraryList(req, res, query);
+  }
+  const libraryMatch = /^\/api\/v1\/library\/([^/]+)(\/restore)?$/.exec(path);
+  if (libraryMatch !== null) {
+    return libraryChange(req, res, decodeURIComponent(libraryMatch[1]), libraryMatch[2] !== undefined);
   }
   if (req.method === "POST" && path === "/api/v1/auth/logout") {
     const outcome = scenario.logout;
@@ -227,7 +290,7 @@ async function api(req, res, path, query) {
 }
 
 /** 論文頁：ID 對到假資料的一篇、一種錯誤，或「很慢」（等一下再回某一篇）；其他 ID 都是 404（同後端）。 */
-async function paper(res, id) {
+async function paper(res, id, member) {
   const error = PAPERS.errors?.[id];
   if (error !== undefined) {
     const codes = { 401: "not_authenticated", 404: "not_found", 500: "internal_error" };
@@ -237,10 +300,94 @@ async function paper(res, id) {
   if (slow !== undefined) {
     await sleep(slow.delayMs);
     if (res.destroyed) return undefined;
-    return paper(res, slow.of);
+    return paper(res, slow.of, member);
   }
   const entry = PAPERS.papers[id];
-  return entry === undefined ? problem(res, 404, "not_found") : json(res, 200, entry.page);
+  return entry === undefined
+    ? problem(res, 404, "not_found")
+    : json(res, 200, { ...entry.page, in_my_library: libraryIdsOf(member).includes(entry.page.paper.id) });
+}
+
+/** 文獻庫的一筆：先找清單，再找論文頁假資料；都沒有是 undefined（404）。 */
+function libraryItem(id, addedAt = new Date(INITIAL_ADDED_AT).toISOString()) {
+  let row = LIST.rows.find((entry) => entry.row.id === id)?.row;
+  const page = PAPERS.papers[id]?.page;
+  if (row === undefined && page !== undefined) {
+    const p = page.paper;
+    row = {
+      id: p.id,
+      title: p.title,
+      authors: p.authors.slice(0, 3),
+      author_count: p.authors.length,
+      publication_year: p.publication_year,
+      journal: p.journal,
+      journal_issn_l: p.journal_issn_l,
+      doi: p.doi,
+      doi_url: p.doi_url,
+      has_abstract: page.abstract !== null,
+      in_scope: p.in_scope,
+      is_retracted: p.is_retracted,
+    };
+  }
+  if (row === undefined) return undefined;
+  return { paper: { ...row, in_my_library: true }, added_via: "manual", added_at: addedAt };
+}
+
+/** 我的文獻庫的清單：一頁 client-config 的 library_page_size 篇，cursor 是位移。 */
+async function libraryList(req, res, query) {
+  const member = currentMember(req);
+  if (member === null) return problem(res, 401, "not_authenticated");
+  const outcome = scenario.library;
+  await sleep(scenario.libraryDelay);
+  if (res.destroyed || req.socket.destroyed) return undefined;
+  if (outcome === "expired") return problem(res, 401, "not_authenticated");
+  if (outcome === "failed") return problem(res, 500, "internal_error");
+  const size = LIST.clientConfig.library_page_size;
+  const cursor = query.get("cursor");
+  const offset = cursor !== null && /^o\d+$/.test(cursor) ? Number(cursor.slice(1)) : 0;
+  const records = libraryOf(member).items;
+  const items = records.slice(offset, offset + size).flatMap((record) => libraryItem(record.id, record.addedAt) ?? []);
+  return json(res, 200, {
+    items,
+    next_cursor: offset + size < records.length ? `o${offset + size}` : null,
+    total: scenario.libraryTotal > 0 ? scenario.libraryTotal : records.length,
+  });
+}
+
+/** 加入（PUT）、移出（DELETE）、復原（POST …/restore）。 */
+function libraryChange(req, res, id, restore) {
+  const member = currentMember(req);
+  if (member === null || scenario.libraryChange === "expired") return problem(res, 401, "not_authenticated");
+  if (scenario.libraryChange === "failed") return problem(res, 500, "internal_error");
+  if (libraryItem(id) === undefined) return problem(res, 404, "not_found");
+  const library = libraryOf(member);
+  const current = library.items.find((record) => record.id === id);
+  const respond = (record) => json(res, 200, libraryItem(id, record.addedAt));
+  if (req.method === "PUT" && !restore) {
+    if (current !== undefined) return respond(current);
+    libraryClock += 1;
+    const added = { id, addedAt: new Date(Date.parse("2026-11-10T00:00:00.000Z") + libraryClock * 1000).toISOString() };
+    library.items = insertRecord(library.items, added);
+    return respond(added);
+  }
+  if (req.method === "DELETE" && !restore) {
+    if (current === undefined) return problem(res, 404, "not_found");
+    library.items = library.items.filter((record) => record !== current);
+    library.removed = [...library.removed, current];
+    // 回移出前的那一筆（和後端一樣）。
+    return respond(current);
+  }
+  if (req.method === "POST" && restore) {
+    // 已經在文獻庫 → 回現在那一筆、不動封存；不在 → 用最新一筆封存、寫回原本的加入時間。
+    if (current !== undefined) return respond(current);
+    const latest = library.removed.findLastIndex((record) => record.id === id);
+    if (latest < 0) return problem(res, 404, "not_found");
+    const record = library.removed[latest];
+    library.removed = library.removed.filter((_, index) => index !== latest);
+    library.items = insertRecord(library.items, record);
+    return respond(record);
+  }
+  return problem(res, 404, "not_found");
 }
 
 /** 追蹤範圍的第一年（同 config/journals.yaml 的 start_year）：更早的年份後端回 422。 */
@@ -250,7 +397,7 @@ const START_YEAR = 2016;
  * 依網址參數篩選假清單（後端的簡化版，和 e2e/api-mock.ts 的 filterListRows 同一套規則）；年份不合、
  * 不認得的期刊／主題／方法代號（顯示名稱裡沒有）是 null（422）。
  */
-function filterRows(query) {
+function filterRows(query, member) {
   const journals = query.getAll("journal");
   const years = query.getAll("year").map(Number);
   const topics = query.getAll("topic");
@@ -271,28 +418,29 @@ function filterRows(query) {
         topics.every((topic) => (topic === "unclassified" ? entry.topics.length === 0 : entry.topics.includes(topic))) &&
         methods.every((method) => (entry.methods ?? []).includes(method)) &&
         (query.get("this_week") !== "true" || entry.this_week) &&
-        (scope === "tracked" || (scope === "lab" ? entry.lab : entry.personal)),
+        (scope === "tracked" || (scope === "lab" ? entry.lab : libraryIdsOf(member).includes(entry.row.id))),
     )
     .sort((a, b) => (b.row.publication_year ?? 0) - (a.row.publication_year ?? 0));
 }
 
 /** 找論文的清單：篩選、分頁（cursor 是位移「o20」）。 */
 async function paperList(req, res, query) {
-  if (currentMember(req) === null) return problem(res, 401, "not_authenticated");
+  const member = currentMember(req);
+  if (member === null) return problem(res, 401, "not_authenticated");
   listRequests += 1;
   const outcome = listRequests > scenario.listFailAfter ? scenario.list : "ok";
   if (listRequests > scenario.listDelayAfter) await sleep(scenario.listDelay);
   if (res.destroyed || req.socket.destroyed) return undefined;
   if (outcome === "expired") return problem(res, 401, "not_authenticated");
   if (outcome === "failed") return problem(res, 500, "internal_error");
-  const rows = filterRows(query);
+  const rows = filterRows(query, member);
   if (rows === null) return problem(res, 422, "request_invalid");
   const size = LIST.clientConfig.paper_list_page_size;
   const cursor = query.get("cursor");
   const offset = cursor !== null && /^o\d+$/.test(cursor) ? Number(cursor.slice(1)) : 0;
   const total = scenario.listTotal > 0 ? scenario.listTotal : rows.length;
   return json(res, 200, {
-    items: rows.slice(offset, offset + size).map((entry) => entry.row),
+    items: rows.slice(offset, offset + size).map((entry) => ({ ...entry.row, in_my_library: libraryIdsOf(member).includes(entry.row.id) })),
     next_cursor: offset + size < rows.length ? `o${offset + size}` : null,
     total,
     snapshot: LIST.snapshot,
@@ -314,6 +462,49 @@ function searchIndex() {
   ];
 }
 
+/** 我的文獻庫每一種狀態怎麼看（給人看的清單）。 */
+function libraryIndex() {
+  const base = `http://127.0.0.1:${args.port}`;
+  return [
+    { label: "list", url: `${base}/library`, note: "可以操作（勾選、開啟選取的全文、移出、復原）" },
+    { label: "selected", url: `${base}/__mock?select=0,1,2`, note: "先打開這個，再開 /library：勾了 3 篇" },
+    { label: "blocked", url: `${base}/__mock?select=0,1&blockPopups=1`, note: "先打開這個，再開 /library、按「開啟選取的全文」：擋住新分頁" },
+    { label: "empty", url: `${base}/__mock?libraryEmpty=1`, note: "先打開這個，再開 /library：空的；/search?scope=personal 是找論文的「文獻庫是空的」" },
+    { label: "loading", url: `${base}/__mock?libraryDelay=600000`, note: "先打開這個，再開 /library：骨架" },
+    { label: "error", url: `${base}/__mock?library=failed`, note: "先打開這個，再開 /library：錯誤" },
+    { label: "change-failed", url: `${base}/__mock?libraryChange=failed`, note: "加入、移出、復原都失敗（回到按之前的樣子）" },
+  ];
+}
+
+/** 頁面殼多載入的一支（select、removeRow、blockPopups）：自動勾幾列、按一列的「移出」、讓 window.open 回 null。只有這支替身會送。 */
+function injectScript() {
+  const picks = String(scenario.select)
+    .split(",")
+    .map(Number)
+    .filter((index) => Number.isInteger(index) && index >= 0);
+  return `(() => {
+  if (${Number(scenario.blockPopups) > 0}) window.open = () => null;
+  if (${Number(scenario.libraryHang) > 0}) {
+    // 文獻庫清單的請求一直不回（也不真的送出：網路是安靜的，比對工具才等得到「網路安靜」）。
+    const send = window.fetch.bind(window);
+    window.fetch = (input, init) =>
+      String(input instanceof Request ? input.url : input).includes("/api/v1/library") ? new Promise(() => {}) : send(input, init);
+  }
+  const picks = ${JSON.stringify(picks)};
+  const removeRow = ${Number(scenario.removeRow)};
+  if ((picks.length === 0 && removeRow < 0) || location.pathname !== "/library") return;
+  const visible = (element) => element !== null && element.offsetParent !== null;
+  const timer = setInterval(() => {
+    const rows = [...document.querySelectorAll("[data-library-rows] > li")];
+    if (rows.length === 0) return;
+    clearInterval(timer);
+    picks.forEach((index) => rows[index]?.querySelector("input[type=checkbox]")?.click());
+    if (removeRow >= 0) [...(rows[removeRow]?.querySelectorAll("[data-library=remove]") ?? [])].find(visible)?.click();
+  }, 50);
+})();
+`;
+}
+
 /** 每一種狀態的網址（給人看的清單）。 */
 function paperIndex() {
   const base = `http://127.0.0.1:${args.port}/papers/`;
@@ -327,19 +518,23 @@ function paperIndex() {
 }
 
 function control(res, query) {
-  for (const key of ["login", "logout", "names", "list"]) {
+  for (const key of ["login", "logout", "names", "list", "library", "libraryChange", "select"]) {
     if (query.has(key)) scenario[key] = query.get(key);
   }
-  for (const key of ["loginDelay", "logoutDelay", "listDelay", "listDelayAfter", "listTotal", "listFailAfter"]) {
+  for (const key of ["loginDelay", "logoutDelay", "listDelay", "listDelayAfter", "listTotal", "listFailAfter", "libraryDelay", "libraryTotal", "removeRow", "blockPopups", "libraryHang"]) {
     if (query.has(key)) scenario[key] = Number(query.get(key));
   }
   if (query.has("listDelayAfter") || query.has("listFailAfter")) listRequests = 0;
+  if (query.has("libraryEmpty")) {
+    // 每位成員的文獻庫都回到一開始的樣子（第一位假成員是空的或一開始那幾篇，其他人是空的）。
+    resetLibraries(query.get("libraryEmpty") === "1");
+  }
   if (query.has("signedIn")) scenario.alwaysSignedIn = query.get("signedIn") === "true";
   if (query.has("expire")) {
     sessions.clear();
     scenario.alwaysSignedIn = false;
   }
-  json(res, 200, { ...scenario, sessions: sessions.size });
+  json(res, 200, { ...scenario, sessions: sessions.size, libraryCount: libraryOf(MEMBERS[0]).items.length });
 }
 
 function staticFile(res, path) {
@@ -361,7 +556,12 @@ function staticFile(res, path) {
   // 找不到的路徑回頁面殼（ADR-0010 第 11 點），由瀏覽器裡的路由決定顯示什麼。
   const target = exists ? file : join(DIST, "index.html");
   const type = TYPES[extname(target)] ?? "application/octet-stream";
-  send(res, 200, readFileSync(target), { ...SECURITY_HEADERS, "Content-Type": type });
+  let body = readFileSync(target);
+  // select、blockPopups：頁面殼多載入 /__mock/inject.js（同源的檔案，安全標頭的 CSP 照樣放行），放在最前面。
+  if (target.endsWith("index.html") && (scenario.select !== "" || scenario.removeRow >= 0 || scenario.blockPopups > 0 || scenario.libraryHang > 0)) {
+    body = Buffer.from(String(body).replace("<head>", '<head><script src="/__mock/inject.js"></script>'));
+  }
+  send(res, 200, body, { ...SECURITY_HEADERS, "Content-Type": type });
 }
 
 createServer((req, res) => {
@@ -369,6 +569,8 @@ createServer((req, res) => {
   if (url.pathname === "/__mock") return control(res, url.searchParams);
   if (url.pathname === "/__mock/papers") return json(res, 200, paperIndex());
   if (url.pathname === "/__mock/search") return json(res, 200, searchIndex());
+  if (url.pathname === "/__mock/library") return json(res, 200, libraryIndex());
+  if (url.pathname === "/__mock/inject.js") return send(res, 200, injectScript(), { ...SECURITY_HEADERS, "Content-Type": TYPES[".js"] });
   if (url.pathname.startsWith("/api/")) {
     api(req, res, url.pathname, url.searchParams).catch((error) => {
       process.stderr.write(`${error}\n`);
@@ -381,4 +583,5 @@ createServer((req, res) => {
   process.stdout.write(`mock api: http://127.0.0.1:${args.port}/login (dist: ${DIST})\n`);
   for (const row of paperIndex()) process.stdout.write(`  ${row.label.padEnd(18)} ${row.url}\n`);
   for (const row of searchIndex()) process.stdout.write(`  search ${row.label.padEnd(11)} ${row.url}\n`);
+  for (const row of libraryIndex()) process.stdout.write(`  library ${row.label.padEnd(13)} ${row.url}\n`);
 });

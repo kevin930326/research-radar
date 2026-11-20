@@ -186,8 +186,11 @@ export function SearchPage({ params: addressParams, onUpdate, onSignedOut }: Sea
     body = <SkeletonRows label={t("search.results.loading")} />;
   } else if (start) {
     body = <StartBlock list={found} names={state.names} />;
+  } else if (found.total === 0 && params.scope === "personal" && !hasConditions(params)) {
+    // 範圍是我的文獻庫、沒有條件、0 篇：文獻庫是空的（Story 3.17；State Patterns「12. 找論文」）。
+    body = <LibraryEmptyBar />;
   } else if (found.total === 0) {
-    // 範圍裡本來就沒有論文、也沒有條件時，沒有東西可以清除（「你的文獻庫還沒有論文」是 Story 3.17）。
+    // 範圍裡本來就沒有論文、也沒有條件時，沒有東西可以清除。
     body = <ZeroBar clear={hasConditions(params) ? params : null} />;
   } else {
     const rows = found.items.slice(0, limit);
@@ -339,17 +342,22 @@ function CountLine({ total, thisWeek }: { total: number; thisWeek: boolean }) {
   );
 }
 
-/** 「再載入 20 篇」與「已顯示 n／N」（手機：按鈕滿寬，數字在下面置中）。 */
-function More({
+/**
+ * 「再載入 20 篇」與「已顯示 n／N」（手機：按鈕滿寬，數字在下面置中）。我的文獻庫（Story 3.17）也用：
+ * `next` 是按鈕上寫的篇數（剩下不到一頁時寫實際的篇數）；沒給就是 `pageSize`。
+ */
+export function More({
   shown,
   total,
   pageSize,
+  next,
   loading,
   onMore,
 }: {
   shown: number;
   total: number;
   pageSize: number;
+  next?: number;
   loading: boolean;
   onMore: () => void;
 }) {
@@ -364,7 +372,7 @@ function More({
           onClick={onMore}
           className="inline-flex h-tap-target w-full cursor-pointer items-center justify-center gap-[10px] rounded-full border border-border bg-transparent px-6 text-button text-s14 tracking-006 text-text-primary transition-[border-color] duration-250 enabled:hover:border-text-primary disabled:cursor-default split:w-auto"
         >
-          {loading ? t("search.results.loadingMore") : t("search.results.more", { count: pageSize })}
+          {loading ? t("search.results.loadingMore") : t("search.results.more", { count: next ?? pageSize })}
         </button>
       <div className="mt-3 text-center split:mt-[0px] split:text-left">
         <span data-shown className="font-mono text-s13 tracking-006 text-text-secondary">
@@ -421,8 +429,39 @@ function ZeroBar({ clear }: { clear: SearchParams | null }) {
   );
 }
 
+/**
+ * 範圍選我的文獻庫、但文獻庫是空的（State Patterns「12. 找論文」；樣子參考設計稿 search.html「文獻庫是空的」那一條）：
+ * 「你的文獻庫還沒有論文」＋「改找所有追蹤期刊」。「上傳或匯入」是 Epic 6（AR-67），不放。
+ */
+function LibraryEmptyBar() {
+  const { t } = useTranslation("search");
+  return (
+    <div role="status" data-state="library-empty" className="mt-[36px] flex max-w-reading-width items-start gap-[14px] split:mt-12">
+      <span className="flex text-text-secondary">
+        <NoticeIcon className="mt-[7px]" />
+      </span>
+      <div>
+        <p className="text-s17 leading-170 text-text-primary">{t("search.empty.library")}</p>
+        <div className="mt-4 flex flex-wrap items-center gap-x-6 gap-y-3">
+          {/* 看得到的 36px（設計稿），連結本身 44px（ADR-0037），負外距抵掉。 */}
+          <Link
+            to="/search"
+            search={{}}
+            replace
+            resetScroll={false}
+            data-to-tracked
+            className="-my-1 inline-flex min-h-tap-target items-center text-s14 tracking-004 text-accent-gold no-underline decoration-1 underline-offset-4 hover:underline"
+          >
+            {t("search.empty.toTracked")}
+          </Link>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /** 錯誤（State Patterns「12. 找論文」）：「沒有載入成功。重新整理後再試」＋「重新整理」（重讀，條件留著）。 */
-function ErrorBar({ message, action, onRetry }: { message: string; action: string; onRetry: () => void }) {
+export function ErrorBar({ message, action, onRetry }: { message: string; action: string; onRetry: () => void }) {
   return (
     <div role="alert" data-state="error" className="mt-[36px] flex max-w-reading-width flex-wrap items-center gap-x-[14px] gap-y-[10px] split:mt-12">
       <span className="flex text-danger">

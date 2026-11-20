@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 
 import type { FullTextLinks } from "../../generated/model";
 import { ExternalArrow, NEW_TAB_NOTE_ID } from "../ExternalArrow";
+import { LibraryBarButton, type LibraryControl } from "./LibraryBlock";
 import { RAIL_LABEL_CLASS } from "./parts";
 
 // 取得全文（EXPERIENCE.md 畫面 8 第 6 點；設計稿 paper.html 的輔助欄與手機版）：
@@ -10,7 +11,7 @@ import { RAIL_LABEL_CLASS } from "./parts";
 // - 899px 以下：書目與分類下方一塊（VPN 那句改成「下方的…」＋開放取用版本），「開啟全文」在底部固定列。
 // - 沒有 DOI（也沒有開放取用版本）：一行「這篇沒有 DOI，沒有全文連結」（設計稿沒畫，沿用輔助欄「我的 PDF」那一行小字的樣子），沒有按鈕與底部固定列。
 // - 「開放取用版本」只在 API 有給連結時出現（3.6 的 API 目前一律是 null，Unpaywall 還沒接）。
-// - 我的文獻庫、引用、我的 PDF、手機底部的「加入我的文獻庫」屬於 3.17、3.10、Epic 6（AR-67），這一輪不放。
+// - 手機底部的「加入我的文獻庫」與輔助欄的「我的文獻庫」在 LibraryBlock.tsx（Story 3.17）；引用、我的 PDF 屬於 3.10、Epic 6（AR-67）。
 // 「開啟全文」是按鈕（設計稿是 <button>），按下開新分頁；不帶來源頁與 window.opener。
 
 function openInNewTab(url: string) {
@@ -107,8 +108,11 @@ export function FullTextMobile({ links }: { links: FullTextLinks }) {
   );
 }
 
-/** 手機版的底部固定列：只有「開啟全文」（「加入我的文獻庫」屬於 3.17）。沒有 DOI 時整列不出現。 */
-export function FullTextBar({ links }: { links: FullTextLinks }) {
+/**
+ * 手機版的底部固定列：「開啟全文」＋還沒加入時的「加入我的文獻庫」（Story 3.17；已加入時只剩「開啟全文」）。
+ * 沒有 DOI 時整列不出現（「加入我的文獻庫」改在書目下面的輔助區，見 LibraryMobile）。
+ */
+export function FullTextBar({ links, library }: { links: FullTextLinks; library?: LibraryControl }) {
   const { t } = useTranslation("paper");
   const doiUrl = links.doi_url;
   if (doiUrl === null) {
@@ -129,6 +133,7 @@ export function FullTextBar({ links }: { links: FullTextLinks }) {
         {t("paper.fullText.open")}
         <ExternalArrow />
       </button>
+      {library === undefined ? null : <LibraryBarButton library={library} />}
     </div>
   );
 }
