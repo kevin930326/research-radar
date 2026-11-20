@@ -126,6 +126,15 @@
 #   2026-11-18 晚上開始、2026-11-20 01:28（台北）PR 100 合併。中間含 Kevin 用真金鑰重跑 90 篇被拒收的中文重點。
 #   Kevin 2026-11-20 三輪合起來回報「大約 29 小時」「大概 2 小時」，所以記成一筆，沒有拆開。
 #   estimate_h 只算三個 Story；算倍率時這一筆的動手時間含不是 Story 的部分，偏高估。
+# epic-3e 那一筆：ADR-0029 更新與 3.7a（示範站可用的判定，PR 107、108），3.7a 是從 3.7 拆出來的、沒有自己的估計
+#   （estimate_h 寫 null）。自動執行約 3 小時；從開始到 Kevin 手動補完真實資料庫的資料約 13 小時。
+#   Kevin 2026-11-20 回報自己動手「1～2 小時」。
+# epic-3f 那一筆：3.14 的成員版（示範站論文清單還沒做，Story 還是 in-progress）、3.17，加設計稿第二版（PR 109～111）。
+#   2026-11-20 14:50 開工、21:57（台北）PR 111 合併，約 7 小時，中間停下來等 Kevin 決定兩次（共執行三次）。
+#   Kevin 2026-11-21 回報自己動手「體感小於 1 小時」，記成 0.5～1。estimate_h 把 3.14 整個 Story 的 3.5 h 算進去，偏高估。
+# epic-3g 那一筆：3.17 的收尾修正、整頁寬度上限（ADR-0054）、論文列第二版（PR 112～114），不是 Story、沒有估計。
+#   2026-11-20 22:22 開工、2026-11-21 01:20 收尾、02:13（台北）PR 114 合併，約 4 小時。
+#   Kevin 2026-11-21 回報自己動手「體感小於 1 小時」，記成 0.5～1。
 # 重估的倍率只用 kevin_h_low、kevin_h_high（見上面「怎麼重估」第 1 點），elapsed_h 只留著對照。
 # 這個區塊要留在 generated 上面，重跑 skill 才不會洗掉註解（2026-11-14 測過）。
 actual_hours:
@@ -135,6 +144,9 @@ actual_hours:
   - {round: "epic-3c＋真 key 全庫", stories: "3.6、3.8", estimate_h: 6, elapsed_h: 6, kevin_h_low: 2, kevin_h_high: 3, rough: true}
   - {round: epic-2c, stories: "中文重點檢查規則修正（PR 96、97，不是 Story）", estimate_h: null, elapsed_h: 7, kevin_h_low: 1, kevin_h_high: 1, rough: true}
   - {round: "epic-3d＋ci-fix＋epic-2d", stories: "3.13、3.16、3.18", estimate_h: 8, elapsed_h: 29, kevin_h_low: 2, kevin_h_high: 2, rough: true}
+  - {round: epic-3e, stories: "ADR-0029 更新、3.7a", estimate_h: null, elapsed_h: 3, kevin_h_low: 1, kevin_h_high: 2, rough: true}
+  - {round: epic-3f, stories: "3.14（成員版）、3.17", estimate_h: 7, elapsed_h: 7, kevin_h_low: 0.5, kevin_h_high: 1, rough: true}
+  - {round: epic-3g, stories: "3.17 收尾修正、整頁寬度上限、論文列第二版（PR 112～114，不是 Story）", estimate_h: null, elapsed_h: 4, kevin_h_low: 0.5, kevin_h_high: 1, rough: true}
 
 generated: 11-14-2026 03:46
 last_updated: 11-17-2026 03:10
@@ -187,10 +199,10 @@ development_status:
   3-11-修正分類: backlog
   3-12-回報中文重點錯誤: backlog
   3-13-找論文清單的-api-篩選: done  # PR 99 已合併
-  3-14-找論文-篩選-與示範站論文清單: in-progress
+  3-14-找論文-篩選-與示範站論文清單: in-progress  # 成員版 PR 109 已合併；示範站論文清單還沒做
   3-15-資料涵蓋範圍: backlog
   3-16-個人文獻庫的-api: done  # PR 98 已合併
-  3-17-加入-移出與我的文獻庫-基本版: review
+  3-17-加入-移出與我的文獻庫-基本版: done  # PR 110 已合併
   3-18-備份與還原指令: done  # PR 100 已合併
   3-19-部署到-oracle-試用主機-只有-kevin-連得進去: backlog
   epic-3-retrospective: optional
