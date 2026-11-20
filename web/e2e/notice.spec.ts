@@ -7,7 +7,7 @@ import { SITES } from "./pages.ts";
 const member = SITES[0]!;
 const CAVEATS = ["rare", "supported", "evidenceMap", "trendLag"] as const;
 
-test("member: / goes to the notice page", async ({ page }) => {
+test("member: / goes to the search page", async ({ page }) => {
   await page.goto(`${member.baseURL}/`);
   await expect(page).toHaveURL(`${member.baseURL}/search`);
   await expect(page.locator("h1")).toHaveText(TEXT["search:search.page.title"]);

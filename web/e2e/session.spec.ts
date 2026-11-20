@@ -45,7 +45,7 @@ test.describe("login page", () => {
     expect(apiMock.requests.filter((request) => request.method === "POST")).toHaveLength(1);
   });
 
-  test("success goes to the notice page with the nav bar", async ({ page, apiMock }) => {
+  test("success goes to the search page with the nav bar", async ({ page, apiMock }) => {
     await page.goto(`${member.baseURL}/login`);
     await page.getByRole("button", { name: LOGIN }).click();
     await expect(page).toHaveURL(`${member.baseURL}/search`);
@@ -120,7 +120,7 @@ test.describe("signing in is required", () => {
     expect(post?.body).toEqual({ member_id: MEMBERS[0]!.member_id, next: "/notice?from=test" });
   });
 
-  test("without a page to return to, login goes to the notice page", async ({ page, apiMock }) => {
+  test("without a page to return to, login goes to the search page", async ({ page, apiMock }) => {
     apiMock.member = null;
     await page.goto(`${member.baseURL}/`);
     await expect(page).toHaveURL(new RegExp(`/login\\?next=`));

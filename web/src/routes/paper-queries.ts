@@ -111,11 +111,33 @@ export function libraryListQuery(queryClient: QueryClient, limit: number) {
   });
 }
 
+/** 我的文獻庫的總篇數（`found`）或登入過期（`signedOut`）。 */
+export type LibraryCountResult = { kind: "found"; total: number } | { kind: "signedOut" };
+
+/**
+ * 我的文獻庫一共幾篇（`GET /api/v1/library` 第一頁的 total；只讀一頁）。找論文範圍選「我的文獻庫」、沒有條件、
+ * 0 篇時用它分辨「文獻庫是空的」與「文獻庫有論文、但都不在找論文的範圍裡」（F11，Kevin 2026-11-20）。
+ * 鍵不放在 `["library", …]` 底下：那一組是文獻庫清單，`libraryListQuery` 會把同一組的每一份當成可以接著讀的上一份。
+ * 每次用到都重讀（`staleTime` 0、`gcTime` 0）：別的分頁、我的文獻庫那一頁改過的篇數不會留著舊的。
+ * 只要總篇數，但 API 沒有只回篇數的寫法，照樣讀第一頁（不改後端）。
+ */
+export const libraryCountQuery = queryOptions({
+  queryKey: ["library-count"],
+  queryFn: async (): Promise<LibraryCountResult> => {
+    const result = await librarySource().list(0);
+    return result.kind === "found" ? { kind: "found", total: result.list.total } : result;
+  },
+  retry: false,
+  staleTime: 0,
+  // 沒有畫面在用就丟掉：下次用到時不先拿舊的篇數顯示一下才換（審查）。
+  gcTime: 0,
+});
+
 /**
  * 加入或移出之後，快取裡這一篇的「在不在我的文獻庫」跟著改：論文頁、找論文的清單（每一份）。
  * 找論文的清單正在讀的（「再載入」、重讀）先取消：那一份是改之前讀的（伺服器那一頁也可能在寫入生效前讀），
  * 讀完會把「已加入」蓋回去（審查 F10）。改完之後，畫面正在用的清單重讀一次，以伺服器為準
- * （範圍是我的文獻庫的那幾份篇數也會變）；沒在用的標成過期，下次打開時重讀。文獻庫清單在下次打開時本來就會重讀。
+ * （範圍是我的文獻庫的那幾份篇數也會變）；沒在用的標成過期，下次打開時重讀。文獻庫清單在下次打開時本來就會重讀；文獻庫篇數（libraryCountQuery）同樣處理。
  * `stillCurrent`：等取消的這段期間可能換了人（登出、登入過期、換人登入），寫快取前再問一次；回 false 就什麼都不寫、
  * 回 false（審查 G1）。回 true 表示寫了。
  */
@@ -138,5 +160,6 @@ export async function markInLibrary(
       : data,
   );
   void queryClient.invalidateQueries({ queryKey: ["paper-list"], refetchType: "active" });
+  void queryClient.invalidateQueries({ queryKey: ["library-count"], refetchType: "active" });
   return true;
 }
