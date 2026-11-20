@@ -156,6 +156,20 @@ test.describe("search: states", () => {
     await expect(page.locator("[data-clear-all]")).toHaveCount(0);
   });
 
+  test("an empty library (the list itself complete): the library message, no zero bar, nothing to clear", async ({ page, apiMock }) => {
+    // 審查 F6：文獻庫真的是空的（替身的文獻庫沒有論文），清單的假資料一列都不刪。
+    apiMock.libraryIds = [];
+    expect(apiMock.listRows).toEqual(LIST_FIXTURES.rows);
+    await openSearch(page, "?scope=personal");
+    const empty = page.locator("[data-state='library-empty']");
+    await expect(empty).toContainText(text("search:search.empty.library"));
+    await expect(empty.getByRole("link")).toHaveCount(1);
+    await expect(empty.getByRole("link")).toHaveText(text("search:search.empty.toTracked"));
+    await expect(page.locator("[data-state='zero']")).toHaveCount(0);
+    await expect(page.locator("[data-clear-all]")).toHaveCount(0);
+    await expect(rows(page)).toHaveCount(0);
+  });
+
   test("loading shows the skeleton until the list arrives", async ({ page, apiMock }) => {
     const [listGate, release] = gate();
     apiMock.listGate = listGate;
@@ -538,6 +552,8 @@ test.describe("search: page shape", () => {
     const expectedIds = filterListRows(LIST_FIXTURES.rows, new URLSearchParams("topic=e_commerce"))!.map((entry) => entry.row.id);
     expect(expectedIds.filter((id) => personal.has(id)).length).toBeGreaterThan(0);
     expect(expectedIds.filter((id) => !personal.has(id)).length).toBeGreaterThan(0);
+    // 畫面上的列和預期的完全一樣（順序照 API），兩種列才真的都在畫面上（審查 F5）。
+    expect(await rows(page).evaluateAll((elements) => elements.map((element) => element.getAttribute("data-paper-row")))).toEqual(expectedIds);
     const all = await rows(page).all();
     for (const row of all) {
       const id = await row.getAttribute("data-paper-row");
@@ -546,6 +562,8 @@ test.describe("search: page shape", () => {
       if (personal.has(id!)) {
         await expect(added).toHaveCount(1);
         await expect(added).toHaveText(text("search:search.row.added"));
+        // 「●」：字前面一個不念出來的圓點（審查 F20）。
+        await expect(added.locator("span[aria-hidden='true']")).toHaveCount(1);
         await expect(row.getByRole("button")).toHaveCount(0);
       } else {
         await expect(added).toHaveCount(0);

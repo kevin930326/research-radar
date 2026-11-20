@@ -24,8 +24,11 @@ import { ErrorBar, More } from "./SearchPage";
 //   「開啟選取的全文（N 篇）」：一次最多 10 篇（超過時停用，旁邊「一次最多開 10 篇」）；每篇開一個新分頁（DOI 連結），
 //   沒有 DOI 的跳過（「N 篇沒有全文連結，已跳過」）；開了之後按鈕原地顯示「已開啟 N 篇」2 秒；
 //   瀏覽器擋住新分頁時不顯示這一句，改在動作列下方列出連結。手機一次開不了多個分頁：原地列出連結。
-//   連結只開 DOI（externalUrl 只收 https），不組學校代理或付費牆的網址。
+//   瀏覽器擋住時列出的是還沒開出來的那幾篇（已經開了的不重複列）。
+//   連結只開後端給的 DOI 連結（externalUrl 只收 http／https），不組學校代理或付費牆的網址。
 // - 「移出」：那一列原地變成「已移出」＋「復原」，不跳確認；離開這一頁後消失（離開時丟掉文獻庫清單的快取）。
+//   後端回 404（已經不在，例如另一個分頁移出了）時只顯示「已移出」、不給「復原」：這一次沒有真的移出，
+//   復原會拿到別次移出的封存（ADR-0049 復原取最新一筆；審查 F3）。
 // - 空的：「你的文獻庫還沒有論文」＋一行「在論文頁按『加入我的文獻庫』」（AR-67 過渡做法，Kevin 2026-11-14 決定；
 //   上傳、匯入兩行與「上傳或匯入」按鈕是 Epic 6）。
 // - 載入中：論文列的骨架；錯誤：「沒有載入成功」＋「重新整理」（照設計稿的字，列給 Kevin 決定）。
@@ -86,13 +89,14 @@ export function LibraryPage({ shown, onMore, onSignedOut }: LibraryPageProps) {
   useEffect(() => () => queryClient.removeQueries({ queryKey: ["library"] }), [queryClient]);
 
   const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
-  const [gone, setGone] = useState<ReadonlySet<string>>(new Set());
+  // 移出了的（值是能不能復原：這一次真的移出了才能）。
+  const [gone, setGone] = useState<ReadonlyMap<string, boolean>>(new Map());
   const [busy, setBusy] = useState<ReadonlySet<string>>(new Set());
   // 篇數＝API 的 total 加上「讀到清單之後」移出（−1）與復原（+1）的篇數；更早的已經算在 total 裡。
   const [changes, setChanges] = useState<{ at: number; delta: number }[]>([]);
   const [notes, setNotes] = useState<Note[]>([]);
   const [opened, setOpened] = useState<number | null>(null);
-  const [focus, setFocus] = useState<{ id: string; target: "remove" | "restore" } | null>(null);
+  const [focus, setFocus] = useState<{ id: string; target: "remove" | "restore" | "gone" } | null>(null);
   const flashTimer = useRef<number | undefined>(undefined);
   useEffect(() => () => window.clearTimeout(flashTimer.current), []);
 
@@ -107,7 +111,7 @@ export function LibraryPage({ shown, onMore, onSignedOut }: LibraryPageProps) {
   // 移出、復原之後，焦點移到同一列的另一個按鈕（設計稿：移出 → 復原、復原 → 移出）。
   useEffect(() => {
     if (focus === null) return;
-    const selector = `[data-library-row="${focus.id}"] [data-library="${focus.target}"]`;
+    const selector = `[data-library-row="${CSS.escape(focus.id)}"] [data-library="${focus.target}"]`;
     for (const element of document.querySelectorAll<HTMLElement>(selector)) {
       if (element.offsetParent !== null) {
         element.focus();
@@ -141,12 +145,18 @@ export function LibraryPage({ shown, onMore, onSignedOut }: LibraryPageProps) {
     setBusy((current) => setOf(current, id, true));
     void change(id, action).then((outcome) => {
       setBusy((current) => setOf(current, id, false));
-      if (outcome !== "done") return;
-      setGone((current) => setOf(current, id, action === "remove"));
+      if (outcome === "failed") return;
+      setGone((current) => {
+        const next = new Map(current);
+        if (action === "remove") next.set(id, outcome === "done");
+        else next.delete(id);
+        return next;
+      });
       setChanges((current) => [...current, { at: Date.now(), delta: action === "remove" ? -1 : 1 }]);
       if (action === "remove") setSelected((current) => setOf(current, id, false));
       clearNotes();
-      setFocus({ id, target: action === "remove" ? "restore" : "remove" });
+      // 不能復原的那一列沒有按鈕可以接焦點：焦點交給「已移出」那一段字。
+      setFocus({ id, target: action === "restore" ? "remove" : outcome === "done" ? "restore" : "gone" });
     });
   };
 
@@ -191,15 +201,10 @@ export function LibraryPage({ shown, onMore, onSignedOut }: LibraryPageProps) {
       if (!isDesktop()) {
         if (links.length > 0) next.push({ kind: "mobile", links });
       } else if (links.length > 0) {
-        let blocked = false;
-        for (const link of links) {
-          if (!openTab(link.url)) {
-            blocked = true;
-            break;
-          }
-        }
-        if (blocked) {
-          next.push({ kind: "blocked", links });
+        // 第一個被擋住的那一篇起，後面的都沒開出來（已經開了的不再列）。
+        const firstBlocked = links.findIndex((link) => !openTab(link.url));
+        if (firstBlocked >= 0) {
+          next.push({ kind: "blocked", links: links.slice(firstBlocked) });
         } else {
           setOpened(links.length);
           flashTimer.current = window.setTimeout(() => setOpened(null), FLASH_MS);
@@ -242,6 +247,7 @@ export function LibraryPage({ shown, onMore, onSignedOut }: LibraryPageProps) {
               names={namesData}
               selected={selected.has(item.paper.id)}
               gone={gone.has(item.paper.id)}
+              restorable={gone.get(item.paper.id) === true}
               busy={busy.has(item.paper.id)}
               onSelect={(on) => {
                 setSelected((current) => setOf(current, item.paper.id, on));
@@ -421,6 +427,8 @@ interface RowProps {
   names: Parameters<typeof Meta>[0]["names"];
   selected: boolean;
   gone: boolean;
+  /** 移出了而且能復原（這一次真的移出了）。 */
+  restorable: boolean;
   busy: boolean;
   onSelect: (on: boolean) => void;
   onRemove: () => void;
@@ -445,7 +453,7 @@ function RemoveButton({ busy, onRemove, className }: { busy: boolean; onRemove: 
 }
 
 /** 一篇論文（設計稿 .lrow）：勾選框、標題（連到論文頁）、期刊 · 年份、「移出」；移出後是「已移出」＋標題＋「復原」。 */
-function LibraryRow({ item, first, names, selected, gone, busy, onSelect, onRemove, onRestore }: RowProps) {
+function LibraryRow({ item, first, names, selected, gone, restorable, busy, onSelect, onRemove, onRestore }: RowProps) {
   const { t } = useTranslation("library");
   const paper = item.paper;
   return (
@@ -455,18 +463,22 @@ function LibraryRow({ item, first, names, selected, gone, busy, onSelect, onRemo
     >
       {gone ? (
         <div data-library-gone className="flex min-h-[28px] items-center gap-4">
-          <span className="shrink-0 font-mono text-s13 tracking-006 text-text-secondary">{t("library.row.removed")}</span>
+          <span data-library="gone" tabIndex={-1} className="shrink-0 font-mono text-s13 tracking-006 text-text-secondary">
+            {t("library.row.removed")}
+          </span>
           <span className="min-w-[0px] flex-1 truncate font-display text-s17 text-text-tertiary split:text-s18">{paper.title}</span>
-          <button
-            type="button"
-            data-library="restore"
-            disabled={busy}
-            aria-busy={busy || undefined}
-            onClick={onRestore}
-            className="-my-2 inline-flex h-tap-target min-w-tap-target cursor-pointer items-center justify-end bg-transparent p-[0px] text-s13 tracking-004 whitespace-nowrap text-accent-gold decoration-1 underline-offset-4 hover:underline disabled:cursor-default"
-          >
-            {t("library.row.restore")}
-          </button>
+          {restorable ? (
+            <button
+              type="button"
+              data-library="restore"
+              disabled={busy}
+              aria-busy={busy || undefined}
+              onClick={onRestore}
+              className="-my-2 inline-flex h-tap-target min-w-tap-target cursor-pointer items-center justify-end bg-transparent p-[0px] text-s13 tracking-004 whitespace-nowrap text-accent-gold decoration-1 underline-offset-4 hover:underline disabled:cursor-default"
+            >
+              {t("library.row.restore")}
+            </button>
+          ) : null}
         </div>
       ) : (
         <div className="flex items-start gap-2 split:gap-3">

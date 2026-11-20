@@ -113,9 +113,12 @@ export function libraryListQuery(queryClient: QueryClient, limit: number) {
 
 /**
  * 加入或移出之後，快取裡這一篇的「在不在我的文獻庫」跟著改：論文頁、找論文的清單（每一份）。
- * 找論文的清單另外標成過期（範圍是我的文獻庫的那幾份篇數會變），文獻庫清單在下次打開時本來就會重讀。
+ * 找論文的清單正在讀的（「再載入」、重讀）先取消：那一份是改之前讀的（伺服器那一頁也可能在寫入生效前讀），
+ * 讀完會把「已加入」蓋回去（審查 F10）。改完之後，畫面正在用的清單重讀一次，以伺服器為準
+ * （範圍是我的文獻庫的那幾份篇數也會變）；沒在用的標成過期，下次打開時重讀。文獻庫清單在下次打開時本來就會重讀。
  */
-export function markInLibrary(queryClient: QueryClient, paperId: string, inLibrary: boolean): void {
+export async function markInLibrary(queryClient: QueryClient, paperId: string, inLibrary: boolean): Promise<void> {
+  await queryClient.cancelQueries({ queryKey: ["paper-list"] });
   queryClient.setQueryData<PaperResult>(["papers", paperId], (data) =>
     data?.kind === "found" ? { ...data, page: { ...data.page, in_my_library: inLibrary } } : data,
   );
@@ -126,5 +129,5 @@ export function markInLibrary(queryClient: QueryClient, paperId: string, inLibra
       ? { ...data, list: { ...data.list, items: mark(data.list.items), pending: mark(data.list.pending) } }
       : data,
   );
-  void queryClient.invalidateQueries({ queryKey: ["paper-list"], refetchType: "none" });
+  void queryClient.invalidateQueries({ queryKey: ["paper-list"], refetchType: "active" });
 }

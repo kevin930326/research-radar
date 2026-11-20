@@ -2,7 +2,7 @@
 import { queryOptions, type QueryClient } from "@tanstack/react-query";
 
 import { datasource } from "../datasource";
-import type { MemberSession } from "../datasource/types";
+import type { Member, MemberSession } from "../datasource/types";
 
 /** 成員版才有的登入函式；示範站的建置沒有成員版的頁面，走到這裡就是程式寫錯。 */
 export function memberSession(): MemberSession {
@@ -27,14 +27,41 @@ export const meQuery = queryOptions({
   retry: false,
 });
 
+/** 每個查詢快取「清過幾次」：每次 clearMemberQueries 加 1。 */
+const generations = new WeakMap<QueryClient, number>();
+
 /**
  * 換人或沒有人的時候（登出成功、發現登入過期、登入成功）：取消進行中的查詢、清掉所有查詢快取。
  * 成員版的查詢都是某一位成員的資料，下一位登入的人不能看到上一位的（只清「我是誰」不夠）。
  * 先取消再清：還在路上的回應不會在清掉之後又寫回快取。
  */
 export async function clearMemberQueries(queryClient: QueryClient): Promise<void> {
+  // 世代號先加 1：還在路上的加入、移出、復原（不是查詢，cancelQueries 擋不到）回來時看得出已經換過人（審查 F2）。
+  generations.set(queryClient, memberGeneration(queryClient) + 1);
   await queryClient.cancelQueries();
   queryClient.removeQueries();
+}
+
+/**
+ * 這個查詢快取目前是第幾代（每次 clearMemberQueries 加 1）。送出寫入前記下來、回來時比對：
+ * 不一樣表示中間登出、登入過期或換了人，回應是上一位的，不能寫進現在的快取。
+ */
+export function memberGeneration(queryClient: QueryClient): number {
+  return generations.get(queryClient) ?? 0;
+}
+
+/**
+ * 每次進成員版的頁面先問「我是誰」。快取裡原本是另一位成員時（例如在另一個分頁登出、換人登入，cookie 換了），
+ * 先清掉所有查詢快取再繼續：快取裡的論文列、文獻庫都是上一位的（審查 F1）。`wasSignedIn` 是問之前快取裡有沒有成員。
+ */
+export async function loadMember(queryClient: QueryClient): Promise<{ member: Member | null; wasSignedIn: boolean }> {
+  const previous = queryClient.getQueryData(meQuery.queryKey);
+  const member = await queryClient.fetchQuery(meQuery);
+  if (member !== null && previous != null && previous.member_id !== member.member_id) {
+    await clearMemberQueries(queryClient);
+    queryClient.setQueryData(meQuery.queryKey, member);
+  }
+  return { member, wasSignedIn: previous != null };
 }
 
 /** 登入後的第一頁：找論文（Story 3.14 起；之前是使用須知，AR-67；系統首頁做好後改成系統首頁）。 */

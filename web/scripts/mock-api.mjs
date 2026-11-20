@@ -7,8 +7,11 @@
 // Story 3.14 加上找論文的兩個端點（/api/v1/papers 清單、/api/v1/client-config）：資料來自
 // e2e/fixtures/paper-list.json（自己編的假清單，和 e2e 共用），依網址參數篩選、用位移當 cursor 分頁。
 // Story 3.17 加上我的文獻庫的四個端點（GET /api/v1/library、PUT／DELETE /api/v1/library/{id}、
-// POST /api/v1/library/{id}/restore）：文獻庫一開始是清單裡 personal 的那幾列（新加入的排前面），
-// 找論文的 in_my_library、範圍「我的文獻庫」、論文頁的 in_my_library 都照它算。
+// POST /api/v1/library/{id}/restore）：每位成員各有自己的文獻庫與封存（依成員 ID 分開；審查 F4）。
+// 第一位假成員一開始是清單裡 personal 的那幾列，其他人一開始是空的；依加入時間新到舊。
+// 找論文的 in_my_library、範圍「我的文獻庫」、論文頁的 in_my_library 都照目前登入那一位的算。
+// 復原照 ADR-0049：已經在文獻庫 → 200、不動封存；不在 → 用最新一筆封存寫回原本的加入時間（回到原本的位置）；
+// 沒有封存 → 404（審查 F13）。
 // 畫面是真正的建置結果；這支只代替後端，不是給測試用的（Playwright 測試用 e2e/api-mock.ts 的 page.route）。
 //
 // 用法（在 web/ 底下，先 npm run build:member）：
@@ -138,11 +141,35 @@ const scenario = {
   libraryHang: 0,
   alwaysSignedIn: args.signedIn,
 };
-/** 一開始在文獻庫裡的（清單裡 personal 的那幾列）。 */
+/** 第一位假成員一開始在文獻庫裡的（清單裡 personal 的那幾列）。 */
 const INITIAL_LIBRARY = LIST.rows.filter((entry) => entry.personal).map((entry) => entry.row.id);
-/** 我的文獻庫（論文 ID，新加入的在前）與移出過、可以復原的。 */
-let libraryIds = [...INITIAL_LIBRARY];
-let libraryRemoved = [];
+const INITIAL_ADDED_AT = Date.parse("2026-11-01T00:00:00.000Z");
+/** 一開始就在的那幾篇的加入時間：第 i 篇早 i 小時（新的在前）。 */
+function initialRecords(ids) {
+  return ids.map((id, index) => ({ id, addedAt: new Date(INITIAL_ADDED_AT - index * 3_600_000).toISOString() }));
+}
+/** 成員 ID → { items：文獻庫（依加入時間新到舊）, removed：封存（最新的在最後） }。 */
+let libraries = new Map();
+/** 加入時間用的時鐘（每加入一篇往後 1 秒）。 */
+let libraryClock = 0;
+function resetLibraries(empty) {
+  libraries = new Map([[MEMBERS[0].member_id, { items: empty ? [] : initialRecords(INITIAL_LIBRARY), removed: [] }]]);
+}
+resetLibraries(false);
+/** 這位成員的文獻庫（沒有就建一個空的）。 */
+function libraryOf(member) {
+  if (!libraries.has(member.member_id)) libraries.set(member.member_id, { items: [], removed: [] });
+  return libraries.get(member.member_id);
+}
+/** 這位成員文獻庫裡的論文 ID。 */
+function libraryIdsOf(member) {
+  return libraryOf(member).items.map((record) => record.id);
+}
+/** 依加入時間新到舊放進去（復原時回到原本的位置）。 */
+function insertRecord(items, record) {
+  const index = items.findIndex((entry) => entry.addedAt < record.addedAt);
+  return index < 0 ? [...items, record] : [...items.slice(0, index), record, ...items.slice(index)];
+}
 /** 收過幾次清單請求（listDelayAfter 用）。 */
 let listRequests = 0;
 /** 有效的 session token → 成員。 */
@@ -238,8 +265,9 @@ async function api(req, res, path, query) {
     return paperList(req, res, query);
   }
   if (req.method === "GET" && path.startsWith("/api/v1/papers/")) {
-    if (currentMember(req) === null) return problem(res, 401, "not_authenticated");
-    return paper(res, decodeURIComponent(path.slice("/api/v1/papers/".length)));
+    const member = currentMember(req);
+    if (member === null) return problem(res, 401, "not_authenticated");
+    return paper(res, decodeURIComponent(path.slice("/api/v1/papers/".length)), member);
   }
   if (req.method === "GET" && path === "/api/v1/library") {
     return libraryList(req, res, query);
@@ -262,7 +290,7 @@ async function api(req, res, path, query) {
 }
 
 /** 論文頁：ID 對到假資料的一篇、一種錯誤，或「很慢」（等一下再回某一篇）；其他 ID 都是 404（同後端）。 */
-async function paper(res, id) {
+async function paper(res, id, member) {
   const error = PAPERS.errors?.[id];
   if (error !== undefined) {
     const codes = { 401: "not_authenticated", 404: "not_found", 500: "internal_error" };
@@ -272,16 +300,16 @@ async function paper(res, id) {
   if (slow !== undefined) {
     await sleep(slow.delayMs);
     if (res.destroyed) return undefined;
-    return paper(res, slow.of);
+    return paper(res, slow.of, member);
   }
   const entry = PAPERS.papers[id];
   return entry === undefined
     ? problem(res, 404, "not_found")
-    : json(res, 200, { ...entry.page, in_my_library: libraryIds.includes(entry.page.paper.id) });
+    : json(res, 200, { ...entry.page, in_my_library: libraryIdsOf(member).includes(entry.page.paper.id) });
 }
 
 /** 文獻庫的一筆：先找清單，再找論文頁假資料；都沒有是 undefined（404）。 */
-function libraryItem(id) {
+function libraryItem(id, addedAt = new Date(INITIAL_ADDED_AT).toISOString()) {
   let row = LIST.rows.find((entry) => entry.row.id === id)?.row;
   const page = PAPERS.papers[id]?.page;
   if (row === undefined && page !== undefined) {
@@ -302,12 +330,13 @@ function libraryItem(id) {
     };
   }
   if (row === undefined) return undefined;
-  return { paper: { ...row, in_my_library: true }, added_via: "manual", added_at: "2026-11-01T00:00:00Z" };
+  return { paper: { ...row, in_my_library: true }, added_via: "manual", added_at: addedAt };
 }
 
 /** 我的文獻庫的清單：一頁 client-config 的 library_page_size 篇，cursor 是位移。 */
 async function libraryList(req, res, query) {
-  if (currentMember(req) === null) return problem(res, 401, "not_authenticated");
+  const member = currentMember(req);
+  if (member === null) return problem(res, 401, "not_authenticated");
   const outcome = scenario.library;
   await sleep(scenario.libraryDelay);
   if (res.destroyed || req.socket.destroyed) return undefined;
@@ -316,36 +345,47 @@ async function libraryList(req, res, query) {
   const size = LIST.clientConfig.library_page_size;
   const cursor = query.get("cursor");
   const offset = cursor !== null && /^o\d+$/.test(cursor) ? Number(cursor.slice(1)) : 0;
-  const items = libraryIds.slice(offset, offset + size).flatMap((id) => libraryItem(id) ?? []);
+  const records = libraryOf(member).items;
+  const items = records.slice(offset, offset + size).flatMap((record) => libraryItem(record.id, record.addedAt) ?? []);
   return json(res, 200, {
     items,
-    next_cursor: offset + size < libraryIds.length ? `o${offset + size}` : null,
-    total: scenario.libraryTotal > 0 ? scenario.libraryTotal : libraryIds.length,
+    next_cursor: offset + size < records.length ? `o${offset + size}` : null,
+    total: scenario.libraryTotal > 0 ? scenario.libraryTotal : records.length,
   });
 }
 
 /** 加入（PUT）、移出（DELETE）、復原（POST …/restore）。 */
 function libraryChange(req, res, id, restore) {
-  if (currentMember(req) === null || scenario.libraryChange === "expired") return problem(res, 401, "not_authenticated");
+  const member = currentMember(req);
+  if (member === null || scenario.libraryChange === "expired") return problem(res, 401, "not_authenticated");
   if (scenario.libraryChange === "failed") return problem(res, 500, "internal_error");
-  const item = libraryItem(id);
-  if (item === undefined) return problem(res, 404, "not_found");
-  const inLibrary = libraryIds.includes(id);
+  if (libraryItem(id) === undefined) return problem(res, 404, "not_found");
+  const library = libraryOf(member);
+  const current = library.items.find((record) => record.id === id);
+  const respond = (record) => json(res, 200, libraryItem(id, record.addedAt));
   if (req.method === "PUT" && !restore) {
-    if (!inLibrary) libraryIds = [id, ...libraryIds];
-    return json(res, 200, item);
+    if (current !== undefined) return respond(current);
+    libraryClock += 1;
+    const added = { id, addedAt: new Date(Date.parse("2026-11-10T00:00:00.000Z") + libraryClock * 1000).toISOString() };
+    library.items = insertRecord(library.items, added);
+    return respond(added);
   }
   if (req.method === "DELETE" && !restore) {
-    if (!inLibrary) return problem(res, 404, "not_found");
-    libraryIds = libraryIds.filter((entry) => entry !== id);
-    libraryRemoved = [...libraryRemoved, id];
-    return json(res, 200, item);
+    if (current === undefined) return problem(res, 404, "not_found");
+    library.items = library.items.filter((record) => record !== current);
+    library.removed = [...library.removed, current];
+    // 回移出前的那一筆（和後端一樣）。
+    return respond(current);
   }
   if (req.method === "POST" && restore) {
-    if (!libraryRemoved.includes(id)) return problem(res, 404, "not_found");
-    libraryRemoved = libraryRemoved.filter((entry) => entry !== id);
-    if (!inLibrary) libraryIds = [id, ...libraryIds];
-    return json(res, 200, item);
+    // 已經在文獻庫 → 回現在那一筆、不動封存；不在 → 用最新一筆封存、寫回原本的加入時間。
+    if (current !== undefined) return respond(current);
+    const latest = library.removed.findLastIndex((record) => record.id === id);
+    if (latest < 0) return problem(res, 404, "not_found");
+    const record = library.removed[latest];
+    library.removed = library.removed.filter((_, index) => index !== latest);
+    library.items = insertRecord(library.items, record);
+    return respond(record);
   }
   return problem(res, 404, "not_found");
 }
@@ -357,7 +397,7 @@ const START_YEAR = 2016;
  * 依網址參數篩選假清單（後端的簡化版，和 e2e/api-mock.ts 的 filterListRows 同一套規則）；年份不合、
  * 不認得的期刊／主題／方法代號（顯示名稱裡沒有）是 null（422）。
  */
-function filterRows(query) {
+function filterRows(query, member) {
   const journals = query.getAll("journal");
   const years = query.getAll("year").map(Number);
   const topics = query.getAll("topic");
@@ -378,28 +418,29 @@ function filterRows(query) {
         topics.every((topic) => (topic === "unclassified" ? entry.topics.length === 0 : entry.topics.includes(topic))) &&
         methods.every((method) => (entry.methods ?? []).includes(method)) &&
         (query.get("this_week") !== "true" || entry.this_week) &&
-        (scope === "tracked" || (scope === "lab" ? entry.lab : libraryIds.includes(entry.row.id))),
+        (scope === "tracked" || (scope === "lab" ? entry.lab : libraryIdsOf(member).includes(entry.row.id))),
     )
     .sort((a, b) => (b.row.publication_year ?? 0) - (a.row.publication_year ?? 0));
 }
 
 /** 找論文的清單：篩選、分頁（cursor 是位移「o20」）。 */
 async function paperList(req, res, query) {
-  if (currentMember(req) === null) return problem(res, 401, "not_authenticated");
+  const member = currentMember(req);
+  if (member === null) return problem(res, 401, "not_authenticated");
   listRequests += 1;
   const outcome = listRequests > scenario.listFailAfter ? scenario.list : "ok";
   if (listRequests > scenario.listDelayAfter) await sleep(scenario.listDelay);
   if (res.destroyed || req.socket.destroyed) return undefined;
   if (outcome === "expired") return problem(res, 401, "not_authenticated");
   if (outcome === "failed") return problem(res, 500, "internal_error");
-  const rows = filterRows(query);
+  const rows = filterRows(query, member);
   if (rows === null) return problem(res, 422, "request_invalid");
   const size = LIST.clientConfig.paper_list_page_size;
   const cursor = query.get("cursor");
   const offset = cursor !== null && /^o\d+$/.test(cursor) ? Number(cursor.slice(1)) : 0;
   const total = scenario.listTotal > 0 ? scenario.listTotal : rows.length;
   return json(res, 200, {
-    items: rows.slice(offset, offset + size).map((entry) => ({ ...entry.row, in_my_library: libraryIds.includes(entry.row.id) })),
+    items: rows.slice(offset, offset + size).map((entry) => ({ ...entry.row, in_my_library: libraryIdsOf(member).includes(entry.row.id) })),
     next_cursor: offset + size < rows.length ? `o${offset + size}` : null,
     total,
     snapshot: LIST.snapshot,
@@ -485,15 +526,15 @@ function control(res, query) {
   }
   if (query.has("listDelayAfter") || query.has("listFailAfter")) listRequests = 0;
   if (query.has("libraryEmpty")) {
-    libraryIds = query.get("libraryEmpty") === "1" ? [] : [...INITIAL_LIBRARY];
-    libraryRemoved = [];
+    // 每位成員的文獻庫都回到一開始的樣子（第一位假成員是空的或一開始那幾篇，其他人是空的）。
+    resetLibraries(query.get("libraryEmpty") === "1");
   }
   if (query.has("signedIn")) scenario.alwaysSignedIn = query.get("signedIn") === "true";
   if (query.has("expire")) {
     sessions.clear();
     scenario.alwaysSignedIn = false;
   }
-  json(res, 200, { ...scenario, sessions: sessions.size, libraryCount: libraryIds.length });
+  json(res, 200, { ...scenario, sessions: sessions.size, libraryCount: libraryOf(MEMBERS[0]).items.length });
 }
 
 function staticFile(res, path) {

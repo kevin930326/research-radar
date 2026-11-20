@@ -46,6 +46,7 @@ from radar.repo.library import create_library_item
 from radar.repo.paper_rows import find_paper_rows
 from radar.repo.papers import find_paper_page_facts
 from radar.services.members import allow_member
+from tests.backup_support import count_in_snapshot, publish_snapshot
 from tests.database import TestDatabase, migrate
 from tests.llm_support import (
     create_hidden_paper,
@@ -834,7 +835,10 @@ def test_system_and_public_reads_never_say_in_my_library(database: Database, api
 
 def test_admin_does_not_see_other_members_library(database: Database, api: Api) -> None:
     paper_id = create_paper(database)
-    api.add(paper_id, api.other_token)
+    # 前提：乙真的加入了（審查 F8：沒加成功時這條什麼都會過）。
+    added = api.add(paper_id, api.other_token)
+    assert added.status_code == 200, added.text
+    assert added.json()["paper"]["in_my_library"] is True
 
     with database.transaction() as connection:
         rows = find_paper_rows(
@@ -887,3 +891,30 @@ def test_in_my_library_is_one_query_for_the_whole_page(db: TestDatabase) -> None
     assert len(few_library_sql) == len(many_library_sql)
     for statements in (few_sql, many_sql, few_library_sql, many_library_sql):
         assert len([sql for sql in statements if "AS in_my_library" in sql]) == 1
+
+
+def test_public_reads_of_a_visible_paper_never_say_in_my_library(
+    db: TestDatabase, database: Database, api: Api
+) -> None:
+    # 審查 F8：訪客看得到的論文（算進已發佈的快照），乙確定加入了；訪客讀列表與論文頁都讀得到
+    # 這一篇，而且 in_my_library 是假（不洩漏任何人的文獻庫）。
+    paper_id = create_paper(database)
+    count_in_snapshot(db, paper_id, publish_snapshot(db))
+    added = api.add(paper_id, api.other_token)
+    assert added.status_code == 200, added.text
+    assert added.json()["paper"]["in_my_library"] is True
+
+    with database.transaction() as connection:
+        public_rows = find_paper_rows(PublicViewer(), connection, [paper_id])
+        public_page = find_paper_page_facts(PublicViewer(), connection, paper_id)
+        other_rows = find_paper_rows(
+            MemberViewer(member_id=api.other_id, is_admin=False), connection, [paper_id]
+        )
+
+    assert set(public_rows) == {paper_id}
+    assert public_rows[paper_id].in_my_library is False
+    assert public_page is not None
+    assert public_page.paper_id == paper_id
+    assert public_page.in_my_library is False
+    # 同一篇在乙自己讀的時候是真（確定上面的假不是因為根本沒加進去）。
+    assert other_rows[paper_id].in_my_library is True

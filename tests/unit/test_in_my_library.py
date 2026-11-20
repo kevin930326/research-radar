@@ -7,6 +7,8 @@
 - 別名：只收小寫識別字，不能和子查詢的別名相同。
 - 欄位預設假：`PaperRowFacts`、`PaperPageFacts` 沒有算的地方不會說成「在」；回應模型一定要給、
   只收布林。
+- 算出來是真的時候，文獻庫一筆與論文頁的回應照樣寫真（審查 F20：既有單元測試的假資料沒有給，
+  只測到預設的假）。
 """
 
 import dataclasses
@@ -18,7 +20,11 @@ from pydantic import ValidationError
 from radar.domain.contracts import PaperRow
 from radar.domain.paper_rows import PaperRowFacts
 from radar.domain.viewer import MemberViewer, PublicViewer, SystemViewer
+from radar.entrypoints.api.library import library_item_response
+from radar.entrypoints.api.papers import paper_page_response
 from radar.repo.visibility import visible_in_own_library
+from tests.unit.test_api_library import ENTRY
+from tests.unit.test_api_papers import PAGE
 
 OWNER_ID = uuid.UUID("018f0000-0000-7000-8000-0000000000a1")
 FACTS = PaperRowFacts(
@@ -85,3 +91,16 @@ def test_the_row_must_say_it() -> None:
     del data["in_my_library"]
     with pytest.raises(ValidationError):
         PaperRow.model_validate(data)
+
+
+def test_true_facts_come_out_true_in_the_library_item_and_paper_page_responses() -> None:
+    entry = dataclasses.replace(ENTRY, paper=dataclasses.replace(ENTRY.paper, in_my_library=True))
+    page = dataclasses.replace(PAGE, facts=dataclasses.replace(PAGE.facts, in_my_library=True))
+
+    item = library_item_response(entry, lambda _issn: "misq").model_dump(mode="json")
+    paper_page = paper_page_response(page).model_dump(mode="json")
+
+    assert item["paper"]["in_my_library"] is True
+    assert paper_page["in_my_library"] is True
+    # 對照：同樣的資料，facts 是假時回應是假（不是固定寫真）。
+    assert paper_page_response(PAGE).model_dump(mode="json")["in_my_library"] is False

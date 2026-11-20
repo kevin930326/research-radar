@@ -16,10 +16,10 @@ import { PaperPage } from "../pages/PaperPage";
 import { SearchPage } from "../pages/SearchPage";
 import { isPaperId } from "../pages/paper-format";
 import { validateSearchParams, type SearchParams } from "../pages/search-filters";
-import { useLibraryChange } from "./library-change";
+import { libraryShown, useLibraryChange } from "./library-change";
 import { displayNamesQuery, paperSource } from "./paper-queries";
 import { PlainMain, rootRoute } from "./root";
-import { FIRST_PAGE, clearMemberQueries, meQuery, validateLoginSearch } from "./session";
+import { FIRST_PAGE, clearMemberQueries, loadMember, validateLoginSearch } from "./session";
 
 // 成員版的路由表（Story 3.5）：
 // - /login：登入頁（開發與試用期間是假登入頁），不用登入。
@@ -67,8 +67,8 @@ const appRoute = createRoute({
   id: "app",
   beforeLoad: async ({ context, location }) => {
     const { queryClient } = context;
-    const wasSignedIn = queryClient.getQueryData(meQuery.queryKey) != null;
-    const member = await queryClient.fetchQuery(meQuery);
+    // 換了人（另一個分頁換人登入）時 loadMember 先清掉上一位的查詢快取（審查 F1）。
+    const { member, wasSignedIn } = await loadMember(queryClient);
     if (member === null) {
       // 登入過期（或還沒登入）：清掉所有查詢快取，再登入的可能是另一個人。
       await clearMemberQueries(queryClient);
@@ -227,12 +227,14 @@ function PaperWithNames({ page }: { page: PaperPageData }) {
 }
 
 /**
- * 論文頁的「我的文獻庫」（Story 3.17）：一打開照 API 的 `in_my_library` 顯示；按了之後送出，成功才換樣子
+ * 論文頁的「我的文獻庫」（Story 3.17）：照 API 的 `in_my_library` 顯示；按了之後送出，成功才換樣子
  * （快取裡這一篇也跟著改，見 useLibraryChange）。送出中再按不會再送一次。
+ * 按過之後的結果只對「按的時候那一份論文頁資料」有效：路由換了一篇論文或重讀了（`page` 換成新的一份），
+ * 就照新的 `in_my_library` 顯示，不沿用舊的狀態（審查 F9）。移出時已經不在（404）也算移出了。
  */
 function usePaperLibrary(page: PaperPageData): LibraryControl {
   const change = useLibraryChange();
-  const [inLibrary, setInLibrary] = useState(page.in_my_library);
+  const [changed, setChanged] = useState<{ page: PaperPageData; inLibrary: boolean } | null>(null);
   const [busy, setBusy] = useState(false);
   const [focusToken, setFocusToken] = useState(0);
   // 連點兩下時第二下還看不到 busy（同一次畫面），用 ref 擋。
@@ -244,13 +246,19 @@ function usePaperLibrary(page: PaperPageData): LibraryControl {
     void change(page.paper.id, action).then((outcome) => {
       sending.current = false;
       setBusy(false);
-      if (outcome === "done") {
-        setInLibrary(action === "add");
+      if (outcome !== "failed") {
+        setChanged({ page, inLibrary: action === "add" });
         setFocusToken((token) => token + 1);
       }
     });
   };
-  return { inLibrary, busy, focusToken, onAdd: () => run("add"), onRemove: () => run("remove") };
+  return {
+    inLibrary: libraryShown(page, changed),
+    busy,
+    focusToken,
+    onAdd: () => run("add"),
+    onRemove: () => run("remove"),
+  };
 }
 
 const paperRoute = createRoute({
@@ -290,7 +298,8 @@ const paperRoute = createRoute({
     if (data.kind === "notFound") {
       return <NotFound />;
     }
-    return <PaperWithNames page={data.page} />;
+    // 換一篇論文時整塊重新掛上（送出中、焦點等元件內的狀態不帶到下一篇；審查 F9）。
+    return <PaperWithNames key={data.page.paper.id} page={data.page} />;
   },
 });
 
