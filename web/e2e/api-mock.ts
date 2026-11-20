@@ -431,8 +431,9 @@ export async function installApiMock(page: Page, state: ApiMockState): Promise<v
         if (current === undefined) return problem(route, 404, "not_found");
         library.items = library.items.filter((record) => record !== current);
         library.removed = [...library.removed, current];
-        // 回移出前的那一筆（和後端一樣）。
-        return respond(current);
+        // 回移出前的那一筆，只有 in_my_library 是 false（和後端一樣，ADR-0053 更新 2026-11-21）。
+        const removed = libraryItem(state.listRows, id, current.addedAt)!;
+        return json(route, { ...removed, paper: { ...removed.paper, in_my_library: false } });
       }
       // 復原（ADR-0049）：已經在文獻庫 → 回現在那一筆、不動封存；不在 → 用最新一筆封存、寫回原本的加入時間。
       if (current !== undefined) return respond(current);

@@ -7,7 +7,8 @@
 - 加入：一句 `INSERT … SELECT … ON CONFLICT DO NOTHING`；沒寫入時查自己的文獻庫，有就回原本那一筆
   （`added_via`、`added_at` 不變），沒有就是看不到。
 - 移出：讀自己的那一筆 → 讀論文列（刪掉之後，私人論文就看不到了）→ 整列複製到 `deleted_record`
-  → 刪 → 稽核；回移出前的那一筆。
+  → 刪 → 稽核；回移出前的那一筆，只有論文列的 `in_my_library` 改成假（已經不在了，ADR-0053
+  更新 2026-11-21）。加入、復原回的那一筆在交易裡讀論文列，本來就是真。
 - 復原：這篇已經在自己的文獻庫 → 回現在那一筆、不動任何封存（稽核記 `restored: false`、對象與
   `added_via` 都是現在那一筆）；不在 → 讀自己最新的一筆封存，用原本的 `id`／`added_via`／`added_at`
   寫回、刪掉那筆封存、稽核；沒有封存 → None。
@@ -22,6 +23,7 @@
 
 import uuid
 from collections.abc import Sequence
+from dataclasses import replace
 
 import structlog
 
@@ -163,7 +165,8 @@ def remove_library_item(
     actor: MemberViewer, database: Database, paper_id: uuid.UUID
 ) -> LibraryEntry | None:
     """把 `paper_id` 移出 `actor` 自己的文獻庫：先複製到 `deleted_record` 再刪，寫稽核，回移出前的
-    那一筆。不在自己的文獻庫（或同時被另一個請求移出了）回 None；別人的那一筆不動。
+    那一筆，只有論文列的 `in_my_library` 是假（已經不在了）。不在自己的文獻庫（或同時被另一個請求
+    移出了）回 None；別人的那一筆不動。
 
     Raises:
         PermissionDeniedError: `actor` 不是這一筆的擁有者（權限表）。
@@ -203,7 +206,8 @@ def remove_library_item(
         log.info("要移出的那一筆已經被另一個請求移出", paper_id=str(paper_id))
         return None
     log.info("已移出文獻庫", library_item_id=str(item.id), deleted_record_id=str(record_id))
-    return entry
+    # 論文列是刪掉之前讀的（那時還在）；回應要說「已經不在」（ADR-0053 更新 2026-11-21）。
+    return replace(entry, paper=replace(entry.paper, in_my_library=False))
 
 
 def restore_library_item(
