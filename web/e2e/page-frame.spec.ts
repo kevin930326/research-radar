@@ -91,3 +91,29 @@ for (const [widthText, expected] of Object.entries(FRAMES)) {
     expect(rect.x, "login column x").toBeCloseTo((width - 360) / 2, 0);
   });
 }
+
+// 一律保留捲軸的位置（Kevin 2026-11-21 決定，epic-3g P2-1）：很短的頁面（找不到這一頁）和很長的頁面（使用須知），
+// 內容左緣一樣。本機與 CI 的測試瀏覽器捲軸都不佔寬度（chromium 無頭模式隱藏捲軸；webkit 也量不到），
+// 左緣在這裡加不加 scrollbar-gutter 都一樣，所以另外斷言 <html> 的 scrollbar-gutter 是 stable：
+// 這條擋得到「這行被拿掉或寫錯」，擋不到「真的有捲軸的瀏覽器上左緣還是會跳」（要用有捲軸的電腦人工看）。
+test("short and long pages keep the content's left edge (scrollbar-gutter: stable)", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  const edges: number[] = [];
+  for (const [path, tall] of [
+    [MISSING_PATH, false],
+    ["/notice", true],
+  ] as const) {
+    await page.goto(`${member.baseURL}${path}`);
+    await expect(page.locator("main h1")).toBeVisible();
+    const sizes = await page.evaluate(() => ({
+      scrollHeight: document.documentElement.scrollHeight,
+      innerHeight: window.innerHeight,
+      gutter: getComputedStyle(document.documentElement).scrollbarGutter,
+    }));
+    expect(sizes.scrollHeight > sizes.innerHeight, `${path} scrolls`).toBe(tall);
+    expect(sizes.gutter, `${path} scrollbar-gutter`).toBe("stable");
+    // 內容左緣：main 的左緣加左邊留白（兩頁的標題排法不同，不拿標題比）。
+    edges.push((await box(page, "main")).contentX);
+  }
+  expect(edges[1]).toBeCloseTo(edges[0]!, 0);
+});

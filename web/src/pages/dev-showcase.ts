@@ -95,6 +95,7 @@ export const LINE_HEIGHT_SCALE: readonly string[] = [
   "leading-140",
   "leading-145",
   "leading-150",
+  "leading-155",
   "leading-160",
   "leading-165",
   "leading-170",

@@ -119,7 +119,7 @@
   --text-table-number--font-weight: 400;
 
   /*
-   * 尺度（DESIGN.md font-sizes 26 個、line-heights 17 個、letter-spacings 11 個；ADR-0038）：
+   * 尺度（DESIGN.md font-sizes 26 個、line-heights 18 個、letter-spacings 11 個；ADR-0038）：
    * 設計稿的字級、行高、字距組合不等於上面任何一個角色時，用這三組自由搭配。
    * text-s15 只設字級（不帶行高與字距）、leading-185 是行高 1.85（leading-normal 是瀏覽器預設的 normal）、tracking-004 是字距 0.04em（n001 是 -0.01em）。
    * 尺度以外的 leading-…／tracking-…（含負號、任意值、間距代幣）、text-[…]／text-(…)、
@@ -160,6 +160,7 @@
   --leading-140: 1.4;
   --leading-145: 1.45;
   --leading-150: 1.5;
+  --leading-155: 1.55;
   --leading-160: 1.6;
   --leading-165: 1.65;
   --leading-170: 1.7;
@@ -220,9 +221,14 @@
 }
 
 @layer base {
+  /*
+   * 一律保留捲軸的位置（Kevin 2026-11-21 決定，epic-3g P2-1）：有捲軸的電腦上，頁面從不用捲變成要捲時，
+   * 置中的內容（ADR-0054）不會左右跳。全站只加在這裡。
+   */
   html {
     color-scheme: dark;
     background-color: var(--color-background);
+    scrollbar-gutter: stable;
   }
 
   body {
