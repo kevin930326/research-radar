@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 
 import type { Page } from "@playwright/test";
 
-import { LIST_FIXTURES, MEMBERS, filterListRows, gate, paperId, type ApiRequest, type ListFixtureRow } from "./api-mock.ts";
+import { LIST_FIXTURES, MEMBERS, filterListRows, gate, libraryOf, paperId, type ApiRequest, type ListFixtureRow } from "./api-mock.ts";
 import { TEXT } from "./expected.ts";
 import { expect, test } from "./fixtures.ts";
 import { SITES } from "./pages.ts";
@@ -342,6 +342,8 @@ test.describe("my library page", () => {
     const [first] = apiMock.libraryIds;
     await openLibrary(page);
     const remove = row(page, first!).locator("[data-library='remove']:visible");
+    // 審查 K4：清單列完才讀 before（webkit 曾在清單還沒載完時就讀到只有標題的 main）。
+    await expect(rows(page)).toHaveCount(apiMock.libraryIds.length);
     const before = await page.locator("main").innerText();
     await remove.click();
     await requestsOf(apiMock.requests, "DELETE", "/api/v1/library/");
@@ -554,16 +556,24 @@ test.describe("my library on search rows", () => {
     await expect(page.locator(`[data-paper-row="${id}"] [data-library='added']`)).toBeVisible();
   });
 
-  test("add lights up when focus is in the row (keyboard)", async ({ page }) => {
-    // 驗收條件「滑到或聚焦在一列」（審查 F14）：焦點放到那一列的標題連結（滑鼠不在列上）。
-    // 直接 focus()：Safari 預設按 Tab 不停在連結上（審查 G4），用 Tab 走過去在 webkit 走不到。
+  test("add lights up when focus is in the row (keyboard)", async ({ page, browserName }) => {
+    // 驗收條件「滑到或聚焦在一列」（審查 F14）：用鍵盤把焦點移到那一列的標題連結（滑鼠不在列上）。
+    // 審查 K1：要真的用鍵盤走到。Safari 預設 Tab 不停在連結上，要用 Option+Tab（同 a11y-floor.spec.ts 的 walkFocus）。
     await page.setViewportSize(DESKTOP);
     await page.goto(`${member.baseURL}/search?topic=e_commerce`);
     const target = page.locator("[data-paper-row]").filter({ has: page.locator("[data-library='add']") }).first();
     const face = target.locator("[data-library='add'] span").first();
     const dim = await face.evaluate((element) => getComputedStyle(element).color);
     const titleLink = target.locator("h3").getByRole("link");
-    await titleLink.focus();
+    const key = browserName === "webkit" ? "Alt+Tab" : "Tab";
+    // 從頁面開頭往後走，最多按 MAX_TABS 下（導覽列、篩選列、前面幾列的連結與按鈕加起來遠少於這個數）。
+    const MAX_TABS = 80;
+    let reached = false;
+    for (let presses = 0; presses < MAX_TABS && !reached; presses += 1) {
+      await page.keyboard.press(key);
+      reached = await titleLink.evaluate((element) => element === document.activeElement);
+    }
+    expect(reached).toBe(true);
     await expect(titleLink).toBeFocused();
     await expect.poll(() => face.evaluate((element) => getComputedStyle(element).color)).not.toBe(dim);
   });
@@ -600,6 +610,74 @@ test.describe("my library on search rows", () => {
     await expect(page.locator(`[data-paper-row="${id}"] [data-library='added']`)).toBeVisible();
     await expect(page.locator(`[data-paper-row="${id}"] [data-library='add']`)).toHaveCount(0);
     expect(apiMock.libraryIds).toContain(id);
+  });
+
+  test("a first-page re-read still on its way when adding another row does not turn that row back into 'add'", async ({ page, apiMock }) => {
+    // 審查 K3：晚到的那一份要包含被按的那一列、而且在那一份裡是「未加入」。
+    // 做法：加入甲列後，畫面正在用的清單會重讀第一頁（markInLibrary 的 invalidate）；把這次重讀卡住，
+    // 在它還沒回來時按乙列的加入。那一份是乙加入之前算的（乙是 false），乙也在這一頁上。
+    await page.setViewportSize(DESKTOP);
+    await page.goto(`${member.baseURL}/search?topic=e_commerce`);
+    const shown = filterListRows(ROWS, new URLSearchParams("topic=e_commerce"))!;
+    await expect(page.locator("[data-paper-row]")).toHaveCount(shown.length);
+    const candidates = shown.map((entry) => entry.row.id).filter((id) => !apiMock.libraryIds.includes(id));
+    expect(candidates.length).toBeGreaterThanOrEqual(2);
+    const [first, second] = candidates as [string, string];
+    const listReads = () => apiMock.requests.filter((request) => request.method === "GET" && request.path.startsWith("/api/v1/papers?")).length;
+    const readsBefore = listReads();
+    const [rereadGate, releaseReread] = gate();
+    apiMock.listGate = rereadGate;
+    const reread = page.waitForRequest((request) => request.method() === "GET" && new URL(request.url()).pathname === "/api/v1/papers");
+    await page.locator(`[data-paper-row="${first}"] [data-library='add']`).click();
+    await expect(page.locator(`[data-paper-row="${first}"] [data-library='added']`)).toBeVisible();
+    await expect.poll(listReads).toBe(readsBefore + 1);
+    // 之後的讀取（乙加入後的重讀）另外卡住，只放行上面那一份。
+    const [laterGate, releaseLater] = gate();
+    apiMock.listGate = laterGate;
+    await page.locator(`[data-paper-row="${second}"] [data-library='add']`).click();
+    await expect(page.locator(`[data-paper-row="${second}"] [data-library='added']`)).toBeVisible();
+    expect(apiMock.libraryIds).toContain(second);
+    releaseReread();
+    const lateResponse = (await (await reread).response())!;
+    const late = (await lateResponse.json()) as { items: { id: string; in_my_library: boolean }[] };
+    await lateResponse.finished();
+    // 晚到的那一份有乙、而且乙是「未加入」（甲已經是加入）。
+    expect(late.items.find((item) => item.id === second)?.in_my_library).toBe(false);
+    expect(late.items.find((item) => item.id === first)?.in_my_library).toBe(true);
+    // 等瀏覽器把那一份交給畫面（兩個畫格），再看乙仍是「● 已加入」。
+    await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+    await expect(page.locator(`[data-paper-row="${second}"] [data-library='add']`)).toHaveCount(0);
+    await expect(page.locator(`[data-paper-row="${second}"] [data-library='added']`)).toBeVisible();
+    apiMock.listGate = null;
+    releaseLater();
+    await expect.poll(listReads).toBeGreaterThan(readsBefore + 1);
+    await expect(page.locator(`[data-paper-row="${second}"] [data-library='added']`)).toBeVisible();
+    await expect(page.locator(`[data-paper-row="${second}"] [data-library='add']`)).toHaveCount(0);
+  });
+
+  test("the mock answers with the member who sent the request, even if someone else signs in before it is sent", async ({ page, apiMock }) => {
+    // 審查 K2：替身「接到請求就記下成員」要有測試。甲、乙對同一篇的收藏狀態不同；
+    // 卡住甲的找論文請求，換成乙之後再放行，回應仍是甲的資料。
+    const shown = filterListRows(ROWS, new URLSearchParams("topic=e_commerce"))!;
+    const mine = shown.find((entry) => entry.personal)!.row.id;
+    expect(apiMock.member).toEqual(MEMBERS[0]);
+    const mineAll = apiMock.libraryIds;
+    expect(mineAll).toContain(mine);
+    expect(libraryOf(apiMock, MEMBERS[1]!.member_id).items.map((record) => record.id)).not.toContain(mine);
+    const [listGate, release] = gate();
+    apiMock.listGate = listGate;
+    const sent = page.waitForRequest((request) => request.method() === "GET" && new URL(request.url()).pathname === "/api/v1/papers");
+    await page.setViewportSize(DESKTOP);
+    await page.goto(`${member.baseURL}/search?topic=e_commerce`);
+    const request = await sent;
+    await expect.poll(() => apiMock.requests.filter((entry) => entry.method === "GET" && entry.path.startsWith("/api/v1/papers?")).length).toBe(1);
+    apiMock.member = MEMBERS[1]!;
+    apiMock.listGate = null;
+    release();
+    const answer = (await (await request.response())!.json()) as { items: { id: string; in_my_library: boolean }[] };
+    expect(answer.items.find((item) => item.id === mine)?.in_my_library).toBe(true);
+    // 每一列都照甲的文獻庫算（乙的是空的）。
+    expect(answer.items.map((item) => item.in_my_library)).toEqual(answer.items.map((item) => mineAll.includes(item.id)));
   });
 
   test("someone else signs in from another tab: the next page shows their library, not the cached one", async ({ page, apiMock }) => {
