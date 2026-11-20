@@ -51,14 +51,25 @@ Kevin 2026-11-19 決定：授權只看**出版社自己那一版**（OpenAlex �
 4. **判定**（`domain/policy.is_demo_eligible`，全專案唯一）：授權在 `DEMO_ELIGIBLE_LICENSES`（CC BY、CC BY-SA、CC0）、**至少一個出版社名稱正規化後不是空的**、而且沒有任何 ID 或名稱在排除清單裡，才是 True。**沒有出版社欄位＝False**（無法確認不是被排除的出版社，寧可不放；Kevin 2026-11-20 已同意）。排除清單沒有載入（`ScopeSettings.demo_publishers` 是 None）也是 False。
    - **名稱是必要條件，只有 ID 不夠**（PR #108 審查後加）：排除清單目前只靠名稱（設定檔的 `id` 都是 null），只有出版社 ID（看得懂或看不懂都一樣）、或名稱正規化後全部是空的（沒有任何字母或數字，例如只有空白、標點或看不見的字元；正規化規則見第 5 點）時，比不到名稱不代表不是 IEEE，一律 False。這比 Kevin 同意的「沒有出版社欄位＝不可用」更嚴，只會讓可用的變少（**保守方向，列給 Kevin 確認**）。之後排除清單補上實際的 ID 時再檢討這個條件。
 5. **排除清單** `config/demo_publishers.yaml`：每筆 `id`（OpenAlex 出版社 ID，可以是 null）、`name`（`host_organization_name` 的完整寫法）、`note`；至少一筆。名稱比對前兩邊（設定檔的名稱與論文的名稱）都經同一個函式 `normalize_publisher_name` 算出比對鍵，**只比字母與數字**：(1) NFKC；(2) `casefold`；(3) 只留 Unicode 類別以 `L`（字母）或 `N`（數字）開頭的字元，其他全部拿掉，包括空白、標點、符號（`So` 等，例如點字空白 U+2800）、格式字元 `Cf`（零寬空白、BOM、軟連字號等）、控制字元 `Cc`、組字符號 `Mn`（組字連接符 U+034F、異體字選擇符等）、私用區 `Co`、未指派 `Cn`；(4) 另外拿掉韓文填充字 U+115F、U+1160、U+3164、U+FFA0（類別是 `Lo`，但畫面上看不見）。所以 `IEEE Computer Society`、`IEEE-Computer Society`、字與字之間夾零寬空白或直接黏在一起的寫法都得到同一個鍵 `ieeecomputersociety`，`I.E.E.E.` 和 `IEEE` 同鍵；名稱沒有任何字母或數字時鍵是空字串，第 4 點不算它是名稱。**這是「寧可多排除」的選擇**（PR #108 第 3 輪確認審查後改）：不同的名稱可能撞成同一個鍵（例如只差標點或空白的兩家出版社），撞到排除清單只會讓可用的變少，不會讓該排除的漏掉；換來的是不必逐一列舉各種看不見或分隔用的字元。設定檔裡兩筆名稱得到同一個鍵不算錯（合併成一筆）；名稱沒有任何字母或數字的設定檔項目算寫錯。存進資料庫的 `publisher_names` 照舊是原字串，只有比對與「有沒有名稱」用這個鍵。檔案壞掉或不見時，api、worker、CLI 的啟動檢查列出問題、不啟動（和其他領域設定檔一樣）。
-6. **寫入**：`demo_eligible` 只由 `repo/papers.upsert_by_external_id` 寫，值只由 `is_demo_eligible` 算。三條寫入路徑（每週更新、第一次匯入＝第一次每週更新、`radar reparse`）都經這個函式；排除清單放在它本來就收的 `ScopeSettings`（`demo_publishers`；Kevin 2026-11-20 已同意），正式路徑用 `DomainConfig.scope_settings()` 建（worker 的 `load_scope`、`radar reparse`）。CREATED、UPDATED 時四欄整欄覆寫，STALE 不寫。
+6. **寫入**：`demo_eligible` 由 `repo/papers.upsert_by_external_id` 寫，另有 `radar reparse` 結束時的重判（第 9 點，經 `repo/papers.update_papers_not_demo_eligible`）**只會把 true 改成 false**；值一律只由 `is_demo_eligible` 算。三條寫入路徑（每週更新、第一次匯入＝第一次每週更新、`radar reparse`）都經這個函式；排除清單放在它本來就收的 `ScopeSettings`（`demo_publishers`；Kevin 2026-11-20 已同意），正式路徑用 `DomainConfig.scope_settings()` 建（worker 的 `load_scope`、`radar reparse`）。CREATED、UPDATED 時四欄整欄覆寫，STALE 不寫。
 7. **變動偵測不改（ADR-0028）**：授權或出版社變了、`source_hash` 沒變時，四欄照樣更新，但 `source_changed_at` 不動、`source_changed` 是 False，不會讓向量化或 AI 工作重做。
 8. **view `demo_full_paper`**：`counted_paper` ∩ `demo_eligible` ∩ 有目前用的摘要（`paper_abstract.is_current`）∩ 摘要來源允許公開。**「摘要來源允許公開」只在這個 view 定義**：只有 `openalex`（Semantic Scholar 還沒有書面授權；`uploaded_pdf` 永遠不是目前的摘要）。欄位明列、撤掉應用程式角色的寫入權限。
 9. **排除清單改了之後**：已經存下的 `demo_eligible` 不會自己變，要跑 `radar reparse` 重算（reparse 用存下的原始資料，不連 OpenAlex）。授權、出版社欄位同理：遷移後的第一次補資料也是跑 `radar reparse`。
    - **例外：reparse 沒有重寫到的論文保留舊值**。reparse 只重寫「有原始資料紀錄、最新那份讀得到、內容核對得過、解析得了、ID 對得上、而且不是 STALE」的論文；沒有原始資料紀錄、原始資料不見（`missing_object`）、解壓失敗或 SHA-256 雜湊對不上（`hash_mismatch`）、解析失敗（`parse_error`）、ID 對不上（`id_mismatch`）或 STALE 的論文照 ADR-0022 維持舊資料，`demo_eligible` 也維持舊清單算出來的值。第一次補資料不受影響（遷移後全部是 false，不會留下舊的 true）；只有「之後排除清單再改」時，這些論文可能留著已經不該有的 true。
    - **核對查詢**：每次改排除清單、跑完 reparse 之後，以及 Story 3.7 匯出之前，Kevin 用唯讀查詢確認「`demo_eligible` 為 true 的論文裡，存下的出版社名稱（正規化後）或 ID 對到排除清單的」是 0 篇。查詢本身寫在 PR #108 說明的 Kevin 手動步驟。
-   - 程式要不要補（例如 reparse 結束時用存下的欄位對沒重寫到的論文再判一次，只往 false 改）：會多一個寫 `demo_eligible` 的地方，和第 6 點衝突，**列為 Story 3.7 開工前 Kevin 要決定的事**。
+   - **程式補上（Kevin 2026-11-20 決定）**：reparse 套用暫存列的同一個交易裡，對 `demo_eligible` 為 true、而這次沒有寫到（UPDATED）的論文，用存下的 `primary_license`、`publisher_ids`、`publisher_names` 和套用用的同一份 `scope.demo_publishers` 經 `is_demo_eligible` 再判一次，算出 False 的才改成 false；原本 false 的不管算出來是什麼都不動。判定只在 Python，SQL 只做「依 id 把 true 改成 false」。reparse 的結果多兩個數字：重判了幾篇、其中幾篇改成 false。核對查詢照舊要跑。
 10. **部署與退版**：部署（遷移 0021＋重建 api、worker）要在沒有進行中的每週更新時做。舊程式抓到、還沒套用的暫存列沒有授權與出版社欄位，新程式套用時會把那幾篇寫成沒有授權、沒有出版社、`demo_eligible = false`（只會往不可用錯，再跑一次 reparse 就補回來）。退回舊版程式前要先確認暫存區是空的：新程式寫的暫存列有舊程式不認得的欄位，舊程式讀不進來，那次每週更新會一直失敗。
+
+## 更新（2026-11-21）
+
+- **IEEE 的出版社 ID 已查證**：Kevin 2026-11-20 用唯讀查詢從資料庫查到 IEEE Transactions on Engineering Management（ISSN-L 0018-9391，2,893 篇）的出版社 ID 只有 `P4310319808`、名稱只有 `Institute of Electrical and Electronics Engineers` 一種寫法；`config/demo_publishers.yaml` 全名那一筆補上這個 ID。`IEEE`、`IEEE Computer Society` 兩筆留著當保守寫法（`id` 是 null）。第 4 點「名稱是必要條件」不變（Kevin 2026-11-20 決定維持）。「已知限制」第一點的 ID 部分因此已解決；名稱寫法之外的 IEEE 論文仍靠核對查詢確認。
+- **reparse 沒重寫到的論文重判**：第 6 點、第 9 點最後一小點照 Kevin 2026-11-20 的決定改寫（見上）。做法的細節：
+  - 套用與重判在同一個交易（持有寫入鎖），所以沒有「套用了、還沒重判」的中間狀態；中途失敗整個退回，重跑一次就補上；只往 false 改，重跑幾次結果一樣。
+  - 「這次寫到的」只算 UPDATED（reparse 不會 CREATED）；STALE 和各種略過的都算沒寫到。
+  - 排除清單沒有載入（`demo_publishers` 是 None）時 `is_demo_eligible` 一律 False，重判會把沒寫到的 true 全部改成 false：和同一次套用寫到的論文（`upsert_by_external_id` 也寫 false）一致，方向是少放，所以不另外擋；正式路徑一定帶 `DomainConfig.scope_settings()`。
+  - reparse 沒有不寫入的模式（例如 `--dry-run`），不用另外處理。
+  - 「已知限制」第三點（排除清單再改時可能留著舊的 true）因此由程式處理；核對查詢照舊保留當第二道檢查。
+- **`PublisherExclusions` 建立時自己正規化**：ID 經 `normalize_openalex_id`（看不懂的照原字串去頭尾空白、轉大寫，和比對論文 ID 時一樣），名稱經 `normalize_publisher_name`；正規化後是空字串的丟 `ValueError`（和設定檔載入把沒有字母或數字的名稱當寫錯一致）。從設定檔載入的結果不變。
 
 ## 理由
 

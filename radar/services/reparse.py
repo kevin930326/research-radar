@@ -25,13 +25,14 @@ from radar.domain.papers import KeywordSource, PaperOrigin, ParsedPaper, UpsertO
 from radar.domain.parsers import ParseError
 from radar.domain.parsers.openalex import parse_openalex_work
 from radar.domain.permissions import Action, require
+from radar.domain.policy import is_demo_eligible
 from radar.domain.raw_records import RawFetchRef, RawSource, decompress_raw
 from radar.domain.scope import ScopeSettings
 from radar.domain.staging import StagingItem, StagingKind
 from radar.domain.storage_keys import ObjectNotFoundError, raw_object_key
 from radar.domain.viewer import SystemViewer, Viewer
 from radar.ports import ObjectStore
-from radar.repo.db import INGEST_WRITE_LOCK_KEY, Database, SessionLock
+from radar.repo.db import INGEST_WRITE_LOCK_KEY, Connection, Database, SessionLock
 
 # 入口不能直接 import radar.repo；reparse 會丟這個例外，從這裡轉出去給 `radar reparse` 攔。
 from radar.repo.db import AdvisoryLockLostError as AdvisoryLockLostError
@@ -41,7 +42,13 @@ from radar.repo.ingest_staging import (
     delete_staged_papers_of_kind,
     list_staged_papers,
 )
-from radar.repo.papers import find_known_external_ids, update_paper_keywords, upsert_by_external_id
+from radar.repo.papers import (
+    find_known_external_ids,
+    list_demo_eligible_facts,
+    update_paper_keywords,
+    update_papers_not_demo_eligible,
+    upsert_by_external_id,
+)
 from radar.repo.raw_fetches import list_latest_raw_fetches
 from radar.repo.weekly_runs import find_fetching_weekly_run
 
@@ -86,6 +93,8 @@ class ReparseResult:
     - `staged`：放進暫存表的篇數。
     - `updated`：套用時寫進論文的篇數；`stale`：資料比論文上的舊、什麼都沒寫的篇數。
     - `conflicts`：識別碼已經屬於另一篇論文、沒有掛上去的個數。
+    - `demo_rechecked`：套用後重判「示範站可用」的篇數（這次沒有重寫到、原本 `demo_eligible` 為
+      真的論文；ADR-0052 第 9 點）；`demo_revoked`：其中從 true 改成 false 的篇數。
     """
 
     raw_keys: int = 0
@@ -98,6 +107,8 @@ class ReparseResult:
     updated: int = 0
     stale: int = 0
     conflicts: int = 0
+    demo_rechecked: int = 0
+    demo_revoked: int = 0
 
 
 @dataclass
@@ -113,6 +124,8 @@ class _Counts:
     updated: int = 0
     stale: int = 0
     conflicts: int = 0
+    demo_rechecked: int = 0
+    demo_revoked: int = 0
 
 
 def reparse_papers(
@@ -142,8 +155,12 @@ def reparse_papers(
        暫存列。
     3. 一個交易：依 `id` 分批讀這個 `batch_id` 的暫存列，逐筆 `upsert_by_external_id`（`tracked`、
        暫存列的 `excluded_reason`），不是 STALE 時整批覆寫 OpenAlex 的關鍵字；全部寫完在同一個
-       交易刪掉這一批的暫存列。中途失敗整個交易退回（論文、摘要、關鍵字都不變），暫存列留著，
-       下次執行一開始清掉。
+       交易刪掉這一批的暫存列。接著在**同一個交易**重判示範站可用（ADR-0052 第 9 點）：
+       `demo_eligible` 為真、而這次沒有寫到（UPDATED）的論文（沒有原始資料紀錄、各種失敗略過、
+       STALE），用存下的授權與出版社欄位經 `is_demo_eligible`（同一份 `scope.demo_publishers`）
+       再算一次，算出 False 的才改成 false；只往 false 改。中途失敗整個交易退回（論文、摘要、
+       關鍵字、`demo_eligible` 都不變），暫存列留著，下次執行一開始清掉；套用與重判在同一個交易，
+       不會有「套用了、還沒重判」的中間狀態，重跑幾次結果一樣。
 
     Raises:
         PermissionDeniedError: `actor` 不是系統工作（不碰資料庫與物件儲存）。
@@ -229,6 +246,8 @@ def _reparse_locked(
         updated=counts.updated,
         stale=counts.stale,
         conflicts=counts.conflicts,
+        demo_rechecked=counts.demo_rechecked,
+        demo_revoked=counts.demo_revoked,
     )
     log.info("重新解析結束", source=RawSource.OPENALEX.value, **vars(result))
     return result
@@ -288,11 +307,12 @@ def _apply(
     batch_size: int,
     counts: _Counts,
 ) -> None:
-    """一個交易：把這一批的暫存列逐筆寫進論文，寫完刪掉暫存列。
+    """一個交易：把這一批的暫存列逐筆寫進論文，寫完刪掉暫存列，再重判沒寫到的論文的示範站可用。
 
     讀到的暫存列數和放進去的不一樣（例如另一個 reparse 同時在跑、一開始把這一批刪掉）就丟錯，
     整個交易退回，不會只寫一半。
     """
+    rewritten: set[uuid.UUID] = set()
     with lock.transaction() as connection:
         after_id: uuid.UUID | None = None
         applied = 0
@@ -319,6 +339,7 @@ def _apply(
                     counts.stale += 1
                     continue
                 counts.updated += 1
+                rewritten.add(result.paper_id)
                 counts.conflicts += len(result.conflicts)
                 update_paper_keywords(
                     connection, result.paper_id, KeywordSource.OPENALEX, row.paper.keywords
@@ -329,3 +350,46 @@ def _apply(
                 "暫存列數和放進去的不一樣，可能有另一個 reparse 同時在跑；已整個退回"
             )
         delete_staged_papers(connection, batch_id)
+        _recheck_demo_eligible(connection, viewer, scope, rewritten, batch_size, counts)
+
+
+def _recheck_demo_eligible(
+    connection: Connection,
+    viewer: SystemViewer,
+    scope: ScopeSettings,
+    rewritten: set[uuid.UUID],
+    batch_size: int,
+    counts: _Counts,
+) -> None:
+    """重判這次沒有重寫到的論文的 `demo_eligible`，只把 true 改成 false（ADR-0052 第 6、9 點）。
+
+    判定只經 `is_demo_eligible`，用存下的 `primary_license`、`publisher_ids`、`publisher_names` 與
+    套用用的同一份 `scope.demo_publishers`。排除清單沒有載入（None）時 `is_demo_eligible` 一律
+    False，所以全部改成 false：和同一次套用寫到的論文一致（`upsert_by_external_id` 也會寫 false），
+    方向是「少放」；正式路徑（`radar reparse`）一定帶 `DomainConfig.scope_settings()`。
+    """
+    after_id: uuid.UUID | None = None
+    while True:
+        page = list_demo_eligible_facts(viewer, connection, after_id=after_id, limit=batch_size)
+        if not page:
+            break
+        revoke: list[uuid.UUID] = []
+        for facts in page:
+            if facts.paper_id in rewritten:
+                continue
+            counts.demo_rechecked += 1
+            if not is_demo_eligible(
+                facts.primary_license,
+                facts.publisher_ids,
+                facts.publisher_names,
+                scope.demo_publishers,
+            ):
+                revoke.append(facts.paper_id)
+        counts.demo_revoked += update_papers_not_demo_eligible(connection, revoke)
+        after_id = page[-1].paper_id
+    if counts.demo_revoked:
+        log.info(
+            "重判示範站可用：沒重寫到的論文有幾篇改成不可用",
+            rechecked=counts.demo_rechecked,
+            revoked=counts.demo_revoked,
+        )
