@@ -12,6 +12,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
+from structlog.testing import capture_logs
 
 from radar.adapters.fake import FakeObjectStore
 from radar.domain.domain_config import ExclusionRulesConfig
@@ -268,3 +269,15 @@ def test_stored_parsed_paper_fields_are_what_gets_rechecked(
 
     assert _eligible(demo_db, paper_id) is False
     assert (result.demo_rechecked, result.demo_revoked) == (1, 1)
+
+
+def test_finish_log_carries_the_recheck_numbers(demo_db: TestDatabase, database: Database) -> None:
+    # CLI 還沒印這兩個數字之前，Kevin 從「重新解析結束」那一行日誌（JSON，寫在 stdout）讀。
+    store = FakeObjectStore()
+    _seed_case(database, store, "no_raw", 1)
+
+    with capture_logs() as logs:
+        _reparse(database, store, NEW_SCOPE)
+
+    [finished] = [log for log in logs if log["event"] == "重新解析結束"]
+    assert (finished["demo_rechecked"], finished["demo_revoked"]) == (1, 1)
