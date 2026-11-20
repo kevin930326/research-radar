@@ -1,6 +1,6 @@
 # ADR-0054：整頁內容最寬 1088px、置中
 
-- 狀態：已採用（Kevin 2026-11-20 決定）；設計稿與規格已改，程式還沒改
+- 狀態：已採用（Kevin 2026-11-20 決定）；設計稿、規格、程式都已改（PR 113，2026-11-21 合併）
 - 日期：2026-11-20
 - 相關：ADR-0038（設計稿是畫面的依據）、`DESIGN.md` Layout & Spacing、`EXPERIENCE.md`「已決定的事項」第 93 項
 
@@ -43,4 +43,5 @@
 ## 目前做到哪
 
 - 已改：`docs/ux/reference/screens/search-no-box.html`、`library.html`（2026-11-20 第二版）；`DESIGN.md`、`EXPERIENCE.md` 的文字。
-- 還沒改：其他設計稿（寬於 1280px 時仍是舊排法，比對時以這份 ADR 為準）；程式。
+- 已改：程式（PR 113，2026-11-21 合併）：外框只定義在 `web/src/routes/root.tsx` 的 `PAGE_FRAME_CLASS`，代幣 `page-max-width`（1280px，含左右留白）。頁尾還沒做（Story 3.15），做的時候套同一個外框。
+- 還沒改：其他設計稿（寬於 1280px 時仍是舊排法，比對時以這份 ADR 為準）。
