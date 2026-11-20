@@ -4,6 +4,8 @@
 // Story 3.8 加上論文頁的兩個端點（/api/v1/papers/{id}、/api/v1/display-names）：資料來自
 // e2e/fixtures/papers.json（自己編的假論文，和 e2e 共用），每一種狀態是一個論文 ID，啟動時把網址印出來；
 // 畫面上沒有切換列。
+// Story 3.14 加上找論文的兩個端點（/api/v1/papers 清單、/api/v1/client-config）：資料來自
+// e2e/fixtures/paper-list.json（自己編的假清單，和 e2e 共用），依網址參數篩選、用位移當 cursor 分頁。
 // 畫面是真正的建置結果；這支只代替後端，不是給測試用的（Playwright 測試用 e2e/api-mock.ts 的 page.route）。
 //
 // 用法（在 web/ 底下，先 npm run build:member）：
@@ -15,8 +17,11 @@
 //   --member-name   測試成員的顯示名稱，預設 Test Member A
 //   --signed-in     一開始就是登入狀態（設計稿比對時，每次都是新的瀏覽器，沒有 cookie）
 //   --papers-file   論文頁的假資料，預設 e2e/fixtures/papers.json（格式同那一份）
+//   --list-file     找論文的假清單，預設 e2e/fixtures/paper-list.json（格式同那一份；可以多一個 displayNames，
+//                   換掉論文頁假資料裡的顯示名稱）
 //
 // 論文頁：http://127.0.0.1:4180/__mock/papers 列出每一種狀態的網址（啟動時也印出來）。
+// 找論文：http://127.0.0.1:4180/__mock/search 列出每一種狀態怎麼看（啟動時也印出來）。
 //
 // 切換情境（例如看登入失敗、登出失敗）：打開或 curl
 //   http://127.0.0.1:4180/__mock?login=failed            登入：ok／failed（伺服器錯誤）／denied（不在名單裡）
@@ -27,6 +32,15 @@
 //   http://127.0.0.1:4180/__mock?expire=1                讓目前的登入過期（下一次換頁回到登入頁）
 //   http://127.0.0.1:4180/__mock?names=failed            論文頁的顯示名稱：ok／failed（伺服器錯誤：分類那一行是
 //                                                        「沒有載入成功」＋「重試」）／expired（401：回登入頁）
+//   http://127.0.0.1:4180/__mock?list=failed             找論文的清單：ok／failed（伺服器錯誤：「錯誤」狀態）／
+//                                                        expired（401：回登入頁）
+//   http://127.0.0.1:4180/__mock?listDelay=60000         找論文的清單要等幾毫秒（看載入中的骨架）
+//   http://127.0.0.1:4180/__mock?listDelayAfter=1        前幾次清單請求不等，之後的才等 listDelay（先讀到一次資料、
+//                                                        再換條件看骨架：資料日期那一行留著）
+//   http://127.0.0.1:4180/__mock?list=failed&listFailAfter=1  前幾次清單請求照常回，之後的才失敗（先讀到一次資料、
+//                                                        再換條件看錯誤：資料日期那一行留著）
+//   http://127.0.0.1:4180/__mock?listTotal=126           清單回報的總篇數改成這個數字（設計稿比對時對齊設計稿的數字；
+//                                                        0 是不改）
 // 參數可以一起給；回傳目前的情境（JSON）。
 /* global process, URL, setTimeout */
 import { randomUUID } from "node:crypto";
@@ -53,7 +67,14 @@ const TYPES = {
 };
 
 function parseArgs(argv) {
-  const args = { port: 4180, dist: "dist", memberName: "Test Member A", signedIn: false, papersFile: "e2e/fixtures/papers.json" };
+  const args = {
+    port: 4180,
+    dist: "dist",
+    memberName: "Test Member A",
+    signedIn: false,
+    papersFile: "e2e/fixtures/papers.json",
+    listFile: "e2e/fixtures/paper-list.json",
+  };
   for (let i = 0; i < argv.length; i += 1) {
     const key = argv[i];
     if (key === "--signed-in") {
@@ -65,6 +86,7 @@ function parseArgs(argv) {
     else if (key === "--dist") args.dist = value;
     else if (key === "--member-name") args.memberName = value;
     else if (key === "--papers-file") args.papersFile = value;
+    else if (key === "--list-file") args.listFile = value;
     else throw new Error(`unknown option: ${key}`);
     i += 1;
   }
@@ -78,7 +100,23 @@ const MEMBERS = [
   { member_id: "00000000-0000-4000-8000-00000000000b", display_name: "Test Member B" },
 ];
 const PAPERS = JSON.parse(readFileSync(resolve(WEB_ROOT, args.papersFile), "utf-8"));
-const scenario = { login: "ok", logout: "ok", names: "ok", loginDelay: 0, logoutDelay: 0, alwaysSignedIn: args.signedIn };
+const LIST = JSON.parse(readFileSync(resolve(WEB_ROOT, args.listFile), "utf-8"));
+if (LIST.displayNames !== undefined) PAPERS.displayNames = LIST.displayNames;
+const scenario = {
+  login: "ok",
+  logout: "ok",
+  names: "ok",
+  list: "ok",
+  loginDelay: 0,
+  logoutDelay: 0,
+  listDelay: 0,
+  listDelayAfter: 0,
+  listTotal: 0,
+  listFailAfter: 0,
+  alwaysSignedIn: args.signedIn,
+};
+/** 收過幾次清單請求（listDelayAfter 用）。 */
+let listRequests = 0;
 /** 有效的 session token → 成員。 */
 const sessions = new Map();
 
@@ -93,7 +131,13 @@ function json(res, status, value, headers = {}) {
   send(res, status, JSON.stringify(value), { "Content-Type": "application/json", ...headers });
 }
 
-const TITLES = { 401: "Unauthorized", 403: "Forbidden", 404: "Not Found", 500: "Internal Server Error" };
+const TITLES = {
+  401: "Unauthorized",
+  403: "Forbidden",
+  404: "Not Found",
+  422: "Unprocessable Entity",
+  500: "Internal Server Error",
+};
 
 function problem(res, status, code) {
   json(res, status, { type: "about:blank", title: TITLES[status], status, code }, {
@@ -130,7 +174,7 @@ async function readJson(req) {
   }
 }
 
-async function api(req, res, path) {
+async function api(req, res, path, query) {
   if (req.method === "GET" && path === "/api/v1/me") {
     const member = currentMember(req);
     return member === null ? problem(res, 401, "not_authenticated") : json(res, 200, member);
@@ -157,6 +201,13 @@ async function api(req, res, path) {
     if (currentMember(req) === null || scenario.names === "expired") return problem(res, 401, "not_authenticated");
     if (scenario.names === "failed") return problem(res, 500, "internal_error");
     return json(res, 200, PAPERS.displayNames);
+  }
+  if (req.method === "GET" && path === "/api/v1/client-config") {
+    if (currentMember(req) === null) return problem(res, 401, "not_authenticated");
+    return json(res, 200, LIST.clientConfig);
+  }
+  if (req.method === "GET" && path === "/api/v1/papers") {
+    return paperList(req, res, query);
   }
   if (req.method === "GET" && path.startsWith("/api/v1/papers/")) {
     if (currentMember(req) === null) return problem(res, 401, "not_authenticated");
@@ -192,6 +243,77 @@ async function paper(res, id) {
   return entry === undefined ? problem(res, 404, "not_found") : json(res, 200, entry.page);
 }
 
+/** 追蹤範圍的第一年（同 config/journals.yaml 的 start_year）：更早的年份後端回 422。 */
+const START_YEAR = 2016;
+
+/**
+ * 依網址參數篩選假清單（後端的簡化版，和 e2e/api-mock.ts 的 filterListRows 同一套規則）；年份不合、
+ * 不認得的期刊／主題／方法代號（顯示名稱裡沒有）是 null（422）。
+ */
+function filterRows(query) {
+  const journals = query.getAll("journal");
+  const years = query.getAll("year").map(Number);
+  const topics = query.getAll("topic");
+  const methods = query.getAll("method");
+  const scope = query.get("scope") ?? "tracked";
+  if (years.some((year) => !Number.isInteger(year) || year < START_YEAR)) return null;
+  const names = PAPERS.displayNames;
+  const known = (entries, keys, extra = []) =>
+    keys.every((key) => extra.includes(key) || (entries ?? []).some((entry) => entry.key === key));
+  if (!known(names.journals, journals) || !known(names.topics, topics, ["unclassified"]) || !known(names.methods, methods)) {
+    return null;
+  }
+  return LIST.rows
+    .filter(
+      (entry) =>
+        (journals.length === 0 || journals.includes(entry.row.journal ?? "")) &&
+        (years.length === 0 || years.includes(entry.row.publication_year ?? 0)) &&
+        topics.every((topic) => (topic === "unclassified" ? entry.topics.length === 0 : entry.topics.includes(topic))) &&
+        methods.every((method) => (entry.methods ?? []).includes(method)) &&
+        (query.get("this_week") !== "true" || entry.this_week) &&
+        (scope === "tracked" || (scope === "lab" ? entry.lab : entry.personal)),
+    )
+    .sort((a, b) => (b.row.publication_year ?? 0) - (a.row.publication_year ?? 0));
+}
+
+/** 找論文的清單：篩選、分頁（cursor 是位移「o20」）。 */
+async function paperList(req, res, query) {
+  if (currentMember(req) === null) return problem(res, 401, "not_authenticated");
+  listRequests += 1;
+  const outcome = listRequests > scenario.listFailAfter ? scenario.list : "ok";
+  if (listRequests > scenario.listDelayAfter) await sleep(scenario.listDelay);
+  if (res.destroyed || req.socket.destroyed) return undefined;
+  if (outcome === "expired") return problem(res, 401, "not_authenticated");
+  if (outcome === "failed") return problem(res, 500, "internal_error");
+  const rows = filterRows(query);
+  if (rows === null) return problem(res, 422, "request_invalid");
+  const size = LIST.clientConfig.paper_list_page_size;
+  const cursor = query.get("cursor");
+  const offset = cursor !== null && /^o\d+$/.test(cursor) ? Number(cursor.slice(1)) : 0;
+  const total = scenario.listTotal > 0 ? scenario.listTotal : rows.length;
+  return json(res, 200, {
+    items: rows.slice(offset, offset + size).map((entry) => entry.row),
+    next_cursor: offset + size < rows.length ? `o${offset + size}` : null,
+    total,
+    snapshot: LIST.snapshot,
+  });
+}
+
+/** 找論文每一種狀態怎麼看（給人看的清單）。 */
+function searchIndex() {
+  const base = `http://127.0.0.1:${args.port}`;
+  return [
+    { label: "start", url: `${base}/search`, note: "還沒有任何條件：本週新增前 3 篇" },
+    { label: "linked", url: `${base}/search?this_week=true`, note: "從「看全部 N 篇」帶進來的條件" },
+    { label: "filtered", url: `${base}/search?journal=misq,isr,jmis,jais,ejis,isj,jit,jsis,dss,im,io&from=2022&to=2026`, note: "篩選中" },
+    { label: "results", url: `${base}/search?topic=e_commerce`, note: "有結果（多於一頁時有「再載入」）" },
+    { label: "method", url: `${base}/search?method=experiment`, note: "從論文頁的方法標籤帶進來的條件" },
+    { label: "zero", url: `${base}/search?journal=misq&from=2016&to=2016`, note: "沒有結果" },
+    { label: "loading", url: `${base}/__mock?listDelay=600000`, note: "先打開這個，再開任何找論文的網址：骨架" },
+    { label: "error", url: `${base}/__mock?list=failed`, note: "先打開這個，再開任何找論文的網址：錯誤" },
+  ];
+}
+
 /** 每一種狀態的網址（給人看的清單）。 */
 function paperIndex() {
   const base = `http://127.0.0.1:${args.port}/papers/`;
@@ -205,12 +327,13 @@ function paperIndex() {
 }
 
 function control(res, query) {
-  for (const key of ["login", "logout", "names"]) {
+  for (const key of ["login", "logout", "names", "list"]) {
     if (query.has(key)) scenario[key] = query.get(key);
   }
-  for (const key of ["loginDelay", "logoutDelay"]) {
+  for (const key of ["loginDelay", "logoutDelay", "listDelay", "listDelayAfter", "listTotal", "listFailAfter"]) {
     if (query.has(key)) scenario[key] = Number(query.get(key));
   }
+  if (query.has("listDelayAfter") || query.has("listFailAfter")) listRequests = 0;
   if (query.has("signedIn")) scenario.alwaysSignedIn = query.get("signedIn") === "true";
   if (query.has("expire")) {
     sessions.clear();
@@ -245,8 +368,9 @@ createServer((req, res) => {
   const url = new URL(req.url ?? "/", "http://127.0.0.1");
   if (url.pathname === "/__mock") return control(res, url.searchParams);
   if (url.pathname === "/__mock/papers") return json(res, 200, paperIndex());
+  if (url.pathname === "/__mock/search") return json(res, 200, searchIndex());
   if (url.pathname.startsWith("/api/")) {
-    api(req, res, url.pathname).catch((error) => {
+    api(req, res, url.pathname, url.searchParams).catch((error) => {
       process.stderr.write(`${error}\n`);
       problem(res, 500, "internal_error");
     });
@@ -256,4 +380,5 @@ createServer((req, res) => {
 }).listen(args.port, "127.0.0.1", () => {
   process.stdout.write(`mock api: http://127.0.0.1:${args.port}/login (dist: ${DIST})\n`);
   for (const row of paperIndex()) process.stdout.write(`  ${row.label.padEnd(18)} ${row.url}\n`);
+  for (const row of searchIndex()) process.stdout.write(`  search ${row.label.padEnd(11)} ${row.url}\n`);
 });

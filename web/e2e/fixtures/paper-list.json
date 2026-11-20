@@ -1,0 +1,752 @@
+{
+  "_comment": "找論文（Story 3.14）的假清單：自己編的標題、作者與 DOI（10.5555 是測試用的 DOI 前綴），不是真的論文。e2e/api-mock.ts 與 scripts/mock-api.mjs 共用。row 是 API 回的一列；topics、methods（沒寫是沒有方法）、this_week、lab、personal 是替身用來篩選的欄位（API 不回）。 前三列（本週新增的前 3 篇）的 ID 用論文頁假資料裡的三篇（normal、no-abstract、all-failed），站內連結檢查點標題時落在真的有的論文頁。",
+  "snapshot": {
+    "number": 12,
+    "as_of": "2026-11-11T17:30:00Z"
+  },
+  "clientConfig": {
+    "timezone": "Asia/Taipei",
+    "library_page_size": 20,
+    "paper_list_page_size": 20
+  },
+  "rows": [
+    {
+      "row": {
+        "id": "38000000-0000-4000-8000-000000000001",
+        "title": "Fake Paper 01: Trust and Ledger in an Example Setting",
+        "authors": [
+          "Author B"
+        ],
+        "author_count": 2,
+        "publication_year": 2026,
+        "journal": "isj",
+        "journal_issn_l": null,
+        "doi": "10.5555/fake.0001",
+        "doi_url": "https://doi.org/10.5555/fake.0001",
+        "has_abstract": true,
+        "in_scope": true,
+        "is_retracted": false
+      },
+      "topics": [
+        "supply_chain"
+      ],
+      "this_week": true,
+      "lab": false,
+      "personal": true
+    },
+    {
+      "row": {
+        "id": "38000000-0000-4000-8000-000000000003",
+        "title": "Fake Paper 02: A Deliberately Long Example Title About Platform Trust, Supply Signals and Team Routines That Wraps Onto a Second Line on Narrow Screens",
+        "authors": [
+          "Author C"
+        ],
+        "author_count": 3,
+        "publication_year": 2026,
+        "journal": "io",
+        "journal_issn_l": null,
+        "doi": "10.5555/fake.0002",
+        "doi_url": "https://doi.org/10.5555/fake.0002",
+        "has_abstract": true,
+        "in_scope": true,
+        "is_retracted": false
+      },
+      "topics": [
+        "e_commerce",
+        "information_economics"
+      ],
+      "this_week": true,
+      "lab": false,
+      "personal": false,
+      "methods": [
+        "experiment"
+      ]
+    },
+    {
+      "row": {
+        "id": "38000000-0000-4000-8000-000000000005",
+        "title": "Fake Paper 03: Signals and Analytics in an Example Setting",
+        "authors": [
+          "Author D"
+        ],
+        "author_count": 4,
+        "publication_year": 2026,
+        "journal": "isr",
+        "journal_issn_l": null,
+        "doi": "10.5555/fake.0003",
+        "doi_url": "https://doi.org/10.5555/fake.0003",
+        "has_abstract": true,
+        "in_scope": true,
+        "is_retracted": false
+      },
+      "topics": [
+        "it_project_management"
+      ],
+      "this_week": true,
+      "lab": true,
+      "personal": false
+    },
+    {
+      "row": {
+        "id": "00000000-0000-4000-9000-000000000004",
+        "title": "Fake Paper 04: Ledger and Adoption in an Example Setting",
+        "authors": [
+          "Author E"
+        ],
+        "author_count": 1,
+        "publication_year": 2025,
+        "journal": "jit",
+        "journal_issn_l": null,
+        "doi": "10.5555/fake.0004",
+        "doi_url": "https://doi.org/10.5555/fake.0004",
+        "has_abstract": true,
+        "in_scope": true,
+        "is_retracted": false
+      },
+      "topics": [
+        "e_commerce",
+        "information_economics"
+      ],
+      "this_week": true,
+      "lab": false,
+      "personal": false
+    },
+    {
+      "row": {
+        "id": "00000000-0000-4000-9000-000000000005",
+        "title": "Fake Paper 05: Routines and Markets in an Example Setting",
+        "authors": [
+          "Author F"
+        ],
+        "author_count": 2,
+        "publication_year": 2025,
+        "journal": "pmj",
+        "journal_issn_l": null,
+        "doi": "10.5555/fake.0005",
+        "doi_url": "https://doi.org/10.5555/fake.0005",
+        "has_abstract": false,
+        "in_scope": true,
+        "is_retracted": false
+      },
+      "topics": [
+        "ai_data_analytics"
+      ],
+      "this_week": true,
+      "lab": false,
+      "personal": false
+    },
+    {
+      "row": {
+        "id": "00000000-0000-4000-9000-000000000006",
+        "title": "Fake Paper 06: Analytics and Teams in an Example Setting",
+        "authors": [
+          "Author G"
+        ],
+        "author_count": 3,
+        "publication_year": 2025,
+        "journal": "jmis",
+        "journal_issn_l": null,
+        "doi": "10.5555/fake.0006",
+        "doi_url": "https://doi.org/10.5555/fake.0006",
+        "has_abstract": true,
+        "in_scope": true,
+        "is_retracted": false
+      },
+      "topics": [
+        "erp"
+      ],
+      "this_week": false,
+      "lab": true,
+      "personal": false,
+      "methods": [
+        "experiment"
+      ]
+    },
+    {
+      "row": {
+        "id": "00000000-0000-4000-9000-000000000007",
+        "title": "Fake Paper 07: Adoption and Platform in an Example Setting",
+        "authors": [
+          "Author H"
+        ],
+        "author_count": 4,
+        "publication_year": 2024,
+        "journal": "jsis",
+        "journal_issn_l": null,
+        "doi": "10.5555/fake.0007",
+        "doi_url": "https://doi.org/10.5555/fake.0007",
+        "has_abstract": true,
+        "in_scope": true,
+        "is_retracted": false
+      },
+      "topics": [],
+      "this_week": false,
+      "lab": false,
+      "personal": false
+    },
+    {
+      "row": {
+        "id": "00000000-0000-4000-9000-000000000008",
+        "title": "Fake Paper 08: Markets and Trust in an Example Setting",
+        "authors": [
+          "Author I"
+        ],
+        "author_count": 1,
+        "publication_year": 2024,
+        "journal": "tem",
+        "journal_issn_l": null,
+        "doi": "10.5555/fake.0008",
+        "doi_url": "https://doi.org/10.5555/fake.0008",
+        "has_abstract": true,
+        "in_scope": true,
+        "is_retracted": false
+      },
+      "topics": [
+        "e_commerce",
+        "information_economics"
+      ],
+      "this_week": false,
+      "lab": false,
+      "personal": false
+    },
+    {
+      "row": {
+        "id": "00000000-0000-4000-9000-000000000009",
+        "title": "Fake Paper 09: Teams and Supply in an Example Setting",
+        "authors": [
+          "Author J"
+        ],
+        "author_count": 2,
+        "publication_year": 2024,
+        "journal": "jais",
+        "journal_issn_l": null,
+        "doi": null,
+        "doi_url": null,
+        "has_abstract": true,
+        "in_scope": true,
+        "is_retracted": false
+      },
+      "topics": [
+        "it_project_management"
+      ],
+      "this_week": false,
+      "lab": true,
+      "personal": false
+    },
+    {
+      "row": {
+        "id": "00000000-0000-4000-9000-000000000010",
+        "title": "Fake Paper 10: Platform and Signals in an Example Setting",
+        "authors": [
+          "Author K"
+        ],
+        "author_count": 3,
+        "publication_year": 2023,
+        "journal": "dss",
+        "journal_issn_l": null,
+        "doi": "10.5555/fake.0010",
+        "doi_url": "https://doi.org/10.5555/fake.0010",
+        "has_abstract": false,
+        "in_scope": true,
+        "is_retracted": false
+      },
+      "topics": [
+        "e_commerce",
+        "information_economics"
+      ],
+      "this_week": false,
+      "lab": false,
+      "personal": false,
+      "methods": [
+        "experiment"
+      ]
+    },
+    {
+      "row": {
+        "id": "00000000-0000-4000-9000-000000000011",
+        "title": "Fake Paper 11: Trust and Ledger in an Example Setting",
+        "authors": [
+          "Author L"
+        ],
+        "author_count": 4,
+        "publication_year": 2023,
+        "journal": "database",
+        "journal_issn_l": null,
+        "doi": "10.5555/fake.0011",
+        "doi_url": "https://doi.org/10.5555/fake.0011",
+        "has_abstract": true,
+        "in_scope": true,
+        "is_retracted": false
+      },
+      "topics": [
+        "ai_data_analytics"
+      ],
+      "this_week": false,
+      "lab": false,
+      "personal": true
+    },
+    {
+      "row": {
+        "id": "00000000-0000-4000-9000-000000000012",
+        "title": "Fake Paper 12: Supply and Routines in an Example Setting",
+        "authors": [
+          "Author M"
+        ],
+        "author_count": 1,
+        "publication_year": 2023,
+        "journal": "ejis",
+        "journal_issn_l": null,
+        "doi": "10.5555/fake.0012",
+        "doi_url": "https://doi.org/10.5555/fake.0012",
+        "has_abstract": true,
+        "in_scope": true,
+        "is_retracted": false
+      },
+      "topics": [
+        "erp"
+      ],
+      "this_week": false,
+      "lab": true,
+      "personal": false
+    },
+    {
+      "row": {
+        "id": "00000000-0000-4000-9000-000000000013",
+        "title": "Fake Paper 13: Signals and Analytics in an Example Setting",
+        "authors": [
+          "Author N"
+        ],
+        "author_count": 2,
+        "publication_year": 2022,
+        "journal": "im",
+        "journal_issn_l": null,
+        "doi": "10.5555/fake.0013",
+        "doi_url": "https://doi.org/10.5555/fake.0013",
+        "has_abstract": true,
+        "in_scope": true,
+        "is_retracted": false
+      },
+      "topics": [
+        "supply_chain"
+      ],
+      "this_week": false,
+      "lab": false,
+      "personal": false
+    },
+    {
+      "row": {
+        "id": "00000000-0000-4000-9000-000000000014",
+        "title": "Fake Paper 14: Ledger and Adoption in an Example Setting",
+        "authors": [
+          "Author O"
+        ],
+        "author_count": 3,
+        "publication_year": 2022,
+        "journal": "misq",
+        "journal_issn_l": null,
+        "doi": "10.5555/fake.0014",
+        "doi_url": "https://doi.org/10.5555/fake.0014",
+        "has_abstract": true,
+        "in_scope": true,
+        "is_retracted": false
+      },
+      "topics": [],
+      "this_week": false,
+      "lab": false,
+      "personal": false,
+      "methods": [
+        "experiment"
+      ]
+    },
+    {
+      "row": {
+        "id": "00000000-0000-4000-9000-000000000015",
+        "title": "Fake Paper 15: Routines and Markets in an Example Setting",
+        "authors": [
+          "Author P"
+        ],
+        "author_count": 4,
+        "publication_year": 2022,
+        "journal": "isj",
+        "journal_issn_l": null,
+        "doi": "10.5555/fake.0015",
+        "doi_url": "https://doi.org/10.5555/fake.0015",
+        "has_abstract": false,
+        "in_scope": true,
+        "is_retracted": false
+      },
+      "topics": [
+        "it_project_management"
+      ],
+      "this_week": false,
+      "lab": true,
+      "personal": false
+    },
+    {
+      "row": {
+        "id": "00000000-0000-4000-9000-000000000016",
+        "title": "Fake Paper 16: Analytics and Teams in an Example Setting",
+        "authors": [
+          "Author Q"
+        ],
+        "author_count": 1,
+        "publication_year": 2021,
+        "journal": "io",
+        "journal_issn_l": null,
+        "doi": "10.5555/fake.0016",
+        "doi_url": "https://doi.org/10.5555/fake.0016",
+        "has_abstract": true,
+        "in_scope": true,
+        "is_retracted": false
+      },
+      "topics": [
+        "e_commerce",
+        "information_economics"
+      ],
+      "this_week": false,
+      "lab": false,
+      "personal": false
+    },
+    {
+      "row": {
+        "id": "00000000-0000-4000-9000-000000000017",
+        "title": "Fake Paper 17: Adoption and Platform in an Example Setting",
+        "authors": [
+          "Author R"
+        ],
+        "author_count": 2,
+        "publication_year": 2021,
+        "journal": "isr",
+        "journal_issn_l": null,
+        "doi": "10.5555/fake.0017",
+        "doi_url": "https://doi.org/10.5555/fake.0017",
+        "has_abstract": true,
+        "in_scope": true,
+        "is_retracted": false
+      },
+      "topics": [
+        "ai_data_analytics"
+      ],
+      "this_week": false,
+      "lab": false,
+      "personal": false
+    },
+    {
+      "row": {
+        "id": "00000000-0000-4000-9000-000000000018",
+        "title": "Fake Paper 18: Markets and Trust in an Example Setting",
+        "authors": [
+          "Author S"
+        ],
+        "author_count": 3,
+        "publication_year": 2021,
+        "journal": "jit",
+        "journal_issn_l": null,
+        "doi": null,
+        "doi_url": null,
+        "has_abstract": true,
+        "in_scope": true,
+        "is_retracted": false
+      },
+      "topics": [
+        "erp"
+      ],
+      "this_week": false,
+      "lab": true,
+      "personal": false,
+      "methods": [
+        "experiment"
+      ]
+    },
+    {
+      "row": {
+        "id": "00000000-0000-4000-9000-000000000019",
+        "title": "Fake Paper 19: Teams and Supply in an Example Setting",
+        "authors": [
+          "Author T"
+        ],
+        "author_count": 4,
+        "publication_year": 2020,
+        "journal": "pmj",
+        "journal_issn_l": null,
+        "doi": "10.5555/fake.0019",
+        "doi_url": "https://doi.org/10.5555/fake.0019",
+        "has_abstract": true,
+        "in_scope": true,
+        "is_retracted": false
+      },
+      "topics": [
+        "supply_chain"
+      ],
+      "this_week": false,
+      "lab": false,
+      "personal": false
+    },
+    {
+      "row": {
+        "id": "00000000-0000-4000-9000-000000000020",
+        "title": "Fake Paper 20: Platform and Signals in an Example Setting",
+        "authors": [
+          "Author U"
+        ],
+        "author_count": 1,
+        "publication_year": 2020,
+        "journal": "jmis",
+        "journal_issn_l": null,
+        "doi": "10.5555/fake.0020",
+        "doi_url": "https://doi.org/10.5555/fake.0020",
+        "has_abstract": false,
+        "in_scope": true,
+        "is_retracted": false
+      },
+      "topics": [
+        "e_commerce",
+        "information_economics"
+      ],
+      "this_week": false,
+      "lab": false,
+      "personal": false
+    },
+    {
+      "row": {
+        "id": "00000000-0000-4000-9000-000000000021",
+        "title": "Fake Paper 21: Trust and Ledger in an Example Setting",
+        "authors": [
+          "Author V"
+        ],
+        "author_count": 2,
+        "publication_year": 2020,
+        "journal": "jsis",
+        "journal_issn_l": null,
+        "doi": "10.5555/fake.0021",
+        "doi_url": "https://doi.org/10.5555/fake.0021",
+        "has_abstract": true,
+        "in_scope": true,
+        "is_retracted": false
+      },
+      "topics": [],
+      "this_week": false,
+      "lab": true,
+      "personal": true
+    },
+    {
+      "row": {
+        "id": "00000000-0000-4000-9000-000000000022",
+        "title": "Fake Paper 22: Supply and Routines in an Example Setting",
+        "authors": [
+          "Author W"
+        ],
+        "author_count": 3,
+        "publication_year": 2019,
+        "journal": "tem",
+        "journal_issn_l": null,
+        "doi": "10.5555/fake.0022",
+        "doi_url": "https://doi.org/10.5555/fake.0022",
+        "has_abstract": true,
+        "in_scope": true,
+        "is_retracted": false
+      },
+      "topics": [
+        "e_commerce",
+        "information_economics"
+      ],
+      "this_week": false,
+      "lab": false,
+      "personal": false,
+      "methods": [
+        "experiment"
+      ]
+    },
+    {
+      "row": {
+        "id": "00000000-0000-4000-9000-000000000023",
+        "title": "Fake Paper 23: Signals and Analytics in an Example Setting",
+        "authors": [
+          "Author X"
+        ],
+        "author_count": 4,
+        "publication_year": 2019,
+        "journal": "jais",
+        "journal_issn_l": null,
+        "doi": "10.5555/fake.0023",
+        "doi_url": "https://doi.org/10.5555/fake.0023",
+        "has_abstract": true,
+        "in_scope": true,
+        "is_retracted": false
+      },
+      "topics": [
+        "ai_data_analytics"
+      ],
+      "this_week": false,
+      "lab": false,
+      "personal": false
+    },
+    {
+      "row": {
+        "id": "00000000-0000-4000-9000-000000000024",
+        "title": "Fake Paper 24: Ledger and Adoption in an Example Setting",
+        "authors": [
+          "Author Y"
+        ],
+        "author_count": 1,
+        "publication_year": 2019,
+        "journal": "dss",
+        "journal_issn_l": null,
+        "doi": "10.5555/fake.0024",
+        "doi_url": "https://doi.org/10.5555/fake.0024",
+        "has_abstract": true,
+        "in_scope": true,
+        "is_retracted": false
+      },
+      "topics": [
+        "erp"
+      ],
+      "this_week": false,
+      "lab": true,
+      "personal": false
+    },
+    {
+      "row": {
+        "id": "00000000-0000-4000-9000-000000000025",
+        "title": "Fake Paper 25: Routines and Markets in an Example Setting",
+        "authors": [
+          "Author Z"
+        ],
+        "author_count": 2,
+        "publication_year": 2018,
+        "journal": "database",
+        "journal_issn_l": null,
+        "doi": "10.5555/fake.0025",
+        "doi_url": "https://doi.org/10.5555/fake.0025",
+        "has_abstract": false,
+        "in_scope": true,
+        "is_retracted": false
+      },
+      "topics": [
+        "supply_chain"
+      ],
+      "this_week": false,
+      "lab": false,
+      "personal": false
+    },
+    {
+      "row": {
+        "id": "00000000-0000-4000-9000-000000000026",
+        "title": "Fake Paper 26: Analytics and Teams in an Example Setting",
+        "authors": [
+          "Author A"
+        ],
+        "author_count": 3,
+        "publication_year": 2018,
+        "journal": "ejis",
+        "journal_issn_l": null,
+        "doi": "10.5555/fake.0026",
+        "doi_url": "https://doi.org/10.5555/fake.0026",
+        "has_abstract": true,
+        "in_scope": true,
+        "is_retracted": false
+      },
+      "topics": [
+        "e_commerce",
+        "information_economics"
+      ],
+      "this_week": false,
+      "lab": false,
+      "personal": false
+    },
+    {
+      "row": {
+        "id": "00000000-0000-4000-9000-000000000027",
+        "title": "Fake Paper 27: Adoption and Platform in an Example Setting",
+        "authors": [
+          "Author B"
+        ],
+        "author_count": 4,
+        "publication_year": 2018,
+        "journal": "im",
+        "journal_issn_l": null,
+        "doi": null,
+        "doi_url": null,
+        "has_abstract": true,
+        "in_scope": true,
+        "is_retracted": false
+      },
+      "topics": [
+        "it_project_management"
+      ],
+      "this_week": false,
+      "lab": true,
+      "personal": false
+    },
+    {
+      "row": {
+        "id": "00000000-0000-4000-9000-000000000028",
+        "title": "Fake Paper 28: Markets and Trust in an Example Setting",
+        "authors": [
+          "Author C"
+        ],
+        "author_count": 1,
+        "publication_year": 2017,
+        "journal": "misq",
+        "journal_issn_l": null,
+        "doi": "10.5555/fake.0028",
+        "doi_url": "https://doi.org/10.5555/fake.0028",
+        "has_abstract": true,
+        "in_scope": true,
+        "is_retracted": false
+      },
+      "topics": [],
+      "this_week": false,
+      "lab": false,
+      "personal": false
+    },
+    {
+      "row": {
+        "id": "00000000-0000-4000-9000-000000000029",
+        "title": "Fake Paper 29: Teams and Supply in an Example Setting",
+        "authors": [
+          "Author D"
+        ],
+        "author_count": 2,
+        "publication_year": 2017,
+        "journal": "isj",
+        "journal_issn_l": null,
+        "doi": "10.5555/fake.0029",
+        "doi_url": "https://doi.org/10.5555/fake.0029",
+        "has_abstract": true,
+        "in_scope": true,
+        "is_retracted": false
+      },
+      "topics": [
+        "ai_data_analytics"
+      ],
+      "this_week": false,
+      "lab": false,
+      "personal": false
+    },
+    {
+      "row": {
+        "id": "00000000-0000-4000-9000-000000000030",
+        "title": "Fake Paper 30: Platform and Signals in an Example Setting",
+        "authors": [
+          "Author E"
+        ],
+        "author_count": 3,
+        "publication_year": 2017,
+        "journal": "io",
+        "journal_issn_l": null,
+        "doi": "10.5555/fake.0030",
+        "doi_url": "https://doi.org/10.5555/fake.0030",
+        "has_abstract": false,
+        "in_scope": true,
+        "is_retracted": false
+      },
+      "topics": [
+        "erp"
+      ],
+      "this_week": false,
+      "lab": true,
+      "personal": false
+    }
+  ]
+}

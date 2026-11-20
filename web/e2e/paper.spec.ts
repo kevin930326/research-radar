@@ -206,7 +206,7 @@ test("A logs out and B logs in in the same tab: A's paper page never shows for B
 
   apiMock.loginList = [second];
   await page.getByRole("button", { name: TEXT["login:login.button.idle"] }).click();
-  await expect(page).toHaveURL(`${member.baseURL}/notice`);
+  await expect(page).toHaveURL(`${member.baseURL}/search`);
   // 回到同一篇（站內換頁，不重新載入整頁），論文的回應晚到。站內沒有連到論文頁的連結（3.14 才有），
   // 所以照瀏覽器「上一頁／下一頁」的做法：改網址後送 popstate，路由照網址換頁。
   const [paperGate, release] = gate();

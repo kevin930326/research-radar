@@ -15,7 +15,7 @@ test("member: an unknown address shows not found with a link home", async ({ pag
   const home = page.getByRole("link", { name: TEXT["common:states.notFound.home"] });
   await expect(home).toHaveAttribute("href", "/");
   await home.click();
-  await expect(page).toHaveURL(`${member.baseURL}/notice`);
+  await expect(page).toHaveURL(`${member.baseURL}/search`);
   await expect(page.getByText(NOT_FOUND, { exact: true })).toHaveCount(0);
   // 離開之後分頁名稱換回原本的。
   await expect(page).not.toHaveTitle(NOT_FOUND);

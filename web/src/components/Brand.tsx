@@ -32,10 +32,10 @@ export function BrandName({ className }: { className: string }) {
 export const HEADER_CLASS =
   "flex items-center justify-between px-gutter-mobile pt-[14px] tablet:px-gutter-tablet split:pt-[30px] wide:px-gutter-desktop";
 
-/** 品牌連結：連到使用須知（3.14 起改成找論文）。可點範圍至少 44 高。 */
+/** 品牌連結：連到找論文（Story 3.14 起；之前是使用須知，系統首頁做好後改成系統首頁，AR-67）。可點範圍至少 44 高。 */
 export function BrandLink({ onClick }: { onClick?: () => void }) {
   return (
-    <Link to="/notice" onClick={onClick} className="flex min-h-tap-target items-center gap-[10px] no-underline split:gap-3">
+    <Link to="/search" onClick={onClick} className="flex min-h-tap-target items-center gap-[10px] no-underline split:gap-3">
       <RadarIcon className="size-[22px]" />
       <BrandName className="text-s21 tracking-001 split:text-brand" />
     </Link>

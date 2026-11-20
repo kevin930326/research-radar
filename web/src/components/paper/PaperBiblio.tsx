@@ -1,3 +1,4 @@
+import { Link } from "@tanstack/react-router";
 import { Fragment, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -60,15 +61,32 @@ function AbstractMark({ has }: { has: boolean }) {
   );
 }
 
-/** 一個主題或方法標籤：設計稿的外框（1px 框、全圓角、26px 高）；連結在 3.14 才接上，現在不能點。 */
-function Tag({ children }: { children: ReactNode }) {
+const TAG_CLASS =
+  "inline-flex h-[26px] items-center rounded-full border border-border px-3 font-mono text-s13 tracking-004 whitespace-nowrap text-text-reading";
+
+/**
+ * 一個主題或方法標籤：連到找論文、帶好這個分類（Story 3.14、AR-67；EXPERIENCE.md 畫面 8 第 2 點）。
+ * 主題標籤直接選好「主題」篩選（畫面 12 第 6 點，不變成條件標籤）；找論文沒有方法的篩選，方法標籤帶進去是
+ * 一個可以移除的條件標籤。站內連結，同一頁打開。滑過時字與框變亮（設計稿 a.tagl）。
+ * 看得到的標籤 26px 高，連結本身 44px（ADR-0037），負外距讓這一列看起來一樣高。
+ * 網址寫死成員版的找論文：示範站的論文頁（Story 3.9）要換成論文清單（ADR-0010 的 2026-11-20 更新）。
+ */
+function ClassificationTagLink({ field, value, children }: { field: "topic" | "method"; value: string; children: ReactNode }) {
   return (
-    <span
-      data-tag
-      className="inline-flex h-[26px] items-center rounded-full border border-border px-3 font-mono text-s13 tracking-004 whitespace-nowrap text-text-reading"
+    <Link
+      to="/search"
+      search={field === "topic" ? { topic: value } : { method: value }}
+      data-topic-link={field === "topic" ? "" : undefined}
+      data-method-link={field === "method" ? "" : undefined}
+      className="group -my-[9px] inline-flex h-tap-target items-center no-underline"
     >
-      {children}
-    </span>
+      <span
+        data-tag
+        className={`${TAG_CLASS} transition-[border-color,color] duration-250 group-hover:border-text-primary group-hover:text-text-primary`}
+      >
+        {children}
+      </span>
+    </Link>
   );
 }
 
@@ -87,13 +105,29 @@ function UnclassifiedTag() {
 
 const UNCLASSIFIED = "unclassified";
 
-function TagGroup({ label, field, names }: { label: string; field: ClassificationField; names: Map<string, string> }) {
+function TagGroup({
+  label,
+  field,
+  names,
+  kind,
+}: {
+  label: string;
+  field: ClassificationField;
+  names: Map<string, string>;
+  /** 主題或方法：連到找論文時帶哪一種條件。 */
+  kind: "topic" | "method";
+}) {
   return (
     <div className="flex flex-wrap items-center gap-[10px]">
       <span className={MONO_LABEL_CLASS}>{label}</span>
-      {field.keys.map((key, index) =>
-        key === UNCLASSIFIED ? <UnclassifiedTag key={index} /> : <Tag key={index}>{names.get(key) ?? key}</Tag>,
-      )}
+      {field.keys.map((key, index) => {
+        if (key === UNCLASSIFIED) return <UnclassifiedTag key={index} />;
+        return (
+          <ClassificationTagLink key={index} field={kind} value={key}>
+            {names.get(key) ?? key}
+          </ClassificationTagLink>
+        );
+      })}
     </div>
   );
 }
@@ -189,10 +223,10 @@ export function ClassificationLine({ block, names, firstBadge }: ClassificationP
     <div data-block="classification" data-block-state="ready">
       <div className="mt-[22px] flex flex-wrap items-center gap-x-[28px] gap-y-[10px]">
         {value.topic === null || value.topic.keys.length === 0 ? null : (
-          <TagGroup label={t("paper.classification.topic")} field={value.topic} names={topics} />
+          <TagGroup label={t("paper.classification.topic")} field={value.topic} names={topics} kind="topic" />
         )}
         {value.method === null || value.method.keys.length === 0 ? null : (
-          <TagGroup label={t("paper.classification.method")} field={value.method} names={methods} />
+          <TagGroup label={t("paper.classification.method")} field={value.method} names={methods} kind="method" />
         )}
         <AiBadge provenance={badgeProvenance(provenance)} first={firstBadge} triggerClassName="-my-[9px]" />
       </div>

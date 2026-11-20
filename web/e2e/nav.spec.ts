@@ -72,8 +72,8 @@ test.describe("desktop nav bar", () => {
   test("has only the brand and the account button", async ({ page }) => {
     await openNotice(page, DESKTOP);
     const header = page.locator("header");
-    await expect(header.getByRole("link")).toHaveCount(1);
-    await expect(header.getByRole("link")).toHaveAttribute("href", "/notice");
+    await expect(header.getByRole("link")).toHaveCount(2);
+    await expect(header.getByRole("link").first()).toHaveAttribute("href", "/search");
     await expect(header.getByRole("button", { name: ACCOUNT })).toBeVisible();
     await expect(header.getByRole("button", { name: MENU })).toBeHidden();
   });
@@ -241,12 +241,12 @@ test.describe("desktop nav bar", () => {
     await openNotice(page, DESKTOP);
     const [meGate, release] = gate();
     apiMock.meGate = meGate;
-    await page.locator("header").getByRole("link").click();
+    await page.locator("header").getByRole("link").first().click();
     // 超過骨架畫面的 0.3 秒：外框（導覽列）不能換成載入中。
     await page.waitForTimeout(800);
     await expect(page.locator("header")).toBeVisible();
     release();
-    await expect(page.locator("h1")).toHaveText(TEXT["notice:notice.page.title"]);
+    await expect(page.locator("h1")).toHaveText(TEXT["search:search.page.title"]);
   });
 
   test("logout success goes to the login page; the back button there needs signing in again", async ({ page }) => {
@@ -292,7 +292,7 @@ test.describe("desktop nav bar", () => {
     apiMock.loginList = [second];
     apiMock.requests.length = 0;
     await page.getByRole("button", { name: LOGIN }).click();
-    await expect(page).toHaveURL(`${member.baseURL}/notice`);
+    await expect(page).toHaveURL(`${member.baseURL}/search`);
     const post = apiMock.requests.find((request) => request.method === "POST");
     expect(post?.body).toEqual({ member_id: second.member_id, next: null });
     await page.getByRole("button", { name: ACCOUNT }).click();
@@ -382,6 +382,22 @@ test.describe("phone menu", () => {
     await page.keyboard.press("Escape");
     await expect(dialog).toBeHidden();
     await expect(open).toBeFocused();
+  });
+
+  test("the phone menu has search; it goes there and is marked as the current page", async ({ page }) => {
+    // Story 3.14（AR-67）：手機選單的「找論文」（審查 A-3；新加的測試，既有的沒有改）。
+    await openNotice(page, PHONE);
+    await page.getByRole("button", { name: MENU }).click();
+    const dialog = page.getByRole("dialog", { name: MENU });
+    const search = dialog.getByRole("link", { name: TEXT["nav:nav.links.search"] });
+    await expect(search).toBeVisible();
+    await expect(search).toHaveAttribute("href", "/search");
+    await search.click();
+    await expect(dialog).toBeHidden();
+    await expect(page).toHaveURL(`${member.baseURL}/search`);
+    await expect(page.locator("h1")).toHaveText(TEXT["search:search.page.title"]);
+    await page.getByRole("button", { name: MENU }).click();
+    await expect(dialog.getByRole("link", { name: TEXT["nav:nav.links.search"] })).toHaveAttribute("aria-current", "page");
   });
 
   test("logout loading and failed in the phone menu", async ({ page, apiMock }) => {

@@ -43,7 +43,7 @@ export async function expectValidLanding(
   label: string,
 ): Promise<void> {
   expectDocumentResponsesOk(responses, label);
-  // 站內轉址（例如 / 導到 /notice）會先經過不在清單裡的網址，所以等網址落定，不是只看一次。
+  // 站內轉址（例如 / 導到 /search）會先經過不在清單裡的網址，所以等網址落定，不是只看一次。
   await expect(page, `${label}: not a known page`).toHaveURL(
     (url) => url.origin === site.baseURL && site.pages.includes(url.pathname),
   );

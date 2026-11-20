@@ -9,8 +9,8 @@ const CAVEATS = ["rare", "supported", "evidenceMap", "trendLag"] as const;
 
 test("member: / goes to the notice page", async ({ page }) => {
   await page.goto(`${member.baseURL}/`);
-  await expect(page).toHaveURL(`${member.baseURL}/notice`);
-  await expect(page.locator("h1")).toHaveText(TEXT["notice:notice.page.title"]);
+  await expect(page).toHaveURL(`${member.baseURL}/search`);
+  await expect(page.locator("h1")).toHaveText(TEXT["search:search.page.title"]);
 });
 
 test("member: notice shows only paragraphs 3 and 4, word for word", async ({ page }) => {

@@ -48,3 +48,13 @@
 | 設計稿的值 | 在哪裡 | 一開始怎麼做 | 已處理 |
 |---|---|---|---|
 | 英文原文摘要的字體 `-apple-system, 'Helvetica Neue', 'Segoe UI', system-ui, sans-serif` | 論文頁「原文摘要」 | 用代幣 `font-reading-en`（`-apple-system, "Segoe UI", Roboto, sans-serif`），沒有加 `Helvetica Neue`。Safari 兩邊都用系統字、看不出差別；Chrome 與 Firefox 不認得 `-apple-system`，設計稿退到 Helvetica Neue、做出來退到 Helvetica，斷行不同（設計稿比對 390 寬「佔幾行」24 對 23） | 待 Kevin 決定：在 `DESIGN.md` 的 `reading-en` 補上 `Helvetica Neue`，或維持現狀 |
+
+## Story 3.14（找論文成員版）
+
+清查 `search-no-box.html`（有結果、還沒篩選、帶條件進來、篩選中、沒有結果、載入中、錯誤、篩選選單、手機的篩選）的行內樣式與 CSS：字級、行高、字距、顏色都在 `DESIGN.md` 的角色或尺度裡（手機論文標題 20px 是 `s20`、手機篩選標題 22px 是 `s22`；`rgba(239,234,224,0.16)`＝`hairline`、`0.26`＝`border`、選單底色＝`popover-surface`）。間距、寬度照設計稿的數字寫任意值（例如選單寬 `w-[490px]`、年份輸入框 `h-[30px]`），ADR-0037 不擋。設計稿沒有規則、自己定的值：
+
+| 值 | 在哪裡 | 怎麼做 | 已處理 |
+|---|---|---|---|
+| 只選一本期刊時標籤上的全名最寬 240px，超過單行截斷加省略號 | 桌機「期刊」標籤 | 設計稿寫縮寫（最長 8 個字母），沒有截斷規則；先顯示全名（Kevin 2026-11-20 決定），自己定 240px | 待 Kevin 確認寬度（決定紀錄 3.14） |
+| 選單底色半透明、沒有背景模糊，下面的字隱約看得到 | 桌機三個篩選選單 | 沿用帳號選單的 `popover-surface`（Kevin 2026-11-16 決定不用毛玻璃） | 維持，不加代幣 |
+| 手機篩選滑入的速度曲線 `ease-out`（`.msw{transition:transform .25s ease-out}`） | 手機「篩選」滿版由下往上滑入 | `DESIGN.md` 沒有速度曲線的代幣、Tailwind 預設的 `ease-out` 已清掉；時間照設計稿 250ms，曲線用瀏覽器預設（`ease`），不換成最接近的 | 待 Kevin 決定：在 `DESIGN.md` 補一個速度曲線代幣，或維持瀏覽器預設 |

@@ -1,7 +1,28 @@
 // 成員版的資料來源：呼叫同網域的後端 API（呼叫函式由 orval 從 openapi.json 產生，Story 3.4）。
-import { displayNames as getDisplayNames, fakeLogin, fakeLoginOptions, logout, me as getMe, paper as getPaper } from "../../generated/api";
-import { FakeLoginMode, type FakeLoginBody } from "../../generated/model";
-import type { DataSource, DisplayNamesResult, LoginOutcome, Member, MemberSession, PaperResult, PaperSource } from "../types";
+import {
+  clientConfig as getClientConfig,
+  displayNames as getDisplayNames,
+  fakeLogin,
+  fakeLoginOptions,
+  listPapers,
+  logout,
+  me as getMe,
+  paper as getPaper,
+} from "../../generated/api";
+import { FakeLoginMode, type FakeLoginBody, type PaperListResponse, type PaperRow } from "../../generated/model";
+import type {
+  ClientConfigResult,
+  DataSource,
+  DisplayNamesResult,
+  LoginOutcome,
+  Member,
+  MemberSession,
+  PaperList,
+  PaperListFilters,
+  PaperListResult,
+  PaperResult,
+  PaperSource,
+} from "../types";
 
 /** 後端 API 的基底路徑（Conventions「API」）。 */
 export const API_BASE = "/api/v1";
@@ -78,6 +99,46 @@ const papers: PaperSource = {
       return { kind: "signedOut" };
     }
     throw new Error(`GET ${API_BASE}/display-names: HTTP ${response.status}`);
+  },
+
+  async clientConfig(): Promise<ClientConfigResult> {
+    const response = await getClientConfig();
+    if (response.status === 200) {
+      return { kind: "found", config: response.data };
+    }
+    if (response.status === 401) {
+      return { kind: "signedOut" };
+    }
+    throw new Error(`GET ${API_BASE}/client-config: HTTP ${response.status}`);
+  },
+
+  async list(filters: PaperListFilters, limit: number, previous?: PaperList | null): Promise<PaperListResult> {
+    // 「再載入」：從上一次的清單接著讀（先用它多讀到的 pending，再照 next_cursor 讀下一頁）。
+    let rows: PaperRow[] = previous ? [...previous.items, ...previous.pending] : [];
+    let last: Omit<PaperListResponse, "items"> | null = previous
+      ? { next_cursor: previous.next_cursor, total: previous.total, snapshot: previous.snapshot }
+      : null;
+    while (last === null || (rows.length < limit && last.next_cursor !== null)) {
+      const cursor: string | undefined = last?.next_cursor ?? undefined;
+      const response = await listPapers(cursor === undefined ? filters : { ...filters, cursor });
+      if (response.status === 401) {
+        return { kind: "signedOut" };
+      }
+      if (response.status !== 200) {
+        // 422（條件不合法，ADR-0047）與其他錯誤：畫面顯示「錯誤」。
+        throw new Error(`GET ${API_BASE}/papers: HTTP ${response.status}`);
+      }
+      const page = response.data;
+      rows = [...rows, ...page.items];
+      last = {
+        // 空的一頁卻還有下一頁（後端不會這樣回）：當作沒有下一頁，不會一直打下去。
+        next_cursor: page.items.length === 0 ? null : page.next_cursor,
+        total: page.total,
+        snapshot: page.snapshot,
+      };
+    }
+    // 只放要求的篇數（型別的約定），多讀到的留在 pending，下一次接著用。
+    return { kind: "found", list: { ...last, items: rows.slice(0, limit), pending: rows.slice(limit) } };
   },
 };
 

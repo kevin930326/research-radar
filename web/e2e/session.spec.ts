@@ -10,6 +10,7 @@ const LOGIN = TEXT["login:login.button.idle"];
 const LOGGING_IN = TEXT["login:login.button.pending"];
 const EXPIRED = TEXT["errors:not_authenticated"];
 const NOTICE_TITLE = TEXT["notice:notice.page.title"];
+const SEARCH_TITLE = TEXT["search:search.page.title"];
 
 test.describe("login page", () => {
   test.beforeEach(({ apiMock }) => {
@@ -40,15 +41,15 @@ test.describe("login page", () => {
     // 停用中再按不會多送一次。
     await button.click({ force: true });
     release();
-    await expect(page).toHaveURL(`${member.baseURL}/notice`);
+    await expect(page).toHaveURL(`${member.baseURL}/search`);
     expect(apiMock.requests.filter((request) => request.method === "POST")).toHaveLength(1);
   });
 
   test("success goes to the notice page with the nav bar", async ({ page, apiMock }) => {
     await page.goto(`${member.baseURL}/login`);
     await page.getByRole("button", { name: LOGIN }).click();
-    await expect(page).toHaveURL(`${member.baseURL}/notice`);
-    await expect(page.locator("h1")).toHaveText(NOTICE_TITLE);
+    await expect(page).toHaveURL(`${member.baseURL}/search`);
+    await expect(page.locator("h1")).toHaveText(SEARCH_TITLE);
     await expect(page.locator("header")).toBeVisible();
     // 沒指定成員就用假登入清單的第一位；沒有 next。
     const post = apiMock.requests.find((request) => request.method === "POST");
@@ -71,7 +72,7 @@ test.describe("login page", () => {
 
     apiMock.login = "ok";
     await button.click();
-    await expect(page).toHaveURL(`${member.baseURL}/notice`);
+    await expect(page).toHaveURL(`${member.baseURL}/search`);
   });
 
   test("not on the list: an explanation line, and the button stays", async ({ page, apiMock }) => {
@@ -89,7 +90,7 @@ test.describe("login page", () => {
     const second = MEMBERS[1]!;
     await page.goto(`${member.baseURL}/login?member=${second.member_id}`);
     await page.getByRole("button", { name: LOGIN }).click();
-    await expect(page).toHaveURL(`${member.baseURL}/notice`);
+    await expect(page).toHaveURL(`${member.baseURL}/search`);
     const post = apiMock.requests.find((request) => request.method === "POST");
     expect(post?.body).toEqual({ member_id: second.member_id, next: null });
   });
@@ -98,7 +99,7 @@ test.describe("login page", () => {
     apiMock.mode = "access_admin";
     await page.goto(`${member.baseURL}/login?member=${MEMBERS[1]!.member_id}`);
     await page.getByRole("button", { name: LOGIN }).click();
-    await expect(page).toHaveURL(`${member.baseURL}/notice`);
+    await expect(page).toHaveURL(`${member.baseURL}/search`);
     const post = apiMock.requests.find((request) => request.method === "POST");
     expect(post?.body).toEqual({ next: null });
   });
@@ -124,7 +125,7 @@ test.describe("signing in is required", () => {
     await page.goto(`${member.baseURL}/`);
     await expect(page).toHaveURL(new RegExp(`/login\\?next=`));
     await page.getByRole("button", { name: LOGIN }).click();
-    await expect(page).toHaveURL(`${member.baseURL}/notice`);
+    await expect(page).toHaveURL(`${member.baseURL}/search`);
   });
 
   test("next pointing outside the site is ignored", async ({ page, apiMock }) => {
@@ -133,7 +134,7 @@ test.describe("signing in is required", () => {
       apiMock.requests.length = 0;
       await page.goto(`${member.baseURL}/login?next=${encodeURIComponent(next)}`);
       await page.getByRole("button", { name: LOGIN }).click();
-      await expect(page).toHaveURL(`${member.baseURL}/notice`);
+      await expect(page).toHaveURL(`${member.baseURL}/search`);
       // 前端自己就不送（替身也會擋，所以要看送出去的內容）。
       const post = apiMock.requests.find((request) => request.method === "POST");
       expect(post?.body, next).toEqual({ member_id: MEMBERS[0]!.member_id, next: null });
@@ -157,8 +158,8 @@ test.describe("signing in is required", () => {
       page.on("pageerror", (error) => pageErrors.push(error.message));
       await page.goto(`${member.baseURL}/login?${query}`);
       await page.getByRole("button", { name: LOGIN }).click();
-      await expect(page).toHaveURL(`${member.baseURL}/notice`);
-      await expect(page.locator("h1")).toHaveText(NOTICE_TITLE);
+      await expect(page).toHaveURL(`${member.baseURL}/search`);
+      await expect(page.locator("h1")).toHaveText(SEARCH_TITLE);
       const posts = apiMock.requests.filter((request) => request.method === "POST");
       expect(posts.map((request) => request.body)).toEqual([{ member_id: MEMBERS[0]!.member_id, next: null }]);
       expect(pageErrors).toEqual([]);
@@ -192,7 +193,7 @@ test.describe("signing in is required", () => {
     await page.getByRole("link", { name: /Research/ }).first().click();
     await expect(page).toHaveURL(/\/login\?/);
     const url = new URL(page.url());
-    expect(url.searchParams.get("next")).toBe("/notice");
+    expect(url.searchParams.get("next")).toBe("/search");
     expect(url.searchParams.get("expired")).toBe("true");
     const note = page.getByRole("status");
     await expect(note).toHaveText(EXPIRED);
@@ -206,7 +207,7 @@ test.describe("signing in is required", () => {
     await expect(page.getByRole("button", { name: LOGGING_IN })).toBeVisible();
     await expect(page.locator("[data-login-note]")).toHaveCount(0);
     release();
-    await expect(page).toHaveURL(`${member.baseURL}/notice`);
+    await expect(page).toHaveURL(`${member.baseURL}/search`);
     await expect(page.locator("header")).toBeVisible();
   });
 
