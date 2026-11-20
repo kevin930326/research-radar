@@ -197,6 +197,8 @@ export function LibraryPage({ shown, onMore, onSignedOut }: LibraryPageProps) {
   };
 
   let body: ReactNode;
+  // 899px 以下勾了論文時的底部選取列（放在內容外面，見下面的 return）。
+  let dock: ReactNode = null;
   if (failed) {
     body = (
       <ErrorBar
@@ -256,6 +258,7 @@ export function LibraryPage({ shown, onMore, onSignedOut }: LibraryPageProps) {
     const actions = { count: picked.length, over, opened, onOpen: openPicked, onCancel: unselect };
     // 批次開啟的結果與說明（設計稿 .notes）：桌機在選取列下面、一起黏在上緣；手機在底部選取列的最上面（決定第 90、91 項）。
     const notesBlock = <Notes notes={notes} mobile={!desktop} />;
+    if (picked.length > 0 && !desktop) dock = <Dock {...actions} notes={notesBlock} />;
 
     body = (
       <>
@@ -306,16 +309,29 @@ export function LibraryPage({ shown, onMore, onSignedOut }: LibraryPageProps) {
             onMore={() => onMore(items.length + pageSize)}
           />
         ) : null}
-        {picked.length > 0 && !desktop ? <Dock {...actions} notes={notesBlock} /> : null}
       </>
     );
   }
 
+  // 這一頁撐滿 main 的高度（外框 main 是直排的 flex）：底部選取列前面有一段會伸長的空白（最少 32px，設計稿 margin-top 32），
+  // 清單很短時選取列也在視窗最下面；有選取列時往下吃掉 main 的下內距（96px），選取列貼齊頁面底部
+  // （設計稿 library.html 390：.pp 至少一個視窗高、main flex:1、.dock 接在 main 後面；審查 R9）。
   return (
-    <div data-page="library" className="text-s14 leading-normal tracking-0 text-text-primary split:max-w-reading-width">
-      <h1 className="font-title-zh text-page-title-zh text-text-primary">{t("library.page.title")}</h1>
-      {body}
-      <NewTabNote />
+    <div
+      data-page="library"
+      className={`flex flex-1 flex-col text-s14 leading-normal tracking-0 text-text-primary split:max-w-reading-width ${dock === null ? "" : "-mb-24"}`}
+    >
+      <div>
+        <h1 className="font-title-zh text-page-title-zh text-text-primary">{t("library.page.title")}</h1>
+        {body}
+        <NewTabNote />
+      </div>
+      {dock === null ? null : (
+        <>
+          <div aria-hidden="true" className="min-h-8 flex-1" />
+          {dock}
+        </>
+      )}
     </div>
   );
 }
@@ -415,14 +431,14 @@ function ActionBar(props: ActionProps) {
 }
 
 /**
- * 899px 以下的選取列（設計稿 .dock）：固定在畫面底部。由上到下：結果與說明（有才佔位）、「一次最多開 10 篇」（各佔一整行）、
+ * 899px 以下的選取列（設計稿 .dock）：黏在視窗底部（清單很短時也在最下面，見 LibraryPage 的 return）。由上到下：結果與說明（有才佔位）、「一次最多開 10 篇」（各佔一整行）、
  * 左邊「已選 N 篇」、右邊「取消」＋「開啟全文」。
  */
 function Dock({ notes, ...props }: ActionProps & { notes: ReactNode }) {
   return (
     <div
       data-library-dock
-      className="sticky bottom-[0px] z-[4] -mx-gutter-mobile mt-8 flex flex-wrap items-center justify-between gap-x-3 gap-y-2 border-t border-hairline bg-background px-gutter-mobile pt-3 pb-[14px] tablet:-mx-gutter-tablet tablet:px-gutter-tablet split:hidden"
+      className="sticky bottom-[0px] z-[4] -mx-gutter-mobile flex flex-wrap items-center justify-between gap-x-3 gap-y-2 border-t border-hairline bg-background px-gutter-mobile pt-3 pb-[14px] tablet:-mx-gutter-tablet tablet:px-gutter-tablet split:hidden"
     >
       {notes}
       {props.over ? (
@@ -441,11 +457,13 @@ function Dock({ notes, ...props }: ActionProps & { notes: ReactNode }) {
 
 /**
  * 批次開啟的結果與說明（設計稿 .notes）：讀得到（role=status）。桌機在選取列下面（每段上 10、下 4；連結清單最高 min(40vh,300px)，
- * 超過在裡面捲）；手機在底部選取列的最上面、佔一整行（每段下 12，相鄰的那一段往上 4；連結清單最高 38vh；沒有內容時不佔位）。
+ * 超過在裡面捲）；手機在底部選取列的最上面、佔一整行（每段下 12，相鄰的那一段往上 4；連結清單最高 38vh；沒有內容時不佔位，但留在無障礙樹裡）。
  */
 function Notes({ notes, mobile }: { notes: Note[]; mobile: boolean }) {
   return (
-    <div role="status" data-library-notes className={mobile ? "basis-full empty:hidden" : ""}>
+    // 手機：沒有內容時用只給螢幕閱讀器的寫法（絕對定位、1px），不佔底部選取列的一行，但一直在無障礙樹裡；
+    // display:none 的即時播報區在內容插進來的同時才出現，螢幕閱讀器常常不念（審查 R11）。
+    <div role="status" data-library-notes className={mobile ? "basis-full empty:sr-only" : ""}>
       {notes.map((note, index) => (
         <NoteBlock key={`${note.kind}-${index}`} note={note} mobile={mobile} first={index === 0} />
       ))}

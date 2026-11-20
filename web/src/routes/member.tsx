@@ -54,7 +54,8 @@ function AppLayout() {
     <div className={`${PAGE_FRAME_CLASS} flex min-h-screen flex-col ${mobileMenuOpen ? "max-split:hidden" : ""}`}>
       <SiteHeader member={member} mobileMenuOpen={mobileMenuOpen} onMobileMenuChange={setMobileMenuOpen} />
       {/* 標題離導覽列：900px 以上 72px、899px 以下 40px（設計稿）；頁尾歸 Story 3.15（Kevin 2026-11-16 決定）。 */}
-      <main className="flex-1 px-gutter-mobile pt-[40px] pb-24 tablet:px-gutter-tablet split:pt-[72px] wide:px-gutter-desktop">
+      {/* main 也是直排的 flex：頁面可以撐滿剩下的高度（我的文獻庫的底部選取列在清單很短時也貼在視窗最下面；審查 R9）。 */}
+      <main className="flex flex-1 flex-col px-gutter-mobile pt-[40px] pb-24 tablet:px-gutter-tablet split:pt-[72px] wide:px-gutter-desktop">
         <Offline />
         <Outlet />
       </main>

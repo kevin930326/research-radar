@@ -22,7 +22,7 @@ import { journalName } from "./filters";
 // 期刊縮寫（EXPERIENCE 決定第 92 項：先顯示全名，太長換行）。
 // 有自己上傳的 PDF、手填書目的論文在找論文按「移出」怎麼呈現還沒決定（設計稿沒畫，等 Epic 6），這裡不寫那個分支。
 // 和設計稿不同的地方：
-// - 沒有摘要的標「沒有摘要」（EXPERIENCE.md 第 4 點；接在期刊 · 年份那一行後面，設計稿同）。
+// - 沒有摘要的標「沒有摘要」（EXPERIENCE.md 第 4 點；900px 以上接在期刊 · 年份那一行後面，899px 以下自己一行、前面沒有「·」，設計稿同）。
 // - 可點範圍至少 44px（ADR-0037）：用透明的內距補，負外距讓版面和設計稿一樣（設計稿用 ::after 外擴，效果相同）。
 // - 「開啟全文」照專案的站外連結慣例：名稱是看得到的字，「（開新分頁）」用 aria-describedby，不用設計稿的 aria-label。
 // - 期刊 · 年份那一行的行高照現狀（瀏覽器預設 normal）：設計稿的 1.55 不在代幣與尺度裡，列給 Kevin 決定。
@@ -75,6 +75,16 @@ export function Meta({ row, names, noAbstract = true }: { row: PaperRow; names: 
       {parts.map(({ key, node }, index) =>
         index === 0 ? (
           <Fragment key={key}>{node}</Fragment>
+        ) : key === "abstract" ? (
+          // 「沒有摘要」：900px 以上接在同一行（前面「·」）；899px 以下自己換一行、前面沒有「·」（設計稿 390 的 <br>；審查 R7）。
+          <Fragment key={key}>
+            {" "}
+            <br className="split:hidden" />
+            <span className="whitespace-nowrap">
+              <span className={`${SEPARATOR_CLASS} max-split:hidden`}>·</span>
+              {node}
+            </span>
+          </Fragment>
         ) : (
           <Fragment key={key}>
             {" "}
@@ -145,53 +155,80 @@ export function RemoveText({
   );
 }
 
+/** 最後按下加入／移出的是哪一次（每次按一個新物件）。焦點因按鈕停用落到 body 時，只有最後按的那一列可以把焦點拿回去（審查 R5）。 */
+let lastPress: object | null = null;
+
 /**
  * 找論文每列的加入／移出（設計稿第二版 search-no-box.html；決定第 87 項）：
  * - 還沒加入：「加入我的文獻庫」（.add：34px 高、最小寬 146、13px、外框；按鈕本身 44px，負外距抵掉）。
  * - 已加入：「● 已加入」＋淡色「移出」（.added：34px 高、最小寬 146、左內距 15；手機最小寬 0、右內距 4；「移出」離「已加入」
  *   18px＝.added 的間距 8＋左邊距 10，手機 8＋12＝20）。
- * 按了之後停用到有結果。成功時快取裡這一列跟著改（論文頁、找論文、我的文獻庫共用 useLibraryChange），焦點移到換出來的那一個按鈕
- * （加入 → 移出、移出 → 加入；設計稿 swapLib）。移出時後端回 404（已經不在）照樣變回「加入」。失敗時按鈕回到原本的樣子，不出字。
+ * 加入：按了之後停用到有結果；成功時快取裡這一列跟著改（論文頁、找論文、我的文獻庫共用 useLibraryChange），換成「已加入」＋「移出」。
+ * 移出：按下去就立刻變回「加入我的文獻庫」（決定第 87 項；審查 R4），回應回來之前那一顆停用（防重複送出）；成功就維持，
+ * 後端回 404（已經不在）也一樣；失敗時退回「● 已加入」＋「移出」，不出字。
+ * 焦點（設計稿 swapLib）：換出來的那一顆接手焦點，但只在焦點還在這一列的按鈕上、或因按鈕停用落到 body（而且這一列是最後按的）時才移，
+ * 使用者已經移到別處就不拉回來（審查 R5）。
  * 同一個畫格連按兩下只送一次（sending 同步擋）。換人、登出、登入過期的情況由 sendLibraryChange 的世代號處理（回應是上一位的就不改快取）。
  */
 export function LibraryToggle({ row }: { row: PaperRow }) {
   const { t } = useTranslation("search");
   const change = useLibraryChange();
   const [busy, setBusy] = useState(false);
-  // 成功後焦點要去的按鈕（失敗時是按的那一顆；每次一個新物件）；換出來的那一個畫好之後移過去一次（handled 記住已經移過的那一次）。
+  // 按了移出：送出中（pending）一律顯示成已經移出；成功後快取還沒換過來的那一下（列還是按的時候那一份資料）也一樣，不閃回「已加入」。
+  // 之後這一列換了一份資料（快取改成不在、或之後又加回去）就照資料。
+  const [removing, setRemoving] = useState<{ row: PaperRow; pending: boolean } | null>(null);
+  // 焦點要去的按鈕（每次一個新物件）；換出來的那一個畫好之後移過去一次（handled 記住已經移過的那一次）。
   const [focusRequest, setFocusRequest] = useState<{ target: "add" | "remove" } | null>(null);
   const handled = useRef<{ target: "add" | "remove" } | null>(null);
   const sending = useRef(false);
   const addRef = useRef<HTMLButtonElement>(null);
   const addedRef = useRef<HTMLSpanElement>(null);
+  const shownIn = row.in_my_library && (removing === null || (!removing.pending && removing.row !== row));
   useEffect(() => {
     if (focusRequest === null || handled.current === focusRequest) return;
-    if (focusRequest.target === "remove" && row.in_my_library) {
+    if (focusRequest.target === "remove" && shownIn) {
       addedRef.current?.querySelector<HTMLButtonElement>("[data-library='remove']")?.focus();
       handled.current = focusRequest;
-    } else if (focusRequest.target === "add" && !row.in_my_library) {
+    } else if (focusRequest.target === "add" && !shownIn) {
       addRef.current?.focus();
       handled.current = focusRequest;
     }
-  }, [focusRequest, row.in_my_library]);
+  }, [focusRequest, shownIn]);
+
+  /** 焦點還算這一列的嗎：在這一列的按鈕上，或落在 body 而且最後按的是這一次。 */
+  const ownsFocus = (press: object) => {
+    const active = document.activeElement;
+    if (active === null || active === document.body) return lastPress === press;
+    return (addRef.current?.contains(active) ?? false) || (addedRef.current?.contains(active) ?? false);
+  };
 
   const send = (action: "add" | "remove") => {
     if (sending.current) return;
     sending.current = true;
-    setBusy(true);
+    const press = {};
+    lastPress = press;
+    if (action === "remove") {
+      setRemoving({ row, pending: true });
+    } else {
+      setBusy(true);
+    }
     void change(row.id, action).then((outcome) => {
+      const owned = ownsFocus(press);
       sending.current = false;
       setBusy(false);
-      if (outcome !== "failed") {
-        setFocusRequest({ target: action === "add" ? "remove" : "add" });
-      } else if (document.activeElement === null || document.activeElement === document.body) {
-        // 送出中按鈕停用，鍵盤焦點掉到 body；失敗時按鈕退回原樣，焦點也放回按的那一顆。
-        setFocusRequest({ target: action });
+      if (action === "remove") {
+        // 成功：快取還沒換過來之前照樣顯示成已經移出；失敗才退回。
+        setRemoving(outcome !== "failed" ? { row, pending: false } : null);
       }
+      if (!owned) return;
+      // 送出中按鈕停用（移出時「移出」已經換成停用的「加入」），鍵盤焦點掉到 body：成功時移到換出來的那一顆
+      // （加入 → 移出、移出 → 加入），失敗時按鈕退回原樣、焦點放回按的那一顆。
+      const done = outcome !== "failed";
+      setFocusRequest({ target: action === "add" ? (done ? "remove" : "add") : done ? "add" : "remove" });
     });
   };
 
-  if (row.in_my_library) {
+  if (shownIn) {
     return (
       <span
         ref={addedRef}
@@ -201,7 +238,7 @@ export function LibraryToggle({ row }: { row: PaperRow }) {
           <span aria-hidden="true" className="size-[6px] shrink-0 rounded-full bg-text-primary" />
           {t("search.row.added")}
         </span>
-        <RemoveText title={row.title} label={t("search.row.remove")} busy={busy} onRemove={() => send("remove")} className="ml-[9px] max-split:ml-[11px]" />
+        <RemoveText title={row.title} label={t("search.row.remove")} busy={false} onRemove={() => send("remove")} className="ml-[9px] max-split:ml-[11px]" />
       </span>
     );
   }
@@ -210,8 +247,9 @@ export function LibraryToggle({ row }: { row: PaperRow }) {
       ref={addRef}
       type="button"
       data-library="add"
-      disabled={busy}
-      aria-busy={busy || undefined}
+      // 移出送出中：已經顯示成「加入」，但回應回來之前不能按（和加入送出中一樣停用）。
+      disabled={busy || removing?.pending === true}
+      aria-busy={busy || removing?.pending === true || undefined}
       aria-label={t("search.row.addLabel", { title: row.title })}
       onClick={() => send("add")}
       className="-my-[5px] inline-flex h-tap-target shrink-0 cursor-pointer items-center bg-transparent p-[0px] disabled:cursor-default"

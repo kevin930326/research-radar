@@ -50,37 +50,91 @@ export function filtersKey(filters: PaperListFilters): string {
  * 找論文的清單：同一組條件、要 `limit` 篇。快取裡同一組條件已經有別的篇數的清單（「再載入」之前的那一份、
  * 起始狀態的前 3 篇）時，從讀到最多的那一份接著讀，不重讀前面的（cursor 不進網址，AD-21）。
  * 沒有可以接著讀的（重新整理、直接打開網址）時最多讀 MAX_SHOWN 篇；之後照樣可以再載入（審查 S1-3）。
+ *
+ * 範圍「我的文獻庫」有本頁移出、留在原地的列（heldRows）時（Kevin 2026-11-20 決定；PR #114 審查 R1、R2）：
+ * - 那一份只在真的要往後讀（「再載入」：它比這次要的少）時拿來接著讀；比這次要的多或一樣多（換條件再換回來、上一頁回到較少的篇數）
+ *   就不用它，照伺服器重讀，移出的那一列才會不見、篇數照伺服器。
+ * - 接著讀的時候，伺服器的 total 已經不算那幾列：把它們加回去，「找到 N 篇」「已顯示 n／N」才不會變小、再載入也不會提早消失。
+ *   加之前用論文 ID 向伺服器確認（論文頁的 in_my_library）：在別的分頁又加回去的那幾篇伺服器已經算了，不再加，列也改回「已加入」。
+ *   新讀到的一頁裡和前面重複的論文（別的分頁加回去、排到後面）只留前面那一列。
  */
 export function paperListQuery(queryClient: QueryClient, filters: PaperListFilters, limit: number) {
   const key = filtersKey(filters);
+  const personal = isPersonalList(["paper-list", key]);
   return queryOptions({
     queryKey: ["paper-list", key, limit],
     queryFn: async () => {
       let previous: PaperList | null = null;
-      const size = (list: PaperList) => list.items.length + list.pending.length;
       for (const [queryKey, data] of queryClient.getQueriesData<{ kind: string; list?: PaperList }>({
         queryKey: ["paper-list", key],
       })) {
         // 自己這一份不算（重讀時要真的重讀）。
         if (queryKey[2] === limit || data?.kind !== "found" || data.list === undefined) continue;
-        if (previous === null || size(data.list) > size(previous)) previous = data.list;
+        if (personal && heldRows(data.list).length > 0 && listSize(data.list) >= limit) continue;
+        if (previous === null || listSize(data.list) > listSize(previous)) previous = data.list;
       }
       const result = await paperSource().list(filters, previous === null ? Math.min(limit, MAX_SHOWN) : limit, previous);
-      // 範圍「我的文獻庫」接著讀時：之前移出、留在原地的那幾列（in_my_library 已是 false）還在清單裡，
-      // 伺服器的 total 卻不算它們；把它們加回去，「找到 N 篇」「已顯示 n／N」才不會變小、再載入也不會提早消失。
-      if (previous !== null && result.kind === "found" && isPersonalList(["paper-list", key])) {
-        const carried = [...previous.items, ...previous.pending].filter((row) => !row.in_my_library).length;
-        return { ...result, list: { ...result.list, total: result.list.total + carried } };
-      }
-      return result;
+      // 沒有真的讀新的一頁（上一份已經夠、或已經讀完）時，total 就是上一份的（已經算過移出的那幾列），不再加。
+      const read = previous !== null && listSize(previous) < limit && previous.next_cursor !== null;
+      if (!personal || previous === null || !read || result.kind !== "found") return result;
+      const held = heldRows(previous);
+      if (held.length === 0) return result;
+      const back = await addedElsewhere(held.map((row) => row.id));
+      const seen = new Set<string>();
+      const rows = [...result.list.items, ...result.list.pending]
+        .filter((row) => {
+          if (seen.has(row.id)) return false;
+          seen.add(row.id);
+          return true;
+        })
+        .map((row) => (back.has(row.id) ? { ...row, in_my_library: true } : row));
+      const items = rows.slice(0, limit);
+      return {
+        ...result,
+        list: { ...result.list, items, pending: rows.slice(items.length), total: result.list.total + held.length - back.size },
+      };
     },
     retry: false,
     staleTime: LIST_STALE_MS,
     gcTime: LIST_GC_MS,
-    // 範圍是我的文獻庫的那幾份：移出後只標成過期（markInLibrary），切回視窗、重新連線時也不自動重讀，
-    // 移出的那一列才會留在原地到重新整理或換條件（Kevin 2026-11-20 決定）。
-    ...(isPersonalList(["paper-list", key]) ? { refetchOnWindowFocus: false, refetchOnReconnect: false } : {}),
+    // 範圍是我的文獻庫、而且有本頁移出暫留的列的那一份：切回視窗、重新連線時不自動重讀，移出的那一列才會留在原地到重新整理或
+    // 換條件（Kevin 2026-11-20 決定）。沒有暫留列的照預設（過期了就重讀：別的分頁加入的、換了人都會跟上；審查 R2）。
+    ...(personal
+      ? { refetchOnWindowFocus: (query: HeldCheck) => !hasHeldRows(query), refetchOnReconnect: (query: HeldCheck) => !hasHeldRows(query) }
+      : {}),
   });
+}
+
+function listSize(list: PaperList): number {
+  return list.items.length + list.pending.length;
+}
+
+/**
+ * 範圍「我的文獻庫」的清單裡，本頁移出、留在原地的列：伺服器回的列一定在文獻庫裡，in_my_library 是 false 的只會是在這一頁
+ * 按了移出（markInLibrary 改的）。
+ */
+export function heldRows(list: PaperList): PaperList["items"] {
+  return [...list.items, ...list.pending].filter((row) => !row.in_my_library);
+}
+
+/** 看一份查詢有沒有暫留列只需要鍵與資料。 */
+type HeldCheck = { queryKey: QueryKey; state: { data: unknown } };
+
+/** 這一份找論文的清單是範圍「我的文獻庫」、而且有本頁移出暫留的列。 */
+export function hasHeldRows(query: HeldCheck): boolean {
+  const data = query.state.data as { kind?: string; list?: PaperList } | undefined;
+  return isPersonalList(query.queryKey) && data?.kind === "found" && data.list !== undefined && heldRows(data.list).length > 0;
+}
+
+/** 這幾篇裡，伺服器說已經在我的文獻庫的（別的分頁又加回去了）。讀不到的當成還不在（照畫面）。 */
+async function addedElsewhere(ids: readonly string[]): Promise<Set<string>> {
+  const answers = await Promise.allSettled(ids.map((id) => paperSource().paper(id)));
+  return new Set(
+    ids.filter((_, index) => {
+      const answer = answers[index];
+      return answer?.status === "fulfilled" && answer.value.kind === "found" && answer.value.page.in_my_library;
+    }),
+  );
 }
 
 // --- 我的文獻庫（Story 3.17）-----------------------------------------------------------------------
@@ -147,7 +201,7 @@ export const libraryCountQuery = queryOptions({
  * 加入或移出之後，快取裡這一篇的「在不在我的文獻庫」跟著改：論文頁、找論文的清單（每一份）。
  * 找論文的清單正在讀的（「再載入」、重讀）先取消：那一份是改之前讀的（伺服器那一頁也可能在寫入生效前讀），
  * 讀完會把「已加入」蓋回去（審查 F10）。改完之後，畫面正在用的清單重讀一次，以伺服器為準；
- * 範圍是我的文獻庫的那幾份例外，只標成過期（見下面）。沒在用的標成過期，下次打開時重讀。文獻庫清單在下次打開時本來就會重讀；文獻庫篇數（libraryCountQuery）同樣處理。
+ * 範圍是我的文獻庫、有本頁移出暫留列的那幾份例外，只標成過期（見下面）。沒在用的標成過期，下次打開時重讀。文獻庫清單在下次打開時本來就會重讀；文獻庫篇數（libraryCountQuery）同樣處理。
  * `stillCurrent`：等取消的這段期間可能換了人（登出、登入過期、換人登入），寫快取前再問一次；回 false 就什麼都不寫、
  * 回 false（審查 G1）。回 true 表示寫了。
  */
@@ -169,10 +223,10 @@ export async function markInLibrary(
       ? { ...data, list: { ...data.list, items: mark(data.list.items), pending: mark(data.list.pending) } }
       : data,
   );
-  // 範圍是我的文獻庫、而且已經有資料的那幾份只標成過期、不馬上重讀：移出的那一列留在原地變回「加入我的文獻庫」、
-  // 「找到 N 篇」不變（Kevin 2026-11-20 決定）；換條件、重新整理、之後再回來才照伺服器。沒有資料的（例如剛被取消的
-  // 第一次讀取）照常重讀，不然畫面會一直是骨架。
-  const keep = (query: Query) => isPersonalList(query.queryKey) && query.state.data !== undefined;
+  // 範圍是我的文獻庫、而且（改完之後）有本頁移出暫留的列的那幾份只標成過期、不馬上重讀：移出的那一列留在原地變回
+  // 「加入我的文獻庫」、「找到 N 篇」不變（Kevin 2026-11-20 決定）；換條件、重新整理、之後再回來才照伺服器。沒有暫留列的
+  // （加入、或沒移出過）照一般規則重讀（審查 R2）；沒有資料的（例如剛被取消的第一次讀取）也照常重讀，不然畫面會一直是骨架。
+  const keep = (query: Query) => hasHeldRows(query);
   void queryClient.invalidateQueries({ queryKey: ["paper-list"], refetchType: "none", predicate: keep });
   void queryClient.invalidateQueries({ queryKey: ["paper-list"], refetchType: "active", predicate: (query) => !keep(query) });
   void queryClient.invalidateQueries({ queryKey: ["library-count"], refetchType: "active" });

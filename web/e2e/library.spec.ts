@@ -1055,8 +1055,9 @@ test.describe("my library page (second version)", () => {
     const open = (await dock.locator("[data-library='open']").boundingBox())!;
     expect(selected.x).toBeLessThan(cancel.x);
     expect(cancel.x).toBeLessThan(open.x);
-    // 沒有內容時說明不佔位。
-    await expect(dock.locator("[data-library-notes]")).toBeHidden();
+    // 沒有內容時說明不佔位（審查 R11 後：仍留在無障礙樹裡，只是 1px、絕對定位）。
+    await expect(dock.locator("[data-library-notes]")).toHaveText("");
+    expect((await dock.locator("[data-library-notes]").boundingBox())!.height).toBeLessThanOrEqual(1);
     await dock.locator("[data-library='open']").click();
     const notes = dock.locator("[data-library-notes]");
     await expect(notes.locator("[data-library-note='mobile']")).toContainText(text("library:library.notes.mobile"));
@@ -1080,6 +1081,356 @@ test.describe("my library page (second version)", () => {
         expect(box.width, selector).toBeGreaterThanOrEqual(44);
       }
     }
+  });
+});
+
+// PR #114 第 1 輪審查的修正（R1～R5、R8）。
+test.describe("search rows: remove (review fixes)", () => {
+  const QUERY = "topic=it_project_management";
+  const shown = filterListRows(ROWS, new URLSearchParams(QUERY))!;
+  const mine = shown.find((entry) => entry.personal)!.row.id;
+  const notMine = shown.filter((entry) => !entry.personal).map((entry) => entry.row.id);
+  const searchRow = (page: Page, id: string) => page.locator(`[data-paper-row="${id}"]`);
+  const heading = (page: Page) => page.locator("main").getByRole("heading", { level: 2 });
+  const found = (count: number) => fill(text("search:search.results.found"), { count });
+
+  /** 這幾篇的加入／移出請求各自等放行才交給替身（每一篇一個閘門；回傳放行的函式）。 */
+  async function holdChanges(page: Page, ids: string[]): Promise<Record<string, () => void>> {
+    const holds: Record<string, Promise<void>> = {};
+    const releases: Record<string, () => void> = {};
+    for (const id of ids) [holds[id], releases[id]] = gate();
+    await page.route("**/api/v1/library/*", async (route) => {
+      const id = decodeURIComponent(new URL(route.request().url()).pathname.split("/").pop()!);
+      await holds[id];
+      await route.fallback();
+    });
+    return releases;
+  }
+
+  test("scope 'my library', 30 papers: load more, remove one, switch the scope and back: found 29 and the row is gone (R1)", async ({ page, apiMock }) => {
+    apiMock.libraryIds = ROWS.map((entry) => entry.row.id);
+    const all = filterListRows(ROWS, new URLSearchParams("scope=personal"), apiMock.libraryIds)!.map((entry) => entry.row.id);
+    expect(all).toHaveLength(30);
+    await page.setViewportSize(DESKTOP);
+    await page.goto(`${member.baseURL}/search?scope=personal`);
+    await expect(heading(page)).toHaveText(found(30));
+    await page.getByRole("button", { name: fill(text("search:search.results.more"), { count: 20 }) }).click();
+    await expect(page.locator("[data-paper-row]")).toHaveCount(30);
+    const removed = all[0]!;
+    await searchRow(page, removed).locator("[data-library='remove']").click();
+    await expect(searchRow(page, removed).locator("[data-library='add']")).toBeFocused();
+    expect(apiMock.libraryIds).toHaveLength(29);
+    await expect(heading(page)).toHaveText(found(30));
+    await page.getByRole("button", { name: text("search:search.scope.tracked") }).click();
+    await expect(page).not.toHaveURL(/scope=personal/);
+    // 起始狀態（本週新增前 3 篇）讀完才換回去。
+    await expect(page.locator("[data-paper-row]")).toHaveCount(3);
+    await expect(page.locator("[data-state='loading']")).toHaveCount(0);
+    // 換回來：等伺服器的這段期間是骨架，不先秀舊的那一份（移出的列還在、篇數 30）。
+    const [listGate, releaseList] = gate();
+    apiMock.listGate = listGate;
+    await page.getByRole("button", { name: text("search:search.scope.personal"), exact: true }).click();
+    await expect(page).toHaveURL(/scope=personal/);
+    await expect(page.getByRole("button", { name: text("search:search.scope.personal"), exact: true })).toHaveAttribute("aria-pressed", "true");
+    await expect(page.locator("[data-state='loading']")).toBeVisible();
+    await expect(page.locator("[data-paper-row]")).toHaveCount(0);
+    apiMock.listGate = null;
+    releaseList();
+    await expect(heading(page)).toHaveText(found(29));
+    await expect(page.locator("[data-paper-row]")).toHaveCount(20);
+    await expect(page.locator("[data-shown]")).toHaveText(fill(text("search:search.results.shown"), { shown: 20, total: 29 }));
+    await expect(searchRow(page, removed)).toHaveCount(0);
+    await page.getByRole("button", { name: fill(text("search:search.results.more"), { count: 20 }) }).click();
+    await expect(page.locator("[data-paper-row]")).toHaveCount(29);
+    await expect(heading(page)).toHaveText(found(29));
+    await expect(searchRow(page, removed)).toHaveCount(0);
+  });
+
+  test("scope 'my library' with nothing removed: back to the tab once the list is stale follows the server (another tab added one; then B took over) (R2)", async ({ page, apiMock }) => {
+    await page.clock.install();
+    const before = [...apiMock.libraryIds];
+    const extra = ROWS.find((entry) => !before.includes(entry.row.id))!.row.id;
+    const bOnly = ROWS.find((entry) => entry.row.id !== extra && !before.includes(entry.row.id))!.row.id;
+    await page.setViewportSize(DESKTOP);
+    await page.goto(`${member.baseURL}/search?scope=personal`);
+    await expect(page.locator("[data-paper-row]")).toHaveCount(before.length);
+    // 另一個分頁：同一位加了一篇。
+    apiMock.libraryIds = [extra, ...before];
+    await page.clock.fastForward("06:00");
+    await page.evaluate(() => window.dispatchEvent(new Event("visibilitychange")));
+    await expect(page.locator("[data-paper-row]")).toHaveCount(before.length + 1);
+    await expect(searchRow(page, extra)).toBeVisible();
+    await expect(heading(page)).toHaveText(found(before.length + 1));
+    // 另一個分頁：換成乙登入（乙只有自己的一篇）。
+    libraryOf(apiMock, MEMBERS[1]!.member_id).items = [{ id: bOnly, addedAt: "2026-11-01T00:00:00.000Z" }];
+    apiMock.member = MEMBERS[1]!;
+    await page.clock.fastForward("06:00");
+    await page.evaluate(() => window.dispatchEvent(new Event("visibilitychange")));
+    await expect(page.locator("[data-paper-row]")).toHaveCount(1);
+    await expect(searchRow(page, bOnly)).toBeVisible();
+    for (const id of [extra, ...before]) await expect(searchRow(page, id)).toHaveCount(0);
+  });
+
+  test("scope 'my library' holding a removed row: back to the tab after it went stale does not read again, the row stays (R2)", async ({ page, apiMock }) => {
+    await page.clock.install();
+    const before = [...apiMock.libraryIds];
+    await page.setViewportSize(DESKTOP);
+    await page.goto(`${member.baseURL}/search?scope=personal`);
+    await expect(page.locator("[data-paper-row]")).toHaveCount(before.length);
+    await searchRow(page, before[0]!).locator("[data-library='remove']").click();
+    await expect(searchRow(page, before[0]!).locator("[data-library='add']")).toBeFocused();
+    const reads = listReads(apiMock.requests);
+    await page.clock.fastForward("06:00");
+    await page.evaluate(() => window.dispatchEvent(new Event("visibilitychange")));
+    await twoFrames(page);
+    expect(listReads(apiMock.requests)).toBe(reads);
+    await expect(page.locator("[data-paper-row]")).toHaveCount(before.length);
+    await expect(heading(page)).toHaveText(found(before.length));
+  });
+
+  test("scope 'my library', A and B each with their own paper: switching members never shows A's rows to B; a remove on A's screen after the cookie changed goes out as B (R3)", async ({ page, apiMock }) => {
+    const aOnly = ROWS[0]!.row.id;
+    const bOnly = ROWS[1]!.row.id;
+    apiMock.libraryIds = [aOnly];
+    libraryOf(apiMock, MEMBERS[1]!.member_id).items = [{ id: bOnly, addedAt: "2026-11-01T00:00:00.000Z" }];
+    await page.setViewportSize(DESKTOP);
+    await page.goto(`${member.baseURL}/search?scope=personal`);
+    await expect(page.locator("[data-paper-row]")).toHaveCount(1);
+    await expect(searchRow(page, aOnly)).toBeVisible();
+    // 另一個分頁換成乙（cookie 換了），這個分頁還是甲的畫面；這時按甲那一列的「移出」：請求帶的是乙的 cookie。
+    apiMock.member = MEMBERS[1]!;
+    await searchRow(page, aOnly).locator("[data-library='remove']").click();
+    const [sent] = await requestsOf(apiMock.requests, "DELETE", "/api/v1/library/");
+    expect(sent!.path).toBe(`/api/v1/library/${aOnly}`);
+    await expect(searchRow(page, aOnly).locator("[data-library='add']")).toBeEnabled();
+    // 乙的文獻庫沒有這篇（替身回 404，照「已經不在」處理）；甲、乙的文獻庫都沒被動到。
+    expect(libraryOf(apiMock, MEMBERS[0]!.member_id).items.map((record) => record.id)).toEqual([aOnly]);
+    expect(libraryOf(apiMock, MEMBERS[1]!.member_id).items.map((record) => record.id)).toEqual([bOnly]);
+    // 站內換頁：發現換了人，清快取；回到範圍我的文獻庫時，乙的清單來之前不出現甲的列。
+    await page.locator("header").getByRole("link", { name: text("nav:nav.links.library") }).click();
+    await expect(rows(page)).toHaveCount(1);
+    const [listGate, releaseList] = gate();
+    apiMock.listGate = listGate;
+    await page.goBack();
+    await expect(page).toHaveURL(`${member.baseURL}/search?scope=personal`);
+    await expect(page.locator("[data-state='loading']")).toBeVisible();
+    await expect(searchRow(page, aOnly)).toHaveCount(0);
+    apiMock.listGate = null;
+    releaseList();
+    await expect(searchRow(page, bOnly)).toBeVisible();
+    await expect(page.locator("[data-paper-row]")).toHaveCount(1);
+    // 同一個分頁：乙登出、甲登入，再回到範圍我的文獻庫：只有甲的。
+    await page.getByRole("button", { name: text("nav:nav.account.trigger") }).click();
+    await page.getByRole("menuitem", { name: text("nav:nav.account.logout") }).click();
+    await expect(page).toHaveURL(`${member.baseURL}/login`);
+    apiMock.loginList = [MEMBERS[0]!];
+    await page.getByRole("button", { name: text("login:login.button.idle") }).click();
+    await expect(page).toHaveURL(`${member.baseURL}/search`);
+    const [listGate2, releaseList2] = gate();
+    apiMock.listGate = listGate2;
+    await page.getByRole("button", { name: text("search:search.scope.personal"), exact: true }).click();
+    await expect(page).toHaveURL(/scope=personal/);
+    await expect(searchRow(page, bOnly)).toHaveCount(0);
+    apiMock.listGate = null;
+    releaseList2();
+    await expect(searchRow(page, aOnly)).toBeVisible();
+    await expect(page.locator("[data-paper-row]")).toHaveCount(1);
+    await expect(searchRow(page, bOnly)).toHaveCount(0);
+  });
+
+  test("remove shows add at once while the request is on its way; success keeps it; failure brings 'added' + remove back (R4, decision 87)", async ({ page, apiMock }) => {
+    await page.setViewportSize(DESKTOP);
+    await page.goto(`${member.baseURL}/search?${QUERY}`);
+    const current = searchRow(page, mine);
+    const add = current.locator("[data-library='add']");
+    // 等待中 → 成功。
+    let [changeGate, releaseChange] = gate();
+    apiMock.libraryChangeGate = changeGate;
+    await current.locator("[data-library='remove']").click();
+    await requestsOf(apiMock.requests, "DELETE", "/api/v1/library/");
+    // 回應還沒回來：已經是「加入我的文獻庫」（停用，防重複送出），沒有「● 已加入」「移出」。
+    await expect(add).toBeVisible();
+    await expect(add).toBeDisabled();
+    await expect(current.locator("[data-library='added']")).toHaveCount(0);
+    await expect(current.locator("[data-library='remove']")).toHaveCount(0);
+    apiMock.libraryChangeGate = null;
+    releaseChange();
+    await expect(add).toBeEnabled();
+    await expect(add).toBeFocused();
+    expect(apiMock.libraryIds).not.toContain(mine);
+    // 加回去，再移出一次：等待中 → 失敗。
+    await add.click();
+    await expect(current.locator("[data-library='remove']")).toBeFocused();
+    [changeGate, releaseChange] = gate();
+    apiMock.libraryChangeGate = changeGate;
+    apiMock.libraryChange = "failed";
+    const deletes = apiMock.requests.filter((request) => request.method === "DELETE").length;
+    await current.locator("[data-library='remove']").click();
+    await expect.poll(() => apiMock.requests.filter((request) => request.method === "DELETE").length).toBe(deletes + 1);
+    await expect(add).toBeDisabled();
+    await expect(current.locator("[data-library='added']")).toHaveCount(0);
+    apiMock.libraryChangeGate = null;
+    releaseChange();
+    await expect(current.locator("[data-library='added']")).toBeVisible();
+    await expect(current.locator("[data-library='remove']")).toBeFocused();
+    await expect(add).toHaveCount(0);
+    expect(apiMock.libraryIds).toContain(mine);
+  });
+
+  test("an answer coming back after the user moved on does not pull focus back to that row (R5)", async ({ page, apiMock }) => {
+    const [first] = notMine;
+    await page.setViewportSize(DESKTOP);
+    await page.goto(`${member.baseURL}/search?${QUERY}`);
+    const release = await holdChanges(page, [first!]);
+    await searchRow(page, first!).locator("[data-library='add']").focus();
+    await page.keyboard.press("Enter");
+    // 使用者已經移到別列。
+    const elsewhere = searchRow(page, notMine[1]!).locator("h3 a");
+    await elsewhere.focus();
+    release[first!]!();
+    await expect(searchRow(page, first!).locator("[data-library='remove']")).toBeVisible();
+    await twoFrames(page);
+    await expect(elsewhere).toBeFocused();
+    expect(apiMock.libraryIds).toContain(first);
+  });
+
+  test("two rows pressed one after the other, answers in either order: focus ends on the row pressed last (R5)", async ({ page }) => {
+    const [first, second] = notMine;
+    await page.setViewportSize(DESKTOP);
+    await page.goto(`${member.baseURL}/search?${QUERY}`);
+    const release = await holdChanges(page, [first!, second!]);
+    await searchRow(page, first!).locator("[data-library='add']").focus();
+    await page.keyboard.press("Enter");
+    await searchRow(page, second!).locator("[data-library='add']").focus();
+    await page.keyboard.press("Enter");
+    // 先按的先回來：不搶焦點。
+    release[first!]!();
+    await expect(searchRow(page, first!).locator("[data-library='remove']")).toBeVisible();
+    await twoFrames(page);
+    await expect(searchRow(page, first!).locator("[data-library='remove']")).not.toBeFocused();
+    release[second!]!();
+    await expect(searchRow(page, second!).locator("[data-library='remove']")).toBeFocused();
+  });
+
+  test("two rows pressed one after the other, the later answers first: focus stays on it when the earlier answer comes back (R5)", async ({ page }) => {
+    const [first, second] = notMine;
+    await page.setViewportSize(DESKTOP);
+    await page.goto(`${member.baseURL}/search?${QUERY}`);
+    const release = await holdChanges(page, [first!, second!]);
+    await searchRow(page, first!).locator("[data-library='add']").focus();
+    await page.keyboard.press("Enter");
+    await searchRow(page, second!).locator("[data-library='add']").focus();
+    await page.keyboard.press("Enter");
+    release[second!]!();
+    await expect(searchRow(page, second!).locator("[data-library='remove']")).toBeFocused();
+    release[first!]!();
+    await expect(searchRow(page, first!).locator("[data-library='remove']")).toBeVisible();
+    await twoFrames(page);
+    await expect(searchRow(page, second!).locator("[data-library='remove']")).toBeFocused();
+  });
+});
+
+test.describe("search rows: 'no abstract' on a phone (R7)", () => {
+  // 設計稿 search-no-box.html 390：「期刊 · 年份」<br>「○ 沒有摘要」：沒有摘要自己一行、前面沒有「·」；900px 以上接在同一行、前面「·」。
+  const QUERY = "topic=it_project_management";
+  const entry = filterListRows(ROWS, new URLSearchParams(QUERY))!.find((candidate) => !candidate.row.has_abstract)!;
+
+  for (const [name, viewport, ownLine] of [
+    ["phone", PHONE, true],
+    ["desktop", DESKTOP, false],
+  ] as const) {
+    test(`${name}: 'no abstract' ${ownLine ? "on its own line with no '·'" : "after '·' on the same line"}`, async ({ page }) => {
+      expect(entry.row.journal).not.toBeNull();
+      expect(entry.row.publication_year).not.toBeNull();
+      await page.setViewportSize(viewport);
+      await page.goto(`${member.baseURL}/search?${QUERY}`);
+      const meta = page.locator(`[data-paper-row="${entry.row.id}"] h3 + div`);
+      const year = meta.getByText(String(entry.row.publication_year), { exact: true });
+      const label = meta.getByText(text("paper:paper.biblio.noAbstract"), { exact: true });
+      await expect(label).toBeVisible();
+      const yearBox = (await year.boundingBox())!;
+      const labelBox = (await label.boundingBox())!;
+      const metaBox = (await meta.boundingBox())!;
+      const separators = meta.locator("span:text-is('·'):visible");
+      if (ownLine) {
+        expect(labelBox.y).toBeGreaterThanOrEqual(yearBox.y + yearBox.height - 1);
+        // 那一行從行首開始（前面只有 6px 的圓圈＋7px 間距）。
+        expect(labelBox.x - metaBox.x).toBeLessThanOrEqual(14);
+        await expect(separators).toHaveCount(1);
+      } else {
+        expect(Math.abs(labelBox.y - yearBox.y)).toBeLessThan(4);
+        await expect(separators).toHaveCount(2);
+      }
+    });
+  }
+});
+
+test.describe("my library page on a phone: the selection dock (R9, R11)", () => {
+  test("a short library: the dock sits at the bottom of the window, not right under the list (R9)", async ({ page, apiMock }) => {
+    apiMock.libraryIds = WITH_DOI.slice(0, 1);
+    await openLibrary(page, PHONE);
+    await checkbox(page, apiMock.libraryIds[0]!).check();
+    const dock = page.locator("[data-library-dock]");
+    await expect(dock).toBeVisible();
+    const box = (await dock.boundingBox())!;
+    expect(box.y + box.height).toBeCloseTo(PHONE.height, 0);
+    // 清單在它上面，沒有被蓋住。
+    const last = (await rows(page).last().boundingBox())!;
+    expect(last.y + last.height).toBeLessThanOrEqual(box.y);
+    expect(await page.evaluate(() => document.documentElement.scrollHeight)).toBeLessThanOrEqual(PHONE.height);
+  });
+
+  test("the results and notes region is in the accessibility tree before anything is written, and takes no room (R11)", async ({ page, apiMock }) => {
+    await recordTabs(page);
+    apiMock.libraryIds = WITH_DOI.slice(0, 2);
+    await openLibrary(page, PHONE);
+    await checkbox(page, apiMock.libraryIds[0]!).check();
+    const dock = page.locator("[data-library-dock]");
+    // getByRole 不算 display:none 的元素：找得到就表示螢幕閱讀器看得到這個即時播報區。
+    const region = dock.getByRole("status");
+    await expect(region).toHaveCount(1);
+    await expect(region).toHaveText("");
+    const empty = (await region.boundingBox())!;
+    expect(empty.height).toBeLessThanOrEqual(1);
+    // 不佔一行：「已選 N 篇」就在選取列的第一行（上框線 1＋上內距 12）。
+    const top = (await dock.boundingBox())!.y;
+    const selected = (await dock.locator("[data-library-selected]").boundingBox())!;
+    const open = (await dock.locator("[data-library='open']").boundingBox())!;
+    expect(Math.min(selected.y, open.y) - top).toBeLessThanOrEqual(13);
+    await openButton(page).click();
+    await expect(region).toContainText(text("library:library.notes.mobile"));
+  });
+});
+
+test.describe("my library page: the selection count after opening (R8)", () => {
+  // 第 221、265 行的既有斷言改字串後不再比篇數（決定第 89 項）；這兩條把篇數補回來，不改既有測試。
+  test("after opening N tabs and the 'opened N' flash, the bar still says N selected", async ({ page, apiMock }) => {
+    await recordTabs(page);
+    apiMock.libraryIds = WITH_DOI.slice(0, 3);
+    await openLibrary(page);
+    for (const id of apiMock.libraryIds) await checkbox(page, id).check();
+    const bar = page.locator("[data-library-actions]");
+    const selected = fill(text("library:library.actions.selected"), { count: apiMock.libraryIds.length });
+    await expect(bar.locator("[data-library-selected]")).toHaveText(selected);
+    await openButton(page).click();
+    await expect(openButton(page)).toHaveText(fill(text("library:library.actions.opened"), { count: 3 }));
+    await expect(bar.locator("[data-library-selected]")).toHaveText(selected);
+    await expect(openButton(page)).toHaveText(text("library:library.actions.open"), { timeout: 4000 });
+    await expect(bar.locator("[data-library-selected]")).toHaveText(selected);
+    for (const id of apiMock.libraryIds) await expect(checkbox(page, id)).toBeChecked();
+  });
+
+  test("when the browser blocks the tabs, the bar still says N selected", async ({ page, apiMock }) => {
+    await recordTabs(page, 0);
+    apiMock.libraryIds = WITH_DOI.slice(0, 2);
+    await openLibrary(page);
+    for (const id of apiMock.libraryIds) await checkbox(page, id).check();
+    await openButton(page).click();
+    await expect(page.locator("[data-library-note='blocked']")).toBeVisible();
+    await expect(page.locator("[data-library-actions] [data-library-selected]")).toHaveText(
+      fill(text("library:library.actions.selected"), { count: apiMock.libraryIds.length }),
+    );
+    for (const id of apiMock.libraryIds) await expect(checkbox(page, id)).toBeChecked();
   });
 });
 
