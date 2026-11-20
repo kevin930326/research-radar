@@ -58,6 +58,19 @@ NO_RULES = ExclusionRulesConfig(rules=())
 
 # 沒有重寫到的幾種情況（ADR-0052 第 9 點「例外」）。
 NOT_REWRITTEN = ["no_raw", "missing_object", "hash_mismatch", "parse_error", "id_mismatch", "stale"]
+# 參數化逐案核對的情況：多一個「gzip 解壓失敗」（和 SHA-256 對不上同算 `hash_mismatch`）。
+NOT_REWRITTEN_WITH_BAD_GZIP = [*NOT_REWRITTEN, "bad_gzip"]
+# 每種情況該走到的分支：(missing_object, hash_mismatch, parse_error, id_mismatch, stale)。
+# 對照論文一定重寫到，所以這裡只反映被測的那一篇。
+EXPECTED_BRANCH = {
+    "no_raw": (0, 0, 0, 0, 0),
+    "missing_object": (1, 0, 0, 0, 0),
+    "hash_mismatch": (0, 1, 0, 0, 0),
+    "bad_gzip": (0, 1, 0, 0, 0),
+    "parse_error": (0, 0, 1, 0, 0),
+    "id_mismatch": (0, 0, 0, 1, 0),
+    "stale": (0, 0, 0, 0, 1),
+}
 
 
 @pytest.fixture
@@ -115,6 +128,9 @@ def _seed_case(database: Database, store: FakeObjectStore, case: str, number: in
     elif case == "hash_mismatch":
         record = _seed_raw(database, store, key, content, T2)
         store.objects[raw_object_key("openalex", record.sha256)] = compress_raw(b'{"id": "x"}')
+    elif case == "bad_gzip":
+        record = _seed_raw(database, store, key, content, T2)
+        store.objects[raw_object_key("openalex", record.sha256)] = b"not gzip at all"
     elif case == "parse_error":
         _seed_raw(database, store, key, b'{"id": "https://openalex.org/W1", "title": 5}', T2)
     elif case == "id_mismatch":
@@ -145,14 +161,17 @@ def _reparse(database: Database, store: FakeObjectStore, scope: ScopeSettings) -
     return reparse_papers(SystemViewer(), database, store, scope=scope, exclusion_rules=NO_RULES)
 
 
-@pytest.mark.parametrize("case", NOT_REWRITTEN)
+@pytest.mark.parametrize("case", NOT_REWRITTEN_WITH_BAD_GZIP)
 def test_paper_not_rewritten_is_rechecked_and_turned_false(
     demo_db: TestDatabase, database: Database, case: str
 ) -> None:
     store = FakeObjectStore()
     paper_id = _seed_case(database, store, case, 1)
-    # 對照：一篇有重寫到的（新的原始資料），出版社也是 Example Open Press。
-    rewritten_work = demo_work(2, issn_l=ISSN)
+    # 對照：一篇有重寫到的（新的原始資料），出版社是新清單仍可以放的 Second Open Press，
+    # 重寫後還是 true，所以重判的查詢讀得到它；它沒算進 demo_rechecked 才證明重寫到的被跳過。
+    rewritten_work = demo_work(
+        2, issn_l=ISSN, publisher_id=SECOND_OPEN_ID, publisher_name=SECOND_OPEN_NAME
+    )
     rewritten_id = _write(database, rewritten_work, fetched_at=T1, scope=OLD_SCOPE)
     _seed_raw(database, store, _key(2), demo_work_bytes(rewritten_work), T2)
     assert _eligible(demo_db, paper_id) is True
@@ -161,10 +180,33 @@ def test_paper_not_rewritten_is_rechecked_and_turned_false(
     result = _reparse(database, store, NEW_SCOPE)
 
     assert _eligible(demo_db, paper_id) is False
-    assert _eligible(demo_db, rewritten_id) is False  # 由 upsert_by_external_id 寫成 false
+    assert _eligible(demo_db, rewritten_id) is True
     assert result.updated == 1
-    # 重判只算沒重寫到的那一篇；重寫到的不經這條路。
+    # 真的走到這種情況該走的分支（不是在別的地方被略過）。
+    branch = (
+        result.missing_object,
+        result.hash_mismatch,
+        result.parse_error,
+        result.id_mismatch,
+        result.stale,
+    )
+    assert branch == EXPECTED_BRANCH[case]
+    # 重判只算沒重寫到的那一篇；重寫到的（仍是 true）不經這條路。
     assert (result.demo_rechecked, result.demo_revoked) == (1, 1)
+
+
+def test_revoked_paper_keeps_its_updated_at(demo_db: TestDatabase, database: Database) -> None:
+    # 重判只寫 demo_eligible（ADR-0052 第 9 點），被撤銷的論文其他欄位連 updated_at 都不動。
+    store = FakeObjectStore()
+    paper_id = _seed_case(database, store, "no_raw", 1)
+    [before] = [row for row in _all_rows(demo_db) if row[0] == paper_id]
+
+    result = _reparse(database, store, NEW_SCOPE)
+
+    [after] = [row for row in _all_rows(demo_db) if row[0] == paper_id]
+    assert result.demo_revoked == 1
+    assert (before[1], after[1]) == (True, False)
+    assert after[2:] == before[2:]  # 授權、出版社欄位、updated_at 都沒變
 
 
 def test_stored_fields_still_eligible_stay_true(demo_db: TestDatabase, database: Database) -> None:

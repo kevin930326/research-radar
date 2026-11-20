@@ -63,13 +63,15 @@ Kevin 2026-11-19 決定：授權只看**出版社自己那一版**（OpenAlex �
 ## 更新（2026-11-21）
 
 - **IEEE 的出版社 ID 已查證**：Kevin 2026-11-20 用唯讀查詢從資料庫查到 IEEE Transactions on Engineering Management（ISSN-L 0018-9391，2,893 篇）的出版社 ID 只有 `P4310319808`、名稱只有 `Institute of Electrical and Electronics Engineers` 一種寫法；`config/demo_publishers.yaml` 全名那一筆補上這個 ID。`IEEE`、`IEEE Computer Society` 兩筆留著當保守寫法（`id` 是 null）。第 4 點「名稱是必要條件」不變（Kevin 2026-11-20 決定維持）。「已知限制」第一點的 ID 部分因此已解決；名稱寫法之外的 IEEE 論文仍靠核對查詢確認。
-- **reparse 沒重寫到的論文重判**：第 6 點、第 9 點最後一小點照 Kevin 2026-11-20 的決定改寫（見上）。做法的細節：
+- **reparse 沒重寫到的論文重判**：第 6 點、第 9 點最後一小點照 Kevin 2026-11-20 的決定改寫（見上）。**這條新的重判規則取代第 9 點「例外」段裡「`demo_eligible` 也維持舊清單算出來的值」的描述**：沒重寫到的論文其他欄位照 ADR-0022 維持舊資料，但 `demo_eligible` 為 true 的會重判、算出 False 就改成 false（「例外」段保留原文當歷史紀錄）。做法的細節：
   - 套用與重判在同一個交易（持有寫入鎖），所以沒有「套用了、還沒重判」的中間狀態；中途失敗整個退回，重跑一次就補上；只往 false 改，重跑幾次結果一樣。
   - 「這次寫到的」只算 UPDATED（reparse 不會 CREATED）；STALE 和各種略過的都算沒寫到。
   - 排除清單沒有載入（`demo_publishers` 是 None）時 `is_demo_eligible` 一律 False，重判會把沒寫到的 true 全部改成 false：和同一次套用寫到的論文（`upsert_by_external_id` 也寫 false）一致，方向是少放，所以不另外擋；正式路徑一定帶 `DomainConfig.scope_settings()`。
   - reparse 沒有不寫入的模式（例如 `--dry-run`），不用另外處理。
+  - 重判只寫 `demo_eligible`，不動 `updated_at` 或其他欄位。重判的兩個數字只記在交易成功之後的「重新解析結束」日誌，不在交易裡另記。
   - 「已知限制」第三點（排除清單再改時可能留著舊的 true）因此由程式處理；核對查詢照舊保留當第二道檢查。
 - **`PublisherExclusions` 建立時自己正規化**：ID 經 `normalize_openalex_id`（看不懂的照原字串去頭尾空白、轉大寫，和比對論文 ID 時一樣），名稱經 `normalize_publisher_name`；正規化後是空字串的丟 `ValueError`（和設定檔載入把沒有字母或數字的名稱當寫錯一致）。從設定檔載入的結果不變。
+- **名稱比對鍵做到結果不再變**：`normalize_publisher_name` 的一輪（NFKC → casefold → 只留字母數字）重複做到結果不變，所以正規化兩次和一次一樣；只做一輪時，拿掉分隔字元後可能還能再組字（例如 `ᄀ-ᅡ`），排除清單和論文名稱會停在不同的鍵而漏排。這只會讓更多寫法對到同一個鍵（更保守）。
 
 ## 理由
 

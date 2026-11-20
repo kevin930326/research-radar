@@ -387,9 +387,5 @@ def _recheck_demo_eligible(
                 revoke.append(facts.paper_id)
         counts.demo_revoked += update_papers_not_demo_eligible(connection, revoke)
         after_id = page[-1].paper_id
-    if counts.demo_revoked:
-        log.info(
-            "重判示範站可用：沒重寫到的論文有幾篇改成不可用",
-            rechecked=counts.demo_rechecked,
-            revoked=counts.demo_revoked,
-        )
+    # 不在這裡另記日誌：交易還沒 commit，記了可能和資料庫不一致。兩個數字只在交易成功之後的
+    # 「重新解析結束」那一行。

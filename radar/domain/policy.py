@@ -125,7 +125,21 @@ def normalize_publisher_name(value: str) -> str:
     韓文填充字（U+115F、U+1160、U+3164、U+FFA0）。所以 `IEEE Computer Society`、
     `IEEE-Computer Society`、`I.E.E.E.`、字與字之間夾零寬空白的寫法都得到同一個鍵；結果是空字串
     ＝沒有名稱（ADR-0052 第 5 點）。寧可多排除：鍵變寬只會讓排除變多、可用變少。
+
+    上面一輪重複做到結果不再變（固定點），所以 `normalize(normalize(x)) == normalize(x)`：拿掉
+    分隔字元後，NFKC 可能把原本隔開的字組起來（例如 `ᄀ-ᅡ` 第一輪得到 `가`、再一輪才是 `가`），
+    只做一輪的話排除清單和論文名稱可能各停在不同的一步而對不上。第一輪之後每一輪只會拿掉字元或
+    把字組起來，實際上多一輪就停。
     """
+    key = _publisher_name_key_once(value)
+    while True:
+        again = _publisher_name_key_once(key)
+        if again == key:
+            return key
+        key = again
+
+
+def _publisher_name_key_once(value: str) -> str:
     text = unicodedata.normalize("NFKC", value).casefold()
     return "".join(
         ch for ch in text if unicodedata.category(ch)[0] in ("L", "N") and ch not in _HANGUL_FILLERS
@@ -147,9 +161,12 @@ class PublisherExclusions:
     建立時一律正規化（不管從設定檔還是測試直接建，呼叫的人不用自己先正規化）：`ids` 經
     `normalize_openalex_id`（看不懂的照原字串去頭尾空白、轉大寫，和 `matches` 比論文的 ID 時同一個
     規則），`names` 經 `normalize_publisher_name`。所以原字串與正規化過的字串建出來相等，建兩次
-    結果一樣。正規化後是空字串的名稱或 ID（例如只有空白、標點、看不見的字元）丟 `ValueError`：
-    和設定檔載入一致（`DemoExcludedPublisher` 把沒有字母或數字的名稱當寫錯）；空的鍵若收下來，
-    會讓任何沒有字母或數字的論文名稱都「對上排除清單」，意思不明。正式路徑由
+    結果一樣。正規化後是空字串就丟 `ValueError`，ID 與名稱的條件不同：
+    - ID：只有去頭尾空白後什麼都不剩（空字串或全是空白）才是空的；看不懂的 ID 照原字串轉大寫
+      收下，所以 `...` 這種只有標點的 ID 不會被拒。
+    - 名稱：沒有任何字母或數字（只有空白、標點、符號、看不見的字元）就是空的；和設定檔載入一致
+      （`DemoExcludedPublisher` 把沒有字母或數字的名稱當寫錯）。空的名稱鍵若收下來，會讓任何沒有
+      字母或數字的論文名稱都「對上排除清單」，意思不明。正式路徑由
     `DemoPublishersConfig.exclusions()` 建立。
     """
 

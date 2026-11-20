@@ -741,3 +741,30 @@ def test_property_raw_and_normalized_exclusions_match_the_same_papers(
     )
     for name in names:
         assert raw.matches((), (name,)) is True
+
+
+# Codex 審查 PR #118 的反例：拿掉分隔字元後 NFKC 會把韓文字母組成音節，只做一輪時要兩次才穩定。
+_RECOMPOSING_NAME = "ᄀ-ᅡ"  # ᄀ-ᅡ
+_SYLLABLE = "가"  # 가
+
+
+def test_name_key_that_recomposes_is_stable_in_one_call() -> None:
+    assert normalize_publisher_name(_RECOMPOSING_NAME) == normalize_publisher_name(_SYLLABLE)
+    assert normalize_publisher_name(_RECOMPOSING_NAME) == _SYLLABLE
+    key = normalize_publisher_name(_RECOMPOSING_NAME)
+    assert normalize_publisher_name(key) == key
+
+
+def test_exclusion_written_with_separator_matches_the_composed_name() -> None:
+    exclusions = PublisherExclusions(ids=frozenset(), names=frozenset({_RECOMPOSING_NAME}))
+
+    assert exclusions.names == frozenset({_SYLLABLE})
+    assert exclusions.matches((), (_SYLLABLE,)) is True
+    assert PublisherExclusions(ids=frozenset(), names=exclusions.names) == exclusions
+
+
+@given(name=st.text(max_size=20))
+def test_property_name_key_is_idempotent(name: str) -> None:
+    key = normalize_publisher_name(name)
+
+    assert normalize_publisher_name(key) == key

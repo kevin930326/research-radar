@@ -1103,13 +1103,14 @@ def update_papers_not_demo_eligible(connection: Connection, paper_ids: Sequence[
 
     只有 `reparse` 結束時的重判呼叫：哪幾篇要改由呼叫端經 `is_demo_eligible` 算好，這裡不判斷、
     不寫任何授權清單或名稱比對。`WHERE demo_eligible`：只會把 true 改成 false，原本就是 false 的
-    不動（也不更新 `updated_at`）。在呼叫端開好的交易裡做，不 commit。
+    不動。只寫 `demo_eligible`，`updated_at` 也不動（ADR-0052 第 9 點只准重判寫這一欄）。在呼叫端
+    開好的交易裡做，不 commit。
     """
     if not paper_ids:
         return 0
     rows = connection.execute(
         text(
-            "UPDATE paper SET demo_eligible = false, updated_at = now()"
+            "UPDATE paper SET demo_eligible = false"
             " WHERE id = ANY(CAST(:ids AS uuid[])) AND demo_eligible"
         ),
         {"ids": list(paper_ids)},
