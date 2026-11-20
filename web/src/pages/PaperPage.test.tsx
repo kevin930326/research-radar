@@ -35,7 +35,7 @@ function fixture(label: string): PaperPageResponse {
   return structuredClone(entry.page);
 }
 
-// 主題標籤連到找論文（Story 3.14，站內連結），要有路由才能算出網址：只放找論文一條路由的記憶體路由。
+// 主題、方法標籤連到找論文（Story 3.14，站內連結），要有路由才能算出網址：只放找論文一條路由的記憶體路由。
 const rootRoute = createRootRoute();
 const searchRoute = createRoute({ getParentRoute: () => rootRoute, path: "/search" });
 const router = createRouter({
@@ -130,8 +130,18 @@ describe("paper page: three AI blocks with content", () => {
     }
     expect(topics[0]).toContain('href="/search?topic=platforms"');
     expect(topics[1]).toContain('href="/search?topic=trust"');
-    // 方法的標籤不是連結（找論文沒有方法的篩選）：整頁的連結只有站外的 EXTERNAL_LINKS 個和這兩個主題。
-    expect(count(html, "<a ")).toBe(EXTERNAL_LINKS + 2);
+    // 整頁的連結只有站外的 EXTERNAL_LINKS 個、這兩個主題與一個方法（下一條）。
+    expect(count(html, "<a ")).toBe(EXTERNAL_LINKS + 2 + 1);
+  });
+
+  it("method tags link to search with the method condition in the same tab", () => {
+    // EXPERIENCE.md 畫面 8 第 2 點：方法標籤帶進去是一個可以移除的條件標籤（審查 S2-1）。
+    const classification = block(html, "classification");
+    const methods = [...classification.matchAll(/<a [^>]*data-method-link[^>]*>/g)].map((match) => match[0]);
+    // 「normal」有一個方法（experiment）。
+    expect(methods).toEqual([expect.stringContaining('href="/search?method=experiment"')]);
+    expect(methods[0]).not.toContain("target=");
+    expect(methods[0]).not.toContain("aria-describedby");
   });
 
   it("does not render things that belong to later stories", () => {

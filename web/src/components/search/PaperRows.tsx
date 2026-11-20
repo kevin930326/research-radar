@@ -119,15 +119,9 @@ export function PaperRowList({ rows, names }: { rows: readonly PaperRow[]; names
 }
 
 // 載入中的骨架（State Patterns「12. 找論文」：6 列論文列的骨架；設計稿「載入中」）：髮線色的長條、不閃動。
-// 寬度照設計稿：桌機三條（標題、期刊年份、第三行）＋右側一條；手機標題兩行，最後一條是「開啟全文」。
-const SKELETON_DESKTOP = [
-  [520, 430],
-  [610, 380],
-  [440, 460],
-  [680, 400],
-  [560, 440],
-  [480, 360],
-] as const;
+// 寬度照設計稿：桌機兩條（標題、期刊年份）＋右側一條；手機標題兩行，最後一條是「開啟全文」。
+// 設計稿的第三條（AI 整理那一行）不畫：這一頁不顯示那一行（Kevin 2026-11-20 決定），載入完版面才不會跳（審查 S2-14）。
+const SKELETON_TITLE_WIDTHS = [520, 610, 440, 680, 560, 480] as const;
 
 /** 一條骨架：`width` 是［手機, 桌機］的寬度（px）；沒給就由 className 定。 */
 function Bar({ className, width }: { className: string; width?: readonly [number, number] }) {
@@ -145,7 +139,7 @@ export function SkeletonRows({ label }: { label: string }) {
         <Bar className="h-[14px] w-[92px]" />
       </div>
       <div aria-hidden="true" className="mt-[14px] border-y border-hairline">
-        {SKELETON_DESKTOP.map(([title, third], index) => (
+        {SKELETON_TITLE_WIDTHS.map((title, index) => (
           <div
             key={index}
             className={`py-[26px] split:flex split:items-start split:justify-between split:gap-12 split:py-[28px] ${index > 0 ? "border-t border-hairline" : ""}`}
@@ -154,7 +148,6 @@ export function SkeletonRows({ label }: { label: string }) {
               <Bar className="h-[15px] split:h-4" width={[title * 0.62, title]} />
               <Bar className="mt-[11px] h-[15px] split:hidden" width={[title * 0.4, title * 0.4]} />
               <Bar className="mt-4 h-[10px] w-[96px]" />
-              <Bar className="mt-[18px] h-[12px]" width={[third * 0.66, third]} />
             </div>
             <div className="mt-[26px] split:mt-[0px] split:flex split:h-[34px] split:w-rail-width split:shrink-0 split:items-center split:gap-[20px]">
               <Bar className="h-[10px] w-16" />

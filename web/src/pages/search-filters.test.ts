@@ -8,8 +8,8 @@ import {
   checkYears,
   clearConditions,
   currentTaipeiYear,
-  filterKey,
   isStart,
+  knownOnly,
   toApiParams,
   validateSearchParams,
   yearPreset,
@@ -27,13 +27,27 @@ describe("search params from the URL", () => {
         this_week: "yes",
         shown: 9999,
         extra: "x",
-      }),
-    ).toEqual({ journal: "misq,isr", from: 2020, to: 2022, shown: 200 });
+      }, 2026),
+    ).toEqual({ journal: "misq,isr", from: 2020, to: 2022, shown: 9999 });
   });
 
   it("drops a year range that is incomplete or reversed", () => {
-    expect(validateSearchParams({ from: 2020 })).toEqual({});
-    expect(validateSearchParams({ from: 2023, to: 2020 })).toEqual({});
+    expect(validateSearchParams({ from: 2020 }, 2026)).toEqual({});
+    expect(validateSearchParams({ from: 2023, to: 2020 }, 2026)).toEqual({});
+  });
+
+  it("drops a year range outside the tracking start year and this year", () => {
+    // 後端對這些年份一定回 422（ADR-0050 第 10 點）：整組不套用，不送出去。
+    expect(validateSearchParams({ from: 2010, to: 2020 }, 2026)).toEqual({});
+    expect(validateSearchParams({ from: 2016, to: 2070 }, 2026)).toEqual({});
+    expect(validateSearchParams({ from: 1, to: 9999 }, 2026)).toEqual({});
+    expect(validateSearchParams({ from: 2016, to: 2027 }, 2026)).toEqual({});
+    expect(validateSearchParams({ from: 2016, to: 2026 }, 2026)).toEqual({ from: 2016, to: 2026 });
+    expect(validateSearchParams({ from: 2016, to: 2027 }, 2027)).toEqual({ from: 2016, to: 2027 });
+  });
+
+  it("keeps method keys brought in from the paper page", () => {
+    expect(validateSearchParams({ method: "experiment,BAD KEY" }, 2026)).toEqual({ method: "experiment" });
   });
 
   it("keeps lab and personal scopes and the this-week condition", () => {
@@ -78,8 +92,28 @@ describe("search conditions", () => {
     expect(toApiParams({})).toEqual({});
   });
 
-  it("the filter key ignores how many rows are shown", () => {
-    expect(filterKey({ topic: "erp", shown: 60 })).toEqual({ topic: "erp" });
+  it("the API parameters ignore how many rows are shown", () => {
+    // 原本測 filterKey（只有測試在用，審查 H-L1 刪掉）；同一個性質由 toApiParams 保證。
+    expect(toApiParams({ topic: "erp", shown: 60 })).toEqual({ topic: ["erp"] });
+  });
+
+  it("a method is a condition sent to the API and cleared with the rest", () => {
+    expect(isStart({ method: "experiment" })).toBe(false);
+    expect(appliedFilterCount({ method: "experiment" })).toBe(0);
+    expect(toApiParams({ method: "experiment,survey" })).toEqual({ method: ["experiment", "survey"] });
+    expect(clearConditions({ method: "experiment", scope: "personal" })).toEqual({ scope: "personal" });
+  });
+
+  it("drops keys the display names do not know before sending", () => {
+    const names = {
+      journals: [{ key: "misq", name: "MIS Quarterly" }],
+      topics: [{ key: "erp", name: "ERP" }],
+      methods: [{ key: "experiment", name: "Experiment" }],
+    };
+    expect(
+      knownOnly({ scope: "lab", journal: "misq,old_journal", topic: "erp,unclassified,not_a_topic", method: "gone", from: 2020, to: 2021 }, names),
+    ).toEqual({ scope: "lab", journal: "misq", topic: "erp,unclassified", method: undefined, from: 2020, to: 2021 });
+    expect(knownOnly({ topic: "not_a_topic" }, names)).toEqual({ journal: undefined, topic: undefined, method: undefined });
   });
 });
 

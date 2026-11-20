@@ -1,14 +1,19 @@
 import { Popover } from "@base-ui/react/popover";
-import { useId, useState, type ReactNode } from "react";
+import { Link } from "@tanstack/react-router";
+import { useId, useRef, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 
-import { TRACKING_START_YEAR } from "../../pages/search-filters";
+import { PHONE_QUERY, useCloseAcrossBreakpoint } from "../../hooks/use-close-across-breakpoint";
+import { TRACKING_START_YEAR, type SearchParams } from "../../pages/search-filters";
 import { journalValue, topicValue, yearValue, type FilterState } from "./filters";
 import { JournalOptions, TopicOptions, YearOptions } from "./FilterLists";
 import { Caret } from "./parts";
 
 // 桌機（900px 以上）的三個篩選選單（設計稿 search-no-box.html 的 .chip.f 與 .menu）：期刊、年份、主題。
-// 行為用 Base UI Popover（ADR-0010）：一次只開一個（開另一個等於點了外面）、點外面或按 Esc 關掉、焦點回到標籤。
+// 行為用 Base UI Popover（ADR-0010）：一次只開一個（開另一個等於點了外面）、點外面或按 Esc 關掉、焦點回到標籤；
+// 視窗縮到手機寬度時關掉（標籤看不到了，審查 S2-4）。
+// 標籤的報讀名稱由內容算出（「期刊 MIS Quarterly」），選了什麼也唸得到（審查 S2-2）。
+// 底部的「清除」是連到拿掉這個篩選的網址的連結（設計稿）；按了它會不見，焦點先移到選單的第一個選項（審查 S2-3）。
 // 有選的時候標籤變暖白底、後面接「· 選了什麼」；期刊與主題有選時選單底部才出現「清除」（年份選單沒有底部）。
 // 和設計稿不同的地方（ADR-0037、Kevin 的決定）：
 // - 標籤看得到的高度 32px，按鈕本身 44px 高（透明），用負外距讓這一排的高度和設計稿一樣。
@@ -26,21 +31,22 @@ interface MenuProps {
   value: string | null;
   /** 選單寬度（設計稿：期刊 490、年份與主題 260）。 */
   width: "wide" | "narrow";
-  /** 期刊與主題有選時底部的「清除」；年份是 null。 */
-  onClear: (() => void) | null;
+  /** 期刊與主題有選時底部「清除」連到的條件；年份是 null。 */
+  clear: SearchParams | null;
   children: ReactNode;
 }
 
-function FilterMenu({ label, value, width, onClear, children }: MenuProps) {
+function FilterMenu({ label, value, width, clear, children }: MenuProps) {
   const { t } = useTranslation("search");
   const [open, setOpen] = useState(false);
   const labelId = useId();
+  const popupRef = useRef<HTMLDivElement>(null);
   const selected = value !== null;
+  useCloseAcrossBreakpoint(open, PHONE_QUERY, () => setOpen(false));
   return (
     <Popover.Root open={open} onOpenChange={setOpen}>
       <Popover.Trigger
         data-filter-chip
-        aria-labelledby={labelId}
         className="group -my-[6px] inline-flex h-tap-target cursor-pointer items-center bg-transparent p-[0px]"
       >
         <span
@@ -71,21 +77,25 @@ function FilterMenu({ label, value, width, onClear, children }: MenuProps) {
           className="z-10"
         >
           <Popover.Popup
+            ref={popupRef}
             aria-labelledby={labelId}
             className={`box-border max-w-[calc(100vw-40px)] border border-border bg-popover-surface leading-normal tracking-0 text-text-primary transition-[opacity,transform] duration-200 data-[ending-style]:-translate-y-1 data-[ending-style]:opacity-0 data-[starting-style]:-translate-y-1 data-[starting-style]:opacity-0 ${
               width === "wide" ? "w-[490px]" : "w-[260px]"
             }`}
           >
             <div className="py-2">{children}</div>
-            {onClear !== null && selected ? (
+            {clear !== null && selected ? (
               <div className="flex justify-end border-t border-hairline px-4 py-[10px] text-s13">
-                <button
-                  type="button"
-                  onClick={onClear}
-                  className="-my-[13px] inline-flex min-h-tap-target min-w-tap-target cursor-pointer items-center justify-end bg-transparent p-[0px] text-accent-gold decoration-1 underline-offset-4 hover:underline"
+                <Link
+                  to="/search"
+                  search={clear}
+                  replace
+                  resetScroll={false}
+                  onClick={() => popupRef.current?.querySelector<HTMLElement>("input")?.focus()}
+                  className="-my-[13px] inline-flex min-h-tap-target min-w-tap-target items-center justify-end text-accent-gold no-underline decoration-1 underline-offset-4 hover:underline"
                 >
                   {t("search.filter.clear")}
-                </button>
+                </Link>
               </div>
             ) : null}
           </Popover.Popup>
@@ -106,18 +116,18 @@ export function FilterMenus({ state }: { state: FilterState }) {
         label={t("search.filter.journal")}
         value={journalValue(state, t)}
         width="wide"
-        onClear={() => state.apply({ ...state.params, journal: undefined })}
+        clear={{ ...state.params, journal: undefined, shown: undefined }}
       >
         <JournalOptions state={state} size="menu" />
       </FilterMenu>
-      <FilterMenu label={t("search.filter.year")} value={yearValue(state)} width="narrow" onClear={null}>
+      <FilterMenu label={t("search.filter.year")} value={yearValue(state)} width="narrow" clear={null}>
         <YearOptions state={state} size="menu" startYear={TRACKING_START_YEAR} />
       </FilterMenu>
       <FilterMenu
         label={t("search.filter.topic")}
         value={topicValue(state, t, unclassified)}
         width="narrow"
-        onClear={() => state.apply({ ...state.params, topic: undefined })}
+        clear={{ ...state.params, topic: undefined, shown: undefined }}
       >
         <TopicOptions state={state} size="menu" />
       </FilterMenu>

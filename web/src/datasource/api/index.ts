@@ -9,7 +9,7 @@ import {
   me as getMe,
   paper as getPaper,
 } from "../../generated/api";
-import { FakeLoginMode, type FakeLoginBody } from "../../generated/model";
+import { FakeLoginMode, type FakeLoginBody, type PaperListResponse, type PaperRow } from "../../generated/model";
 import type {
   ClientConfigResult,
   DataSource,
@@ -113,10 +113,13 @@ const papers: PaperSource = {
   },
 
   async list(filters: PaperListFilters, limit: number, previous?: PaperList | null): Promise<PaperListResult> {
-    // 「再載入」：從上一次的清單接著讀；沒有下一頁就直接回上一次的。
-    let list: PaperList | null = previous ?? null;
-    while (list === null || (list.items.length < limit && list.next_cursor !== null)) {
-      const cursor: string | undefined = list?.next_cursor ?? undefined;
+    // 「再載入」：從上一次的清單接著讀（先用它多讀到的 pending，再照 next_cursor 讀下一頁）。
+    let rows: PaperRow[] = previous ? [...previous.items, ...previous.pending] : [];
+    let last: Omit<PaperListResponse, "items"> | null = previous
+      ? { next_cursor: previous.next_cursor, total: previous.total, snapshot: previous.snapshot }
+      : null;
+    while (last === null || (rows.length < limit && last.next_cursor !== null)) {
+      const cursor: string | undefined = last?.next_cursor ?? undefined;
       const response = await listPapers(cursor === undefined ? filters : { ...filters, cursor });
       if (response.status === 401) {
         return { kind: "signedOut" };
@@ -126,15 +129,16 @@ const papers: PaperSource = {
         throw new Error(`GET ${API_BASE}/papers: HTTP ${response.status}`);
       }
       const page = response.data;
-      list = {
-        items: list === null ? page.items : [...list.items, ...page.items],
+      rows = [...rows, ...page.items];
+      last = {
         // 空的一頁卻還有下一頁（後端不會這樣回）：當作沒有下一頁，不會一直打下去。
         next_cursor: page.items.length === 0 ? null : page.next_cursor,
         total: page.total,
         snapshot: page.snapshot,
       };
     }
-    return { kind: "found", list };
+    // 只放要求的篇數（型別的約定），多讀到的留在 pending，下一次接著用。
+    return { kind: "found", list: { ...last, items: rows.slice(0, limit), pending: rows.slice(limit) } };
   },
 };
 

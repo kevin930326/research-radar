@@ -34,11 +34,12 @@ export function PaperTitle({
   className = "",
 }: PaperTitleProps) {
   const wrapClass = wrap === "balance" ? "text-balance" : "text-pretty";
+  // 沒有空格的超長字串（化學名、網址）也要斷行，不撐出橫向捲動（審查 S2-19）。
   return (
     <Tag
       lang={lang}
       data-paper-text="title"
-      className={`font-display ${wrapClass} text-text-primary ${TITLE_SIZE_CLASS[size]} ${className}`}
+      className={`font-display ${wrapClass} wrap-break-word text-text-primary ${TITLE_SIZE_CLASS[size]} ${className}`}
     >
       {children}
     </Tag>

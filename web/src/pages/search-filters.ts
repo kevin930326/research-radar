@@ -1,7 +1,7 @@
 // 找論文（Story 3.14）的篩選條件：網址參數怎麼讀、怎麼寫、怎麼換成 API 的參數（AD-21：篩選與目前顯示幾篇
 // 都寫進網址，cursor 不進網址）。只處理資料，畫面上的字由 i18n 提供。
 // 條件怎麼合（期刊、年份「或」，主題「且」）由後端決定（ADR-0050 第 2 點），前端只把選的值原樣送出去。
-import type { ListPapersParams, PaperListScope } from "../generated/model";
+import type { DisplayNames, ListPapersParams, PaperListScope } from "../generated/model";
 
 /**
  * 追蹤範圍的起始年（年份輸入的下限、「不限」右邊的年份範圍）。
@@ -31,10 +31,13 @@ export const AIS_CORE_JOURNALS: readonly string[] = [
 export const START_ROWS = 3;
 
 /**
- * 網址上「目前顯示幾篇」的上限（AD-21 的設定值）：重新整理時資料來源層一次拿回這麼多篇，
- * 網址被改成很大的數也不會連打幾百次 API。
+ * 快取裡沒有可以接著讀的清單時（重新整理、直接打開網址），一次最多讀回幾篇：網址的「目前顯示幾篇」
+ * 被改成很大的數也不會連打幾百次 API。只限制這一次，之後照樣可以「再載入」（審查 S1-3）。
  */
 export const MAX_SHOWN = 200;
+
+/** 主題「未分類」的代號（後端的保留字，ADR-0050 第 1 點）。 */
+export const UNCLASSIFIED_TOPIC = "unclassified";
 
 const SCOPES: readonly PaperListScope[] = ["tracked", "lab", "personal"];
 /** 期刊、主題代號：英數字、底線、連字號（後端的代號都是這種寫法；其他字元不放進網址也不送出去）。 */
@@ -53,6 +56,11 @@ export interface SearchParams {
   to?: number;
   /** 主題代號，逗號分隔（多選）。 */
   topic?: string;
+  /**
+   * 方法代號，逗號分隔：只從論文頁的方法標籤帶進來（找論文沒有方法的篩選選單），
+   * 顯示成可以移除的條件標籤（EXPERIENCE.md 畫面 8 第 2 點）。
+   */
+  method?: string;
   /** 從「看全部 N 篇」帶進來的條件「本週新增」。 */
   this_week?: true;
   /** 目前顯示幾篇（按過「再載入」才有；省略是一頁）。 */
@@ -73,14 +81,20 @@ function yearValue(value: unknown): number | undefined {
   return Number.isInteger(year) && year >= 1 && year <= 9999 ? year : undefined;
 }
 
-/** 路由的 validateSearch：只留看得懂的值，其他丟掉（每個欄位都寫出來，網址上沒檢查過的值才不會留下）。 */
-export function validateSearchParams(search: Record<string, unknown>): SearchParams {
+/**
+ * 路由的 validateSearch：只留看得懂的值，其他丟掉（每個欄位都寫出來，網址上沒檢查過的值才不會留下）。
+ * 年份範圍要在追蹤起始年到今年（台北）之間、起不晚於訖，不合就整組不套用：後端對這種年份一定回 422
+ * （ADR-0050 第 10 點），送出去只會變成「沒有載入成功」（審查 S1-1）。
+ */
+export function validateSearchParams(search: Record<string, unknown>, currentYear: number = currentTaipeiYear()): SearchParams {
   const scope = SCOPES.includes(search.scope as PaperListScope) ? (search.scope as PaperListScope) : "tracked";
   const journal = keyList(search.journal);
   const topic = keyList(search.topic);
+  const method = keyList(search.method);
   const from = yearValue(search.from);
   const to = yearValue(search.to);
-  const hasYears = from !== undefined && to !== undefined && from <= to;
+  const hasYears =
+    from !== undefined && to !== undefined && TRACKING_START_YEAR <= from && from <= to && to <= currentYear;
   const shown = typeof search.shown === "number" && Number.isInteger(search.shown) ? search.shown : undefined;
   return {
     scope: scope === "tracked" ? undefined : scope,
@@ -88,10 +102,28 @@ export function validateSearchParams(search: Record<string, unknown>): SearchPar
     from: hasYears ? from : undefined,
     to: hasYears ? to : undefined,
     topic: topic.length > 0 ? topic.join(",") : undefined,
+    method: method.length > 0 ? method.join(",") : undefined,
     this_week: search.this_week === true || search.this_week === "true" ? true : undefined,
-    shown: shown !== undefined && shown > 0 ? Math.min(shown, MAX_SHOWN) : undefined,
+    shown: shown !== undefined && shown > 0 ? shown : undefined,
   };
 }
+
+/**
+ * 只留顯示名稱裡有的期刊、主題、方法代號（主題另外認得「未分類」）。網址上不認得的代號（舊書籤、
+ * 分類表改版前留下的主題）送出去後端回 422（ADR-0050 第 10 點），所以送出前拿掉（審查 S1-2）。
+ */
+export function knownOnly(params: SearchParams, names: DisplayNames): SearchParams {
+  const keep = (value: string | undefined, known: Set<string>) =>
+    joinKeys(selectedKeys(value).filter((key) => known.has(key)));
+  const keys = (entries: readonly { key: string }[]) => new Set(entries.map((entry) => entry.key));
+  return {
+    ...params,
+    journal: keep(params.journal, keys(names.journals)),
+    topic: keep(params.topic, new Set([...keys(names.topics), UNCLASSIFIED_TOPIC])),
+    method: keep(params.method, keys(names.methods)),
+  };
+}
+
 
 /** 選了哪些期刊、主題（網址上的逗號分隔字串拆開）。 */
 export function selectedKeys(value: string | undefined): string[] {
@@ -103,10 +135,14 @@ export function joinKeys(keys: readonly string[]): string | undefined {
   return keys.length === 0 ? undefined : keys.join(",");
 }
 
-/** 有沒有期刊、年份、主題、「本週新增」任何一個條件（範圍不算條件）。 */
+/** 有沒有期刊、年份、主題、方法、「本週新增」任何一個條件（範圍不算條件）。 */
 export function hasConditions(params: SearchParams): boolean {
   return (
-    params.journal !== undefined || params.from !== undefined || params.topic !== undefined || params.this_week === true
+    params.journal !== undefined ||
+    params.from !== undefined ||
+    params.topic !== undefined ||
+    params.method !== undefined ||
+    params.this_week === true
   );
 }
 
@@ -120,7 +156,7 @@ export function appliedFilterCount(params: SearchParams): number {
   return [params.journal, params.from, params.topic].filter((value) => value !== undefined).length;
 }
 
-/** 拿掉期刊、年份、主題與帶進來的條件（「清除篩選」）；範圍留著。 */
+/** 拿掉期刊、年份、主題與帶進來的條件（方法、本週新增；「清除篩選」）；範圍留著。 */
 export function clearConditions(params: SearchParams): SearchParams {
   return { scope: params.scope };
 }
@@ -138,6 +174,8 @@ export function toApiParams(params: SearchParams): ListPapersParams {
   if (journals.length > 0) api.journal = journals;
   if (params.from !== undefined && params.to !== undefined) api.year = yearRange(params.from, params.to);
   if (topics.length > 0) api.topic = topics;
+  const methods = selectedKeys(params.method);
+  if (methods.length > 0) api.method = methods;
   if (params.this_week === true) api.this_week = true;
   if (params.scope !== undefined) api.scope = params.scope;
   return api;
@@ -193,11 +231,4 @@ export function checkYears(
 export function currentTaipeiYear(now: Date = new Date()): number {
   const year = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Taipei", year: "numeric" }).format(now);
   return Number(year);
-}
-
-/** 篩選條件（給查詢快取當鍵、決定 cursor 要不要重來）：網址參數去掉「目前顯示幾篇」。 */
-export function filterKey(params: SearchParams): SearchParams {
-  const rest = { ...params };
-  delete rest.shown;
-  return rest;
 }

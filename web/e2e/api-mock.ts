@@ -37,6 +37,8 @@ export const PAPER_FIXTURES = fixtures as unknown as PaperFixtures;
 export interface ListFixtureRow {
   row: PaperRow;
   topics: string[];
+  /** 方法代號（沒寫是沒有方法）。 */
+  methods?: string[];
   this_week: boolean;
   lab: boolean;
   personal: boolean;
@@ -54,21 +56,30 @@ export const LIST_FIXTURES = listFixtures as unknown as ListFixtures;
 const START_YEAR = 2016;
 
 /**
- * 依網址參數篩選假清單（後端的簡化版，ADR-0050）：期刊、年份多選是「或」，主題是「且」（unclassified 是沒有主題），
- * 範圍 lab／personal 只留標了的列；依年份新到舊。年份早於追蹤範圍是 null（422）。
+ * 依網址參數篩選假清單（後端的簡化版，ADR-0050）：期刊、年份多選是「或」，主題、方法是「且」（unclassified 是沒有主題），
+ * 範圍 lab／personal 只留標了的列；依年份新到舊。年份早於追蹤範圍、不認得的期刊／主題／方法代號是 null（422，
+ * ADR-0050 第 10 點；認得的是論文頁假資料的顯示名稱）。
  */
 export function filterListRows(rows: readonly ListFixtureRow[], query: URLSearchParams): ListFixtureRow[] | null {
   const journals = query.getAll("journal");
   const years = query.getAll("year").map(Number);
   const topics = query.getAll("topic");
+  const methods = query.getAll("method");
   const scope = query.get("scope") ?? "tracked";
   if (years.some((year) => !Number.isInteger(year) || year < START_YEAR)) return null;
+  const names = PAPER_FIXTURES.displayNames;
+  const known = (entries: readonly { key: string }[], keys: string[], extra: string[] = []) =>
+    keys.every((key) => extra.includes(key) || entries.some((entry) => entry.key === key));
+  if (!known(names.journals, journals) || !known(names.topics, topics, ["unclassified"]) || !known(names.methods, methods)) {
+    return null;
+  }
   return rows
     .filter(
       (entry) =>
         (journals.length === 0 || journals.includes(entry.row.journal ?? "")) &&
         (years.length === 0 || years.includes(entry.row.publication_year ?? 0)) &&
         topics.every((topic) => (topic === "unclassified" ? entry.topics.length === 0 : entry.topics.includes(topic))) &&
+        methods.every((method) => (entry.methods ?? []).includes(method)) &&
         (query.get("this_week") !== "true" || entry.this_week) &&
         (scope === "tracked" || (scope === "lab" ? entry.lab : entry.personal)),
     )

@@ -246,19 +246,30 @@ async function paper(res, id) {
 /** 追蹤範圍的第一年（同 config/journals.yaml 的 start_year）：更早的年份後端回 422。 */
 const START_YEAR = 2016;
 
-/** 依網址參數篩選假清單（後端的簡化版，和 e2e/api-mock.ts 的 filterListRows 同一套規則）；年份不合是 null。 */
+/**
+ * 依網址參數篩選假清單（後端的簡化版，和 e2e/api-mock.ts 的 filterListRows 同一套規則）；年份不合、
+ * 不認得的期刊／主題／方法代號（顯示名稱裡沒有）是 null（422）。
+ */
 function filterRows(query) {
   const journals = query.getAll("journal");
   const years = query.getAll("year").map(Number);
   const topics = query.getAll("topic");
+  const methods = query.getAll("method");
   const scope = query.get("scope") ?? "tracked";
   if (years.some((year) => !Number.isInteger(year) || year < START_YEAR)) return null;
+  const names = PAPERS.displayNames;
+  const known = (entries, keys, extra = []) =>
+    keys.every((key) => extra.includes(key) || (entries ?? []).some((entry) => entry.key === key));
+  if (!known(names.journals, journals) || !known(names.topics, topics, ["unclassified"]) || !known(names.methods, methods)) {
+    return null;
+  }
   return LIST.rows
     .filter(
       (entry) =>
         (journals.length === 0 || journals.includes(entry.row.journal ?? "")) &&
         (years.length === 0 || years.includes(entry.row.publication_year ?? 0)) &&
         topics.every((topic) => (topic === "unclassified" ? entry.topics.length === 0 : entry.topics.includes(topic))) &&
+        methods.every((method) => (entry.methods ?? []).includes(method)) &&
         (query.get("this_week") !== "true" || entry.this_week) &&
         (scope === "tracked" || (scope === "lab" ? entry.lab : entry.personal)),
     )
@@ -296,6 +307,7 @@ function searchIndex() {
     { label: "linked", url: `${base}/search?this_week=true`, note: "從「看全部 N 篇」帶進來的條件" },
     { label: "filtered", url: `${base}/search?journal=misq,isr,jmis,jais,ejis,isj,jit,jsis,dss,im,io&from=2022&to=2026`, note: "篩選中" },
     { label: "results", url: `${base}/search?topic=e_commerce`, note: "有結果（多於一頁時有「再載入」）" },
+    { label: "method", url: `${base}/search?method=experiment`, note: "從論文頁的方法標籤帶進來的條件" },
     { label: "zero", url: `${base}/search?journal=misq&from=2016&to=2016`, note: "沒有結果" },
     { label: "loading", url: `${base}/__mock?listDelay=600000`, note: "先打開這個，再開任何找論文的網址：骨架" },
     { label: "error", url: `${base}/__mock?list=failed`, note: "先打開這個，再開任何找論文的網址：錯誤" },

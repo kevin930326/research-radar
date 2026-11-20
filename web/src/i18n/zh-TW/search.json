@@ -34,7 +34,8 @@
       "reversed": "起始年不能比結束年晚"
     },
     "condition": {
-      "thisWeek": "本週新增"
+      "thisWeek": "本週新增",
+      "named": "{{label}}：{{value}}"
     },
     "start": {
       "seeAll": "看全部 {{count}} 篇"

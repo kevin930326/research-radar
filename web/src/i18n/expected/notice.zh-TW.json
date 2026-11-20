@@ -127,6 +127,7 @@
     "search:search.filter.aisCore": "AIS 核心 11 本",
     "search:search.year.tooEarly": "追蹤範圍從 {{year}} 年開始",
     "search:search.condition.thisWeek": "本週新增",
+    "search:search.condition.named": "{{label}}：{{value}}",
     "search:search.start.seeAll": "看全部 {{count}} 篇",
     "search:search.results.found": "找到 {{count}} 篇",
     "search:search.results.byYear": "依年份排序",

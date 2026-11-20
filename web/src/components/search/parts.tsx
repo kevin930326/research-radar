@@ -68,8 +68,9 @@ interface OptionProps {
 }
 
 /**
- * 一個選項（設計稿 .opt）：整列都可以點。真正的輸入框蓋滿整列、外觀透明（不是 opacity 0：鍵盤焦點的金色外框要看得到），
- * 前面畫一個勾選框或圓點。
+ * 一個選項（設計稿 .opt）：整列都可以點（點在 label 上）。真正的輸入框外觀透明（不是 opacity 0：鍵盤焦點的金色外框要看得到），
+ * 前面畫一個勾選框或圓點。輸入框比整列往內縮 5px：全站的焦點外框外擴 4px，畫出來剛好在整列往內 1px 的地方
+ * （設計稿 outline-offset:-1px），不蓋到上下的選項，也不用改全站的焦點規則（ADR-0037；審查 S2-8）。
  */
 export function FilterOption({ type, name, checked, onChange, size, label, detail }: OptionProps) {
   return (
@@ -81,7 +82,7 @@ export function FilterOption({ type, name, checked, onChange, size, label, detai
         name={name}
         checked={checked}
         onChange={onChange}
-        className="absolute inset-[0px] m-[0px] cursor-pointer appearance-none bg-transparent"
+        className="absolute inset-[5px] m-[0px] cursor-pointer appearance-none bg-transparent"
       />
       {type === "checkbox" ? <CheckBox checked={checked} /> : <RadioMark checked={checked} />}
       {label === undefined ? null : (

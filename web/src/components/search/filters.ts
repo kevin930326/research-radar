@@ -3,9 +3,11 @@
 import type { TFunction } from "i18next";
 
 import type { DisplayNames } from "../../generated/model";
+import { DESKTOP_QUERY } from "../../hooks/use-close-across-breakpoint";
 import {
   AIS_CORE_JOURNALS,
   TRACKING_START_YEAR,
+  UNCLASSIFIED_TOPIC,
   joinKeys,
   presetRange,
   selectedKeys,
@@ -14,8 +16,8 @@ import {
 } from "../../pages/search-filters";
 import { formatYears } from "./parts";
 
-/** 主題「未分類」的代號（後端的保留字，ADR-0050 第 1 點）。 */
-export const UNCLASSIFIED = "unclassified";
+/** 主題「未分類」的代號（同 search-filters.ts）。 */
+export const UNCLASSIFIED = UNCLASSIFIED_TOPIC;
 
 export interface FilterState {
   params: SearchParams;
@@ -23,8 +25,11 @@ export interface FilterState {
   names: DisplayNames | null;
   /** 今年（台北）：「今年」「近 N 年」與年份上限。 */
   currentYear: number;
-  /** 套用新的條件（寫進網址；「目前顯示幾篇」回到一頁）。 */
-  apply: (next: SearchParams) => void;
+  /**
+   * 套用新的條件（寫進網址；「目前顯示幾篇」回到一頁）。傳的是「怎麼從目前網址上的條件算出下一組」：
+   * 網址還沒換完時（每次換頁都要等「我是誰」）連點兩個選項，第二個才不會用舊的條件把第一個蓋掉（審查 S1-4）。
+   */
+  update: (change: (current: SearchParams) => SearchParams) => void;
 }
 
 /** 勾一個或取消一個（期刊、主題的複選）。 */
@@ -33,10 +38,12 @@ export function toggleKey(value: string | undefined, key: string): string | unde
   return joinKeys(keys.includes(key) ? keys.filter((item) => item !== key) : [...keys, key]);
 }
 
-/** 「AIS 核心 11 本」：只勾這 11 本（設計稿的快速選項是「換成這 11 本」，不是再加上）。顯示名稱裡沒有的不送。 */
-export function aisCoreJournals(names: DisplayNames | null): string | undefined {
-  const known = new Set((names?.journals ?? []).map((entry) => entry.key));
-  return joinKeys(AIS_CORE_JOURNALS.filter((key) => known.has(key)));
+/**
+ * 「AIS 核心 11 本」：只勾這 11 本（設計稿的快速選項是「換成這 11 本」，不是再加上）。
+ * 直接用常數，不看顯示名稱：顯示名稱還沒讀到時按下去也不會把期刊條件清掉（審查 S1-9）。
+ */
+export function aisCoreJournals(): string | undefined {
+  return joinKeys(AIS_CORE_JOURNALS);
 }
 
 /** 期刊的顯示名稱（全名）；沒讀到或不認得就用代號。 */
@@ -81,3 +88,12 @@ export function yearOptions(currentYear: number): { preset: "none" | "thisYear" 
 }
 
 export { yearPreset };
+
+/**
+ * 按了會讓自己不見的東西（「清除」「清除篩選」、條件標籤的 ×）之後，焦點移到一定還在的地方：
+ * 桌機是第一個篩選標籤（期刊），手機是「篩選」按鈕（審查 S2-3）。
+ */
+export function focusFilters(): void {
+  const desktop = typeof window.matchMedia === "function" && window.matchMedia(DESKTOP_QUERY).matches;
+  document.querySelector<HTMLElement>(desktop ? "[data-filter-chip]" : "[data-mobile-filter]")?.focus();
+}

@@ -1,5 +1,5 @@
 {
-  "_comment": "找論文（Story 3.14）的假清單：自己編的標題、作者與 DOI（10.5555 是測試用的 DOI 前綴），不是真的論文。e2e/api-mock.ts 與 scripts/mock-api.mjs 共用。row 是 API 回的一列；topics、this_week、lab、personal 是替身用來篩選的欄位（API 不回）。 前三列（本週新增的前 3 篇）的 ID 用論文頁假資料裡的三篇（normal、no-abstract、all-failed），站內連結檢查點標題時落在真的有的論文頁。",
+  "_comment": "找論文（Story 3.14）的假清單：自己編的標題、作者與 DOI（10.5555 是測試用的 DOI 前綴），不是真的論文。e2e/api-mock.ts 與 scripts/mock-api.mjs 共用。row 是 API 回的一列；topics、methods（沒寫是沒有方法）、this_week、lab、personal 是替身用來篩選的欄位（API 不回）。 前三列（本週新增的前 3 篇）的 ID 用論文頁假資料裡的三篇（normal、no-abstract、all-failed），站內連結檢查點標題時落在真的有的論文頁。",
   "snapshot": {
     "number": 12,
     "as_of": "2026-11-11T17:30:00Z"
@@ -57,7 +57,10 @@
       ],
       "this_week": true,
       "lab": false,
-      "personal": false
+      "personal": false,
+      "methods": [
+        "experiment"
+      ]
     },
     {
       "row": {
@@ -154,7 +157,10 @@
       ],
       "this_week": false,
       "lab": true,
-      "personal": false
+      "personal": false,
+      "methods": [
+        "experiment"
+      ]
     },
     {
       "row": {
@@ -250,7 +256,10 @@
       ],
       "this_week": false,
       "lab": false,
-      "personal": false
+      "personal": false,
+      "methods": [
+        "experiment"
+      ]
     },
     {
       "row": {
@@ -344,7 +353,10 @@
       "topics": [],
       "this_week": false,
       "lab": false,
-      "personal": false
+      "personal": false,
+      "methods": [
+        "experiment"
+      ]
     },
     {
       "row": {
@@ -441,7 +453,10 @@
       ],
       "this_week": false,
       "lab": true,
-      "personal": false
+      "personal": false,
+      "methods": [
+        "experiment"
+      ]
     },
     {
       "row": {
@@ -537,7 +552,10 @@
       ],
       "this_week": false,
       "lab": false,
-      "personal": false
+      "personal": false,
+      "methods": [
+        "experiment"
+      ]
     },
     {
       "row": {

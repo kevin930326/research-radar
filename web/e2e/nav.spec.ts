@@ -384,6 +384,22 @@ test.describe("phone menu", () => {
     await expect(open).toBeFocused();
   });
 
+  test("the phone menu has search; it goes there and is marked as the current page", async ({ page }) => {
+    // Story 3.14（AR-67）：手機選單的「找論文」（審查 A-3；新加的測試，既有的沒有改）。
+    await openNotice(page, PHONE);
+    await page.getByRole("button", { name: MENU }).click();
+    const dialog = page.getByRole("dialog", { name: MENU });
+    const search = dialog.getByRole("link", { name: TEXT["nav:nav.links.search"] });
+    await expect(search).toBeVisible();
+    await expect(search).toHaveAttribute("href", "/search");
+    await search.click();
+    await expect(dialog).toBeHidden();
+    await expect(page).toHaveURL(`${member.baseURL}/search`);
+    await expect(page.locator("h1")).toHaveText(TEXT["search:search.page.title"]);
+    await page.getByRole("button", { name: MENU }).click();
+    await expect(dialog.getByRole("link", { name: TEXT["nav:nav.links.search"] })).toHaveAttribute("aria-current", "page");
+  });
+
   test("logout loading and failed in the phone menu", async ({ page, apiMock }) => {
     const [logoutGate, release] = gate();
     apiMock.logoutGate = logoutGate;

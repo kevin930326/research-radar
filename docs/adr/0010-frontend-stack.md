@@ -151,3 +151,4 @@ web/src/
 
 - 資料來源層的型別多了 `clientConfig()` 與 `list()`；示範站的實作在 3.14 示範站部分之前是 `papers: null`，示範站的建置不會用到這兩個函式。
 - 3.14 的驗收條件有一部分（示範站的論文清單與入口）留到 3.7 之後，PR 說明列出還沒驗的條件。
+- 論文頁的分類標籤（`web/src/components/paper/PaperBiblio.tsx` 的 `ClassificationTagLink`，主題與方法）寫死連到成員版的 `/search`；示範站有論文頁（Story 3.9）時，示範站要換成連到論文清單。

@@ -13,7 +13,7 @@ import { NoticePage } from "../pages/NoticePage";
 import { PaperPage } from "../pages/PaperPage";
 import { SearchPage } from "../pages/SearchPage";
 import { isPaperId } from "../pages/paper-format";
-import { validateSearchParams } from "../pages/search-filters";
+import { validateSearchParams, type SearchParams } from "../pages/search-filters";
 import { displayNamesQuery, paperSource } from "./paper-queries";
 import { PlainMain, rootRoute } from "./root";
 import { FIRST_PAGE, clearMemberQueries, meQuery, validateLoginSearch } from "./session";
@@ -119,8 +119,11 @@ const searchRoute = createRoute({
     return (
       <SearchPage
         params={params}
-        // 篩選改了：換掉這一筆瀏覽紀錄（不是每勾一個就多一筆），捲動位置不動。
-        onChange={(next) => void navigate({ search: next, replace: true, resetScroll: false })}
+        // 篩選改了：換掉這一筆瀏覽紀錄（不是每勾一個就多一筆），捲動位置不動。下一組條件用函式從最新的網址算
+        // （上一次換頁還在等「我是誰」時，畫面拿到的條件是舊的；審查 S1-4）。
+        onUpdate={(change) =>
+          void navigate({ search: (current: SearchParams) => change(current), replace: true, resetScroll: false })
+        }
         onSignedOut={() =>
           void (async () => {
             await clearMemberQueries(queryClient);

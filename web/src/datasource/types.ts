@@ -7,6 +7,7 @@ import type {
   MemberResponse,
   PaperListResponse,
   PaperPageResponse,
+  PaperRow,
 } from "../generated/model";
 
 /** 這份建置是哪一個站：成員版或示範站。 */
@@ -68,12 +69,18 @@ export type ClientConfigResult = { kind: "found"; config: ClientConfig } | { kin
 /** 找論文的篩選條件（`GET /api/v1/papers` 的參數，不含 cursor：cursor 由資料來源層自己接）。 */
 export type PaperListFilters = Omit<ListPapersParams, "cursor">;
 
-/** 找論文的清單：目前拿到的論文、下一頁的 cursor、符合條件的總篇數、快照（API 的回應形狀）。 */
-export type PaperList = PaperListResponse;
+/**
+ * 找論文的清單：API 的回應形狀（要顯示的論文、下一頁的 cursor、符合條件的總篇數、快照），
+ * 加上 `pending`：已經讀到、但超過要求的篇數而沒放進 `items` 的論文（一頁的篇數和要求的篇數不一樣時，
+ * 例如起始狀態只要 3 篇）。下一次「再載入」先用 `pending`，用完才照 `next_cursor` 讀下一頁。
+ */
+export interface PaperList extends PaperListResponse {
+  pending: PaperRow[];
+}
 
 /**
  * 列出論文的結果（Story 3.14）：
- * - `found`：讀到了（`items` 最多到要求的篇數）。
+ * - `found`：讀到了（`items` 最多到要求的篇數，多讀到的放在 `pending`）。
  * - `signedOut`：沒登入或登入過期（401）。
  * 條件不合法（422 `request_invalid`，ADR-0047）與其他錯誤丟出例外，畫面顯示 State Patterns「12. 找論文」的「錯誤」。
  */
