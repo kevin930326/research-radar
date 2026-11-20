@@ -1445,3 +1445,90 @@ for (const width of [1440, 1000, 500]) {
     await page.screenshot({ path: `${SCREENSHOT_DIR}library-${width}.png`, fullPage: true });
   });
 }
+
+// PR #114 第 2 輪修正（確認審查 C1；Gemini 參考審查第 1 條＝G1）。
+test.describe("search rows: remove (review fixes, round 2)", () => {
+  const searchRow = (page: Page, id: string) => page.locator(`[data-paper-row="${id}"]`);
+  const heading = (page: Page) => page.locator("main").getByRole("heading", { level: 2 });
+  const found = (count: number) => fill(text("search:search.results.found"), { count });
+  const personalScope = (page: Page) => page.getByRole("button", { name: text("search:search.scope.personal"), exact: true });
+
+  test("scope 'my library': remove one, go to my library page, back to search by the nav, switch to 'my library': the skeleton until the server answers, not the old list (C1)", async ({ page, apiMock }) => {
+    apiMock.libraryIds = ROWS.map((entry) => entry.row.id);
+    const all = filterListRows(ROWS, new URLSearchParams("scope=personal"), apiMock.libraryIds)!.map((entry) => entry.row.id);
+    expect(all).toHaveLength(30);
+    await page.setViewportSize(DESKTOP);
+    await page.goto(`${member.baseURL}/search?scope=personal`);
+    await expect(heading(page)).toHaveText(found(30));
+    await page.getByRole("button", { name: fill(text("search:search.results.more"), { count: 20 }) }).click();
+    await expect(page.locator("[data-paper-row]")).toHaveCount(30);
+    const removed = all[0]!;
+    await searchRow(page, removed).locator("[data-library='remove']").click();
+    await expect(searchRow(page, removed).locator("[data-library='add']")).toBeFocused();
+    expect(apiMock.libraryIds).toHaveLength(29);
+    // 到我的文獻庫，再用導覽列回找論文（條件是預設的起始狀態）。
+    await page.locator("header").getByRole("link", { name: text("nav:nav.links.library") }).click();
+    await expect(rows(page)).toHaveCount(20);
+    await page.locator("header").getByRole("link", { name: text("nav:nav.links.search") }).click();
+    await expect(page).toHaveURL(`${member.baseURL}/search`);
+    await expect(page.locator("[data-paper-row]")).toHaveCount(3);
+    await expect(page.locator("[data-state='loading']")).toHaveCount(0);
+    // 換到範圍我的文獻庫：伺服器回來前是骨架，不出現舊的那一份（找到 30 篇、移出的那一列）。
+    const [listGate, releaseList] = gate();
+    apiMock.listGate = listGate;
+    await personalScope(page).click();
+    await expect(page).toHaveURL(/scope=personal/);
+    await expect(personalScope(page)).toHaveAttribute("aria-pressed", "true");
+    await expect(page.locator("[data-state='loading']")).toBeVisible();
+    await expect(page.locator("[data-paper-row]")).toHaveCount(0);
+    await expect(page.getByText(found(30))).toHaveCount(0);
+    await expect(searchRow(page, removed)).toHaveCount(0);
+    apiMock.listGate = null;
+    releaseList();
+    await expect(heading(page)).toHaveText(found(29));
+    await expect(page.locator("[data-paper-row]")).toHaveCount(20);
+    await expect(searchRow(page, removed)).toHaveCount(0);
+  });
+
+  test("scope 'my library' holding a removed row; B signs in from another tab; back to this tab: B's list, not A's, and A's rows cannot be added to B's library (G1)", async ({ page, apiMock }) => {
+    const aRows = [ROWS[0]!.row.id, ROWS[2]!.row.id];
+    const bOnly = ROWS[1]!.row.id;
+    apiMock.libraryIds = [...aRows];
+    libraryOf(apiMock, MEMBERS[1]!.member_id).items = [{ id: bOnly, addedAt: "2026-11-01T00:00:00.000Z" }];
+    await page.setViewportSize(DESKTOP);
+    await page.goto(`${member.baseURL}/search?scope=personal`);
+    await expect(page.locator("[data-paper-row]")).toHaveCount(2);
+    await searchRow(page, aRows[0]!).locator("[data-library='remove']").click();
+    await expect(searchRow(page, aRows[0]!).locator("[data-library='add']")).toBeFocused();
+    expect(libraryOf(apiMock, MEMBERS[0]!.member_id).items.map((record) => record.id)).toEqual([aRows[1]]);
+    // 另一個分頁換成乙登入，再切回這個分頁。
+    apiMock.member = MEMBERS[1]!;
+    await page.evaluate(() => window.dispatchEvent(new Event("visibilitychange")));
+    await expect(searchRow(page, bOnly)).toBeVisible();
+    await expect(page.locator("[data-paper-row]")).toHaveCount(1);
+    for (const id of aRows) await expect(searchRow(page, id)).toHaveCount(0);
+    await expect(heading(page)).toHaveText(found(1));
+    // 乙的文獻庫沒被加進甲移出的那一篇；沒有送出加入。
+    expect(apiMock.requests.filter((request) => request.method === "PUT")).toHaveLength(0);
+    expect(libraryOf(apiMock, MEMBERS[1]!.member_id).items.map((record) => record.id)).toEqual([bOnly]);
+  });
+
+  test("scope 'my library' holding a removed row; still the same member when back to this tab: the row stays, the list is not read again (G1)", async ({ page, apiMock }) => {
+    const before = [...apiMock.libraryIds];
+    await page.setViewportSize(DESKTOP);
+    await page.goto(`${member.baseURL}/search?scope=personal`);
+    await expect(page.locator("[data-paper-row]")).toHaveCount(before.length);
+    await searchRow(page, before[0]!).locator("[data-library='remove']").click();
+    await expect(searchRow(page, before[0]!).locator("[data-library='add']")).toBeFocused();
+    const reads = listReads(apiMock.requests);
+    const meAsked = apiMock.requests.filter((request) => request.path === "/api/v1/me").length;
+    await page.evaluate(() => window.dispatchEvent(new Event("visibilitychange")));
+    // 問過一次「我是誰」（同一位），清單不重讀，暫留列還在。
+    await expect.poll(() => apiMock.requests.filter((request) => request.path === "/api/v1/me").length).toBe(meAsked + 1);
+    await twoFrames(page);
+    expect(listReads(apiMock.requests)).toBe(reads);
+    await expect(page.locator("[data-paper-row]")).toHaveCount(before.length);
+    await expect(searchRow(page, before[0]!).locator("[data-library='add']")).toBeEnabled();
+    await expect(heading(page)).toHaveText(found(before.length));
+  });
+});

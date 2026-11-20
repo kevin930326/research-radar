@@ -108,14 +108,12 @@ export function SearchPage({ params: addressParams, onUpdate, onSignedOut }: Sea
     placeholderData: (previous, previousQuery) => (previousQuery?.queryKey[1] === key ? previous : undefined),
   });
 
-  // 換了條件：上一組條件（範圍我的文獻庫）裡有本頁移出暫留列的那幾份丟掉。換回來時從伺服器重讀，不先把舊的那一份（移出的列還在、
+  // 換了條件：別組條件（範圍我的文獻庫）裡有本頁移出暫留列的那幾份丟掉。換回來時從伺服器重讀，不先把舊的那一份（移出的列還在、
   // 篇數是移出前的）秀出來再換掉（PR #114 審查 R1；Kevin 2026-11-20 決定「換條件後才照伺服器」）。從論文頁按上一頁回來不算換條件，留著。
-  const lastKey = useRef(key);
+  // 頁面一掛上也做一次（不只在頁面上換條件時）：到別頁再回來時條件可能已經不同（例如導覽列的「找論文」是預設條件），
+  // 上一組條件的暫留清單還在快取裡，之後換回去會先閃出舊的那一份（確認審查 C1）。
   useEffect(() => {
-    const before = lastKey.current;
-    lastKey.current = key;
-    if (before === key) return;
-    queryClient.removeQueries({ queryKey: ["paper-list", before], predicate: hasHeldRows });
+    queryClient.removeQueries({ queryKey: ["paper-list"], predicate: (query) => query.queryKey[1] !== key && hasHeldRows(query) });
   }, [key, queryClient]);
 
   const found = list.data?.kind === "found" ? list.data.list : null;

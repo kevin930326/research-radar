@@ -80,6 +80,10 @@ export function paperListQuery(queryClient: QueryClient, filters: PaperListFilte
       const held = heldRows(previous);
       if (held.length === 0) return result;
       const back = await addedElsewhere(held.map((row) => row.id));
+      // 新讀到的一頁裡又出現的暫留列：伺服器回的列一定在文獻庫裡，也算加回去了（論文 ID 的確認讀不到時，照畫面算，
+      // 篇數才不會比列多；確認審查 C3）。
+      const fresh = new Set([...result.list.items, ...result.list.pending].slice(listSize(previous)).map((row) => row.id));
+      for (const row of held) if (fresh.has(row.id)) back.add(row.id);
       const seen = new Set<string>();
       const rows = [...result.list.items, ...result.list.pending]
         .filter((row) => {

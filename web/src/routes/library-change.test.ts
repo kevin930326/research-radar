@@ -355,7 +355,7 @@ describe("paperListQuery 'my library': the real continuation path against a fake
    * GET /api/v1/papers/{id} 回 in_my_library。
    */
   function server(pageSize: number) {
-    const state = { library: [] as string[], after: {} as Record<string, string[]> };
+    const state = { library: [] as string[], after: {} as Record<string, string[]>, paperFails: false };
     const calls: string[] = [];
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = new URL(String(input), "http://test");
@@ -363,6 +363,7 @@ describe("paperListQuery 'my library': the real continuation path against a fake
       const reply = (body: unknown) => new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
       const one = /^\/api\/v1\/papers\/(.+)$/.exec(url.pathname);
       if (one !== null) {
+        if (state.paperFails) return new Response("{}", { status: 500, headers: { "content-type": "application/json" } });
         const id = decodeURIComponent(one[1]!);
         return reply({ paper: { id }, in_my_library: state.library.includes(id) });
       }
@@ -426,6 +427,39 @@ describe("paperListQuery 'my library': the real continuation path against a fake
     const more = await read(queryClient, 5);
     expect(more.items.map((item) => [item.id, item.in_my_library])).toEqual([["a", true], ["b", true], ["c", true], ["d", true]]);
     expect(more.pending).toEqual([]);
+    expect(more.total).toBe(4);
+  });
+
+  it("load more after a remove, another tab added it back, and asking the server about it fails: the total matches the rows shown (C3)", async () => {
+    const queryClient = new QueryClient();
+    const { state, calls } = server(2);
+    state.library = ["a", "b", "c", "d"];
+    await read(queryClient, 2);
+    state.library = ["b", "c", "d"];
+    await markInLibrary(queryClient, "a", false);
+    state.library = ["b", "c", "d", "a"];
+    state.after = { b: ["c", "d", "a"] };
+    state.paperFails = true;
+    calls.length = 0;
+    const more = await read(queryClient, 5);
+    expect(calls).toEqual(["/api/v1/papers?scope=personal&cursor=b", "/api/v1/papers/a"]);
+    // 新的一頁裡又有 a：伺服器已經算它，照畫面只留一列、改回「已加入」，篇數不多算。
+    expect(more.items.map((item) => [item.id, item.in_my_library])).toEqual([["a", true], ["b", true], ["c", true], ["d", true]]);
+    expect(more.pending).toEqual([]);
+    expect(more.next_cursor).toBeNull();
+    expect(more.total).toBe(4);
+  });
+
+  it("load more after a remove and asking the server fails, the row is not in the new page: still held and counted once (C3)", async () => {
+    const queryClient = new QueryClient();
+    const { state } = server(2);
+    state.library = ["a", "b", "c", "d"];
+    await read(queryClient, 2);
+    state.library = ["b", "c", "d"];
+    await markInLibrary(queryClient, "a", false);
+    state.paperFails = true;
+    const more = await read(queryClient, 4);
+    expect(more.items.map((item) => [item.id, item.in_my_library])).toEqual([["a", false], ["b", true], ["c", true], ["d", true]]);
     expect(more.total).toBe(4);
   });
 
