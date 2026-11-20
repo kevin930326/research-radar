@@ -29,6 +29,7 @@
 - PR 說明一律列出沒照我的要求做的地方和原因。
 - 做前端畫面之前，先讀 `docs/ux/reference/README.md`：畫面的字級、顏色、間距、分行以 `docs/ux/reference/screens/` 的設計稿為準；做完用 `web/scripts/design-compare.mjs` 量差異，報告貼進 PR 說明，每一條差異都要寫原因（ADR-0038）。沒有設計稿的畫面先問我，不要自己設計。
 - 開始新的 BMAD 階段或實作 Story 之前，先查 `docs/skills-plan.md`；有符合觸發點、還沒安裝的 skill，先提醒我安裝，不要自己裝。安裝後在狀態欄打勾。
+- `impeccable` skill 只裝了說明文件（Kevin 2026-11-21 決定）：只用它審查與修飾現有畫面的準則；不跑它的安裝、登入、更新指令（`npx impeccable …`），不下載它的引擎，不用 `init`、`document`、`hooks`、`live`、`generate`、`foundations`、`doctor` 這幾個指令。它的建議和設計稿或這份規則衝突時，以設計稿與這份規則為準。細節在 `.claude/skills/impeccable/SOURCE.md`。
 - 每一輪自動執行收尾、PR 都合併之後，問 Kevin 兩個數字：從開始到結束大約多久、他自己坐在電腦前處理大約多久；寫進 sprint-status.yaml 的『實際工時』區塊。
 - 在背景跑任何指令（包含呼叫 Codex）時：啟動後一分鐘內確認它真的開始了才回報「正在跑」，同時告訴我預估要等多久；超過預估時間主動再確認一次，不要等我問。呼叫 codex CLI 時要關掉鍵盤輸入（指令結尾加 < /dev/null）。
 
