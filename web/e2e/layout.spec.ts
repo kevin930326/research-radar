@@ -13,9 +13,13 @@ interface Expected {
   columns: { left: number; gap: number } | null;
 }
 
-// 含斷點兩側：767／768（手機↔平板留白）、899／900（上下排↔兩欄）、1231／1232（窄兩欄↔寬兩欄）。
+// 含斷點兩側：767／768（手機↔平板留白）、899／900（上下排↔兩欄）、1231／1232（窄兩欄↔寬兩欄）、1280／1281（整頁寬度上限）。
+// 1280 以上整頁最寬 1280px、置中（ADR-0054）：gutter 是內容的左緣，等於 (視窗 − 1280) ÷ 2 ＋ 96。
 const LAYOUTS: Record<number, Expected> = {
-  1440: { gutter: 96, columns: { left: 320, gap: 64 } },
+  1920: { gutter: 416, columns: { left: 320, gap: 64 } },
+  1440: { gutter: 176, columns: { left: 320, gap: 64 } },
+  1281: { gutter: 96.5, columns: { left: 320, gap: 64 } },
+  1280: { gutter: 96, columns: { left: 320, gap: 64 } },
   1232: { gutter: 96, columns: { left: 320, gap: 64 } },
   1231: { gutter: 48, columns: { left: 240, gap: 40 } },
   1000: { gutter: 48, columns: { left: 240, gap: 40 } },

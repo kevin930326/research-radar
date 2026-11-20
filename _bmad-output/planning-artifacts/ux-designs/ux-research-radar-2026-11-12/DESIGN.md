@@ -217,6 +217,7 @@ spacing:
   gutter-mobile: 20px
   reading-width: 760px
   rail-width: 248px
+  page-max-width: 1280px
   button-height: 50px
   button-height-compact: 44px
   tap-target: 44px
@@ -505,7 +506,7 @@ v1 的 Must 畫面裡只有示範站首頁是探索類。之後的 2D 鄰居圖�
 - 間距只用 `spacing` 裡的值：4、8、12、16、24、32、48、64、96。
 - 頁面左右留白：桌機 `{spacing.gutter-desktop}`、平板 `{spacing.gutter-tablet}`、手機 `{spacing.gutter-mobile}`。
 - 斷點：寬度 1200px 以上是桌機，768–1199px 是平板，767px 以下是手機。
-- **整頁寬度上限**（Kevin 2026-11-20，ADR-0054）：導覽列、內容、頁尾三塊最寬 1280px（含左右留白各 `{spacing.gutter-desktop}`，內容 1088px），整塊置中；視窗更寬時多的空間平分在左右。視窗 1280px 以下不受影響。這個值還沒有代幣，程式跟著改的那個 Story 再加。
+- **整頁寬度上限**（Kevin 2026-11-20，ADR-0054）：導覽列、內容、頁尾三塊最寬 1280px（含左右留白各 `{spacing.gutter-desktop}`，內容 1088px），整塊置中；視窗更寬時多的空間平分在左右。視窗 1280px 以下不受影響。這個值（含左右留白的 1280px）是 `{spacing.page-max-width}`。
 - **閱讀類畫面的版面**（論文頁定稿，2026-11-12）：
   - 主要欄最寬 `{spacing.reading-width}`；右側可以有一條輔助欄，內容寬 `{spacing.rail-width}`，左邊 32px 內距加一條直的髮線，放動作與附屬資訊。輔助欄要比主要欄輕：裡面的按鈕高 `{spacing.button-height-compact}`、字 14px，不用 `{spacing.button-height}`。
   - 輔助欄在捲動時固定在畫面上（離視窗頂端 32px），往下讀的時候動作一直按得到。導覽列不釘在視窗上、會跟著內容捲走（`EXPERIENCE.md` 元件行為），所以兩者不會重疊。

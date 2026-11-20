@@ -14,7 +14,8 @@ const EXAMPLES = dev.dev.examples;
 // dev-showcase.ts 的範例來歷：UTC 2026-11-11T17:30:00Z 是台北的 2026-11-12。
 const MODEL = "claude-haiku-5-5";
 const TAIPEI_DATE = "2026-11-12";
-const GUTTERS: Record<number, number> = { 1440: 96, 1000: 48, 500: 20 };
+// 內容的左緣。1440 是 (1440 − 1280) ÷ 2 ＋ 96：整頁最寬 1280px、置中（ADR-0054）。
+const GUTTERS: Record<number, number> = { 1440: 176, 1000: 48, 500: 20 };
 
 test("lists the six kinds of components", async ({ page }) => {
   await page.goto(URL_);
