@@ -151,6 +151,43 @@ test.describe("my library page", () => {
     expect(cursors).toEqual([null, "o50", "o100"]);
   });
 
+  test("reloading at shown=250 (200 read at most on a fresh open): the address lines up and load more still works", async ({ page, apiMock }) => {
+    // 審查 G8：直接打開網址時最多讀 200 篇（MAX_SHOWN）。shown＝200＋一頁（50）時，「再載入」算出來的又是 250，
+    // 和網址一樣，按了不會有反應；所以讀完之後網址對齊成 200。測試資料：假清單 30 篇＋這裡編的 270 篇＝300 篇。
+    const pageSize = 50;
+    apiMock.clientConfig = { ...LIST_FIXTURES.clientConfig, library_page_size: pageSize };
+    const extra: ListFixtureRow[] = Array.from({ length: 270 }, (_, index) => {
+      const id = `39000000-0000-4000-8000-1${String(index).padStart(11, "0")}`;
+      return {
+        row: { ...ROWS[0]!.row, id, title: `Fake Library Paper ${index + 1}`, in_my_library: false },
+        topics: [],
+        this_week: false,
+        lab: false,
+        personal: false,
+      };
+    });
+    apiMock.listRows = [...ROWS, ...extra];
+    apiMock.libraryIds = apiMock.listRows.map((entry) => entry.row.id);
+    expect(apiMock.libraryIds.length).toBe(300);
+    const shownIds = () => rows(page).evaluateAll((elements) => elements.map((element) => element.getAttribute("data-library-row")));
+    const more = page.locator("[data-load-more]");
+
+    await openLibrary(page, DESKTOP, "?shown=250");
+    await expect(rows(page)).toHaveCount(200);
+    await expect(page).toHaveURL(`${member.baseURL}/library?shown=200`);
+    expect(await shownIds()).toEqual(apiMock.libraryIds.slice(0, 200));
+    await expect(page.locator("[data-shown]")).toHaveText(fill(text("search:search.results.shown"), { shown: 200, total: 300 }));
+    await expect(more).toHaveText(fill(text("search:search.results.more"), { count: 50 }));
+
+    await more.click();
+    await expect(rows(page)).toHaveCount(250);
+    expect(await shownIds()).toEqual(apiMock.libraryIds.slice(0, 250));
+    await expect(page).toHaveURL(`${member.baseURL}/library?shown=250`);
+    const cursors = (await requestsOf(apiMock.requests, "GET", "/api/v1/library")).map((request) => new URL(request.path, member.baseURL).searchParams.get("cursor"));
+    // 對齊時不重讀：一開始 4 頁（200 篇），再載入讀第 5 頁。
+    expect(cursors).toEqual([null, "o50", "o100", "o150", "o200"]);
+  });
+
   test("selecting replaces the count with the action bar; cancel goes back", async ({ page, apiMock }) => {
     apiMock.libraryIds = ROWS.map((entry) => entry.row.id);
     await openLibrary(page);
@@ -311,6 +348,29 @@ test.describe("my library page", () => {
     await expect(remove).toBeEnabled();
     await expect(row(page, first!).locator("[data-library-gone]")).toHaveCount(0);
     expect(await page.locator("main").innerText()).toBe(before);
+  });
+
+  test("two clicks in the same frame on remove, then on undo: one request each, the count moves by one", async ({ page, apiMock }) => {
+    // 審查 G7：兩下在同一個工作裡送出（第二下時畫面還沒換成「送出中」），只能送一次，篇數只減 1、只加 1。
+    const [first] = apiMock.libraryIds;
+    const total = apiMock.libraryIds.length;
+    const count = page.locator("[data-library-count]");
+    await openLibrary(page);
+    await row(page, first!).locator("[data-library='remove']:visible").evaluate((element: HTMLElement) => {
+      element.click();
+      element.click();
+    });
+    await expect(row(page, first!).locator("[data-library='restore']")).toBeFocused();
+    await expect(count).toHaveText(fill(text("library:library.list.count"), { count: total - 1 }));
+    expect(apiMock.requests.filter((request) => request.method === "DELETE" && request.path.startsWith("/api/v1/library/")).map((request) => request.path)).toEqual([`/api/v1/library/${first}`]);
+
+    await row(page, first!).locator("[data-library='restore']").evaluate((element: HTMLElement) => {
+      element.click();
+      element.click();
+    });
+    await expect(row(page, first!).locator("[data-library='remove']:visible")).toBeFocused();
+    await expect(count).toHaveText(fill(text("library:library.list.count"), { count: total }));
+    expect(apiMock.requests.filter((request) => request.method === "POST" && request.path.startsWith("/api/v1/library/")).map((request) => request.path)).toEqual([`/api/v1/library/${first}/restore`]);
   });
 
   test("remove when it is already gone (removed in another tab): 'removed' without undo", async ({ page, apiMock }) => {
@@ -495,24 +555,22 @@ test.describe("my library on search rows", () => {
   });
 
   test("add lights up when focus is in the row (keyboard)", async ({ page }) => {
-    // 驗收條件「滑到或聚焦在一列」（審查 F14）：用 Tab 把焦點移到那一列的標題連結。
+    // 驗收條件「滑到或聚焦在一列」（審查 F14）：焦點放到那一列的標題連結（滑鼠不在列上）。
+    // 直接 focus()：Safari 預設按 Tab 不停在連結上（審查 G4），用 Tab 走過去在 webkit 走不到。
     await page.setViewportSize(DESKTOP);
     await page.goto(`${member.baseURL}/search?topic=e_commerce`);
     const target = page.locator("[data-paper-row]").filter({ has: page.locator("[data-library='add']") }).first();
     const face = target.locator("[data-library='add'] span").first();
     const dim = await face.evaluate((element) => getComputedStyle(element).color);
     const titleLink = target.locator("h3").getByRole("link");
-    await page.locator("h1").click();
-    for (let step = 0; step < 200; step += 1) {
-      await page.keyboard.press("Tab");
-      if (await titleLink.evaluate((element) => element === document.activeElement)) break;
-    }
+    await titleLink.focus();
     await expect(titleLink).toBeFocused();
     await expect.poll(() => face.evaluate((element) => getComputedStyle(element).color)).not.toBe(dim);
   });
 
   test("a list read still on its way when adding does not turn the row back into 'add'", async ({ page, apiMock }) => {
     // 審查 F10：「再載入」還在讀（伺服器那一頁是加入之前讀的）時按加入，讀完之後那一列仍是「● 已加入」。
+    // 審查 G3：替身在接到請求時就把回應算好（加入之前的文獻庫），閘門只延遲送出；這裡也確認晚到的那一份真的是加入前算的。
     const query = "from=2016&to=2026";
     const total = filterListRows(ROWS, new URLSearchParams(`year=${Array.from({ length: 11 }, (_, index) => 2016 + index).join("&year=")}`))!.length;
     expect(total).toBeGreaterThan(LIST_FIXTURES.clientConfig.paper_list_page_size);
@@ -521,14 +579,23 @@ test.describe("my library on search rows", () => {
     await expect(page.locator("[data-paper-row]")).toHaveCount(LIST_FIXTURES.clientConfig.paper_list_page_size);
     const target = page.locator("[data-paper-row]").filter({ has: page.locator("[data-library='add']") }).first();
     const id = (await target.getAttribute("data-paper-row"))!;
+    const before = apiMock.libraryIds;
+    expect(before).not.toContain(id);
     const [listGate, release] = gate();
     apiMock.listGate = listGate;
+    const late = page.waitForResponse((response) => response.url().includes("/api/v1/papers?") && response.url().includes("cursor="));
     await page.locator("[data-load-more]").click();
     await expect.poll(() => apiMock.requests.filter((request) => request.path.startsWith("/api/v1/papers?") && request.path.includes("cursor=")).length).toBeGreaterThan(0);
     await target.locator("[data-library='add']").click();
     await expect(page.locator(`[data-paper-row="${id}"] [data-library='added']`)).toBeVisible();
+    // 加入在伺服器那邊已經完成，還在路上的那一份還沒送出。
+    expect(apiMock.libraryIds).toContain(id);
     apiMock.listGate = null;
     release();
+    const stale = (await (await late).json()) as { items: { id: string; in_my_library: boolean }[] };
+    expect(stale.items.length).toBeGreaterThan(0);
+    // 晚到的那一份照加入之前的文獻庫算（不是放行時的）。
+    expect(stale.items.map((item) => item.in_my_library)).toEqual(stale.items.map((item) => before.includes(item.id)));
     await expect(page.locator("[data-paper-row]")).toHaveCount(total);
     await expect(page.locator(`[data-paper-row="${id}"] [data-library='added']`)).toBeVisible();
     await expect(page.locator(`[data-paper-row="${id}"] [data-library='add']`)).toHaveCount(0);

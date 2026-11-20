@@ -1,12 +1,12 @@
-// 加入、移出、復原（Story 3.17）：回應回來之前換了人就不改快取（審查 F2）、移出時已經不在（404）不給復原
+// 加入、移出、復原（Story 3.17）：回應回來之前換了人就不改快取（審查 F2）、寫快取前與處理 401 時換了人也一樣（審查 G1）、移出時已經不在（404）不給復原
 // （審查 F3）、論文頁換了一份資料就照新的顯示（審查 F9）、清單讀到一半時加入不會被讀完的舊資料蓋回去（審查 F10）。
 import { QueryClient } from "@tanstack/react-query";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import type { LibraryChangeResult, LibraryItem, LibrarySource, PaperList, PaperPage } from "../datasource/types";
 import { libraryShown, sendLibraryChange } from "./library-change";
 import { markInLibrary } from "./paper-queries";
-import { clearMemberQueries } from "./session";
+import { clearMemberQueries, memberGeneration } from "./session";
 
 const PAPER = "00000000-0000-4000-8000-000000000001";
 
@@ -59,10 +59,69 @@ describe("sendLibraryChange", () => {
   it("a 401 that comes back after the cache was cleared is not treated as this member's sign-out", async () => {
     const queryClient = new QueryClient();
     const [hold, release] = gate();
-    const pending = sendLibraryChange(queryClient, source({ kind: "signedOut" }, hold), PAPER, "remove");
+    const toLogin = vi.fn();
+    const pending = sendLibraryChange(queryClient, source({ kind: "signedOut" }, hold), PAPER, "remove", toLogin);
     await clearMemberQueries(queryClient);
     release();
     expect(await pending).toBe("failed");
+    expect(toLogin).not.toHaveBeenCalled();
+  });
+
+  it("a 401 for this member: the cache is cleared, then back to the login page", async () => {
+    const queryClient = new QueryClient();
+    queryClient.setQueryData(LIST_KEY, list(true));
+    const toLogin = vi.fn(() => {
+      // 回登入頁時快取已經清掉。
+      expect(queryClient.getQueryData(LIST_KEY)).toBeUndefined();
+    });
+    expect(await sendLibraryChange(queryClient, source({ kind: "signedOut" }), PAPER, "remove", toLogin)).toBe("failed");
+    expect(toLogin).toHaveBeenCalledTimes(1);
+    expect(memberGeneration(queryClient)).toBe(1);
+  });
+
+  it("someone else signs in while the 401 is clearing the cache: no trip to the login page", async () => {
+    // 審查 G1：清快取要等（取消進行中的查詢）；這段期間乙登入成功（登入成功也會清一次），不能把乙踢回登入頁。
+    const queryClient = new QueryClient();
+    const cancel = queryClient.cancelQueries.bind(queryClient);
+    vi.spyOn(queryClient, "cancelQueries").mockImplementationOnce(async (...args) => {
+      await cancel(...args);
+      await clearMemberQueries(queryClient);
+    });
+    const toLogin = vi.fn();
+    expect(await sendLibraryChange(queryClient, source({ kind: "signedOut" }), PAPER, "remove", toLogin)).toBe("failed");
+    expect(toLogin).not.toHaveBeenCalled();
+    expect(memberGeneration(queryClient)).toBe(2);
+  });
+
+  it.each(["add", "remove"] as const)(
+    "%s: someone else signs in while waiting to write (cancelling list reads): nothing is written",
+    async (action) => {
+      // 審查 G1：回應回來時還是甲；寫快取前要先取消進行中的清單讀取，這段期間甲登出、乙登入，乙讀到同一篇。
+      const queryClient = new QueryClient();
+      const before = action === "add" ? false : true;
+      queryClient.setQueryData(LIST_KEY, list(before));
+      const cancel = queryClient.cancelQueries.bind(queryClient);
+      vi.spyOn(queryClient, "cancelQueries").mockImplementationOnce(async (...args) => {
+        await cancel(...args);
+        await clearMemberQueries(queryClient);
+        queryClient.setQueryData(LIST_KEY, list(before));
+      });
+      expect(await sendLibraryChange(queryClient, source({ kind: "done", item: ITEM }), PAPER, action)).toBe("failed");
+      expect(queryClient.getQueryData<ReturnType<typeof list>>(LIST_KEY)!.list.items[0]!.in_my_library).toBe(before);
+    },
+  );
+
+  it("remove answered 404, someone else signs in while waiting to write: nothing is written", async () => {
+    const queryClient = new QueryClient();
+    queryClient.setQueryData(LIST_KEY, list(true));
+    const cancel = queryClient.cancelQueries.bind(queryClient);
+    vi.spyOn(queryClient, "cancelQueries").mockImplementationOnce(async (...args) => {
+      await cancel(...args);
+      await clearMemberQueries(queryClient);
+      queryClient.setQueryData(LIST_KEY, list(true));
+    });
+    expect(await sendLibraryChange(queryClient, source({ kind: "notFound" }), PAPER, "remove")).toBe("failed");
+    expect(queryClient.getQueryData<ReturnType<typeof list>>(LIST_KEY)!.list.items[0]!.in_my_library).toBe(true);
   });
 
   it("removing what is already gone (404): not in the library, but no undo", async () => {

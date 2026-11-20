@@ -116,9 +116,17 @@ export function libraryListQuery(queryClient: QueryClient, limit: number) {
  * 找論文的清單正在讀的（「再載入」、重讀）先取消：那一份是改之前讀的（伺服器那一頁也可能在寫入生效前讀），
  * 讀完會把「已加入」蓋回去（審查 F10）。改完之後，畫面正在用的清單重讀一次，以伺服器為準
  * （範圍是我的文獻庫的那幾份篇數也會變）；沒在用的標成過期，下次打開時重讀。文獻庫清單在下次打開時本來就會重讀。
+ * `stillCurrent`：等取消的這段期間可能換了人（登出、登入過期、換人登入），寫快取前再問一次；回 false 就什麼都不寫、
+ * 回 false（審查 G1）。回 true 表示寫了。
  */
-export async function markInLibrary(queryClient: QueryClient, paperId: string, inLibrary: boolean): Promise<void> {
+export async function markInLibrary(
+  queryClient: QueryClient,
+  paperId: string,
+  inLibrary: boolean,
+  stillCurrent: () => boolean = () => true,
+): Promise<boolean> {
   await queryClient.cancelQueries({ queryKey: ["paper-list"] });
+  if (!stillCurrent()) return false;
   queryClient.setQueryData<PaperResult>(["papers", paperId], (data) =>
     data?.kind === "found" ? { ...data, page: { ...data.page, in_my_library: inLibrary } } : data,
   );
@@ -130,4 +138,5 @@ export async function markInLibrary(queryClient: QueryClient, paperId: string, i
       : data,
   );
   void queryClient.invalidateQueries({ queryKey: ["paper-list"], refetchType: "active" });
+  return true;
 }

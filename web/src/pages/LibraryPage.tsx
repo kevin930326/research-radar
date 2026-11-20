@@ -92,6 +92,10 @@ export function LibraryPage({ shown, onMore, onSignedOut }: LibraryPageProps) {
   // 移出了的（值是能不能復原：這一次真的移出了才能）。
   const [gone, setGone] = useState<ReadonlyMap<string, boolean>>(new Map());
   const [busy, setBusy] = useState<ReadonlySet<string>>(new Set());
+  // 送出中的那幾篇、目前移出了的那幾篇，同步記一份（審查 G7）：同一次畫面裡連按兩下時，第二下還看不到 busy／gone 的
+  // 新狀態，靠這兩份擋掉第二次送出，也不讓篇數多扣或多加。
+  const sending = useRef(new Set<string>());
+  const goneNow = useRef(new Set<string>());
   // 篇數＝API 的 total 加上「讀到清單之後」移出（−1）與復原（+1）的篇數；更早的已經算在 total 裡。
   const [changes, setChanges] = useState<{ at: number; delta: number }[]>([]);
   const [notes, setNotes] = useState<Note[]>([]);
@@ -107,6 +111,30 @@ export function LibraryPage({ shown, onMore, onSignedOut }: LibraryPageProps) {
     notified.current = true;
     onSignedOut();
   }, [signedOut, onSignedOut]);
+
+  // 直接打開（重新整理）網址時最多讀 MAX_SHOWN 篇（libraryListQuery）：網址的 shown 比讀到的多、後面還有的時候，
+  // 把 shown 對齊成讀到的篇數。不對齊的話 shown 剛好是 MAX_SHOWN＋一頁時，「再載入」算出來的篇數就是現在的 shown，
+  // 網址不變、什麼都不會發生（審查 G8）。對齊後的清單從讀到的那一份接著用，不重讀；對齊之後把原本那一份（只讀到
+  // MAX_SHOWN 篇、卻記在較大的篇數底下）丟掉，之後再載入到那個篇數時才會從對齊後的那一份接著讀。
+  const alignedFrom = useRef<number | null>(null);
+  useEffect(() => {
+    if (alignedFrom.current === null || limit === alignedFrom.current) return;
+    queryClient.removeQueries({ queryKey: ["library", alignedFrom.current], exact: true });
+    alignedFrom.current = null;
+  }, [limit, queryClient]);
+  const capped =
+    list.data?.kind === "found" &&
+    !list.isPlaceholderData &&
+    limit !== null &&
+    list.data.list.items.length < limit &&
+    (list.data.list.pending.length > 0 || list.data.list.next_cursor !== null)
+      ? list.data.list.items.length
+      : null;
+  useEffect(() => {
+    if (capped === null) return;
+    alignedFrom.current = limit;
+    onMore(capped);
+  }, [capped, limit, onMore]);
 
   // 移出、復原之後，焦點移到同一列的另一個按鈕（設計稿：移出 → 復原、復原 → 移出）。
   useEffect(() => {
@@ -141,18 +169,25 @@ export function LibraryPage({ shown, onMore, onSignedOut }: LibraryPageProps) {
 
   const run = (item: LibraryItem, action: Extract<LibraryAction, "remove" | "restore">) => {
     const id = item.paper.id;
-    if (busy.has(id)) return;
+    if (sending.current.has(id)) return;
+    sending.current.add(id);
     setBusy((current) => setOf(current, id, true));
     void change(id, action).then((outcome) => {
+      sending.current.delete(id);
       setBusy((current) => setOf(current, id, false));
       if (outcome === "failed") return;
+      // 篇數只在「移出了／還在」真的改變時增減。
+      const wasGone = goneNow.current.has(id);
+      if (action === "remove") goneNow.current.add(id);
+      else goneNow.current.delete(id);
+      const changed = wasGone !== (action === "remove");
       setGone((current) => {
         const next = new Map(current);
         if (action === "remove") next.set(id, outcome === "done");
         else next.delete(id);
         return next;
       });
-      setChanges((current) => [...current, { at: Date.now(), delta: action === "remove" ? -1 : 1 }]);
+      if (changed) setChanges((current) => [...current, { at: Date.now(), delta: action === "remove" ? -1 : 1 }]);
       if (action === "remove") setSelected((current) => setOf(current, id, false));
       clearNotes();
       // 不能復原的那一列沒有按鈕可以接焦點：焦點交給「已移出」那一段字。

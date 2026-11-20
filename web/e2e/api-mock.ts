@@ -381,35 +381,43 @@ export async function installApiMock(page: Page, state: ApiMockState): Promise<v
     }
     if (method === "GET" && path === "/api/v1/papers") {
       state.requests.push({ method, path: `${path}${url.search}`, body });
-      await state.listGate;
-      if (state.member === null || state.list === "expired") return problem(route, 401, "not_authenticated");
-      if (state.list === "failed") return problem(route, 500, "internal_error");
-      const mine = libraryOf(state, state.member.member_id).items.map((record) => record.id);
+      // 接到請求時就照這時登入的那一位、這時的文獻庫算好回應（伺服器在這時讀資料庫）；閘門只延遲送出（審查 G2、G3）。
+      const asker = state.member;
+      const mine = asker === null ? [] : libraryOf(state, asker.member_id).items.map((record) => record.id);
       const rows = filterListRows(state.listRows, url.searchParams, mine);
-      if (rows === null) return problem(route, 422, "request_invalid");
       const pageSize = LIST_FIXTURES.clientConfig.paper_list_page_size;
-      const page = listPage(rows, url.searchParams.get("cursor"), pageSize, LIST_FIXTURES.snapshot);
-      const items = page.items.map((row) => ({ ...row, in_my_library: mine.includes(row.id) }));
-      return json(route, { ...page, items });
+      const page = rows === null ? null : listPage(rows, url.searchParams.get("cursor"), pageSize, LIST_FIXTURES.snapshot);
+      const answer = page === null ? null : { ...page, items: page.items.map((row) => ({ ...row, in_my_library: mine.includes(row.id) })) };
+      await state.listGate;
+      if (asker === null || state.list === "expired") return problem(route, 401, "not_authenticated");
+      if (state.list === "failed") return problem(route, 500, "internal_error");
+      if (answer === null) return problem(route, 422, "request_invalid");
+      return json(route, answer);
     }
     if (method === "GET" && path === "/api/v1/library") {
       state.requests.push({ method, path: `${path}${url.search}`, body });
+      // 同上：接到請求時就照這時的成員與文獻庫算好（審查 G2）。
+      const asker = state.member;
+      const answer =
+        asker === null
+          ? null
+          : libraryPage(state.listRows, libraryOf(state, asker.member_id).items, url.searchParams.get("cursor"), state.clientConfig.library_page_size);
       await state.libraryGate;
-      if (state.member === null || state.library === "expired") return problem(route, 401, "not_authenticated");
+      if (answer === null || state.library === "expired") return problem(route, 401, "not_authenticated");
       if (state.library === "failed") return problem(route, 500, "internal_error");
-      const pageSize = state.clientConfig.library_page_size;
-      const records = libraryOf(state, state.member.member_id).items;
-      return json(route, libraryPage(state.listRows, records, url.searchParams.get("cursor"), pageSize));
+      return json(route, answer);
     }
     const libraryMatch = /^\/api\/v1\/library\/([^/]+)(\/restore)?$/.exec(path);
     if (libraryMatch !== null && (method === "PUT" || method === "DELETE" || (method === "POST" && libraryMatch[2] !== undefined))) {
       state.requests.push({ method, path, body });
+      // 請求是誰送的，看接到時的 cookie（審查 G2）；閘門放行後才寫（看送出中）。
+      const asker = state.member;
       await state.libraryChangeGate;
-      if (state.member === null || state.libraryChange === "expired") return problem(route, 401, "not_authenticated");
+      if (asker === null || state.libraryChange === "expired") return problem(route, 401, "not_authenticated");
       if (state.libraryChange === "failed") return problem(route, 500, "internal_error");
       const id = decodeURIComponent(libraryMatch[1]!);
       if (libraryItem(state.listRows, id) === undefined) return problem(route, 404, "not_found");
-      const library = libraryOf(state, state.member.member_id);
+      const library = libraryOf(state, asker.member_id);
       const current = library.items.find((record) => record.id === id);
       const respond = (record: LibraryRecord) => json(route, libraryItem(state.listRows, id, record.addedAt));
       if (method === "PUT") {
@@ -437,11 +445,13 @@ export async function installApiMock(page: Page, state: ApiMockState): Promise<v
     }
     if (method === "GET" && path.startsWith("/api/v1/papers/")) {
       state.requests.push({ method, path, body });
+      // 接到請求時就記下是誰、這時的文獻庫（審查 G2）。
+      const asker = state.member;
+      const library = asker === null ? [] : [...libraryOf(state, asker.member_id).items];
       await state.paperGate;
-      if (state.member === null) return problem(route, 401, "not_authenticated");
-      const own = state.paperByMember[state.member.member_id];
+      if (asker === null) return problem(route, 401, "not_authenticated");
+      const own = state.paperByMember[asker.member_id];
       if (own !== undefined) return json(route, own);
-      const library = libraryOf(state, state.member.member_id).items;
       const mine = (page: PaperPageResponse) => ({ ...page, in_my_library: library.some((record) => record.id === page.paper.id) });
       let id = decodeURIComponent(path.slice("/api/v1/papers/".length));
       const error = PAPER_FIXTURES.errors[id];
