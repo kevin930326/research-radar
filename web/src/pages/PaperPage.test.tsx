@@ -6,6 +6,13 @@ import "../i18n";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
+import {
+  RouterContextProvider,
+  createMemoryHistory,
+  createRootRoute,
+  createRoute,
+  createRouter,
+} from "@tanstack/react-router";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -28,8 +35,20 @@ function fixture(label: string): PaperPageResponse {
   return structuredClone(entry.page);
 }
 
+// 主題標籤連到找論文（Story 3.14，站內連結），要有路由才能算出網址：只放找論文一條路由的記憶體路由。
+const rootRoute = createRootRoute();
+const searchRoute = createRoute({ getParentRoute: () => rootRoute, path: "/search" });
+const router = createRouter({
+  routeTree: rootRoute.addChildren([searchRoute]),
+  history: createMemoryHistory({ initialEntries: ["/papers/rr-1"] }),
+});
+
 function render(page: PaperPageResponse): string {
-  return renderToStaticMarkup(<PaperPage page={page} names={NAMES} />);
+  return renderToStaticMarkup(
+    <RouterContextProvider router={router}>
+      <PaperPage page={page} names={NAMES} />
+    </RouterContextProvider>,
+  );
 }
 
 /** 某個 data-block 區塊的 HTML（到下一個區塊之前）。 */
@@ -53,6 +72,9 @@ const LATER_STORIES = expectMissing("paper.txt")
 function count(html: string, text: string): number {
   return html.split(text).length - 1;
 }
+
+/** 「normal」這篇的站外連結數（Story 3.14 之前整頁的連結都是站外，數量和當時一樣）。 */
+const EXTERNAL_LINKS = 4;
 
 const FAILED = TEXT["paper:paper.state.failed"]!;
 const PENDING = TEXT["paper:paper.state.pending"]!;
@@ -85,12 +107,31 @@ describe("paper page: three AI blocks with content", () => {
   });
 
   it("external links open in a new tab without the opener", () => {
-    for (const match of html.matchAll(/<a [^>]*>/g)) {
+    // 站外連結（http 開頭）：書目的 DOI、開啟全文（桌機、手機各一）、開放取用版本、期刊頁……數量固定，不能少。
+    const external = [...html.matchAll(/<a [^>]*>/g)].filter((match) => /href="https?:/.test(match[0]));
+    expect(external.length).toBe(EXTERNAL_LINKS);
+    for (const match of external) {
       expect(match[0]).toContain('target="_blank"');
       expect(match[0]).toContain('rel="noopener noreferrer"');
       expect(match[0]).toContain('aria-describedby="new-tab-note"');
     }
     expect(html).toContain(`<span id="new-tab-note" hidden="">${TEXT["common:links.external.newTab"]}</span>`);
+  });
+
+  it("topic tags link to search with the topic filter in the same tab", () => {
+    const classification = block(html, "classification");
+    const topics = [...classification.matchAll(/<a [^>]*data-topic-link[^>]*>/g)].map((match) => match[0]);
+    // 「normal」有兩個主題（platforms、trust），一個一個連結。
+    expect(topics.length).toBe(2);
+    for (const tag of topics) {
+      expect(tag).toMatch(/href="\/search\?topic=[a-z0-9_]+"/);
+      expect(tag).not.toContain("target=");
+      expect(tag).not.toContain("aria-describedby");
+    }
+    expect(topics[0]).toContain('href="/search?topic=platforms"');
+    expect(topics[1]).toContain('href="/search?topic=trust"');
+    // 方法的標籤不是連結（找論文沒有方法的篩選）：整頁的連結只有站外的 EXTERNAL_LINKS 個和這兩個主題。
+    expect(count(html, "<a ")).toBe(EXTERNAL_LINKS + 2);
   });
 
   it("does not render things that belong to later stories", () => {

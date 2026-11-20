@@ -19,11 +19,27 @@ interface PaperTitleProps {
   size?: TitleSize;
   /** 論文頁的標題是 h1；清單裡多半是 h2 或 p。 */
   as?: "h1" | "h2" | "h3" | "p" | "span";
+  /** 換行方式：預設平均（balance）；找論文的論文列照設計稿用 pretty（Story 3.14）。 */
+  wrap?: "balance" | "pretty";
+  /** 額外的類別（例如手機的字級）。 */
+  className?: string;
 }
 
-export function PaperTitle({ children, lang = "en", size = "page", as: Tag = "p" }: PaperTitleProps) {
+export function PaperTitle({
+  children,
+  lang = "en",
+  size = "page",
+  as: Tag = "p",
+  wrap = "balance",
+  className = "",
+}: PaperTitleProps) {
+  const wrapClass = wrap === "balance" ? "text-balance" : "text-pretty";
   return (
-    <Tag lang={lang} data-paper-text="title" className={`font-display text-balance text-text-primary ${TITLE_SIZE_CLASS[size]}`}>
+    <Tag
+      lang={lang}
+      data-paper-text="title"
+      className={`font-display ${wrapClass} text-text-primary ${TITLE_SIZE_CLASS[size]} ${className}`}
+    >
       {children}
     </Tag>
   );

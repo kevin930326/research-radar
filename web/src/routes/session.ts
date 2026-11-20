@@ -37,8 +37,8 @@ export async function clearMemberQueries(queryClient: QueryClient): Promise<void
   queryClient.removeQueries();
 }
 
-/** 登入後的第一頁（3.14 之前是使用須知，AR-67）。 */
-export const FIRST_PAGE = "/notice";
+/** 登入後的第一頁：找論文（Story 3.14 起；之前是使用須知，AR-67；系統首頁做好後改成系統首頁）。 */
+export const FIRST_PAGE = "/search";
 
 const NEXT_MAX_LENGTH = 2048;
 const LOGIN_PATH = "/login";

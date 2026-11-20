@@ -7,12 +7,14 @@ import { LoadFailed } from "../components/states/LoadFailed";
 import { Offline } from "../components/states/Offline";
 import { NotFound } from "../components/states/NotFound";
 import { PageLoading } from "../components/states/PageLoading";
-import { datasource } from "../datasource";
-import type { PaperPage as PaperPageData, PaperSource } from "../datasource/types";
+import type { PaperPage as PaperPageData } from "../datasource/types";
 import { LoginPage } from "../pages/LoginPage";
 import { NoticePage } from "../pages/NoticePage";
 import { PaperPage } from "../pages/PaperPage";
+import { SearchPage } from "../pages/SearchPage";
 import { isPaperId } from "../pages/paper-format";
+import { validateSearchParams } from "../pages/search-filters";
+import { displayNamesQuery, paperSource } from "./paper-queries";
 import { PlainMain, rootRoute } from "./root";
 import { FIRST_PAGE, clearMemberQueries, meQuery, validateLoginSearch } from "./session";
 
@@ -22,7 +24,9 @@ import { FIRST_PAGE, clearMemberQueries, meQuery, validateLoginSearch } from "./
 //   沒登入（401）就到登入頁，網址帶 next（登入後回到原本那一頁）；本來在站內（快取裡有上一次的成員）
 //   才是「登入過期」，多帶 expired，登入頁顯示「登入已經過期，請再登入一次」。直接打開網址時快取是空的，不顯示。
 //   「我是誰」問不到（網路、伺服器錯誤）是全站共用的「載入失敗」。
-// - 3.14 之前登入後第一頁是使用須知，所以 / 先導到 /notice。
+// - 登入後第一頁是找論文（Story 3.14 起；之前是使用須知，AR-67），所以 / 導到 /search。
+// - /search：找論文（Story 3.14 成員版）。篩選與目前顯示幾篇都寫進網址（AD-21），路由驗證網址參數；
+//   資料在頁面裡讀（篩選列先出來，論文列在讀的時候是骨架），任何一個 API 回 401 時照登入過期處理。
 // - /papers/$paperId：論文頁（Story 3.8）。ID 不是 UUID 時不送請求；看不到或不存在（404）時在導覽列下方顯示
 //   全站共用的「找不到這一頁」；論文或顯示名稱任一個 API 回 401 時照登入過期處理（清快取、回登入頁）。
 //   論文讀到就顯示整頁；顯示名稱沒讀到只有分類那一行顯示訊息條與「重試」（Codex 審查 3.8 中 3、中 6）。
@@ -103,6 +107,31 @@ const noticeRoute = createRoute({
   component: NoticePage,
 });
 
+const searchRoute = createRoute({
+  getParentRoute: () => appRoute,
+  path: "/search",
+  validateSearch: validateSearchParams,
+  component: function SearchRoute() {
+    const params = searchRoute.useSearch();
+    const navigate = searchRoute.useNavigate();
+    const queryClient = useQueryClient();
+    const href = useLocation({ select: (location) => location.href });
+    return (
+      <SearchPage
+        params={params}
+        // 篩選改了：換掉這一筆瀏覽紀錄（不是每勾一個就多一筆），捲動位置不動。
+        onChange={(next) => void navigate({ search: next, replace: true, resetScroll: false })}
+        onSignedOut={() =>
+          void (async () => {
+            await clearMemberQueries(queryClient);
+            await navigate({ to: "/login", search: { next: href, expired: true as const }, replace: true });
+          })()
+        }
+      />
+    );
+  },
+});
+
 // 元件示範頁只在開發環境（Story 3.2）：正式建置時 import.meta.env.DEV 是 false，這一段連同動態 import
 // 整個被拿掉，建置結果沒有這個路由、元件與示範頁的文字（e2e/dev-only.spec.ts 檢查）。不用登入。
 function devRoutes() {
@@ -128,27 +157,8 @@ function devRoutes() {
   ] as const;
 }
 
-/** 成員版才有的論文讀取函式；示範站的論文頁是 Story 3.9。 */
-function paperSource(): PaperSource {
-  const source = datasource.papers;
-  if (source === null) {
-    throw new Error("paper source is only available in the member build");
-  }
-  return source;
-}
-
 const paperQuery = (paperId: string) =>
   queryOptions({ queryKey: ["papers", paperId], queryFn: () => paperSource().paper(paperId), retry: false });
-
-// 顯示名稱是設定值，同一位成員登入期間不會變：讀到就留著（登出、換人時 clearMemberQueries 會清掉）。
-// 路由先讀一次；畫面掛上時不再自動重讀，沒讀到也不自動重試（按「重試」才讀）。
-const displayNamesQuery = queryOptions({
-  queryKey: ["display-names"],
-  queryFn: () => paperSource().displayNames(),
-  retry: false,
-  staleTime: Infinity,
-  retryOnMount: false,
-});
 
 /** 論文頁＋顯示名稱：顯示名稱沒讀到時只有分類那一行顯示訊息條；按「重試」回 401 時照登入過期處理。 */
 function PaperWithNames({ page }: { page: PaperPageData }) {
@@ -217,7 +227,7 @@ const paperRoute = createRoute({
   },
 });
 
-const appTree = appRoute.addChildren([indexRoute, noticeRoute, paperRoute]);
+const appTree = appRoute.addChildren([indexRoute, noticeRoute, searchRoute, paperRoute]);
 
 export const routeTree = import.meta.env.DEV
   ? rootRoute.addChildren([loginRoute, appTree, ...devRoutes()])

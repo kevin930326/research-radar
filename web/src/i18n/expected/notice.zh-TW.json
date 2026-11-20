@@ -8,7 +8,8 @@
     "10. 登入（說明、按鈕、登入中、兩種訊息條；「回示範站」在 Epic 13）",
     "18. 帳號選單（帳號、使用須知、登出、登出中、登出失敗；「我的問答紀錄」在 Epic 5）與成員版導覽列（品牌、手機的選單按鈕與關閉選單）",
     "State Patterns 全站共用的登入過期（沿用 errors.not_authenticated）",
-    "8. 論文頁（成員版：書目、分類、中文重點、研究模型、原文摘要、取得全文；State Patterns「8. 論文頁」）與 Component Patterns 資料日期列、文字連結（開新分頁）"
+    "8. 論文頁（成員版：書目、分類、中文重點、研究模型、原文摘要、取得全文；State Patterns「8. 論文頁」）與 Component Patterns 資料日期列、文字連結（開新分頁）",
+    "12. 找論文（Epic 3 版、成員版：範圍、三個篩選選單、本週新增、結果、再載入、沒有符合、手機的篩選；State Patterns「12. 找論文」）與成員版導覽列的「找論文」"
   ],
   "strings": {
     "notice:notice.page.title": "使用須知",
@@ -112,7 +113,28 @@
     "common:dataDate.bar.snapshot": "· #{{number}}",
     "common:dataDate.bar.number": "#{{number}}",
     "common:dataDate.bar.snapshotInfo": "第 {{number}} 次整理出來的資料",
-    "common:links.external.newTab": "（開新分頁）"
+    "common:links.external.newTab": "（開新分頁）",
+    "nav:nav.links.search": "找論文",
+    "search:search.page.title": "找論文",
+    "search:search.scope.tracked": "所有追蹤期刊",
+    "search:search.scope.lab": "實驗室文獻庫",
+    "search:search.scope.personal": "我的文獻庫",
+    "search:search.filter.journal": "期刊",
+    "search:search.filter.year": "年份",
+    "search:search.filter.topic": "主題",
+    "search:search.filter.clear": "清除",
+    "search:search.filter.clearAll": "清除篩選",
+    "search:search.filter.aisCore": "AIS 核心 11 本",
+    "search:search.year.tooEarly": "追蹤範圍從 {{year}} 年開始",
+    "search:search.condition.thisWeek": "本週新增",
+    "search:search.start.seeAll": "看全部 {{count}} 篇",
+    "search:search.results.found": "找到 {{count}} 篇",
+    "search:search.results.byYear": "依年份排序",
+    "search:search.results.shown": "已顯示 {{shown}}／{{total}}",
+    "search:search.results.more": "再載入 {{count}} 篇",
+    "search:search.empty.noMatch": "沒有符合的論文",
+    "search:search.mobile.filter": "篩選",
+    "search:search.mobile.apply": "看 {{count}} 篇"
   },
   "absent": [
     "問答的資料怎麼處理",
@@ -157,6 +179,78 @@
     "paper:paper.fullText.vpnBelow": {
       "text": "連學校 VPN 時，下方的「開啟全文」會直接到全文頁",
       "source": "docs/ux/reference/screens/paper.html"
+    },
+    "search:search.filter.journalCount": {
+      "text": "{{count}} 本",
+      "source": "docs/ux/reference/screens/search-no-box.html"
+    },
+    "search:search.filter.topicCount": {
+      "text": "{{count}} 個",
+      "source": "docs/ux/reference/screens/search-no-box.html"
+    },
+    "search:search.filter.removeCondition": {
+      "text": "移除這個條件",
+      "source": "docs/ux/reference/screens/search-no-box.html"
+    },
+    "search:search.year.none": {
+      "text": "不限",
+      "source": "docs/ux/reference/screens/search-no-box.html"
+    },
+    "search:search.year.thisYear": {
+      "text": "今年",
+      "source": "docs/ux/reference/screens/search-no-box.html"
+    },
+    "search:search.year.last3": {
+      "text": "近 3 年",
+      "source": "docs/ux/reference/screens/search-no-box.html"
+    },
+    "search:search.year.last5": {
+      "text": "近 5 年",
+      "source": "docs/ux/reference/screens/search-no-box.html"
+    },
+    "search:search.year.custom": {
+      "text": "自訂",
+      "source": "docs/ux/reference/screens/search-no-box.html"
+    },
+    "search:search.year.to": {
+      "text": "到",
+      "source": "docs/ux/reference/screens/search-no-box.html"
+    },
+    "search:search.year.fromLabel": {
+      "text": "起始年",
+      "source": "docs/ux/reference/screens/search-no-box.html"
+    },
+    "search:search.year.toLabel": {
+      "text": "結束年",
+      "source": "docs/ux/reference/screens/search-no-box.html"
+    },
+    "search:search.year.missing": {
+      "text": "請輸入年份，例如 2020",
+      "source": "docs/ux/reference/screens/search-no-box.html"
+    },
+    "search:search.year.tooLate": {
+      "text": "最晚到 {{year}} 年",
+      "source": "docs/ux/reference/screens/search-no-box.html"
+    },
+    "search:search.year.reversed": {
+      "text": "起始年不能比結束年晚",
+      "source": "docs/ux/reference/screens/search-no-box.html"
+    },
+    "search:search.results.loadingMore": {
+      "text": "載入中…",
+      "source": "docs/ux/reference/screens/search-no-box.html"
+    },
+    "search:search.results.loading": {
+      "text": "載入中",
+      "source": "docs/ux/reference/screens/search-no-box.html"
+    },
+    "search:search.mobile.filterCount": {
+      "text": "篩選 · {{count}}",
+      "source": "docs/ux/reference/screens/search-no-box.html"
+    },
+    "search:search.mobile.close": {
+      "text": "關閉",
+      "source": "docs/ux/reference/screens/search-no-box.html"
     }
   }
 }

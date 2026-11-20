@@ -1,0 +1,60 @@
+{
+  "search": {
+    "page": {
+      "title": "找論文"
+    },
+    "scope": {
+      "tracked": "所有追蹤期刊",
+      "lab": "實驗室文獻庫",
+      "personal": "我的文獻庫"
+    },
+    "filter": {
+      "journal": "期刊",
+      "year": "年份",
+      "topic": "主題",
+      "clear": "清除",
+      "clearAll": "清除篩選",
+      "aisCore": "AIS 核心 11 本",
+      "journalCount": "{{count}} 本",
+      "topicCount": "{{count}} 個",
+      "removeCondition": "移除這個條件"
+    },
+    "year": {
+      "none": "不限",
+      "thisYear": "今年",
+      "last3": "近 3 年",
+      "last5": "近 5 年",
+      "custom": "自訂",
+      "to": "到",
+      "fromLabel": "起始年",
+      "toLabel": "結束年",
+      "missing": "請輸入年份，例如 2020",
+      "tooEarly": "追蹤範圍從 {{year}} 年開始",
+      "tooLate": "最晚到 {{year}} 年",
+      "reversed": "起始年不能比結束年晚"
+    },
+    "condition": {
+      "thisWeek": "本週新增"
+    },
+    "start": {
+      "seeAll": "看全部 {{count}} 篇"
+    },
+    "results": {
+      "found": "找到 {{count}} 篇",
+      "byYear": "依年份排序",
+      "shown": "已顯示 {{shown}}／{{total}}",
+      "more": "再載入 {{count}} 篇",
+      "loadingMore": "載入中…",
+      "loading": "載入中"
+    },
+    "empty": {
+      "noMatch": "沒有符合的論文"
+    },
+    "mobile": {
+      "filter": "篩選",
+      "filterCount": "篩選 · {{count}}",
+      "close": "關閉",
+      "apply": "看 {{count}} 篇"
+    }
+  }
+}

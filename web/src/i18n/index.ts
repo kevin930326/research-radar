@@ -11,14 +11,15 @@ import login from "./zh-TW/login.json";
 import nav from "./zh-TW/nav.json";
 import notice from "./zh-TW/notice.json";
 import paper from "./zh-TW/paper.json";
+import search from "./zh-TW/search.json";
 
 export const LANGUAGE = "zh-TW";
 
 export const resources = {
-  [LANGUAGE]: { common, notice, caveat, ai, errors, login, nav, paper },
+  [LANGUAGE]: { common, notice, caveat, ai, errors, login, nav, paper, search },
 } as const;
 
-export const NAMESPACES = ["common", "notice", "caveat", "ai", "errors", "login", "nav", "paper"] as const;
+export const NAMESPACES = ["common", "notice", "caveat", "ai", "errors", "login", "nav", "paper", "search"] as const;
 
 void i18n.use(initReactI18next).init({
   lng: LANGUAGE,

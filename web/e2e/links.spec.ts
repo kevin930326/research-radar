@@ -45,7 +45,7 @@ for (const site of SITES) {
         }
         const before = page.url();
         await link.click();
-        // 站內轉址（例如 / 導到 /notice）時落點和 href 不同，所以只等網址離開原本這一頁。
+        // 站內轉址（例如 / 導到 /search）時落點和 href 不同，所以只等網址離開原本這一頁。
         if (target.href !== before) {
           await expect(page).not.toHaveURL(before);
         }

@@ -10,12 +10,13 @@ import { useLogOut } from "../hooks/use-log-out";
 import { BrandLink, HEADER_CLASS } from "./Brand";
 
 // 手機（899px 以下）的滿版選單（畫面 18、EXPERIENCE.md Responsive「導覽列」）：右上的「選單」按鈕打開，
-// 「關閉選單」或 Esc 關上。依 AR-67 這一輪只有帳號那幾項（名稱、使用須知、登出）；導覽連結在 3.14 起接上。
+// 「關閉選單」或 Esc 關上。依 AR-67 放目的地已經做好的：導覽連結「找論文」（Story 3.14），以及帳號那幾項
+// （名稱、使用須知、登出）；「我的文獻庫」在 3.17 接上，趨勢、關係排行表、問答還不出現。
 // 行為用 Base UI Dialog（ADR-0010）：焦點留在選單裡、關上後回到「選單」按鈕。選單打開時頁面本身藏起來
 // （設計稿也是整頁換成選單，見 routes/member.tsx）。
 // 樣子照設計稿 docs/ux/reference/screens/login-account.html 的 .mmenu：上方和導覽列同一個外框，
-// 下面是帳號那一塊（上方 36px、1px 框色的線、線下 22px）。設計稿帳號那一塊上面還有導覽連結的那一塊
-// （每個連結上方一條髮線、最後一條在下方）；這一輪沒有導覽連結，那一塊整個不畫，也就沒有它的髮線。
+// 下面先是導覽連結那一塊（每個連結 60px 高、上方一條髮線，最後一條在下方；24px 標題字、字距 0.06em），
+// 再來是帳號那一塊（上方 36px、1px 框色的線、線下 22px）。
 // 設計稿的滿版選單沒有畫「目前所在的頁面右邊的金點」（EXPERIENCE.md 18 有寫）：照設計稿不畫，報告裡寫明。
 // 和設計稿不同的地方（ADR-0037）：
 // - 「登出」滿寬（設計稿只有字那麼寬，31px）：看得到的按鈕與連結至少 44×44（第 5 點）。
@@ -96,6 +97,15 @@ export function MobileMenu({ member, open, onOpenChange, triggerRef, desktopFocu
             </Dialog.Close>
           </div>
           <nav className="flex-1 px-gutter-mobile pt-[28px] pb-[40px] leading-normal tablet:px-gutter-tablet">
+            <div className="border-b border-hairline">
+              <Link
+                to="/search"
+                onClick={close}
+                className="flex min-h-[60px] items-center justify-between border-t border-hairline font-title-zh text-section-title-zh leading-normal tracking-006 text-text-primary no-underline transition-[color] duration-200 hover:text-accent-gold"
+              >
+                {t("nav.links.search")}
+              </Link>
+            </div>
             <div className="mt-[36px] border-t border-border pt-[22px]">
               <div className="pb-[8px] text-nav text-text-secondary">{member.display_name}</div>
               <Link to="/notice" onClick={close} className={ITEM_CLASS}>

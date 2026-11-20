@@ -5,9 +5,89 @@
       {
         "key": "jes",
         "name": "Journal of Example Studies"
+      },
+      {
+        "key": "misq",
+        "name": "MIS Quarterly"
+      },
+      {
+        "key": "isr",
+        "name": "Information Systems Research"
+      },
+      {
+        "key": "jmis",
+        "name": "Journal of Management Information Systems"
+      },
+      {
+        "key": "jais",
+        "name": "Journal of the Association for Information Systems"
+      },
+      {
+        "key": "ejis",
+        "name": "European Journal of Information Systems"
+      },
+      {
+        "key": "isj",
+        "name": "Information Systems Journal"
+      },
+      {
+        "key": "jit",
+        "name": "Journal of Information Technology"
+      },
+      {
+        "key": "jsis",
+        "name": "Journal of Strategic Information Systems"
+      },
+      {
+        "key": "dss",
+        "name": "Decision Support Systems"
+      },
+      {
+        "key": "im",
+        "name": "Information & Management"
+      },
+      {
+        "key": "io",
+        "name": "Information and Organization"
+      },
+      {
+        "key": "pmj",
+        "name": "Project Management Journal"
+      },
+      {
+        "key": "tem",
+        "name": "IEEE Transactions on Engineering Management"
+      },
+      {
+        "key": "database",
+        "name": "The DATA BASE for Advances in Information Systems"
       }
     ],
     "topics": [
+      {
+        "key": "erp",
+        "name": "ERP"
+      },
+      {
+        "key": "supply_chain",
+        "name": "供應鏈"
+      },
+      {
+        "key": "e_commerce",
+        "name": "電子商務"
+      },
+      {
+        "key": "it_project_management",
+        "name": "IT 專案管理"
+      },
+      {
+        "key": "information_economics",
+        "name": "資訊經濟"
+      },
+      {
+        "key": "ai_data_analytics",
+        "name": "AI／資料分析"
+      },
       {
         "key": "platforms",
         "name": "平台經濟"
