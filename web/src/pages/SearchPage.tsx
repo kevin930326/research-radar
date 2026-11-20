@@ -93,7 +93,9 @@ export function SearchPage({ params: addressParams, onUpdate, onSignedOut }: Sea
   const pageSize = config.data?.kind === "found" ? config.data.config.paper_list_page_size : null;
   const namesData = names.data?.kind === "found" ? names.data.names : null;
   // 網址上的條件拿掉不認得的代號（顯示名稱還沒讀到時是 null：先不查清單）。
-  const known = namesData === null ? null : knownOnly(addressParams, namesData);
+  // 網址上沒有期刊、主題、方法代號時不用等顯示名稱，和顯示名稱同時查（確認審查 N9）。
+  const hasKeys = [addressParams.journal, addressParams.topic, addressParams.method].some((value) => value !== undefined);
+  const known = namesData !== null ? knownOnly(addressParams, namesData) : hasKeys ? null : addressParams;
   const params = known ?? addressParams;
   const start = isStart(params);
   const filters = toApiParams(start ? { this_week: true } : params);
@@ -145,7 +147,8 @@ export function SearchPage({ params: addressParams, onUpdate, onSignedOut }: Sea
           onRemove={removeCondition((current) => ({ ...current, this_week: undefined }))}
         />
       ) : null}
-      {selectedKeys(params.method).map((method) => (
+      {/* 顯示名稱讀到前不畫方法標籤：不先出現代號，不認得的代號也不會閃一下（確認審查 N2）。 */}
+      {(namesData === null ? [] : selectedKeys(params.method)).map((method) => (
         <ConditionTag
           key={method}
           kind="method"

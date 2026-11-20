@@ -129,18 +129,28 @@ export function YearOptions({ state, size, startYear }: { state: FilterState; si
   const applied = yearPreset(state.params, state.currentYear);
   // 剛選的選項：網址還沒換好（每次換頁都要等「我是誰」）時，單選鈕先停在剛選的那一個，不跳回網址上的舊值；
   // 按了「自訂」但還沒輸入合格的年份時，網址還是原本的條件，這裡記住「自訂」是選著的。
-  // 網址上的年份變了就清掉快速選項（換好了，照網址）；「自訂」留著（較早一次的換頁晚到時不把它蓋掉）。
   const [picked, setPicked] = useState<YearPreset | null>(null);
-  const [seenApplied, setSeenApplied] = useState(applied);
-  if (seenApplied !== applied) {
-    setSeenApplied(applied);
-    if (picked !== "custom") setPicked(null);
-  }
   const [fromText, setFromText] = useState(String(state.params.from ?? startYear));
   const [toText, setToText] = useState(String(state.params.to ?? state.currentYear));
   const [problem, setProblem] = useState<YearProblem | null>(null);
   // 輸入框的字改過才檢查（設計稿用 change 事件：只是 Tab 經過不算）。
   const [dirty, setDirty] = useState(false);
+  // 網址上的年份變了：換好了，照網址。快速選項一律清掉；「自訂」只在還沒套用時留著（較早一次的換頁晚到時不把它蓋掉），
+  // 網址變成自訂範圍（套用好了）或「不限」（清除篩選、條件標籤 ×）時也清掉，兩個框與錯誤一起回到網址的值。
+  // 手機篩選開著時年份這一段不會重建，不這樣做會停在「自訂」與舊年份（確認審查 N1）。
+  // 比的是網址上的起訖年（不是快速選項）：自訂範圍換成另一個自訂範圍時兩個框也要跟著換。
+  const appliedRange = `${state.params.from ?? ""}-${state.params.to ?? ""}`;
+  const [seenRange, setSeenRange] = useState(appliedRange);
+  if (seenRange !== appliedRange) {
+    setSeenRange(appliedRange);
+    if (picked !== "custom" || applied === "custom" || applied === "none") {
+      setPicked(null);
+      setFromText(String(state.params.from ?? startYear));
+      setToText(String(state.params.to ?? state.currentYear));
+      setProblem(null);
+      setDirty(false);
+    }
+  }
   // 按「自訂」之後要把焦點移到起始年並選起來：等兩個框換成新的字（畫面更新完）才做，選取才不會被換字蓋掉。
   const [focusRequest, setFocusRequest] = useState(0);
   const checked: YearPreset = picked ?? applied;

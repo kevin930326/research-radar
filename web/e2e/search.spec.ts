@@ -63,6 +63,11 @@ async function lastListRequest(requests: { path: string }[]): Promise<URLSearchP
 const option = (page: Page, role: "radio" | "checkbox", name: string) =>
   page.locator("label").filter({ has: page.getByRole(role, { name }) });
 
+/** 今年（台北時間；年份選項與網址驗證用同一個時區）。 */
+function taipeiYear(): string {
+  return new Intl.DateTimeFormat("en", { timeZone: "Asia/Taipei", year: "numeric" }).format(new Date());
+}
+
 /** 「找到 N 篇」整句。 */
 function foundText(total: number): string {
   return fill(text("search:search.results.found"), { count: total });
@@ -243,10 +248,12 @@ test.describe("search: filters", () => {
     await openSearch(page, "?topic=not_a_topic&journal=misq,old_journal&method=gone");
     await expect(rows(page).first()).toBeVisible();
     await expect(page.getByRole("alert").filter({ hasText: text("common:states.loadFailed.message") })).toHaveCount(0);
-    const sent = await lastListRequest(apiMock.requests);
-    expect(sent.getAll("topic")).toEqual([]);
-    expect(sent.getAll("journal")).toEqual(["misq"]);
-    expect(sent.getAll("method")).toEqual([]);
+    // 每一個清單請求都要對（確認審查 N3）：只看最後一個，先送過一次 422 再送對的也會通過。
+    await lastListRequest(apiMock.requests);
+    const sent = listRequests(apiMock.requests);
+    expect(sent.map((query) => query.getAll("topic"))).toEqual(sent.map(() => []));
+    expect(sent.map((query) => query.getAll("journal"))).toEqual(sent.map(() => ["misq"]));
+    expect(sent.map((query) => query.getAll("method"))).toEqual(sent.map(() => []));
   });
 
   test("years outside the tracking range in the address are not sent", async ({ page, apiMock }) => {
@@ -254,7 +261,11 @@ test.describe("search: filters", () => {
     await openSearch(page, "?topic=e_commerce&from=2010&to=2020");
     await expect(rows(page).first()).toBeVisible();
     await expect(page.getByRole("alert").filter({ hasText: text("common:states.loadFailed.message") })).toHaveCount(0);
-    expect((await lastListRequest(apiMock.requests)).getAll("year")).toEqual([]);
+    // 每一個清單請求都不帶年份（確認審查 N3）。
+    await lastListRequest(apiMock.requests);
+    const sent = listRequests(apiMock.requests);
+    expect(sent.map((query) => query.getAll("year"))).toEqual(sent.map(() => []));
+    expect(sent.map((query) => query.getAll("topic"))).toEqual(sent.map(() => ["e_commerce"]));
   });
 
   test("a method brought in from the paper page is a removable condition", async ({ page, apiMock }) => {
@@ -390,6 +401,98 @@ test.describe("search: filters", () => {
     await expect(page).toHaveURL(`${member.baseURL}/search`);
     // 「清除篩選」不見了，焦點在第一段的標題（審查 S2-3）。
     await expect(sheet.locator("[data-filter-section='journal'] > button")).toBeFocused();
+  });
+
+  test("phone: clearing after a custom year range shows no limit and the default boxes again", async ({ page }) => {
+    // 確認審查 N1：手機篩選開著時年份那一段不會重建；網址的年份拿掉了，單選鈕與兩個框也要跟著回到預設。
+    const thisYear = taipeiYear();
+    await openSearch(page, "", PHONE);
+    await page.locator("[data-mobile-filter]").click();
+    const sheet = page.getByRole("dialog");
+    await sheet.locator("[data-filter-section='year'] > button").click();
+    const custom = sheet.getByRole("radio", { name: text("search:search.year.custom") });
+    const none = sheet.getByRole("radio", { name: text("search:search.year.none") });
+    const fromBox = sheet.getByRole("textbox", { name: text("search:search.year.fromLabel") });
+    const toBox = sheet.getByRole("textbox", { name: text("search:search.year.toLabel") });
+    const clearAll = sheet.getByRole("link", { name: text("search:search.filter.clearAll") });
+
+    // 情況一：自訂 2018–2019 套用後清除。
+    await option(page, "radio", text("search:search.year.custom")).click();
+    await fromBox.fill("2018");
+    await toBox.fill("2019");
+    await toBox.press("Enter");
+    await expect(page).toHaveURL(`${member.baseURL}/search?from=2018&to=2019`);
+    await expect(custom).toBeChecked();
+    await clearAll.click();
+    await expect(page).toHaveURL(`${member.baseURL}/search`);
+    await expect(none).toBeChecked();
+    await expect(custom).not.toBeChecked();
+    await expect(fromBox).toHaveValue("2016");
+    await expect(toBox).toHaveValue(thisYear);
+
+    // 情況二：套用近 3 年，按「自訂」不輸入就清除。
+    await option(page, "radio", text("search:search.year.last3")).click();
+    await expect(page).toHaveURL((url) => url.searchParams.has("from"));
+    await option(page, "radio", text("search:search.year.custom")).click();
+    await expect(custom).toBeChecked();
+    await clearAll.click();
+    await expect(page).toHaveURL(`${member.baseURL}/search`);
+    await expect(none).toBeChecked();
+    await expect(custom).not.toBeChecked();
+    await expect(fromBox).toHaveValue("2016");
+    await expect(toBox).toHaveValue(thisYear);
+  });
+
+  test("a desktop menu closed by narrowing to phone width hands the focus to the phone filter button", async ({ page }) => {
+    // 審查 S2-4、確認審查 N4：桌機的標籤在手機寬度藏起來，焦點不能留在看不到的地方或掉到 body。
+    await openSearch(page, "?topic=e_commerce");
+    await chip(page, "search:search.filter.topic").click();
+    await expect(page.getByRole("checkbox", { name: ECOMMERCE })).toBeVisible();
+    await page.setViewportSize(PHONE);
+    await expect(page.getByRole("checkbox", { name: ECOMMERCE })).toHaveCount(0);
+    await expect(page.locator("[data-mobile-filter]")).toBeFocused();
+  });
+
+  test("desktop: clearing after a custom year range shows no limit and the default boxes again", async ({ page }) => {
+    // 確認審查 N1 的桌機版：年份選單裡自訂後，按頁面上的「清除篩選」，再打開年份選單是「不限」與預設年份。
+    const thisYear = taipeiYear();
+    await openSearch(page, "?topic=e_commerce");
+    const yearChip = chip(page, "search:search.filter.year");
+    const custom = page.getByRole("radio", { name: text("search:search.year.custom") });
+    const none = page.getByRole("radio", { name: text("search:search.year.none") });
+    const fromBox = page.getByRole("textbox", { name: text("search:search.year.fromLabel") });
+    const toBox = page.getByRole("textbox", { name: text("search:search.year.toLabel") });
+    const clearAll = page.locator("[data-clear-all]:visible");
+
+    // 情況一：自訂 2018–2019 套用後清除。
+    await yearChip.click();
+    await option(page, "radio", text("search:search.year.custom")).click();
+    await fromBox.fill("2018");
+    await toBox.fill("2019");
+    await toBox.press("Enter");
+    await expect(page).toHaveURL(`${member.baseURL}/search?topic=e_commerce&from=2018&to=2019`);
+    await page.keyboard.press("Escape");
+    await clearAll.click();
+    await expect(page).toHaveURL(`${member.baseURL}/search`);
+    await yearChip.click();
+    await expect(none).toBeChecked();
+    await expect(custom).not.toBeChecked();
+    await expect(fromBox).toHaveValue("2016");
+    await expect(toBox).toHaveValue(thisYear);
+
+    // 情況二：套用近 3 年，按「自訂」不輸入，關掉選單後清除。
+    await option(page, "radio", text("search:search.year.last3")).click();
+    await expect(page).toHaveURL((url) => url.searchParams.has("from"));
+    await option(page, "radio", text("search:search.year.custom")).click();
+    await expect(custom).toBeChecked();
+    await page.keyboard.press("Escape");
+    await clearAll.click();
+    await expect(page).toHaveURL(`${member.baseURL}/search`);
+    await yearChip.click();
+    await expect(none).toBeChecked();
+    await expect(custom).not.toBeChecked();
+    await expect(fromBox).toHaveValue("2016");
+    await expect(toBox).toHaveValue(thisYear);
   });
 });
 

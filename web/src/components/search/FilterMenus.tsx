@@ -41,8 +41,13 @@ function FilterMenu({ label, value, width, clear, children }: MenuProps) {
   const [open, setOpen] = useState(false);
   const labelId = useId();
   const popupRef = useRef<HTMLDivElement>(null);
+  // 跨到手機寬度關掉時標籤已經藏起來，焦點改回手機的「篩選」按鈕（同 MobileFilters 的做法；確認審查 N4）。
+  const closedByBreakpoint = useRef(false);
   const selected = value !== null;
-  useCloseAcrossBreakpoint(open, PHONE_QUERY, () => setOpen(false));
+  useCloseAcrossBreakpoint(open, PHONE_QUERY, () => {
+    closedByBreakpoint.current = true;
+    setOpen(false);
+  });
   return (
     <Popover.Root open={open} onOpenChange={setOpen}>
       <Popover.Trigger
@@ -79,6 +84,11 @@ function FilterMenu({ label, value, width, clear, children }: MenuProps) {
           <Popover.Popup
             ref={popupRef}
             aria-labelledby={labelId}
+            finalFocus={() => {
+              if (!closedByBreakpoint.current) return true;
+              closedByBreakpoint.current = false;
+              return document.querySelector<HTMLElement>("[data-mobile-filter]");
+            }}
             className={`box-border max-w-[calc(100vw-40px)] border border-border bg-popover-surface leading-normal tracking-0 text-text-primary transition-[opacity,transform] duration-200 data-[ending-style]:-translate-y-1 data-[ending-style]:opacity-0 data-[starting-style]:-translate-y-1 data-[starting-style]:opacity-0 ${
               width === "wide" ? "w-[490px]" : "w-[260px]"
             }`}
