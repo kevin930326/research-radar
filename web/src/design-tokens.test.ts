@@ -171,7 +171,8 @@ describe("DESIGN.md tokens equal the Tailwind theme", () => {
   it("reads the expected number of tokens from DESIGN.md", () => {
     expect(Object.keys(colors)).toHaveLength(20);
     expect(Object.keys(typography)).toHaveLength(21);
-    expect(Object.keys(spacing)).toHaveLength(17);
+    // 18：ADR-0054 加了 page-max-width（2026-11-20）。
+    expect(Object.keys(spacing)).toHaveLength(18);
     expect(Object.keys(rounded)).toHaveLength(2);
     expect(Object.keys(fontSizes)).toHaveLength(26);
     expect(Object.keys(lineHeights)).toHaveLength(17);

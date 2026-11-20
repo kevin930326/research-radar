@@ -180,7 +180,7 @@
   --tracking-01: 0.1em;
   --tracking-012: 0.12em;
 
-  /* spacing（DESIGN.md spacing，17 個） */
+  /* spacing（DESIGN.md spacing，18 個） */
   --spacing-1: 4px;
   --spacing-2: 8px;
   --spacing-3: 12px;
@@ -195,6 +195,7 @@
   --spacing-gutter-mobile: 20px;
   --spacing-reading-width: 760px;
   --spacing-rail-width: 248px;
+  --spacing-page-max-width: 1280px;
   --spacing-button-height: 50px;
   --spacing-button-height-compact: 44px;
   --spacing-tap-target: 44px;
