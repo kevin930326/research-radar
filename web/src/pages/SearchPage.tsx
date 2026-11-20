@@ -12,7 +12,7 @@ import { PaperRowList, SkeletonRows } from "../components/search/PaperRows";
 import { CrossIcon, NoticeIcon } from "../components/search/parts";
 import type { PaperList } from "../datasource/types";
 import type { SnapshotRef } from "../generated/model";
-import { clientConfigQuery, displayNamesQuery, filtersKey, paperListQuery } from "../routes/paper-queries";
+import { clientConfigQuery, displayNamesQuery, filtersKey, libraryCountQuery, paperListQuery } from "../routes/paper-queries";
 import { formatCount, splitTemplate } from "./paper-format";
 import {
   START_ROWS,
@@ -108,7 +108,42 @@ export function SearchPage({ params: addressParams, onUpdate, onSignedOut }: Sea
     placeholderData: (previous, previousQuery) => (previousQuery?.queryKey[1] === key ? previous : undefined),
   });
 
-  const signedOut = [config.data, names.data, list.data].some((data) => data?.kind === "signedOut");
+  const found = list.data?.kind === "found" ? list.data.list : null;
+  // 範圍是我的文獻庫、沒有條件、0 篇：再讀一次文獻庫的篇數，真的是 0 才說「你的文獻庫還沒有論文」；文獻庫有論文、
+  // 但都不在找論文的範圍裡（例如被排除）時照一般的「沒有符合的論文」（F11，Kevin 2026-11-20）。
+  const personalZero = !start && found !== null && found.total === 0 && params.scope === "personal" && !hasConditions(params);
+  const libraryCount = useQuery({ ...libraryCountQuery, enabled: personalZero });
+  const queries = personalZero ? [config, names, list, libraryCount] : [config, names, list];
+
+  // 直接打開（重新整理）網址時最多讀 MAX_SHOWN 篇（paperListQuery）：網址的 shown 比讀到的多、後面還有的時候，
+  // 把 shown 對齊成讀到的篇數。不對齊的話 shown 剛好是 MAX_SHOWN＋一頁時，「再載入」算出來的篇數就是現在的 shown，
+  // 網址不變、什麼都不會發生（同我的文獻庫的審查 G8）。對齊後的清單從讀到的那一份接著用，不重讀；對齊之後把原本那一份
+  // （只讀到 MAX_SHOWN 篇、卻記在較大的篇數底下）丟掉，之後再載入到那個篇數時才會從對齊後的那一份接著讀。
+  // 注意：這兩個 effect 要寫在 useQuery(list) 後面，新的查詢才會先從舊的那一份接著讀、之後才刪舊的（同 LibraryPage）。
+  const alignedFrom = useRef<{ key: string; limit: number } | null>(null);
+  useEffect(() => {
+    const from = alignedFrom.current;
+    if (from === null || (from.key === key && from.limit === limit)) return;
+    queryClient.removeQueries({ queryKey: ["paper-list", from.key, from.limit], exact: true });
+    alignedFrom.current = null;
+  }, [key, limit, queryClient]);
+  const capped =
+    !start &&
+    found !== null &&
+    !list.isPlaceholderData &&
+    limit !== null &&
+    found.items.length < limit &&
+    (found.pending.length > 0 || found.next_cursor !== null)
+      ? found.items.length
+      : null;
+  useEffect(() => {
+    if (capped === null || limit === null) return;
+    alignedFrom.current = { key, limit };
+    // 只在網址還是這一份的篇數時改：這段期間換了條件（shown 已清掉）就不動。
+    onUpdate((current) => (current.shown !== undefined && current.shown > capped ? { ...current, shown: capped } : current));
+  }, [capped, key, limit, onUpdate]);
+
+  const signedOut = [config.data, names.data, list.data, libraryCount.data].some((data) => data?.kind === "signedOut");
   // 只通知一次：換到登入頁的途中這一頁還會再畫幾次（onSignedOut 每次都是新的函式），
   // 再通知一次會用登入頁自己的網址當 next，回不到這一頁。
   const notified = useRef(false);
@@ -124,9 +159,8 @@ export function SearchPage({ params: addressParams, onUpdate, onSignedOut }: Sea
     currentYear,
     update: (change) => onUpdate((current) => ({ ...change(current), shown: undefined })),
   };
-  const found = list.data?.kind === "found" ? list.data.list : null;
   // 已經有資料時，背景重讀失敗不把整個畫面換成錯誤（審查 S1-5）。
-  const failed = [config, names, list].some((query) => query.isError && query.data === undefined);
+  const failed = queries.some((query) => query.isError && query.data === undefined);
   const snapshot = found?.snapshot ?? latestSnapshot(queryClient);
 
   if (signedOut) {
@@ -176,7 +210,7 @@ export function SearchPage({ params: addressParams, onUpdate, onSignedOut }: Sea
         message={tc("states.loadFailed.message")}
         action={tc("states.loadFailed.action")}
         onRetry={() => {
-          for (const query of [config, names, list]) {
+          for (const query of queries) {
             if (query.isError) void query.refetch();
           }
         }}
@@ -186,9 +220,18 @@ export function SearchPage({ params: addressParams, onUpdate, onSignedOut }: Sea
     body = <SkeletonRows label={t("search.results.loading")} />;
   } else if (start) {
     body = <StartBlock list={found} names={state.names} />;
-  } else if (found.total === 0 && params.scope === "personal" && !hasConditions(params)) {
-    // 範圍是我的文獻庫、沒有條件、0 篇：文獻庫是空的（Story 3.17；State Patterns「12. 找論文」）。
-    body = <LibraryEmptyBar />;
+  } else if (personalZero) {
+    // 範圍是我的文獻庫、沒有條件、0 篇：文獻庫真的是空的才是「你的文獻庫還沒有論文」（Story 3.17；State Patterns
+    // 「12. 找論文」）；文獻庫有論文時是「沒有符合的論文」，沒有條件可以清除（F11）。篇數還沒讀到時照樣是骨架。
+    const total = libraryCount.data?.kind === "found" ? libraryCount.data.total : null;
+    body =
+      total === null ? (
+        <SkeletonRows label={t("search.results.loading")} />
+      ) : total === 0 ? (
+        <LibraryEmptyBar />
+      ) : (
+        <ZeroBar clear={null} />
+      );
   } else if (found.total === 0) {
     // 範圍裡本來就沒有論文、也沒有條件時，沒有東西可以清除。
     body = <ZeroBar clear={hasConditions(params) ? params : null} />;

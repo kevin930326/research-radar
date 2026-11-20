@@ -3,7 +3,7 @@
 // 之後每個 Story 都要通過。
 import { errors } from "@playwright/test";
 
-import { createApiState } from "./api-mock.ts";
+import { LIST_FIXTURES, createApiState } from "./api-mock.ts";
 import { TEXT } from "./expected.ts";
 import { expect, test } from "./fixtures.ts";
 import { expectDocumentResponsesOk, expectValidLanding, recordDocumentResponses } from "./landing.ts";
@@ -13,6 +13,18 @@ const NOT_FOUND = TEXT["common:states.notFound.message"];
 const member = SITES[0]!;
 // 按鈕點完等換頁的上限；不換頁的按鈕（例如切換選項）每個都會等滿這段時間。
 const BUTTON_NAVIGATION_WAIT_MS = 1_000;
+
+/**
+ * 有清單的頁面載入完之後一定有的列數（從假資料算；N1，Kevin 2026-11-20）：找論文的起始狀態列本週新增的前 3 篇，
+ * 我的文獻庫列替身文獻庫一開始的那幾篇（假清單裡 personal 的列，一頁放得下）。每一列的標題都是連結。
+ */
+const LIST_ROWS: Record<string, { selector: string; count: number }> = {
+  "/search": { selector: "[data-paper-row]", count: Math.min(3, LIST_FIXTURES.rows.filter((entry) => entry.this_week).length) },
+  "/library": {
+    selector: "[data-library-row]",
+    count: Math.min(LIST_FIXTURES.rows.filter((entry) => entry.personal).length, LIST_FIXTURES.clientConfig.library_page_size),
+  },
+};
 
 for (const site of SITES) {
   for (const path of [...site.pages, MISSING_PATH]) {
@@ -29,14 +41,26 @@ for (const site of SITES) {
         // 頁面殼本身也要回 2xx（「找不到這一頁」也是頁面殼，由瀏覽器裡的路由顯示）。
         expectDocumentResponsesOk(responses, `open ${path}`);
         await expect(page.locator("main")).toBeVisible();
+        // 等頁面載入完（載入骨架都消失；N1）：清單還在骨架時數連結與按鈕，會漏掉清單裡的那些。
+        await expect(page.locator("[data-state='loading']")).toHaveCount(0);
         responses.length = 0;
       };
       await open();
+      const listRows = site.name === "member" ? LIST_ROWS[path] : undefined;
+      if (listRows !== undefined) {
+        // 清單真的列出來了（列數等於從假資料算的），才往下數。
+        expect(listRows.count).toBeGreaterThan(0);
+        await expect(page.locator(`main ${listRows.selector}`)).toHaveCount(listRows.count);
+      }
       const linkCount = await page.locator("main a[href]").count();
       // 看得到的按鈕才點：同一個按鈕在另一種寬度才出現的（例如論文頁手機版底部的「開啟全文」，Story 3.8）
       // 用 CSS 藏起來，點不到；它在那一種寬度的行為由各自的測試看。
       const buttons = page.locator("main button:visible");
       const buttonCount = await buttons.count();
+      if (listRows !== undefined) {
+        // 有清單的頁面一定有東西可點（N1：什麼都沒點就結束要失敗）；每一列的標題都是連結。
+        expect(linkCount).toBeGreaterThanOrEqual(listRows.count);
+      }
 
       for (let index = 0; index < linkCount; index += 1) {
         await open();

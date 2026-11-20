@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 
 import type { Page } from "@playwright/test";
 
-import { LIST_FIXTURES, PAPER_FIXTURES, filterListRows, gate, paperId } from "./api-mock.ts";
+import { LIST_FIXTURES, PAPER_FIXTURES, filterListRows, gate, paperId, type ListFixtureRow } from "./api-mock.ts";
 import { TEXT } from "./expected.ts";
 import { expect, test } from "./fixtures.ts";
 import { SITES } from "./pages.ts";
@@ -131,6 +131,68 @@ test.describe("search: states", () => {
     await expect(rows(page)).toHaveCount(total);
   });
 
+  test("library count fails: the shared error bar, and reload reads the count again", async ({ page, apiMock }) => {
+    // F11：範圍我的文獻庫、沒條件、0 篇時多讀的文獻庫篇數失敗，和清單失敗一樣是錯誤條＋「重新整理」（審查）。
+    apiMock.listRows = LIST_FIXTURES.rows.filter((entry) => !entry.personal);
+    apiMock.library = "failed";
+    await openSearch(page, "?scope=personal");
+    const alert = page.locator("[data-state='error']");
+    await expect(alert).toContainText(text("common:states.loadFailed.message"));
+    apiMock.library = "ok";
+    await alert.getByRole("button", { name: text("common:states.loadFailed.action") }).click();
+    await expect(page.locator("[data-state='zero']")).toContainText(text("search:search.empty.noMatch"));
+  });
+
+  test("library count says the login expired: back to the login page", async ({ page, apiMock }) => {
+    apiMock.listRows = LIST_FIXTURES.rows.filter((entry) => !entry.personal);
+    apiMock.library = "expired";
+    await page.setViewportSize(DESKTOP);
+    await page.goto(`${member.baseURL}/search?scope=personal`);
+    await expect(page).toHaveURL(/\/login\?/);
+    const url = new URL(page.url());
+    expect(url.searchParams.get("next")).toBe("/search?scope=personal");
+    expect(url.searchParams.get("expired")).toBe("true");
+  });
+
+  test("reloading at shown=220 (200 read at most on a fresh open): the address lines up and load more still works", async ({ page, apiMock }) => {
+    // 同我的文獻庫的審查 G8：直接打開網址時最多讀 200 篇（MAX_SHOWN）。shown＝200＋一頁（20）時，「再載入」算出來的
+    // 又是 220，和網址一樣，按了不會有反應；所以讀完之後網址對齊成 200。測試資料：假清單 30 篇＋這裡編的 270 篇，
+    // 條件是「本週新增」（編的都是本週新增）。
+    const extra: ListFixtureRow[] = Array.from({ length: 270 }, (_, index) => ({
+      row: {
+        ...LIST_FIXTURES.rows[0]!.row,
+        id: `38000000-0000-4000-8000-1${String(index).padStart(11, "0")}`,
+        title: `Fake Search Paper ${index + 1}`,
+      },
+      topics: [],
+      this_week: true,
+      lab: false,
+      personal: false,
+    }));
+    apiMock.listRows = [...LIST_FIXTURES.rows, ...extra];
+    const expected = filterListRows(apiMock.listRows, new URLSearchParams("this_week=true"))!.map((entry) => entry.row.id);
+    expect(expected.length).toBeGreaterThan(200 + PAGE_SIZE);
+    const shownIds = () => rows(page).evaluateAll((elements) => elements.map((element) => element.getAttribute("data-paper-row")));
+    const more = page.locator("[data-load-more]");
+
+    await openSearch(page, `?this_week=true&shown=${200 + PAGE_SIZE}`);
+    await expect(rows(page)).toHaveCount(200);
+    await expect(page).toHaveURL(/[?&]shown=200(&|$)/);
+    expect(await shownIds()).toEqual(expected.slice(0, 200));
+    await expect(page.locator("[data-shown]")).toHaveText(
+      fill(text("search:search.results.shown"), { shown: 200, total: expected.length }),
+    );
+    await expect(more).toHaveText(fill(text("search:search.results.more"), { count: PAGE_SIZE }));
+
+    await more.click();
+    await expect(rows(page)).toHaveCount(200 + PAGE_SIZE);
+    expect(await shownIds()).toEqual(expected.slice(0, 200 + PAGE_SIZE));
+    await expect(page).toHaveURL(new RegExp(`[?&]shown=${200 + PAGE_SIZE}(&|$)`));
+    // 對齊時不重讀：一開始 10 頁（200 篇），再載入只讀第 11 頁。
+    const cursors = listRequests(apiMock.requests).map((params) => params.get("cursor"));
+    expect(cursors).toEqual([null, ...Array.from({ length: 10 }, (_, index) => `o${(index + 1) * PAGE_SIZE}`)]);
+  });
+
   test("no match says so and clearing goes back to the start", async ({ page }) => {
     await openSearch(page, "?journal=misq&from=2016&to=2016");
     const zero = page.locator("[data-state='zero']");
@@ -146,7 +208,8 @@ test.describe("search: states", () => {
   test("an empty library without conditions has nothing to clear", async ({ page, apiMock }) => {
     // 審查 S1-8：沒有條件時「清除篩選」按了沒反應，所以不放。Story 3.17：文獻庫是空的時，訊息條是
     // 「你的文獻庫還沒有論文」＋「改找所有追蹤期刊」（State Patterns「12. 找論文」；「上傳或匯入」是 Epic 6）。
-    apiMock.listRows = LIST_FIXTURES.rows.filter((entry) => !entry.personal);
+    // F11（Kevin 2026-11-20 准改準備方式）：文獻庫真的是空的（替身的文獻庫設成空），清單的假資料保持完整。
+    apiMock.libraryIds = [];
     await openSearch(page, "?scope=personal");
     const empty = page.locator("[data-state='library-empty']");
     await expect(empty).toContainText(text("search:search.empty.library"));
@@ -154,6 +217,22 @@ test.describe("search: states", () => {
     await expect(empty.getByRole("link")).toHaveText(text("search:search.empty.toTracked"));
     await expect(page.locator("[data-state='zero']")).toHaveCount(0);
     await expect(page.locator("[data-clear-all]")).toHaveCount(0);
+  });
+
+  test("a library whose papers are all outside search: no match, not the empty-library message, nothing to clear", async ({ page, apiMock }) => {
+    // F11：文獻庫有論文（替身的文獻庫還是一開始的那幾篇），但那幾篇都不在找論文的清單裡（例如被排除），
+    // 範圍選我的文獻庫、沒有條件時是 0 篇。這時文獻庫不是空的，照一般的「沒有符合的論文」。
+    apiMock.listRows = LIST_FIXTURES.rows.filter((entry) => !entry.personal);
+    const inLibrary = LIST_FIXTURES.rows.filter((entry) => entry.personal).length;
+    expect(inLibrary).toBeGreaterThan(0);
+    expect(apiMock.libraryIds).toHaveLength(inLibrary);
+    await openSearch(page, "?scope=personal");
+    const zero = page.locator("[data-state='zero']");
+    await expect(zero).toContainText(text("search:search.empty.noMatch"));
+    await expect(zero.getByRole("link")).toHaveCount(0);
+    await expect(page.locator("[data-state='library-empty']")).toHaveCount(0);
+    await expect(page.locator("[data-clear-all]")).toHaveCount(0);
+    await expect(rows(page)).toHaveCount(0);
   });
 
   test("an empty library (the list itself complete): the library message, no zero bar, nothing to clear", async ({ page, apiMock }) => {
