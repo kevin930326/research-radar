@@ -5,6 +5,7 @@ import { useTranslation } from "react-i18next";
 import type { Member } from "../datasource/types";
 import { AccountMenu } from "./AccountMenu";
 import { BrandLink, HEADER_CLASS } from "./Brand";
+import { NAV_LINKS } from "./nav-links";
 import { MobileMenu } from "./MobileMenu";
 
 // 成員版的導覽列（DESIGN.md Components「導覽列」、EXPERIENCE.md「導覽」、Story 3.5）。
@@ -26,14 +27,17 @@ export function SiteHeader({ member, onMobileMenuChange, mobileMenuOpen }: SiteH
     <header className={HEADER_CLASS}>
       <BrandLink />
       <nav className="hidden items-center text-nav leading-normal split:flex">
-        <Link
-          to="/search"
-          className="group px-4 py-[13px] text-text-secondary no-underline transition-[color] duration-200 hover:text-text-primary data-[status=active]:text-text-primary"
-        >
-          <span className="border-b border-transparent pb-[6px] group-data-[status=active]:border-accent-gold">
-            {t("nav.links.search")}
-          </span>
-        </Link>
+        {NAV_LINKS.map(({ to, label }) => (
+          <Link
+            key={to}
+            to={to}
+            className="group px-4 py-[13px] text-text-secondary no-underline transition-[color] duration-200 hover:text-text-primary data-[status=active]:text-text-primary"
+          >
+            <span className="border-b border-transparent pb-[6px] group-data-[status=active]:border-accent-gold">
+              {t(`nav.links.${label}`)}
+            </span>
+          </Link>
+        ))}
         <AccountMenu member={member} triggerRef={accountTriggerRef} phoneFocusRef={menuTriggerRef} />
       </nav>
       <MobileMenu

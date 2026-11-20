@@ -672,6 +672,8 @@ class PaperRow(BaseModel):
     - `doi` 是正規化後的寫法（一篇有好幾個時是最早記上的那一個）；`doi_url` 由它產生，和它一起有值
       或一起是 null。
     - `has_abstract`：有沒有目前的摘要。
+    - `in_my_library`：這篇在不在**目前登入的成員自己**的文獻庫（Story 3.17、ADR-0053）；
+      別人的文獻庫不算。
     """
 
     model_config = _FROZEN
@@ -688,6 +690,7 @@ class PaperRow(BaseModel):
     has_abstract: StrictBool
     in_scope: StrictBool
     is_retracted: StrictBool
+    in_my_library: StrictBool
 
     @model_validator(mode="after")
     def _check(self) -> Self:
@@ -714,6 +717,7 @@ class PaperRow(BaseModel):
             has_abstract=facts.has_abstract,
             in_scope=facts.in_scope,
             is_retracted=facts.is_retracted,
+            in_my_library=facts.in_my_library,
         )
 
 

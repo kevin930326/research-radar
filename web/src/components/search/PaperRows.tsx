@@ -1,15 +1,18 @@
 import { Link } from "@tanstack/react-router";
-import { Fragment, type CSSProperties, type ReactNode } from "react";
+import { Fragment, useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { DisplayNames, PaperRow } from "../../generated/model";
 import { externalUrl } from "../../pages/paper-format";
+import { useLibraryChange } from "../../routes/library-change";
 import { ExternalArrow, NEW_TAB_NOTE_ID } from "../ExternalArrow";
 import { PaperTitle } from "../PaperText";
+import { PlusIcon } from "../paper/LibraryBlock";
 import { journalName } from "./filters";
 
 // 找論文的論文列（設計稿 search-no-box.html 的 .prow；EXPERIENCE.md 畫面 12 第 4 點）：
-// 標題（連到論文頁）、期刊 · 年份；右側只有「開啟全文」（AR-67：「加入我的文獻庫」在 Story 3.17）。
+// 標題（連到論文頁）、期刊 · 年份；右側「加入我的文獻庫」（Story 3.17）與「開啟全文」（設計稿 search.html 的那一欄：寬 248、間距 20）。
+// 「加入我的文獻庫」平常是暗的外框按鈕，滑到或聚焦在那一列才亮；已經加入的是「● 已加入」，不能按（EXPERIENCE.md 畫面 12 第 4 點）。
 // 900px 以上兩欄（文字最寬 760、右側動作）；899px 以下動作移到標題下方（EXPERIENCE.md Responsive）。
 // 「開啟全文」平常暗一階（閱讀字色），滑到或聚焦在那一列才變金色。
 // 不做的（Kevin 2026-11-20 決定，之後另開 Story）：設計稿每列第三行的「AI 整理」＋研究問題、「中文重點產生中」；
@@ -17,12 +20,13 @@ import { journalName } from "./filters";
 // 和設計稿不同的地方：
 // - 期刊寫全名（Kevin 2026-11-20 決定先顯示全名，縮寫之後補）。
 // - 沒有摘要的標「沒有摘要」（EXPERIENCE.md 第 4 點；設計稿沒畫，沿用期刊 · 年份那一行的樣式接在後面）。
-// - 沒有 DOI 的論文右側不放東西（沒有全文連結；設計稿沒畫，列進決定紀錄）。
+// - 沒有 DOI 的論文右側只有「加入我的文獻庫」（沒有全文連結；設計稿沒畫，列進決定紀錄）。
 // - 標題連結與「開啟全文」的可點範圍至少 44px 高（ADR-0037）：用透明的內距補，負外距讓版面和設計稿一樣。
 
 const SEPARATOR_CLASS = "px-[9px] text-text-tertiary";
 
-function Meta({ row, names }: { row: PaperRow; names: DisplayNames | null }) {
+/** 期刊 · 年份（· 沒有摘要）。我的文獻庫的列不標「沒有摘要」（`noAbstract` 給 false；設計稿 library.html 沒有）。 */
+export function Meta({ row, names, noAbstract = true }: { row: PaperRow; names: DisplayNames | null; noAbstract?: boolean }) {
   const { t } = useTranslation("paper");
   const parts: { key: string; node: ReactNode }[] = [];
   if (row.journal !== null) {
@@ -31,7 +35,7 @@ function Meta({ row, names }: { row: PaperRow; names: DisplayNames | null }) {
   if (row.publication_year !== null) {
     parts.push({ key: "year", node: <span>{row.publication_year}</span> });
   }
-  if (!row.has_abstract) {
+  if (!row.has_abstract && noAbstract) {
     // 前面一個 6px 的空心圓（設計稿的「沒有摘要」）。
     parts.push({
       key: "abstract",
@@ -78,6 +82,60 @@ function OpenFullText({ href }: { href: string }) {
   );
 }
 
+/**
+ * 「加入我的文獻庫」（設計稿 search.html 的 .add：34px 高、最小寬 146、13px）／「● 已加入」（.added，不能按的文字）。
+ * 看得到的按鈕 34px，按鈕本身 44px（ADR-0037），負外距抵掉。按了之後停用到有結果；成功時快取裡這一列換成「已加入」，
+ * 焦點移到「已加入」那一段字（按鈕不見了）。失敗時按鈕回到原本的樣子（State Patterns 沒有句子，列給 Kevin 決定）。
+ */
+function AddToLibrary({ row }: { row: PaperRow }) {
+  const { t } = useTranslation("search");
+  const change = useLibraryChange();
+  const [busy, setBusy] = useState(false);
+  const [focusAdded, setFocusAdded] = useState(false);
+  const sending = useRef(false);
+  const added = useRef<HTMLSpanElement>(null);
+  useEffect(() => {
+    if (focusAdded && row.in_my_library) added.current?.focus();
+  }, [focusAdded, row.in_my_library]);
+  if (row.in_my_library) {
+    return (
+      <span
+        ref={added}
+        tabIndex={-1}
+        data-library="added"
+        className="inline-flex h-[34px] min-w-[146px] items-center justify-center gap-2 px-[15px] text-s13 tracking-004 whitespace-nowrap text-text-secondary max-split:min-w-[0px] max-split:pr-1 max-split:pl-[0px]"
+      >
+        <span aria-hidden="true" className="size-[6px] shrink-0 rounded-full bg-text-primary" />
+        {t("search.row.added")}
+      </span>
+    );
+  }
+  return (
+    <button
+      type="button"
+      data-library="add"
+      disabled={busy}
+      aria-busy={busy || undefined}
+      onClick={() => {
+        if (sending.current) return;
+        sending.current = true;
+        setBusy(true);
+        void change(row.id, "add").then((outcome) => {
+          sending.current = false;
+          setBusy(false);
+          if (outcome === "done") setFocusAdded(true);
+        });
+      }}
+      className="-my-[5px] inline-flex h-tap-target cursor-pointer items-center bg-transparent p-[0px] disabled:cursor-default"
+    >
+      <span className="inline-flex h-[34px] min-w-[146px] items-center justify-center gap-2 rounded-full border border-hairline px-[14px] text-s13 tracking-004 whitespace-nowrap text-text-secondary transition-[border-color,color] duration-250 group-focus-within:border-border group-focus-within:text-text-primary group-hover:border-border group-hover:text-text-primary hover:border-text-primary">
+        <PlusIcon />
+        {t("search.row.add")}
+      </span>
+    </button>
+  );
+}
+
 export function PaperRowItem({ row, names }: { row: PaperRow; names: DisplayNames | null }) {
   const doiUrl = externalUrl(row.doi_url);
   return (
@@ -98,11 +156,10 @@ export function PaperRowItem({ row, names }: { row: PaperRow; names: DisplayName
         </PaperTitle>
         <Meta row={row} names={names} />
       </div>
-      {doiUrl === null ? null : (
-        <div className="mt-[14px] flex items-center gap-[20px] split:mt-[0px] split:shrink-0 split:justify-end split:pt-px">
-          <OpenFullText href={doiUrl} />
-        </div>
-      )}
+      <div className="mt-[14px] flex items-center gap-[20px] split:mt-[0px] split:w-rail-width split:shrink-0 split:pt-px">
+        <AddToLibrary row={row} />
+        {doiUrl === null ? null : <OpenFullText href={doiUrl} />}
+      </div>
     </li>
   );
 }

@@ -1557,6 +1557,10 @@
                 "type": "null"
               }
             ]
+          },
+          "in_my_library": {
+            "type": "boolean",
+            "title": "In My Library"
           }
         },
         "additionalProperties": false,
@@ -1568,10 +1572,11 @@
           "classification",
           "research_model",
           "full_text_links",
-          "snapshot"
+          "snapshot",
+          "in_my_library"
         ],
         "title": "PaperPageResponse",
-        "description": "論文頁的資料：書目、目前的摘要、三個 AI 區塊（同一個信封）、全文連結、快照。\n\n沒有目前的摘要時 `abstract` 是 null；一個快照都還沒發佈時 `snapshot` 是 null。"
+        "description": "論文頁的資料：書目、目前的摘要、三個 AI 區塊（同一個信封）、全文連結、快照。\n\n沒有目前的摘要時 `abstract` 是 null；一個快照都還沒發佈時 `snapshot` 是 null。\n`in_my_library`：這篇在不在**目前登入的成員自己**的文獻庫（Story 3.17、ADR-0053）。"
       },
       "PaperRow": {
         "properties": {
@@ -1667,6 +1672,10 @@
           "is_retracted": {
             "type": "boolean",
             "title": "Is Retracted"
+          },
+          "in_my_library": {
+            "type": "boolean",
+            "title": "In My Library"
           }
         },
         "additionalProperties": false,
@@ -1683,10 +1692,11 @@
           "doi_url",
           "has_abstract",
           "in_scope",
-          "is_retracted"
+          "is_retracted",
+          "in_my_library"
         ],
         "title": "PaperRow",
-        "description": "清單上的一篇論文（文獻庫、3.13 的論文清單共用）。\n\n- `authors` 只有前 3 位，`author_count` 是全部的人數。\n- `journal` 是設定檔的期刊代號（不是追蹤的期刊時是 null，這時看 `journal_issn_l`）。\n- `doi` 是正規化後的寫法（一篇有好幾個時是最早記上的那一個）；`doi_url` 由它產生，和它一起有值\n  或一起是 null。\n- `has_abstract`：有沒有目前的摘要。"
+        "description": "清單上的一篇論文（文獻庫、3.13 的論文清單共用）。\n\n- `authors` 只有前 3 位，`author_count` 是全部的人數。\n- `journal` 是設定檔的期刊代號（不是追蹤的期刊時是 null，這時看 `journal_issn_l`）。\n- `doi` 是正規化後的寫法（一篇有好幾個時是最早記上的那一個）；`doi_url` 由它產生，和它一起有值\n  或一起是 null。\n- `has_abstract`：有沒有目前的摘要。\n- `in_my_library`：這篇在不在**目前登入的成員自己**的文獻庫（Story 3.17、ADR-0053）；\n  別人的文獻庫不算。"
       },
       "ProblemDetails": {
         "properties": {

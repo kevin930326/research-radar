@@ -8,6 +8,7 @@ import type { Member } from "../datasource/types";
 import { DESKTOP_QUERY, useCloseAcrossBreakpoint } from "../hooks/use-close-across-breakpoint";
 import { useLogOut } from "../hooks/use-log-out";
 import { BrandLink, HEADER_CLASS } from "./Brand";
+import { NAV_LINKS } from "./nav-links";
 
 // 手機（899px 以下）的滿版選單（畫面 18、EXPERIENCE.md Responsive「導覽列」）：右上的「選單」按鈕打開，
 // 「關閉選單」或 Esc 關上。依 AR-67 放目的地已經做好的：導覽連結「找論文」（Story 3.14），以及帳號那幾項
@@ -98,13 +99,16 @@ export function MobileMenu({ member, open, onOpenChange, triggerRef, desktopFocu
           </div>
           <nav className="flex-1 px-gutter-mobile pt-[28px] pb-[40px] leading-normal tablet:px-gutter-tablet">
             <div className="border-b border-hairline">
-              <Link
-                to="/search"
-                onClick={close}
-                className="flex min-h-[60px] items-center justify-between border-t border-hairline font-title-zh text-section-title-zh leading-normal tracking-006 text-text-primary no-underline transition-[color] duration-200 hover:text-accent-gold"
-              >
-                {t("nav.links.search")}
-              </Link>
+              {NAV_LINKS.map(({ to, label }) => (
+                <Link
+                  key={to}
+                  to={to}
+                  onClick={close}
+                  className="flex min-h-[60px] items-center justify-between border-t border-hairline font-title-zh text-section-title-zh leading-normal tracking-006 text-text-primary no-underline transition-[color] duration-200 hover:text-accent-gold"
+                >
+                  {t(`nav.links.${label}`)}
+                </Link>
+              ))}
             </div>
             <div className="mt-[36px] border-t border-border pt-[22px]">
               <div className="pb-[8px] text-nav text-text-secondary">{member.display_name}</div>

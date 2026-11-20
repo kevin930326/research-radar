@@ -1,6 +1,7 @@
 import { NewTabNote } from "../components/ExternalArrow";
 import { AbstractSection, NoAbstractSection } from "../components/paper/AbstractSection";
 import { FullTextBar, FullTextMobile, FullTextRail } from "../components/paper/FullText";
+import { LibraryMobile, LibraryRail, type LibraryControl } from "../components/paper/LibraryBlock";
 import { PaperBiblio, classificationHasTags } from "../components/paper/PaperBiblio";
 import { ResearchModelSection } from "../components/paper/ResearchModelSection";
 import { ZhSummarySection } from "../components/paper/ZhSummarySection";
@@ -52,9 +53,11 @@ interface PaperPageProps {
   names: DisplayNames | null;
   /** 顯示名稱沒有讀到時，按「重試」要做的事。 */
   onRetryNames?: () => void;
+  /** 我的文獻庫（Story 3.17）：成員版才有；沒給就不顯示「我的文獻庫」。 */
+  library?: LibraryControl;
 }
 
-export function PaperPage({ page, names, onRetryNames }: PaperPageProps) {
+export function PaperPage({ page, names, onRetryNames, library }: PaperPageProps) {
   const first = firstUnverifiedBadge(page, names !== null);
   const links = {
     doi_url: externalUrl(page.full_text_links.doi_url),
@@ -69,16 +72,18 @@ export function PaperPage({ page, names, onRetryNames }: PaperPageProps) {
         <PaperBiblio page={page} names={names} onRetryNames={onRetryNames} firstBadge={first === "classification"} />
         <div className="split:hidden">
           <FullTextMobile links={links} />
+          {library === undefined ? null : <LibraryMobile library={library} hasBar={links.doi_url !== null} />}
         </div>
         {page.abstract === null ? <NoAbstractSection doiUrl={links.doi_url} /> : null}
         <ZhSummarySection block={page.zh_summary} firstBadge={first === "zh_summary"} />
         <ResearchModelSection block={page.research_model} firstBadge={first === "research_model"} />
         {page.abstract === null ? null : <AbstractSection abstract={page.abstract} />}
-        <FullTextBar links={links} />
+        <FullTextBar links={links} library={library} />
       </div>
       {/* 輔助欄：內容寬 248、左邊內距 32、髮線（設計稿的寬度不含內距）。 */}
       <aside className="sticky top-8 mt-8 hidden box-content w-rail-width shrink-0 self-start border-l border-hairline pl-8 split:block">
         <FullTextRail links={links} />
+        {library === undefined ? null : <LibraryRail library={library} />}
       </aside>
       <NewTabNote />
     </article>

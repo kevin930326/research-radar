@@ -1,19 +1,34 @@
 // 成員版的資料來源：呼叫同網域的後端 API（呼叫函式由 orval 從 openapi.json 產生，Story 3.4）。
 import {
+  addLibraryItem,
   clientConfig as getClientConfig,
   displayNames as getDisplayNames,
   fakeLogin,
   fakeLoginOptions,
+  listLibrary,
   listPapers,
   logout,
   me as getMe,
   paper as getPaper,
+  removeLibraryItem,
+  restoreLibraryItem,
 } from "../../generated/api";
-import { FakeLoginMode, type FakeLoginBody, type PaperListResponse, type PaperRow } from "../../generated/model";
+import {
+  FakeLoginMode,
+  type FakeLoginBody,
+  type LibraryItemResponse,
+  type LibraryPageResponse,
+  type PaperListResponse,
+  type PaperRow,
+} from "../../generated/model";
 import type {
   ClientConfigResult,
   DataSource,
   DisplayNamesResult,
+  LibraryChangeResult,
+  LibraryList,
+  LibraryListResult,
+  LibrarySource,
   LoginOutcome,
   Member,
   MemberSession,
@@ -142,10 +157,59 @@ const papers: PaperSource = {
   },
 };
 
+/** 加入、移出、復原共用：200 回那一筆、404 notFound、401 signedOut，其他丟例外。 */
+async function change(
+  name: string,
+  call: () => Promise<{ status: number; data: unknown }>,
+): Promise<LibraryChangeResult> {
+  const response = await call();
+  if (response.status === 200) {
+    return { kind: "done", item: response.data as LibraryItemResponse };
+  }
+  if (response.status === 404) {
+    return { kind: "notFound" };
+  }
+  if (response.status === 401) {
+    return { kind: "signedOut" };
+  }
+  throw new Error(`${name}: HTTP ${response.status}`);
+}
+
+const library: LibrarySource = {
+  async list(limit: number, previous?: LibraryList | null): Promise<LibraryListResult> {
+    // 同找論文的 list：先用上一次多讀到的 pending，不夠才照 next_cursor 讀下一頁。
+    let rows: LibraryItemResponse[] = previous ? [...previous.items, ...previous.pending] : [];
+    let last: Omit<LibraryPageResponse, "items"> | null = previous
+      ? { next_cursor: previous.next_cursor, total: previous.total }
+      : null;
+    while (last === null || (rows.length < limit && last.next_cursor !== null)) {
+      const cursor: string | undefined = last?.next_cursor ?? undefined;
+      const response = await listLibrary(cursor === undefined ? undefined : { cursor });
+      if (response.status === 401) {
+        return { kind: "signedOut" };
+      }
+      if (response.status !== 200) {
+        throw new Error(`GET ${API_BASE}/library: HTTP ${response.status}`);
+      }
+      const page = response.data;
+      rows = [...rows, ...page.items];
+      last = { next_cursor: page.items.length === 0 ? null : page.next_cursor, total: page.total };
+    }
+    return { kind: "found", list: { ...last, items: rows.slice(0, limit), pending: rows.slice(limit) } };
+  },
+
+  // 路徑參數一定要編碼（同論文頁）。
+  add: (paperId) => change(`PUT ${API_BASE}/library/{id}`, () => addLibraryItem(encodeURIComponent(paperId))),
+  remove: (paperId) => change(`DELETE ${API_BASE}/library/{id}`, () => removeLibraryItem(encodeURIComponent(paperId))),
+  restore: (paperId) =>
+    change(`POST ${API_BASE}/library/{id}/restore`, () => restoreLibraryItem(encodeURIComponent(paperId))),
+};
+
 const impl = {
   siteKind: () => "member" as const,
   session,
   papers,
+  library,
   // e2e 用它確認示範站的建置結果不含 API 程式（成員版的建置結果帶著 /api/v1）。
   apiBase: API_BASE,
 };

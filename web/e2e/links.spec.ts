@@ -29,7 +29,9 @@ for (const site of SITES) {
       const linkCount = await page.locator("main a[href]").count();
       // 看得到的按鈕才點：同一個按鈕在另一種寬度才出現的（例如論文頁手機版底部的「開啟全文」，Story 3.8）
       // 用 CSS 藏起來，點不到；它在那一種寬度的行為由各自的測試看。
-      const buttons = page.locator("main button:visible");
+      // 「加入我的文獻庫」「移出」（Story 3.17，data-library）不點：按了會改替身裡的文獻庫，重開這一頁後按鈕數變了；
+      // 它們不換頁，行為由 library.spec.ts 看。
+      const buttons = page.locator("main button:visible:not([data-library])");
       const buttonCount = await buttons.count();
 
       for (let index = 0; index < linkCount; index += 1) {

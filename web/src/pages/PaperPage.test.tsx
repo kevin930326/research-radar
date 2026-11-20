@@ -603,3 +603,50 @@ describe("paper page content", () => {
     expect(body(expectMissing("paper-ai-failed.txt"))).toBe(body(expectMissing("paper.txt")));
   });
 });
+
+// 我的文獻庫（Story 3.17；EXPERIENCE.md 畫面 8 輔助欄、State Patterns「手機：已經加入我的文獻庫」）。
+describe("my library on the paper page", () => {
+  const control = (inLibrary: boolean) => ({ inLibrary, busy: false, focusToken: 0, onAdd: () => {}, onRemove: () => {} });
+
+  function renderWith(page: PaperPageResponse, inLibrary: boolean | undefined): string {
+    return renderToStaticMarkup(
+      <RouterContextProvider router={router}>
+        <PaperPage page={page} names={NAMES} library={inLibrary === undefined ? undefined : control(inLibrary)} />
+      </RouterContextProvider>,
+    );
+  }
+
+  it("not in the library: the rail has the add button and the bottom bar has open full text and add", () => {
+    const html = renderWith(fixture("normal"), false);
+    expect(html).toContain('data-library="rail"');
+    expect(html).toContain(TEXT["paper:paper.library.heading"]);
+    expect(count(html, TEXT["paper:paper.library.add"]!)).toBe(2);
+    expect(html).toContain('data-library="add-mobile"');
+    // 手機：還沒加入時書目下面沒有「我的文獻庫」那一塊（加入在底部固定列）。
+    expect(html).not.toContain('data-library="mobile"');
+    expect(html).not.toContain(TEXT["paper:paper.library.added"]);
+  });
+
+  it("already in the library: added and remove in the rail and under the bibliography; the bar has only open full text", () => {
+    const html = renderWith(fixture("normal"), true);
+    expect(count(html, TEXT["paper:paper.library.added"]!)).toBe(2);
+    expect(count(html, `>${TEXT["paper:paper.library.remove"]}<`)).toBe(2);
+    expect(html).toContain('data-library="mobile"');
+    expect(html).not.toContain('data-library="add-mobile"');
+    expect(html).not.toContain(TEXT["paper:paper.library.add"]);
+    expect(html).toContain('data-full-text="bar"');
+  });
+
+  it("no DOI (no bottom bar): add goes under the bibliography", () => {
+    const html = renderWith(fixture("no-doi"), false);
+    expect(html).not.toContain('data-full-text="bar"');
+    expect(html).toContain('data-library="mobile"');
+    expect(count(html, TEXT["paper:paper.library.add"]!)).toBe(2);
+  });
+
+  it("without the library control (demo site) there is no my-library block", () => {
+    const html = renderWith(fixture("normal"), undefined);
+    expect(html).not.toContain("data-library");
+    expect(html).not.toContain(TEXT["paper:paper.library.add"]);
+  });
+});

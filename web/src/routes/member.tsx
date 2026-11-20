@@ -1,19 +1,22 @@
 import { queryOptions, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Outlet, createRoute, lazyRouteComponent, redirect, useLocation, useNavigate } from "@tanstack/react-router";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { SiteHeader } from "../components/SiteHeader";
+import type { LibraryControl } from "../components/paper/LibraryBlock";
 import { LoadFailed } from "../components/states/LoadFailed";
 import { Offline } from "../components/states/Offline";
 import { NotFound } from "../components/states/NotFound";
 import { PageLoading } from "../components/states/PageLoading";
 import type { PaperPage as PaperPageData } from "../datasource/types";
+import { LibraryPage } from "../pages/LibraryPage";
 import { LoginPage } from "../pages/LoginPage";
 import { NoticePage } from "../pages/NoticePage";
 import { PaperPage } from "../pages/PaperPage";
 import { SearchPage } from "../pages/SearchPage";
 import { isPaperId } from "../pages/paper-format";
 import { validateSearchParams, type SearchParams } from "../pages/search-filters";
+import { useLibraryChange } from "./library-change";
 import { displayNamesQuery, paperSource } from "./paper-queries";
 import { PlainMain, rootRoute } from "./root";
 import { FIRST_PAGE, clearMemberQueries, meQuery, validateLoginSearch } from "./session";
@@ -30,6 +33,8 @@ import { FIRST_PAGE, clearMemberQueries, meQuery, validateLoginSearch } from "./
 // - /papers/$paperId：論文頁（Story 3.8）。ID 不是 UUID 時不送請求；看不到或不存在（404）時在導覽列下方顯示
 //   全站共用的「找不到這一頁」；論文或顯示名稱任一個 API 回 401 時照登入過期處理（清快取、回登入頁）。
 //   論文讀到就顯示整頁；顯示名稱沒讀到只有分類那一行顯示訊息條與「重試」（Codex 審查 3.8 中 3、中 6）。
+// - /library：我的文獻庫（Story 3.17）。「目前顯示幾篇」寫進網址（AD-21）；資料在頁面裡讀，任何一個 API 回 401
+//   時照登入過期處理。
 // - 找不到的網址由最外層顯示（routes/root.tsx），不用登入。
 
 const loginRoute = createRoute({
@@ -135,6 +140,36 @@ const searchRoute = createRoute({
   },
 });
 
+/** 我的文獻庫的網址參數：只有「目前顯示幾篇」（按過「再載入」才有；正整數）。 */
+export function validateLibrarySearch(search: Record<string, unknown>): { shown?: number } {
+  const shown = search.shown;
+  return typeof shown === "number" && Number.isInteger(shown) && shown > 0 ? { shown } : {};
+}
+
+const libraryRoute = createRoute({
+  getParentRoute: () => appRoute,
+  path: "/library",
+  validateSearch: validateLibrarySearch,
+  component: function LibraryRoute() {
+    const { shown } = libraryRoute.useSearch();
+    const navigate = libraryRoute.useNavigate();
+    const queryClient = useQueryClient();
+    const href = useLocation({ select: (location) => location.href });
+    return (
+      <LibraryPage
+        shown={shown}
+        onMore={(next) => void navigate({ search: { shown: next }, replace: true, resetScroll: false })}
+        onSignedOut={() =>
+          void (async () => {
+            await clearMemberQueries(queryClient);
+            await navigate({ to: "/login", search: { next: href, expired: true as const }, replace: true });
+          })()
+        }
+      />
+    );
+  },
+});
+
 // 元件示範頁只在開發環境（Story 3.2）：正式建置時 import.meta.env.DEV 是 false，這一段連同動態 import
 // 整個被拿掉，建置結果沒有這個路由、元件與示範頁的文字（e2e/dev-only.spec.ts 檢查）。不用登入。
 function devRoutes() {
@@ -177,6 +212,7 @@ function PaperWithNames({ page }: { page: PaperPageData }) {
       await navigate({ to: "/login", search: { next: href, expired: true as const }, replace: true });
     })();
   }, [signedOut, queryClient, navigate, href]);
+  const library = usePaperLibrary(page);
   if (signedOut) {
     return null;
   }
@@ -185,8 +221,36 @@ function PaperWithNames({ page }: { page: PaperPageData }) {
       page={page}
       names={names.data?.kind === "found" ? names.data.names : null}
       onRetryNames={() => void names.refetch({ cancelRefetch: false })}
+      library={library}
     />
   );
+}
+
+/**
+ * 論文頁的「我的文獻庫」（Story 3.17）：一打開照 API 的 `in_my_library` 顯示；按了之後送出，成功才換樣子
+ * （快取裡這一篇也跟著改，見 useLibraryChange）。送出中再按不會再送一次。
+ */
+function usePaperLibrary(page: PaperPageData): LibraryControl {
+  const change = useLibraryChange();
+  const [inLibrary, setInLibrary] = useState(page.in_my_library);
+  const [busy, setBusy] = useState(false);
+  const [focusToken, setFocusToken] = useState(0);
+  // 連點兩下時第二下還看不到 busy（同一次畫面），用 ref 擋。
+  const sending = useRef(false);
+  const run = (action: "add" | "remove") => {
+    if (sending.current) return;
+    sending.current = true;
+    setBusy(true);
+    void change(page.paper.id, action).then((outcome) => {
+      sending.current = false;
+      setBusy(false);
+      if (outcome === "done") {
+        setInLibrary(action === "add");
+        setFocusToken((token) => token + 1);
+      }
+    });
+  };
+  return { inLibrary, busy, focusToken, onAdd: () => run("add"), onRemove: () => run("remove") };
 }
 
 const paperRoute = createRoute({
@@ -230,7 +294,7 @@ const paperRoute = createRoute({
   },
 });
 
-const appTree = appRoute.addChildren([indexRoute, noticeRoute, searchRoute, paperRoute]);
+const appTree = appRoute.addChildren([indexRoute, noticeRoute, searchRoute, libraryRoute, paperRoute]);
 
 export const routeTree = import.meta.env.DEV
   ? rootRoute.addChildren([loginRoute, appTree, ...devRoutes()])

@@ -5,6 +5,9 @@
 // （自己編的假論文，scripts/mock-api.mjs 也用同一份）。
 // Story 3.14 加上找論文的兩個端點（/api/v1/papers 清單、/api/v1/client-config）：資料來自 fixtures/paper-list.json
 // （自己編的假清單，scripts/mock-api.mjs 也用同一份），依網址參數篩選、用位移當 cursor 分頁。
+// Story 3.17 加上我的文獻庫的四個端點（GET /api/v1/library、PUT／DELETE /api/v1/library/{id}、
+// POST /api/v1/library/{id}/restore）：文獻庫是 state.libraryIds（一開始是假清單裡 personal 的那幾列），
+// 找論文的清單與論文頁的 in_my_library、範圍「我的文獻庫」都照它算。
 // 其他 /api/ 路徑不處理（交給後面的 route 或預設行為）。
 import type { Page, Route } from "@playwright/test";
 
@@ -12,6 +15,8 @@ import type {
   DisplayNames,
   ClientConfig,
   FakeLoginBody,
+  LibraryItemResponse,
+  LibraryPageResponse,
   FakeLoginMode,
   FakeLoginOptionsResponse,
   FakeLoginResultResponse,
@@ -60,7 +65,11 @@ const START_YEAR = 2016;
  * 範圍 lab／personal 只留標了的列；依年份新到舊。年份早於追蹤範圍、不認得的期刊／主題／方法代號是 null（422，
  * ADR-0050 第 10 點；認得的是論文頁假資料的顯示名稱）。
  */
-export function filterListRows(rows: readonly ListFixtureRow[], query: URLSearchParams): ListFixtureRow[] | null {
+export function filterListRows(
+  rows: readonly ListFixtureRow[],
+  query: URLSearchParams,
+  library?: readonly string[],
+): ListFixtureRow[] | null {
   const journals = query.getAll("journal");
   const years = query.getAll("year").map(Number);
   const topics = query.getAll("topic");
@@ -81,9 +90,46 @@ export function filterListRows(rows: readonly ListFixtureRow[], query: URLSearch
         topics.every((topic) => (topic === "unclassified" ? entry.topics.length === 0 : entry.topics.includes(topic))) &&
         methods.every((method) => (entry.methods ?? []).includes(method)) &&
         (query.get("this_week") !== "true" || entry.this_week) &&
-        (scope === "tracked" || (scope === "lab" ? entry.lab : entry.personal)),
+        (scope === "tracked" || (scope === "lab" ? entry.lab : (library?.includes(entry.row.id) ?? entry.personal))),
     )
     .sort((a, b) => (b.row.publication_year ?? 0) - (a.row.publication_year ?? 0));
+}
+
+/** 論文頁假資料的一篇換成論文列（加入我的文獻庫時用；論文頁的論文不一定在假清單裡）。 */
+function rowFromPage(page: PaperPageResponse): PaperRow {
+  const paper = page.paper;
+  return {
+    id: paper.id,
+    title: paper.title,
+    authors: paper.authors.slice(0, 3),
+    author_count: paper.authors.length,
+    publication_year: paper.publication_year,
+    journal: paper.journal,
+    journal_issn_l: paper.journal_issn_l,
+    doi: paper.doi,
+    doi_url: paper.doi_url,
+    has_abstract: page.abstract !== null,
+    in_scope: paper.in_scope,
+    is_retracted: paper.is_retracted,
+    in_my_library: false,
+  };
+}
+
+/** 文獻庫的一筆：先找假清單，再找論文頁假資料；都沒有是 undefined（後端回 404）。 */
+export function libraryItem(rows: readonly ListFixtureRow[], id: string): LibraryItemResponse | undefined {
+  const fromList = rows.find((entry) => entry.row.id === id)?.row;
+  const fromPage = PAPER_FIXTURES.papers[id]?.page;
+  const row = fromList ?? (fromPage === undefined ? undefined : rowFromPage(fromPage));
+  if (row === undefined) return undefined;
+  return { paper: { ...row, in_my_library: true }, added_via: "manual", added_at: "2026-11-01T00:00:00Z" };
+}
+
+/** 文獻庫的一頁：cursor 是位移（「o50」）。 */
+export function libraryPage(rows: readonly ListFixtureRow[], ids: readonly string[], cursor: string | null, pageSize: number): LibraryPageResponse {
+  const offset = cursor !== null && /^o\d+$/.test(cursor) ? Number(cursor.slice(1)) : 0;
+  const items = ids.slice(offset, offset + pageSize).flatMap((id) => libraryItem(rows, id) ?? []);
+  const next = offset + pageSize < ids.length ? `o${offset + pageSize}` : null;
+  return { items, next_cursor: next, total: ids.length };
 }
 
 /** 篩選後的一頁：cursor 是位移（「o20」）。 */
@@ -150,6 +196,18 @@ export interface ApiMockState {
   listGate: Promise<void> | null;
   /** 找論文的假清單（預設是 fixtures/paper-list.json 的每一列；測試可以換成別的）。 */
   listRows: ListFixtureRow[];
+  /** 我的文獻庫（論文 ID，新加入的在前）。預設是假清單裡 personal 的那幾列。 */
+  libraryIds: string[];
+  /** 移出過、可以復原的論文 ID。 */
+  libraryRemoved: string[];
+  /** 文獻庫清單：成功／伺服器錯誤（500）／登入過期（401）。 */
+  library: "ok" | "failed" | "expired";
+  /** 文獻庫清單：設了就等它 resolve 才回（看載入中的骨架）。 */
+  libraryGate: Promise<void> | null;
+  /** 加入、移出、復原：成功／伺服器錯誤（500）／登入過期（401）。 */
+  libraryChange: "ok" | "failed" | "expired";
+  /** 加入、移出、復原：設了就等它 resolve 才回（看送出中）。 */
+  libraryChangeGate: Promise<void> | null;
   /** 收到的請求（依序）。 */
   requests: ApiRequest[];
 }
@@ -171,6 +229,12 @@ export function createApiState(): ApiMockState {
     list: "ok",
     listGate: null,
     listRows: LIST_FIXTURES.rows,
+    libraryIds: LIST_FIXTURES.rows.filter((entry) => entry.personal).map((entry) => entry.row.id),
+    libraryRemoved: [],
+    library: "ok",
+    libraryGate: null,
+    libraryChange: "ok",
+    libraryChangeGate: null,
     requests: [],
   };
 }
@@ -258,10 +322,45 @@ export async function installApiMock(page: Page, state: ApiMockState): Promise<v
       await state.listGate;
       if (state.member === null || state.list === "expired") return problem(route, 401, "not_authenticated");
       if (state.list === "failed") return problem(route, 500, "internal_error");
-      const rows = filterListRows(state.listRows, url.searchParams);
+      const rows = filterListRows(state.listRows, url.searchParams, state.libraryIds);
       if (rows === null) return problem(route, 422, "request_invalid");
       const pageSize = LIST_FIXTURES.clientConfig.paper_list_page_size;
-      return json(route, listPage(rows, url.searchParams.get("cursor"), pageSize, LIST_FIXTURES.snapshot));
+      const page = listPage(rows, url.searchParams.get("cursor"), pageSize, LIST_FIXTURES.snapshot);
+      const items = page.items.map((row) => ({ ...row, in_my_library: state.libraryIds.includes(row.id) }));
+      return json(route, { ...page, items });
+    }
+    if (method === "GET" && path === "/api/v1/library") {
+      state.requests.push({ method, path: `${path}${url.search}`, body });
+      await state.libraryGate;
+      if (state.member === null || state.library === "expired") return problem(route, 401, "not_authenticated");
+      if (state.library === "failed") return problem(route, 500, "internal_error");
+      const pageSize = LIST_FIXTURES.clientConfig.library_page_size;
+      return json(route, libraryPage(state.listRows, state.libraryIds, url.searchParams.get("cursor"), pageSize));
+    }
+    const libraryMatch = /^\/api\/v1\/library\/([^/]+)(\/restore)?$/.exec(path);
+    if (libraryMatch !== null && (method === "PUT" || method === "DELETE" || (method === "POST" && libraryMatch[2] !== undefined))) {
+      state.requests.push({ method, path, body });
+      await state.libraryChangeGate;
+      if (state.member === null || state.libraryChange === "expired") return problem(route, 401, "not_authenticated");
+      if (state.libraryChange === "failed") return problem(route, 500, "internal_error");
+      const id = decodeURIComponent(libraryMatch[1]!);
+      const item = libraryItem(state.listRows, id);
+      if (item === undefined) return problem(route, 404, "not_found");
+      const inLibrary = state.libraryIds.includes(id);
+      if (method === "PUT") {
+        if (!inLibrary) state.libraryIds = [id, ...state.libraryIds];
+        return json(route, item);
+      }
+      if (method === "DELETE") {
+        if (!inLibrary) return problem(route, 404, "not_found");
+        state.libraryIds = state.libraryIds.filter((entry) => entry !== id);
+        state.libraryRemoved = [...state.libraryRemoved, id];
+        return json(route, item);
+      }
+      if (!state.libraryRemoved.includes(id)) return problem(route, 404, "not_found");
+      state.libraryRemoved = state.libraryRemoved.filter((entry) => entry !== id);
+      if (!inLibrary) state.libraryIds = [id, ...state.libraryIds];
+      return json(route, item);
     }
     if (method === "GET" && path.startsWith("/api/v1/papers/")) {
       state.requests.push({ method, path, body });
@@ -269,12 +368,13 @@ export async function installApiMock(page: Page, state: ApiMockState): Promise<v
       if (state.member === null) return problem(route, 401, "not_authenticated");
       const own = state.paperByMember[state.member.member_id];
       if (own !== undefined) return json(route, own);
+      const mine = (page: PaperPageResponse) => ({ ...page, in_my_library: state.libraryIds.includes(page.paper.id) });
       let id = decodeURIComponent(path.slice("/api/v1/papers/".length));
       const error = PAPER_FIXTURES.errors[id];
       if (error !== undefined) return problem(route, error.status, ERROR_CODES[error.status] ?? "internal_error");
       id = PAPER_FIXTURES.slow[id]?.of ?? id;
       const entry = PAPER_FIXTURES.papers[id];
-      return entry === undefined ? problem(route, 404, "not_found") : json(route, entry.page);
+      return entry === undefined ? problem(route, 404, "not_found") : json(route, mine(entry.page));
     }
     if (method === "POST" && path === "/api/v1/auth/logout") {
       state.requests.push({ method, path, body });

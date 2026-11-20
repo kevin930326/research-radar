@@ -90,6 +90,12 @@
     "names": {
       "loadFailed": "沒有載入成功",
       "retry": "重試"
+    },
+    "library": {
+      "heading": "我的文獻庫",
+      "add": "加入我的文獻庫",
+      "added": "已在我的文獻庫",
+      "remove": "移出"
     }
   }
 }

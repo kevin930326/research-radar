@@ -72,6 +72,7 @@ ROW_JSON = {
     "has_abstract": True,
     "in_scope": True,
     "is_retracted": False,
+    "in_my_library": False,
 }
 SNAPSHOT = Snapshot(
     id=uuid.UUID(int=7),

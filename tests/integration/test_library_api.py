@@ -13,6 +13,9 @@
 - 同時：另一條連線拿著（成員, 論文）的鎖時，加入、移出、復原都排隊等它（看 `pg_locks`），放掉後
   才做完。
 - 論文頁：A 文獻庫裡的私人論文 A 200；B 和不存在的完全一樣的 404。
+- 這篇在不在我的文獻庫（Story 3.17、ADR-0053）：A 加的，A 在找論文清單與論文頁看到真、B 看到假
+  （反過來也一樣）；跟著加入、移出、復原變；文獻庫清單每一筆都是真；系統與訪客身分讀一律假（不洩漏
+  任何人的文獻庫）；管理者也只看自己的；3 篇與一整頁的 SQL 句數相同（整頁一句，不是每篇一句）。
 
 兩位成員經開發環境的假登入取得真的 session（路由用正式的 `install_api_routes`）。資料全是測試自己
 編的（`*@example.com`、假標題）。
@@ -29,16 +32,19 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 from httpx2 import Response
+from sqlalchemy import event
 
 from radar.adapters.fake.login import pick_member_identity
 from radar.domain.auth_settings import AuthSettings, Environment
 from radar.domain.library import AddedVia, library_item_lock_key
-from radar.domain.viewer import SystemViewer
+from radar.domain.viewer import MemberViewer, PublicViewer, SystemViewer
 from radar.entrypoints.api.app import REQUEST_ID_HEADER, create_app
 from radar.entrypoints.api.auth import SESSION_COOKIE, build_auth_routes
 from radar.entrypoints.api.main import install_api_routes
 from radar.repo.db import Database
 from radar.repo.library import create_library_item
+from radar.repo.paper_rows import find_paper_rows
+from radar.repo.papers import find_paper_page_facts
 from radar.services.members import allow_member
 from tests.database import TestDatabase, migrate
 from tests.llm_support import (
@@ -189,6 +195,7 @@ def test_add_a_visible_paper(db: TestDatabase, database: Database, api: Api) -> 
         "has_abstract": True,
         "in_scope": True,
         "is_retracted": False,
+        "in_my_library": True,
     }
     ((item_id, owner_id, stored_paper, added_via, added_at),) = _items(db)
     assert (owner_id, stored_paper, added_via) == (api.owner_id, paper_id, "manual")
@@ -713,3 +720,170 @@ def test_writes_for_the_same_paper_wait_for_the_lock(
     assert not _waiting_for(db, key)
     in_library = [row for row in _items(db) if row[2] == paper_id]
     assert len(in_library) == (0 if action == "remove" else 1)
+
+
+# --- 這篇在不在我的文獻庫（Story 3.17、ADR-0053）--------------------------------------------------
+
+
+class CountingDatabase(Database):
+    """記下執行過的每一句 SQL（證明「在不在我的文獻庫」不是每篇一句）。"""
+
+    def __init__(self, url: str) -> None:
+        super().__init__(url, connect_timeout=5, pool_size=2)
+        self.statements: list[str] = []
+        event.listen(self._engine, "before_cursor_execute", self._record)
+
+    def _record(self, _conn: Any, _cursor: Any, statement: str, *_args: Any) -> None:
+        self.statements.append(statement)
+
+
+def _flags(rows: list[dict[str, Any]]) -> dict[str, bool]:
+    return {row["id"]: row["in_my_library"] for row in rows}
+
+
+def test_in_my_library_is_only_the_viewers_own(database: Database, api: Api) -> None:
+    # 甲加入第一篇；乙加入第二篇。清單與論文頁都只看讀的人自己的文獻庫。
+    mine = create_paper(database, doi="10.1/mine", openalex_id="W31")
+    theirs = create_paper(database, doi="10.1/theirs", openalex_id="W32")
+    nobody = create_paper(database, doi="10.1/nobody", openalex_id="W33")
+    assert api.add(mine, api.owner_token).status_code == 200
+    assert api.add(theirs, api.other_token).status_code == 200
+    lab = {"scope": "lab"}
+
+    owner_list = api.send("GET", "/api/v1/papers", api.owner_token, params=lab)
+    other_list = api.send("GET", "/api/v1/papers", api.other_token, params=lab)
+
+    assert owner_list.status_code == other_list.status_code == 200
+    assert _flags(owner_list.json()["items"]) == {
+        str(mine): True,
+        str(theirs): False,
+        str(nobody): False,
+    }
+    assert _flags(other_list.json()["items"]) == {
+        str(mine): False,
+        str(theirs): True,
+        str(nobody): False,
+    }
+    for paper_id, owner_sees, other_sees in (
+        (mine, True, False),
+        (theirs, False, True),
+        (nobody, False, False),
+    ):
+        owner_page = api.send("GET", f"/api/v1/papers/{paper_id}", api.owner_token)
+        other_page = api.send("GET", f"/api/v1/papers/{paper_id}", api.other_token)
+        assert owner_page.json()["in_my_library"] is owner_sees
+        assert other_page.json()["in_my_library"] is other_sees
+
+
+def test_in_my_library_follows_add_remove_and_restore(database: Database, api: Api) -> None:
+    paper_id = create_paper(database)
+
+    def page_flag() -> bool:
+        flag = api.send("GET", f"/api/v1/papers/{paper_id}", api.owner_token).json()
+        return bool(flag["in_my_library"])
+
+    assert page_flag() is False
+    assert api.add(paper_id, api.owner_token).json()["paper"]["in_my_library"] is True
+    assert page_flag() is True
+    # 移出回的是移出前那一筆（那時還在），之後就不在了。
+    assert api.remove(paper_id, api.owner_token).status_code == 200
+    assert page_flag() is False
+    assert api.restore(paper_id, api.owner_token).json()["paper"]["in_my_library"] is True
+    assert page_flag() is True
+
+
+def test_library_list_rows_are_all_in_my_library(database: Database, api: Api) -> None:
+    private_id = _private_paper_of(database, api.owner_id)
+    added = create_paper(database, doi="10.1/added", openalex_id="W34")
+    other_only = create_paper(database, doi="10.1/other", openalex_id="W35")
+    api.add(added, api.owner_token)
+    api.add(other_only, api.other_token)
+
+    owner_items = api.list(api.owner_token).json()["items"]
+    other_items = api.list(api.other_token).json()["items"]
+
+    assert {item["paper"]["id"] for item in owner_items} == {str(private_id), str(added)}
+    assert all(item["paper"]["in_my_library"] is True for item in owner_items)
+    assert [(item["paper"]["id"], item["paper"]["in_my_library"]) for item in other_items] == [
+        (str(other_only), True)
+    ]
+
+
+def test_system_and_public_reads_never_say_in_my_library(database: Database, api: Api) -> None:
+    # 示範站匯出等系統身分、訪客身分的讀取：就算有人加過，也一律是假（不洩漏任何人的文獻庫）。
+    paper_id = create_paper(database)
+    api.add(paper_id, api.owner_token)
+    api.add(paper_id, api.other_token)
+
+    with database.transaction() as connection:
+        system_rows = find_paper_rows(SystemViewer(), connection, [paper_id])
+        system_page = find_paper_page_facts(SystemViewer(), connection, paper_id)
+        public_rows = find_paper_rows(PublicViewer(), connection, [paper_id])
+        owner_rows = find_paper_rows(
+            MemberViewer(member_id=api.owner_id, is_admin=True), connection, [paper_id]
+        )
+
+    assert system_rows[paper_id].in_my_library is False
+    assert system_page is not None
+    assert system_page.in_my_library is False
+    # 訪客只看得到算進已發佈快照的論文；這篇沒有快照，訪客讀不到，更不會帶出文獻庫狀態。
+    assert public_rows == {}
+    # 管理者也只看自己的文獻庫（這裡甲自己有加）。
+    assert owner_rows[paper_id].in_my_library is True
+
+
+def test_admin_does_not_see_other_members_library(database: Database, api: Api) -> None:
+    paper_id = create_paper(database)
+    api.add(paper_id, api.other_token)
+
+    with database.transaction() as connection:
+        rows = find_paper_rows(
+            MemberViewer(member_id=api.owner_id, is_admin=True), connection, [paper_id]
+        )
+        page = find_paper_page_facts(
+            MemberViewer(member_id=api.owner_id, is_admin=True), connection, paper_id
+        )
+
+    assert rows[paper_id].in_my_library is False
+    assert page is not None
+    assert page.in_my_library is False
+
+
+def test_in_my_library_is_one_query_for_the_whole_page(db: TestDatabase) -> None:
+    # 同一份請求：3 篇與 20 篇（一整頁）執行的 SQL 句數相同（不是每篇一句）；整頁的旗標只在論文列
+    # 那一句裡算，文獻庫清單也一樣。
+    counting = CountingDatabase(db.app_url)
+    api = Api(counting)
+
+    def add_papers(start: int, stop: int) -> list[uuid.UUID]:
+        ids = [
+            create_paper(counting, doi=f"10.1/n{index}", openalex_id=f"W4{index:02d}")
+            for index in range(start, stop)
+        ]
+        for paper_id in ids[::2]:
+            assert api.add(paper_id, api.owner_token).status_code == 200
+        return ids
+
+    def measure(path: str, params: dict[str, str] | None) -> tuple[list[dict[str, Any]], list[str]]:
+        counting.statements.clear()
+        response = api.send("GET", path, api.owner_token, params=params)
+        assert response.status_code == 200, response.text
+        return response.json()["items"], list(counting.statements)
+
+    few = add_papers(0, 3)
+    few_items, few_sql = measure("/api/v1/papers", {"scope": "lab"})
+    few_library, few_library_sql = measure("/api/v1/library", None)
+    many = few + add_papers(3, 30)
+    many_items, many_sql = measure("/api/v1/papers", {"scope": "lab"})
+    many_library, many_library_sql = measure("/api/v1/library", None)
+
+    assert (len(few_items), len(many_items)) == (3, 20)
+    assert (len(few_library), len(many_library)) == (2, 16)
+    added = {str(paper_id) for paper_id in few[::2]} | {str(paper_id) for paper_id in many[3:][::2]}
+    for item in many_items:
+        assert item["in_my_library"] is (item["id"] in added)
+    assert all(item["paper"]["in_my_library"] is True for item in many_library)
+    assert len(few_sql) == len(many_sql)
+    assert len(few_library_sql) == len(many_library_sql)
+    for statements in (few_sql, many_sql, few_library_sql, many_library_sql):
+        assert len([sql for sql in statements if "AS in_my_library" in sql]) == 1

@@ -212,6 +212,7 @@ def test_paper_row_from_facts() -> None:
         "has_abstract": True,
         "in_scope": True,
         "is_retracted": False,
+        "in_my_library": False,
     }
     assert PaperRow.model_config.get("extra") == "forbid"
 

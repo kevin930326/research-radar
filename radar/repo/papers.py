@@ -61,7 +61,7 @@ from radar.domain.trial_runs import TrialCandidate
 from radar.domain.viewer import SystemViewer, Viewer
 from radar.repo.db import Database
 from radar.repo.models import Base
-from radar.repo.visibility import visible_papers, visible_to_system_only
+from radar.repo.visibility import visible_in_own_library, visible_papers, visible_to_system_only
 
 log = structlog.get_logger(__name__)
 
@@ -326,8 +326,10 @@ def find_paper_page_facts(
 
     一句帶可見條件的查詢：不存在、`viewer` 看不到、被排除的非研究文章（`excluded_reason` 有值，
     ADR-0015「被排除的非研究文章沒有論文頁」）都回 None，不先查存在或排除（ADR-0002）。
+    `in_my_library` 是同一句查詢裡的一欄（`visibility.visible_in_own_library`，Story 3.17）。
     """
     visible = visible_papers(viewer, alias="paper")
+    mine = visible_in_own_library(viewer, alias="paper")
     row = (
         connection.execute(
             text(
@@ -342,7 +344,8 @@ def find_paper_page_facts(
                 "  WHERE o.paper_id = paper.id AND o.scheme = :openalex"
                 "  ORDER BY o.created_at, o.id LIMIT 1) AS openalex_id,"
                 " a.id AS abstract_id, a.source AS abstract_source,"
-                " a.content AS abstract_content"
+                " a.content AS abstract_content,"
+                f" {mine} AS in_my_library"
                 " FROM paper LEFT JOIN paper_abstract AS a"
                 " ON a.paper_id = paper.id AND a.is_current"
                 f" WHERE {visible} AND paper.excluded_reason IS NULL AND paper.id = :id"
@@ -382,6 +385,7 @@ def find_paper_page_facts(
         doi=row["doi"],
         openalex_id=row["openalex_id"],
         abstract=abstract,
+        in_my_library=row["in_my_library"],
     )
 
 

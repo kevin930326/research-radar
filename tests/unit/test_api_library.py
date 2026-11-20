@@ -77,6 +77,7 @@ ENTRY_JSON = {
         "has_abstract": False,
         "in_scope": True,
         "is_retracted": False,
+        "in_my_library": False,
     },
     "added_via": "upload",
     "added_at": "2026-11-18T09:30:15.123456Z",
