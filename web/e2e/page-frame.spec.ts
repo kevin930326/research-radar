@@ -91,5 +91,3 @@ for (const [widthText, expected] of Object.entries(FRAMES)) {
     expect(rect.x, "login column x").toBeCloseTo((width - 360) / 2, 0);
   });
 }
-
-// 短頁長頁左緣相同（scrollbar-gutter: stable）的測試在 scrollbar-gutter.spec.ts：要改瀏覽器啟動參數，只能放在自己的檔案。

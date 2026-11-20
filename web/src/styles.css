@@ -221,14 +221,9 @@
 }
 
 @layer base {
-  /*
-   * 一律保留捲軸的位置（Kevin 2026-11-21 決定，epic-3g P2-1）：有捲軸的電腦上，頁面從不用捲變成要捲時，
-   * 置中的內容（ADR-0054）不會左右跳。全站只加在這裡。
-   */
   html {
     color-scheme: dark;
     background-color: var(--color-background);
-    scrollbar-gutter: stable;
   }
 
   body {
