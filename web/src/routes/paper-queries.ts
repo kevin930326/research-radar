@@ -1,5 +1,5 @@
 // 論文頁與找論文共用的查詢（Story 3.8、3.14）：資料都經 datasource（ADR-0010 第 1 點），快取規則寫在這裡。
-import { queryOptions, type QueryClient } from "@tanstack/react-query";
+import { queryOptions, type Query, type QueryClient, type QueryKey } from "@tanstack/react-query";
 
 import { datasource } from "../datasource";
 import type { LibraryList, LibrarySource, PaperList, PaperListFilters, PaperResult, PaperSource } from "../datasource/types";
@@ -55,7 +55,7 @@ export function paperListQuery(queryClient: QueryClient, filters: PaperListFilte
   const key = filtersKey(filters);
   return queryOptions({
     queryKey: ["paper-list", key, limit],
-    queryFn: () => {
+    queryFn: async () => {
       let previous: PaperList | null = null;
       const size = (list: PaperList) => list.items.length + list.pending.length;
       for (const [queryKey, data] of queryClient.getQueriesData<{ kind: string; list?: PaperList }>({
@@ -65,11 +65,21 @@ export function paperListQuery(queryClient: QueryClient, filters: PaperListFilte
         if (queryKey[2] === limit || data?.kind !== "found" || data.list === undefined) continue;
         if (previous === null || size(data.list) > size(previous)) previous = data.list;
       }
-      return paperSource().list(filters, previous === null ? Math.min(limit, MAX_SHOWN) : limit, previous);
+      const result = await paperSource().list(filters, previous === null ? Math.min(limit, MAX_SHOWN) : limit, previous);
+      // 範圍「我的文獻庫」接著讀時：之前移出、留在原地的那幾列（in_my_library 已是 false）還在清單裡，
+      // 伺服器的 total 卻不算它們；把它們加回去，「找到 N 篇」「已顯示 n／N」才不會變小、再載入也不會提早消失。
+      if (previous !== null && result.kind === "found" && isPersonalList(["paper-list", key])) {
+        const carried = [...previous.items, ...previous.pending].filter((row) => !row.in_my_library).length;
+        return { ...result, list: { ...result.list, total: result.list.total + carried } };
+      }
+      return result;
     },
     retry: false,
     staleTime: LIST_STALE_MS,
     gcTime: LIST_GC_MS,
+    // 範圍是我的文獻庫的那幾份：移出後只標成過期（markInLibrary），切回視窗、重新連線時也不自動重讀，
+    // 移出的那一列才會留在原地到重新整理或換條件（Kevin 2026-11-20 決定）。
+    ...(isPersonalList(["paper-list", key]) ? { refetchOnWindowFocus: false, refetchOnReconnect: false } : {}),
   });
 }
 
@@ -136,8 +146,8 @@ export const libraryCountQuery = queryOptions({
 /**
  * 加入或移出之後，快取裡這一篇的「在不在我的文獻庫」跟著改：論文頁、找論文的清單（每一份）。
  * 找論文的清單正在讀的（「再載入」、重讀）先取消：那一份是改之前讀的（伺服器那一頁也可能在寫入生效前讀），
- * 讀完會把「已加入」蓋回去（審查 F10）。改完之後，畫面正在用的清單重讀一次，以伺服器為準
- * （範圍是我的文獻庫的那幾份篇數也會變）；沒在用的標成過期，下次打開時重讀。文獻庫清單在下次打開時本來就會重讀；文獻庫篇數（libraryCountQuery）同樣處理。
+ * 讀完會把「已加入」蓋回去（審查 F10）。改完之後，畫面正在用的清單重讀一次，以伺服器為準；
+ * 範圍是我的文獻庫的那幾份例外，只標成過期（見下面）。沒在用的標成過期，下次打開時重讀。文獻庫清單在下次打開時本來就會重讀；文獻庫篇數（libraryCountQuery）同樣處理。
  * `stillCurrent`：等取消的這段期間可能換了人（登出、登入過期、換人登入），寫快取前再問一次；回 false 就什麼都不寫、
  * 回 false（審查 G1）。回 true 表示寫了。
  */
@@ -159,7 +169,24 @@ export async function markInLibrary(
       ? { ...data, list: { ...data.list, items: mark(data.list.items), pending: mark(data.list.pending) } }
       : data,
   );
-  void queryClient.invalidateQueries({ queryKey: ["paper-list"], refetchType: "active" });
+  // 範圍是我的文獻庫、而且已經有資料的那幾份只標成過期、不馬上重讀：移出的那一列留在原地變回「加入我的文獻庫」、
+  // 「找到 N 篇」不變（Kevin 2026-11-20 決定）；換條件、重新整理、之後再回來才照伺服器。沒有資料的（例如剛被取消的
+  // 第一次讀取）照常重讀，不然畫面會一直是骨架。
+  const keep = (query: Query) => isPersonalList(query.queryKey) && query.state.data !== undefined;
+  void queryClient.invalidateQueries({ queryKey: ["paper-list"], refetchType: "none", predicate: keep });
+  void queryClient.invalidateQueries({ queryKey: ["paper-list"], refetchType: "active", predicate: (query) => !keep(query) });
   void queryClient.invalidateQueries({ queryKey: ["library-count"], refetchType: "active" });
   return true;
+}
+
+/** 這一份找論文的清單是不是範圍「我的文獻庫」（鍵的第二段是 filtersKey）。 */
+export function isPersonalList(queryKey: QueryKey): boolean {
+  const key = queryKey[1];
+  if (typeof key !== "string") return false;
+  try {
+    const entries = JSON.parse(key) as unknown;
+    return Array.isArray(entries) && entries.some((entry) => Array.isArray(entry) && entry[0] === "scope" && entry[1] === "personal");
+  } catch {
+    return false;
+  }
 }

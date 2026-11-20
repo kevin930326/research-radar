@@ -605,17 +605,19 @@ test.describe("search: page shape", () => {
     await expect(page.locator("main form")).toHaveCount(0);
     await expect(page.locator("main").getByRole("heading", { level: 2 })).toHaveText(foundText(total));
     await expect(page.locator("main").getByText(text("search:search.results.byYear"), { exact: true })).toBeVisible();
-    // 起始狀態沒有例句：只有標題、「看全部 N 篇」與論文列的連結；按鈕只有論文列的「加入我的文獻庫」（Story 3.17）。
+    // 起始狀態沒有例句：只有標題、「看全部 N 篇」與論文列的連結；按鈕只有論文列的「加入我的文獻庫」（Story 3.17）
+    // 與已加入那幾列的「移出」（第二版，EXPERIENCE.md「Kevin 的決定」第 87 項）。
     await openSearch(page);
     const start = page.locator("[data-state='start']");
     await expect(rows(page)).toHaveCount(START_ROWS);
-    // 按鈕數從假資料算（E1，Kevin 2026-11-20）：起始的 3 篇裡不在我的文獻庫的那幾篇，各一個「加入我的文獻庫」。
-    const startNotInLibrary = filterListRows(LIST_FIXTURES.rows, new URLSearchParams("this_week=true"))!
-      .slice(0, START_ROWS)
-      .filter((entry) => !entry.personal).length;
+    // 按鈕從假資料算（E1，Kevin 2026-11-20）：起始的 3 篇，不在我的文獻庫的各一個「加入我的文獻庫」、在的各一個「移出」，照列的順序。
+    const startRows = filterListRows(LIST_FIXTURES.rows, new URLSearchParams("this_week=true"))!.slice(0, START_ROWS);
+    const startNotInLibrary = startRows.filter((entry) => !entry.personal).length;
     expect(startNotInLibrary).toBe(1);
-    await expect(start.getByRole("button")).toHaveCount(startNotInLibrary);
-    await expect(start.getByRole("button")).toHaveText(Array(startNotInLibrary).fill(text("search:search.row.add")));
+    await expect(start.getByRole("button")).toHaveCount(START_ROWS);
+    await expect(start.getByRole("button")).toHaveText(
+      startRows.map((entry) => text(entry.personal ? "search:search.row.remove" : "search:search.row.add")),
+    );
     const rowLinks = await start.locator("[data-paper-row]").getByRole("link").count();
     await expect(start.getByRole("link")).toHaveCount(rowLinks + 1);
     await expect(page.getByRole("textbox")).toHaveCount(0);
@@ -623,7 +625,7 @@ test.describe("search: page shape", () => {
 
   test("each row: the title opens the paper page, the right side has only the full-text link in a new tab", async ({ page }) => {
     // 驗收條件第一段（審查 H-M4）：標題連到論文頁；右側的連結只有「開啟全文」。Story 3.17：右側多了
-    // 「加入我的文獻庫」按鈕（已加入的是「● 已加入」，不能按）。
+    // 「加入我的文獻庫」按鈕；第二版（決定第 87 項）：已加入的是「● 已加入」＋一個「移出」按鈕。
     await openSearch(page, "?topic=e_commerce");
     await expect(rows(page)).toHaveCount(expectedTotal("topic=e_commerce"));
     // 已加入與否從假資料判斷（E1，Kevin 2026-11-20），不從畫面讀；兩種列都至少要有一列。
@@ -643,7 +645,8 @@ test.describe("search: page shape", () => {
         await expect(added).toHaveText(text("search:search.row.added"));
         // 「●」：字前面一個不念出來的圓點（審查 F20）。
         await expect(added.locator("span[aria-hidden='true']")).toHaveCount(1);
-        await expect(row.getByRole("button")).toHaveCount(0);
+        await expect(row.getByRole("button")).toHaveCount(1);
+        await expect(row.getByRole("button")).toHaveText(text("search:search.row.remove"));
       } else {
         await expect(added).toHaveCount(0);
         await expect(row.getByRole("button")).toHaveCount(1);

@@ -28,6 +28,7 @@
 //
 // 論文頁：http://127.0.0.1:4180/__mock/papers 列出每一種狀態的網址（啟動時也印出來）。
 // 找論文：http://127.0.0.1:4180/__mock/search 列出每一種狀態怎麼看（啟動時也印出來）。
+// 我的文獻庫：http://127.0.0.1:4180/__mock/library 列出每一種狀態怎麼看（啟動時也印出來）。
 //
 // 切換情境（例如看登入失敗、登出失敗）：打開或 curl
 //   http://127.0.0.1:4180/__mock?login=failed            登入：ok／failed（伺服器錯誤）／denied（不在名單裡）
@@ -52,13 +53,20 @@
 //   http://127.0.0.1:4180/__mock?libraryEmpty=1          文獻庫清空（看「空的」；0 是回到一開始的那幾篇）
 //   http://127.0.0.1:4180/__mock?libraryTotal=128        文獻庫清單回報的總篇數改成這個數字（設計稿比對用；0 是不改）
 //   http://127.0.0.1:4180/__mock?libraryChange=failed    加入、移出、復原：ok／failed（伺服器錯誤）／expired（401）
+//   http://127.0.0.1:4180/__mock?libraryChangeDelay=5000 加入、移出、復原要等幾毫秒才回（看送出中：按鈕停用）
+//   http://127.0.0.1:4180/__mock?libraryAll=1            第一位假成員的文獻庫換成假清單的每一篇（30 篇：有沒有 DOI 的、
+//                                                        超過 10 篇、超過一頁；0 是回到一開始的那幾篇；和 libraryEmpty
+//                                                        同時給時以 libraryAll 為準）
 //   http://127.0.0.1:4180/__mock?select=1,3,6            打開我的文獻庫時自動勾這幾列（從 0 數；設計稿比對看「勾了 3 篇」
 //                                                        等狀態，比對工具只能點文字，點不到勾選框；select= 是不勾）
 //   http://127.0.0.1:4180/__mock?removeRow=0             打開我的文獻庫時自動按這一列的「移出」（-1 是不按）
+//   http://127.0.0.1:4180/__mock?openPicked=1            自動勾完之後再按選取列的「開啟全文」（看批次開啟的結果與說明；
+//                                                        比對工具點「開啟全文」會點到每列自己的連結，所以用這個；沒有
+//                                                        blockPopups 時不真的開分頁、不連到站外，只當作開了）
 //   http://127.0.0.1:4180/__mock?blockPopups=1           讓瀏覽器「擋住新分頁」（window.open 一律回 null）
 //   http://127.0.0.1:4180/__mock?libraryHang=1           文獻庫清單的請求在瀏覽器裡一直不回、也不送出（看載入中的骨架；
 //                                                        libraryDelay 會讓比對工具等不到「網路安靜」）
-//   select、removeRow、blockPopups、libraryHang 是在頁面殼裡多載入一支 /__mock/inject.js（只有這支替身會送，正式建置沒有）。
+//   select、openPicked、removeRow、blockPopups、libraryHang 是在頁面殼裡多載入一支 /__mock/inject.js（只有這支替身會送，正式建置沒有）。
 // 參數可以一起給；回傳目前的情境（JSON）。
 /* global process, URL, setTimeout, Buffer */
 import { randomUUID } from "node:crypto";
@@ -135,8 +143,10 @@ const scenario = {
   libraryDelay: 0,
   libraryTotal: 0,
   libraryChange: "ok",
+  libraryChangeDelay: 0,
   select: "",
   removeRow: -1,
+  openPicked: 0,
   blockPopups: 0,
   libraryHang: 0,
   alwaysSignedIn: args.signedIn,
@@ -152,10 +162,12 @@ function initialRecords(ids) {
 let libraries = new Map();
 /** 加入時間用的時鐘（每加入一篇往後 1 秒）。 */
 let libraryClock = 0;
-function resetLibraries(empty) {
-  libraries = new Map([[MEMBERS[0].member_id, { items: empty ? [] : initialRecords(INITIAL_LIBRARY), removed: [] }]]);
+/** `contents`：empty（空的）／initial（一開始那幾篇）／all（假清單的每一篇，依清單順序）。 */
+function resetLibraries(contents) {
+  const ids = contents === "empty" ? [] : contents === "all" ? LIST.rows.map((entry) => entry.row.id) : INITIAL_LIBRARY;
+  libraries = new Map([[MEMBERS[0].member_id, { items: initialRecords(ids), removed: [] }]]);
 }
-resetLibraries(false);
+resetLibraries("initial");
 /** 這位成員的文獻庫（沒有就建一個空的）。 */
 function libraryOf(member) {
   if (!libraries.has(member.member_id)) libraries.set(member.member_id, { items: [], removed: [] });
@@ -354,11 +366,14 @@ async function libraryList(req, res, query) {
   });
 }
 
-/** 加入（PUT）、移出（DELETE）、復原（POST …/restore）。 */
-function libraryChange(req, res, id, restore) {
+/** 加入（PUT）、移出（DELETE）、復原（POST …/restore）。是誰送的、結果是什麼在收到時就決定，等 libraryChangeDelay 之後才寫、才回。 */
+async function libraryChange(req, res, id, restore) {
   const member = currentMember(req);
-  if (member === null || scenario.libraryChange === "expired") return problem(res, 401, "not_authenticated");
-  if (scenario.libraryChange === "failed") return problem(res, 500, "internal_error");
+  const outcome = scenario.libraryChange;
+  await sleep(scenario.libraryChangeDelay);
+  if (res.destroyed || req.socket.destroyed) return undefined;
+  if (member === null || outcome === "expired") return problem(res, 401, "not_authenticated");
+  if (outcome === "failed") return problem(res, 500, "internal_error");
   if (libraryItem(id) === undefined) return problem(res, 404, "not_found");
   const library = libraryOf(member);
   const current = library.items.find((record) => record.id === id);
@@ -455,6 +470,10 @@ function searchIndex() {
     { label: "linked", url: `${base}/search?this_week=true`, note: "從「看全部 N 篇」帶進來的條件" },
     { label: "filtered", url: `${base}/search?journal=misq,isr,jmis,jais,ejis,isj,jit,jsis,dss,im,io&from=2022&to=2026`, note: "篩選中" },
     { label: "results", url: `${base}/search?topic=e_commerce`, note: "有結果（多於一頁時有「再載入」）" },
+    { label: "row-actions", url: `${base}/search?topic=it_project_management`, note: "每列右側三種樣子：加入我的文獻庫、● 已加入＋移出、沒有 DOI（沒有「開啟全文」）" },
+    { label: "personal", url: `${base}/search?scope=personal`, note: "範圍「我的文獻庫」：按「移出」那一列留在原地變回「加入」、篇數不變" },
+    { label: "sending", url: `${base}/__mock?libraryChangeDelay=5000`, note: "先打開這個，再按加入或移出：送出中（按鈕停用 5 秒）；0 是不等" },
+    { label: "change-failed", url: `${base}/__mock?libraryChange=failed`, note: "先打開這個，再按加入或移出：失敗（按鈕回到原樣、不出字）；ok 是回來" },
     { label: "method", url: `${base}/search?method=experiment`, note: "從論文頁的方法標籤帶進來的條件" },
     { label: "zero", url: `${base}/search?journal=misq&from=2016&to=2016`, note: "沒有結果" },
     { label: "loading", url: `${base}/__mock?listDelay=600000`, note: "先打開這個，再開任何找論文的網址：骨架" },
@@ -466,17 +485,23 @@ function searchIndex() {
 function libraryIndex() {
   const base = `http://127.0.0.1:${args.port}`;
   return [
-    { label: "list", url: `${base}/library`, note: "可以操作（勾選、開啟選取的全文、移出、復原）" },
-    { label: "selected", url: `${base}/__mock?select=0,1,2`, note: "先打開這個，再開 /library：勾了 3 篇" },
-    { label: "blocked", url: `${base}/__mock?select=0,1&blockPopups=1`, note: "先打開這個，再開 /library、按「開啟選取的全文」：擋住新分頁" },
+    { label: "list", url: `${base}/library`, note: "可以操作（每列「移出」＋「開啟全文」、勾選、選取列、移出、復原）" },
+    { label: "many", url: `${base}/__mock?libraryAll=1`, note: "先打開這個，再開 /library：30 篇（有沒有 DOI 的列、「再載入」）；libraryAll=0 回到一開始" },
+    { label: "selected", url: `${base}/__mock?select=0,1`, note: "先打開這個，再開 /library：勾了 2 篇（選取列「已選 2 篇」＋「開啟全文」＋「取消」）" },
+    { label: "skipped", url: `${base}/__mock?libraryAll=1&select=7,8,9&openPicked=1`, note: "先打開這個，再開 /library：勾 3 篇、按了「開啟全文」：1 篇沒有全文連結，已跳過（手機寬度是一篇一篇點開的連結）" },
+    { label: "over", url: `${base}/__mock?libraryAll=1&select=0,1,2,3,4,5,6,7,8,9,10`, note: "先打開這個，再開 /library：勾了 11 篇（按鈕停用、一次最多開 10 篇）" },
+    { label: "blocked", url: `${base}/__mock?select=0,1&blockPopups=1&openPicked=1`, note: "先打開這個，再開 /library：勾 2 篇、按了「開啟全文」：擋住新分頁（桌機）；手機寬度是一篇一篇點開的連結" },
+    { label: "remove", url: `${base}/__mock?removeRow=0`, note: "先打開這個，再開 /library：第一列移出了（已移出＋復原）" },
     { label: "empty", url: `${base}/__mock?libraryEmpty=1`, note: "先打開這個，再開 /library：空的；/search?scope=personal 是找論文的「文獻庫是空的」" },
     { label: "loading", url: `${base}/__mock?libraryDelay=600000`, note: "先打開這個，再開 /library：骨架" },
     { label: "error", url: `${base}/__mock?library=failed`, note: "先打開這個，再開 /library：錯誤" },
     { label: "change-failed", url: `${base}/__mock?libraryChange=failed`, note: "加入、移出、復原都失敗（回到按之前的樣子）" },
+    { label: "sending", url: `${base}/__mock?libraryChangeDelay=5000`, note: "移出、復原要等 5 秒才回（按鈕停用）" },
+    { label: "reset", url: `${base}/__mock?library=ok&libraryDelay=0&libraryTotal=0&libraryHang=0&libraryChange=ok&libraryChangeDelay=0&select=&removeRow=-1&openPicked=0&blockPopups=0&libraryEmpty=0&libraryAll=0`, note: "我的文獻庫每個情境都回到預設（文獻庫回到一開始那幾篇）" },
   ];
 }
 
-/** 頁面殼多載入的一支（select、removeRow、blockPopups）：自動勾幾列、按一列的「移出」、讓 window.open 回 null。只有這支替身會送。 */
+/** 頁面殼多載入的一支（select、openPicked、removeRow、blockPopups）：自動勾幾列（再按「開啟全文」）、按一列的「移出」、讓 window.open 回 null。只有這支替身會送。 */
 function injectScript() {
   const picks = String(scenario.select)
     .split(",")
@@ -484,6 +509,8 @@ function injectScript() {
     .filter((index) => Number.isInteger(index) && index >= 0);
   return `(() => {
   if (${Number(scenario.blockPopups) > 0}) window.open = () => null;
+  // openPicked 而沒有擋住新分頁時：假裝開了分頁、不真的連到站外（看「已開啟 N 篇」）。
+  else if (${Number(scenario.openPicked) > 0}) window.open = () => ({ opener: null, location: { replace() {} } });
   if (${Number(scenario.libraryHang) > 0}) {
     // 文獻庫清單的請求一直不回（也不真的送出：網路是安靜的，比對工具才等得到「網路安靜」）。
     const send = window.fetch.bind(window);
@@ -492,6 +519,7 @@ function injectScript() {
   }
   const picks = ${JSON.stringify(picks)};
   const removeRow = ${Number(scenario.removeRow)};
+  const openPicked = ${Number(scenario.openPicked) > 0};
   if ((picks.length === 0 && removeRow < 0) || location.pathname !== "/library") return;
   const visible = (element) => element !== null && element.offsetParent !== null;
   const timer = setInterval(() => {
@@ -499,6 +527,10 @@ function injectScript() {
     if (rows.length === 0) return;
     clearInterval(timer);
     picks.forEach((index) => rows[index]?.querySelector("input[type=checkbox]")?.click());
+    if (openPicked && picks.length > 0) {
+      // 勾選之後畫面要先換出選取列，下一個畫格再按。
+      requestAnimationFrame(() => requestAnimationFrame(() => [...document.querySelectorAll("[data-library=open]")].find(visible)?.click()));
+    }
     if (removeRow >= 0) [...(rows[removeRow]?.querySelectorAll("[data-library=remove]") ?? [])].find(visible)?.click();
   }, 50);
 })();
@@ -521,14 +553,16 @@ function control(res, query) {
   for (const key of ["login", "logout", "names", "list", "library", "libraryChange", "select"]) {
     if (query.has(key)) scenario[key] = query.get(key);
   }
-  for (const key of ["loginDelay", "logoutDelay", "listDelay", "listDelayAfter", "listTotal", "listFailAfter", "libraryDelay", "libraryTotal", "removeRow", "blockPopups", "libraryHang"]) {
+  for (const key of ["loginDelay", "logoutDelay", "listDelay", "listDelayAfter", "listTotal", "listFailAfter", "libraryDelay", "libraryTotal", "libraryChangeDelay", "removeRow", "openPicked", "blockPopups", "libraryHang"]) {
     if (query.has(key)) scenario[key] = Number(query.get(key));
   }
   if (query.has("listDelayAfter") || query.has("listFailAfter")) listRequests = 0;
   if (query.has("libraryEmpty")) {
     // 每位成員的文獻庫都回到一開始的樣子（第一位假成員是空的或一開始那幾篇，其他人是空的）。
-    resetLibraries(query.get("libraryEmpty") === "1");
+    resetLibraries(query.get("libraryEmpty") === "1" ? "empty" : "initial");
   }
+  // libraryEmpty 和 libraryAll 同時給時，libraryAll 後套用、以它為準。
+  if (query.has("libraryAll")) resetLibraries(query.get("libraryAll") === "1" ? "all" : "initial");
   if (query.has("signedIn")) scenario.alwaysSignedIn = query.get("signedIn") === "true";
   if (query.has("expire")) {
     sessions.clear();
@@ -558,7 +592,7 @@ function staticFile(res, path) {
   const type = TYPES[extname(target)] ?? "application/octet-stream";
   let body = readFileSync(target);
   // select、blockPopups：頁面殼多載入 /__mock/inject.js（同源的檔案，安全標頭的 CSP 照樣放行），放在最前面。
-  if (target.endsWith("index.html") && (scenario.select !== "" || scenario.removeRow >= 0 || scenario.blockPopups > 0 || scenario.libraryHang > 0)) {
+  if (target.endsWith("index.html") && (scenario.select !== "" || scenario.removeRow >= 0 || scenario.openPicked > 0 || scenario.blockPopups > 0 || scenario.libraryHang > 0)) {
     body = Buffer.from(String(body).replace("<head>", '<head><script src="/__mock/inject.js"></script>'));
   }
   send(res, 200, body, { ...SECURITY_HEADERS, "Content-Type": type });

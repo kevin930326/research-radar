@@ -1,11 +1,13 @@
 // 加入、移出、復原（Story 3.17）：回應回來之前換了人就不改快取（審查 F2）、寫快取前與處理 401 時換了人也一樣（審查 G1）、移出時已經不在（404）不給復原
 // （審查 F3）、論文頁換了一份資料就照新的顯示（審查 F9）、清單讀到一半時加入不會被讀完的舊資料蓋回去（審查 F10）。
-import { QueryClient } from "@tanstack/react-query";
+import { QueryClient, QueryObserver } from "@tanstack/react-query";
 import { describe, expect, it, vi } from "vitest";
 
-import type { LibraryChangeResult, LibraryItem, LibrarySource, PaperList, PaperPage } from "../datasource/types";
+import type { LibraryChangeResult, LibraryItem, LibrarySource, PaperList, PaperListFilters, PaperPage } from "../datasource/types";
 import { libraryShown, sendLibraryChange } from "./library-change";
-import { markInLibrary } from "./paper-queries";
+import { datasource } from "../datasource";
+import { toApiParams } from "../pages/search-filters";
+import { filtersKey, isPersonalList, markInLibrary, paperListQuery } from "./paper-queries";
 import { clearMemberQueries, memberGeneration } from "./session";
 
 const PAPER = "00000000-0000-4000-8000-000000000001";
@@ -54,6 +56,29 @@ describe("sendLibraryChange", () => {
     release();
     expect(await pending).toBe("failed");
     expect(queryClient.getQueryData<ReturnType<typeof list>>(LIST_KEY)!.list.items[0]!.in_my_library).toBe(false);
+  });
+
+  it("remove: the answer comes back after the cache was cleared (logged out, someone else logged in): nothing is written", async () => {
+    // 2026-11-20 第二版：找論文也能移出（決定第 87 項）。甲的移出還在路上：甲登出、乙登入（清快取），乙的文獻庫也有這篇。
+    const queryClient = new QueryClient();
+    const [hold, release] = gate();
+    const pending = sendLibraryChange(queryClient, source({ kind: "done", item: ITEM }, hold), PAPER, "remove");
+    await clearMemberQueries(queryClient);
+    queryClient.setQueryData(LIST_KEY, list(true));
+    release();
+    expect(await pending).toBe("failed");
+    expect(queryClient.getQueryData<ReturnType<typeof list>>(LIST_KEY)!.list.items[0]!.in_my_library).toBe(true);
+  });
+
+  it("remove answered 404 after the cache was cleared: nothing is written", async () => {
+    const queryClient = new QueryClient();
+    const [hold, release] = gate();
+    const pending = sendLibraryChange(queryClient, source({ kind: "notFound" }, hold), PAPER, "remove");
+    await clearMemberQueries(queryClient);
+    queryClient.setQueryData(LIST_KEY, list(true));
+    release();
+    expect(await pending).toBe("failed");
+    expect(queryClient.getQueryData<ReturnType<typeof list>>(LIST_KEY)!.list.items[0]!.in_my_library).toBe(true);
   });
 
   it("a 401 that comes back after the cache was cleared is not treated as this member's sign-out", async () => {
@@ -171,6 +196,119 @@ describe("markInLibrary", () => {
     release();
     await reading;
     expect(queryClient.getQueryData<ReturnType<typeof list>>(LIST_KEY)!.list.items[0]!.in_my_library).toBe(true);
+  });
+});
+
+describe("markInLibrary: lists with the scope 'my library'", () => {
+  // 範圍「我的文獻庫」時按移出（Kevin 2026-11-20 決定）：那一列留在原地變回「加入」、篇數不變，所以那一份清單只標過期、不馬上重讀。
+  const PERSONAL_KEY = ["paper-list", JSON.stringify([["scope", "personal"]]), 20];
+  const TRACKED_KEY = ["paper-list", JSON.stringify([["topic", ["e_commerce"]]]), 20];
+
+  /** 有一個畫面在用這一份（掛上觀察者）；回傳讀了幾次的計數與取消掛上的函式。 */
+  function watch(queryClient: QueryClient, queryKey: unknown[], answer: () => ReturnType<typeof list>) {
+    const queryFn = vi.fn(async () => answer());
+    const observer = new QueryObserver(queryClient, { queryKey, queryFn, staleTime: Infinity, retry: false });
+    const stop = observer.subscribe(() => {});
+    return { queryFn, stop };
+  }
+
+  it("an active 'my library' list with data is marked stale but not read again; the row stays, now not in the library", async () => {
+    const queryClient = new QueryClient();
+    queryClient.setQueryData(PERSONAL_KEY, list(true));
+    const { queryFn, stop } = watch(queryClient, PERSONAL_KEY, () => ({ ...list(false), list: { ...list(false).list, items: [], total: 0 } }));
+    expect(await markInLibrary(queryClient, PAPER, false)).toBe(true);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(queryFn).not.toHaveBeenCalled();
+    const data = queryClient.getQueryData<ReturnType<typeof list>>(PERSONAL_KEY)!;
+    expect(data.list.items.map((item) => [item.id, item.in_my_library])).toEqual([[PAPER, false]]);
+    expect(data.list.total).toBe(1);
+    expect(queryClient.getQueryState(PERSONAL_KEY)!.isInvalidated).toBe(true);
+    stop();
+  });
+
+  it("an active list with another scope is read again", async () => {
+    const queryClient = new QueryClient();
+    queryClient.setQueryData(TRACKED_KEY, list(true));
+    const { queryFn, stop } = watch(queryClient, TRACKED_KEY, () => list(false));
+    await markInLibrary(queryClient, PAPER, false);
+    await vi.waitFor(() => expect(queryFn).toHaveBeenCalledTimes(1));
+    stop();
+  });
+
+  it("an active 'my library' list without data (its first read was cancelled) is read again", async () => {
+    const queryClient = new QueryClient();
+    const [hold, release] = gate();
+    let calls = 0;
+    const queryFn = vi.fn(async () => {
+      calls += 1;
+      if (calls === 1) await hold;
+      return list(false);
+    });
+    const observer = new QueryObserver(queryClient, { queryKey: PERSONAL_KEY, queryFn, retry: false });
+    const stop = observer.subscribe(() => {});
+    await vi.waitFor(() => expect(queryFn).toHaveBeenCalledTimes(1));
+    await markInLibrary(queryClient, PAPER, false);
+    release();
+    await vi.waitFor(() => expect(queryFn).toHaveBeenCalledTimes(2));
+    stop();
+  });
+});
+
+describe("paperListQuery: lists with the scope 'my library'", () => {
+  // 移出後只標過期的那一份，切回視窗或重新連線時也不能自動重讀（不然那一列會在換條件、重新整理之前消失）。
+  it("does not read again on window focus or reconnect; other scopes keep the defaults", () => {
+    const queryClient = new QueryClient();
+    const personal = paperListQuery(queryClient, { scope: "personal" } as PaperListFilters, 20);
+    expect(personal.refetchOnWindowFocus).toBe(false);
+    expect(personal.refetchOnReconnect).toBe(false);
+    const tracked = paperListQuery(queryClient, { topic: ["e_commerce"] } as unknown as PaperListFilters, 20);
+    expect(tracked.refetchOnWindowFocus).toBeUndefined();
+    expect(tracked.refetchOnReconnect).toBeUndefined();
+  });
+
+  it("recognises the key built from the search page's own filters", () => {
+    expect(isPersonalList(["paper-list", filtersKey(toApiParams({ scope: "personal" }))])).toBe(true);
+    expect(isPersonalList(["paper-list", filtersKey(toApiParams({ scope: "personal", topic: "e_commerce" }))])).toBe(true);
+    expect(isPersonalList(["paper-list", filtersKey(toApiParams({}))])).toBe(false);
+  });
+
+  it("load more after a remove: the total counts the removed rows still listed (server total + rows carried over that are out)", async () => {
+    const queryClient = new QueryClient();
+    const filters = toApiParams({ scope: "personal" });
+    // 第一頁 3 篇（第 2 篇移出了、留在原地），pending 1 篇也移出了；伺服器現在說一共 5 篇。
+    const previous = {
+      items: [row("a", true), row("b", false), row("c", true)],
+      pending: [row("d", false)],
+      next_cursor: "c1",
+      total: 7,
+    } as unknown as PaperList;
+    queryClient.setQueryData(["paper-list", filtersKey(filters), 3], { kind: "found", list: previous });
+    const fresh = { items: [...previous.items, previous.pending[0]!, row("e", true)], pending: [], next_cursor: null, total: 5 } as unknown as PaperList;
+    const list = vi.spyOn(datasource.papers!, "list").mockResolvedValue({ kind: "found", list: fresh });
+    try {
+      const options = paperListQuery(queryClient, filters, 5);
+      const result = (await (options.queryFn as () => Promise<{ kind: "found"; list: PaperList }>)()).list;
+      expect(list).toHaveBeenCalledWith(filters, 5, previous);
+      expect(result.total).toBe(5 + 2);
+      expect(result.items).toEqual(fresh.items);
+    } finally {
+      list.mockRestore();
+    }
+  });
+
+  it("load more in another scope keeps the server total", async () => {
+    const queryClient = new QueryClient();
+    const filters = toApiParams({});
+    const previous = { items: [row("a", false)], pending: [], next_cursor: "c1", total: 9 } as unknown as PaperList;
+    queryClient.setQueryData(["paper-list", filtersKey(filters), 1], { kind: "found", list: previous });
+    const fresh = { items: [row("a", false), row("b", false)], pending: [], next_cursor: null, total: 4 } as unknown as PaperList;
+    const list = vi.spyOn(datasource.papers!, "list").mockResolvedValue({ kind: "found", list: fresh });
+    try {
+      const result = (await (paperListQuery(queryClient, filters, 2).queryFn as () => Promise<{ kind: "found"; list: PaperList }>)()).list;
+      expect(result.total).toBe(4);
+    } finally {
+      list.mockRestore();
+    }
   });
 });
 

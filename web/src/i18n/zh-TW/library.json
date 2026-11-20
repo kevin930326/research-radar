@@ -9,10 +9,11 @@
       "select": "選取：{{title}}"
     },
     "actions": {
-      "open": "開啟選取的全文（{{count}} 篇）",
+      "selected": "已選 {{count}} 篇",
+      "open": "開啟全文",
       "opened": "已開啟 {{count}} 篇",
       "max": "一次最多開 10 篇",
-      "cancel": "取消選取"
+      "cancel": "取消"
     },
     "notes": {
       "skipped": "{{count}} 篇沒有全文連結，已跳過",
