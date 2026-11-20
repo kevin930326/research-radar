@@ -1,11 +1,9 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link } from "@tanstack/react-router";
 import { useEffect, useRef, useState, useSyncExternalStore, type CSSProperties, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 
 import { NEW_TAB_NOTE_ID, NewTabNote } from "../components/ExternalArrow";
-import { PaperTitle } from "../components/PaperText";
-import { Meta } from "../components/search/PaperRows";
+import { Meta, OpenFullText, RemoveText, RowTitle } from "../components/search/PaperRows";
 import { NoticeIcon } from "../components/search/parts";
 import { DESKTOP_QUERY } from "../hooks/use-close-across-breakpoint";
 import type { LibraryItem } from "../datasource/types";
@@ -15,15 +13,18 @@ import { externalUrl, formatCount, splitTemplate } from "./paper-format";
 import { ErrorBar, More } from "./SearchPage";
 
 // 我的文獻庫（Story 3.17；EXPERIENCE.md 畫面 13、State Patterns「13. 我的文獻庫」；設計稿 docs/ux/reference/screens/library.html）。
-// 照 AR-67 的基本版：標題、篇數、論文列（勾選框、標題、期刊 · 年份、「移出」）、勾選後的動作列、再載入。
+// 照 AR-67 的基本版：標題、篇數、論文列（勾選框、標題、期刊 · 年份、「移出」＋「開啟全文」）、勾選後的選取列、再載入。
+// 2026-11-20 第二版（EXPERIENCE.md「Kevin 的決定」第 86～91 項；設計稿 library.html 第二版）：每列自己有「開啟全文」（不用勾；
+// 沒有 DOI 的沒有）；勾選框平常暗一階；選取列是「已選 N 篇」＋「開啟全文」＋「取消」；批次開啟的結果與說明桌機跟著選取列
+// 黏在上緣，手機在底部選取列的正上方。
 // 不做（AR-67，Epic 6）：右欄（上傳或匯入、儲存空間）、「怎麼加入的」篩選、「有我的 PDF」「追蹤範圍外」兩個開關、
 // 「有 N 篇等你確認」、「● 有我的 PDF」、不能直接移出的原因；每列第三行「AI 整理」不做（D1，Kevin 2026-11-20 決定）。
 // - 一次列 client-config 的 library_page_size 篇（50）；「再載入 N 篇」「已顯示 n／N」，剩下不到一頁時寫實際的篇數，
 //   全部列出來以後不顯示。目前顯示幾篇寫進網址（shown，AD-21）。
-// - 勾選後：900px 以上，寫篇數的那一行原地換成動作列（黏在視窗上緣）；899px 以下動作列固定在畫面底部。
-//   「開啟選取的全文（N 篇）」：一次最多 10 篇（超過時停用，旁邊「一次最多開 10 篇」）；每篇開一個新分頁（DOI 連結），
+// - 勾選後：900px 以上，寫篇數的那一行原地換成選取列（黏在視窗上緣）；899px 以下選取列固定在畫面底部（寫篇數那一行照留著）。
+//   「開啟全文」：一次最多 10 篇（超過時停用，旁邊「一次最多開 10 篇」）；每篇開一個新分頁（DOI 連結），
 //   沒有 DOI 的跳過（「N 篇沒有全文連結，已跳過」）；開了之後按鈕原地顯示「已開啟 N 篇」2 秒；
-//   瀏覽器擋住新分頁時不顯示這一句，改在動作列下方列出連結。手機一次開不了多個分頁：原地列出連結。
+//   瀏覽器擋住新分頁時不顯示這一句，改在選取列下方列出連結。手機一次開不了多個分頁：在底部選取列上方列出連結。
 //   瀏覽器擋住時列出的是還沒開出來的那幾篇（已經開了的不重複列）。
 //   連結只開後端給的 DOI 連結（externalUrl 只收 http／https），不組學校代理或付費牆的網址。
 // - 「移出」：那一列原地變成「已移出」＋「復原」，不跳確認；離開這一頁後消失（離開時丟掉文獻庫清單的快取）。
@@ -196,6 +197,8 @@ export function LibraryPage({ shown, onMore, onSignedOut }: LibraryPageProps) {
   };
 
   let body: ReactNode;
+  // 899px 以下勾了論文時的底部選取列（放在內容外面，見下面的 return）。
+  let dock: ReactNode = null;
   if (failed) {
     body = (
       <ErrorBar
@@ -253,10 +256,13 @@ export function LibraryPage({ shown, onMore, onSignedOut }: LibraryPageProps) {
       clearNotes();
     };
     const actions = { count: picked.length, over, opened, onOpen: openPicked, onCancel: unselect };
+    // 批次開啟的結果與說明（設計稿 .notes）：桌機在選取列下面、一起黏在上緣；手機在底部選取列的最上面（決定第 90、91 項）。
+    const notesBlock = <Notes notes={notes} mobile={!desktop} />;
+    if (picked.length > 0 && !desktop) dock = <Dock {...actions} notes={notesBlock} />;
 
     body = (
       <>
-        {/* 寫篇數的那一行／動作列：900px 以上黏在視窗上緣（設計稿 .slot），899px 以下不黏。 */}
+        {/* 寫篇數的那一行／選取列（＋結果與說明）：900px 以上黏在視窗上緣（設計稿 .slot），899px 以下不黏。 */}
         <div className="mt-2 bg-background split:sticky split:top-[0px] split:z-[4] split:mt-[20px] split:py-3">
           <div className={`flex min-h-[40px] items-center ${picked.length > 0 ? "split:hidden" : ""}`}>
             <h2 data-library-count className="font-mono text-s13 tracking-006 text-text-secondary">
@@ -266,12 +272,12 @@ export function LibraryPage({ shown, onMore, onSignedOut }: LibraryPageProps) {
               )}
             </h2>
           </div>
-          {picked.length > 0 && desktop ? <ActionBar {...actions} /> : null}
-        </div>
-        <div role="status" data-library-notes>
-          {notes.map((note, index) => (
-            <NoteBlock key={`${note.kind}-${index}`} note={note} />
-          ))}
+          {picked.length > 0 && desktop ? (
+            <>
+              <ActionBar {...actions} />
+              {notesBlock}
+            </>
+          ) : null}
         </div>
         <ul data-library-rows className="border-y border-hairline">
           {items.map((item, index) => (
@@ -303,16 +309,29 @@ export function LibraryPage({ shown, onMore, onSignedOut }: LibraryPageProps) {
             onMore={() => onMore(items.length + pageSize)}
           />
         ) : null}
-        {picked.length > 0 && !desktop ? <Dock {...actions} /> : null}
       </>
     );
   }
 
+  // 這一頁撐滿 main 的高度（外框 main 是直排的 flex）：底部選取列前面有一段會伸長的空白（最少 32px，設計稿 margin-top 32），
+  // 清單很短時選取列也在視窗最下面；有選取列時往下吃掉 main 的下內距（96px），選取列貼齊頁面底部
+  // （設計稿 library.html 390：.pp 至少一個視窗高、main flex:1、.dock 接在 main 後面；審查 R9）。
   return (
-    <div data-page="library" className="text-s14 leading-normal tracking-0 text-text-primary split:max-w-reading-width">
-      <h1 className="font-title-zh text-page-title-zh text-text-primary">{t("library.page.title")}</h1>
-      {body}
-      <NewTabNote />
+    <div
+      data-page="library"
+      className={`flex flex-1 flex-col text-s14 leading-normal tracking-0 text-text-primary split:max-w-reading-width ${dock === null ? "" : "-mb-24"}`}
+    >
+      <div>
+        <h1 className="font-title-zh text-page-title-zh text-text-primary">{t("library.page.title")}</h1>
+        {body}
+        <NewTabNote />
+      </div>
+      {dock === null ? null : (
+        <>
+          <div aria-hidden="true" className="min-h-8 flex-1" />
+          {dock}
+        </>
+      )}
     </div>
   );
 }
@@ -327,10 +346,10 @@ interface ActionProps {
 }
 
 /**
- * 「開啟選取的全文（N 篇）」（設計稿 .go：40px 高、暖白底；停用時透明、髮線框、第三層字色）。
- * 看得到的 40px，按鈕本身 44px（ADR-0037），負外距抵掉。
+ * 「開啟全文」（設計稿 button.go：40px 高、暖白底、14px／500／0.06em、字後箭頭；停用時透明、髮線框、第三層字色）。
+ * 按了之後原地顯示「已開啟 N 篇」2 秒。看得到的 40px，按鈕本身 44px（ADR-0037），負外距抵掉。
  */
-function OpenButton({ count, over, opened, onOpen, arrow, className }: ActionProps & { arrow: boolean; className: string }) {
+function OpenButton({ over, opened, onOpen, className }: ActionProps & { className: string }) {
   const { t } = useTranslation("library");
   return (
     <button
@@ -338,20 +357,15 @@ function OpenButton({ count, over, opened, onOpen, arrow, className }: ActionPro
       data-library="open"
       disabled={over}
       onClick={onOpen}
-      className={`group -my-[2px] inline-flex h-tap-target cursor-pointer items-center bg-transparent p-[0px] disabled:cursor-default ${className}`}
+      className="group -my-[2px] inline-flex h-tap-target cursor-pointer items-center bg-transparent p-[0px] disabled:cursor-default"
     >
       <span
-        className={`inline-flex h-[40px] w-full items-center justify-center rounded-full border border-text-primary bg-text-primary text-button text-s14 tracking-006 whitespace-nowrap text-on-button transition-transform duration-200 group-enabled:group-hover:-translate-y-px group-disabled:border-hairline group-disabled:bg-transparent group-disabled:text-text-tertiary ${
-          arrow ? "px-[22px]" : "px-[18px]"
-        }`}
+        className={`inline-flex h-[40px] w-full items-center justify-center rounded-full border border-text-primary bg-text-primary text-button text-s14 tracking-006 whitespace-nowrap text-on-button transition-transform duration-200 group-enabled:group-hover:-translate-y-px group-disabled:border-hairline group-disabled:bg-transparent group-disabled:text-text-tertiary ${className}`}
       >
         {opened === null ? (
           <>
-            {/* 數字自己一段（設計稿 .gn）。 */}
-            {splitTemplate(t("library.actions.open")).map((part, index) =>
-              part.slot === null ? part.text : <span key={index}>{count}</span>,
-            )}
-            {arrow ? <OpenArrow className="ml-[6px]" /> : null}
+            {t("library.actions.open")}
+            <OpenArrow className="ml-[6px]" />
           </>
         ) : (
           t("library.actions.opened", { count: opened })
@@ -369,12 +383,27 @@ function OpenArrow({ className }: { className: string }) {
   );
 }
 
+/** 「已選 N 篇」（設計稿 .selc：DM Mono 13px、0.06em、主要字色；數字自己一段 .gn）。 */
+function SelectedCount({ count }: { count: number }) {
+  const { t } = useTranslation("library");
+  return (
+    <span data-library-selected className="font-mono text-s13 tracking-006 whitespace-nowrap text-text-primary">
+      {splitTemplate(t("library.actions.selected")).map((part, index) =>
+        part.slot === null ? part.text : <span key={index}>{count}</span>,
+      )}
+    </span>
+  );
+}
+
 function MaxNote() {
   const { t } = useTranslation("library");
   return <span className="font-mono text-s12 tracking-006 text-text-secondary">{t("library.actions.max")}</span>;
 }
 
-/** 「取消選取」（設計稿 .txt：13px、第二層字色）；看得到的 28px（手機 40px），按鈕本身 44px（ADR-0037）。 */
+/**
+ * 「取消」（設計稿 button.txt.unsel：13px、第二層字色）；看得到的 28px（手機 40px）。可點範圍高 44px、左右各外擴 9px
+ * （設計稿 .txt.hit），負外距抵掉。
+ */
 function CancelButton({ onCancel, className }: { onCancel: () => void; className: string }) {
   const { t } = useTranslation("library");
   return (
@@ -382,51 +411,75 @@ function CancelButton({ onCancel, className }: { onCancel: () => void; className
       type="button"
       data-library="cancel"
       onClick={onCancel}
-      className={`inline-flex h-tap-target min-w-tap-target cursor-pointer items-center bg-transparent p-[0px] text-s13 tracking-004 whitespace-nowrap text-text-secondary transition-[color] duration-200 hover:text-text-primary ${className}`}
+      className={`-mx-[9px] inline-flex h-tap-target cursor-pointer items-center bg-transparent px-[9px] py-[0px] text-s13 tracking-004 whitespace-nowrap text-text-secondary transition-[color] duration-200 hover:text-text-primary ${className}`}
     >
       {t("library.actions.cancel")}
     </button>
   );
 }
 
-/** 900px 以上的動作列（設計稿 .abar）：原地換掉寫篇數的那一行。 */
+/** 900px 以上的選取列（設計稿 .abar）：原地換掉寫篇數的那一行；「已選 N 篇」→「開啟全文」→（一次最多開 10 篇）→「取消」。 */
 function ActionBar(props: ActionProps) {
   return (
     <div data-library-actions className="hidden min-h-[40px] flex-wrap items-center gap-x-[20px] gap-y-2 split:flex">
-      <OpenButton {...props} arrow className="" />
+      <SelectedCount count={props.count} />
+      <OpenButton {...props} className="px-[22px]" />
       {props.over ? <MaxNote /> : null}
-      <CancelButton onCancel={props.onCancel} className="-my-[2px]" />
+      <CancelButton onCancel={props.onCancel} className="-my-2" />
     </div>
   );
 }
 
-/** 899px 以下的動作列（設計稿 .dock）：固定在畫面底部；「一次最多開 10 篇」在最上面一整行。 */
-function Dock(props: ActionProps) {
+/**
+ * 899px 以下的選取列（設計稿 .dock）：黏在視窗底部（清單很短時也在最下面，見 LibraryPage 的 return）。由上到下：結果與說明（有才佔位）、「一次最多開 10 篇」（各佔一整行）、
+ * 左邊「已選 N 篇」、右邊「取消」＋「開啟全文」。
+ */
+function Dock({ notes, ...props }: ActionProps & { notes: ReactNode }) {
   return (
     <div
       data-library-dock
-      className="sticky bottom-[0px] z-[4] -mx-gutter-mobile mt-8 flex flex-wrap items-center justify-between gap-x-3 gap-y-2 border-t border-hairline bg-background px-gutter-mobile pt-3 pb-[14px] tablet:-mx-gutter-tablet tablet:px-gutter-tablet split:hidden"
+      className="sticky bottom-[0px] z-[4] -mx-gutter-mobile flex flex-wrap items-center justify-between gap-x-3 gap-y-2 border-t border-hairline bg-background px-gutter-mobile pt-3 pb-[14px] tablet:-mx-gutter-tablet tablet:px-gutter-tablet split:hidden"
     >
+      {notes}
       {props.over ? (
         <span className="basis-full">
           <MaxNote />
         </span>
       ) : null}
-      <OpenButton {...props} arrow={false} className="" />
-      <CancelButton onCancel={props.onCancel} className="-my-[2px]" />
+      <SelectedCount count={props.count} />
+      <span className="inline-flex items-center gap-[20px]">
+        <CancelButton onCancel={props.onCancel} className="-my-[2px]" />
+        <OpenButton {...props} className="px-[20px]" />
+      </span>
     </div>
   );
 }
 
-/** 動作列下方的一行（設計稿 .anote）：圖示＋14px 的字；有連結時下面接一串連結（.flist）。 */
-function NoteBlock({ note }: { note: Note }) {
+/**
+ * 批次開啟的結果與說明（設計稿 .notes）：讀得到（role=status）。桌機在選取列下面（每段上 10、下 4；連結清單最高 min(40vh,300px)，
+ * 超過在裡面捲）；手機在底部選取列的最上面、佔一整行（每段下 12，相鄰的那一段往上 4；連結清單最高 38vh；沒有內容時不佔位，但留在無障礙樹裡）。
+ */
+function Notes({ notes, mobile }: { notes: Note[]; mobile: boolean }) {
+  return (
+    // 手機：沒有內容時用只給螢幕閱讀器的寫法（絕對定位、1px），不佔底部選取列的一行，但一直在無障礙樹裡；
+    // display:none 的即時播報區在內容插進來的同時才出現，螢幕閱讀器常常不念（審查 R11）。
+    <div role="status" data-library-notes className={mobile ? "basis-full empty:sr-only" : ""}>
+      {notes.map((note, index) => (
+        <NoteBlock key={`${note.kind}-${index}`} note={note} mobile={mobile} first={index === 0} />
+      ))}
+    </div>
+  );
+}
+
+/** 一段說明（設計稿 .anote）：圖示＋14px 的字；有連結時下面接一串連結（.flist）。 */
+function NoteBlock({ note, mobile, first }: { note: Note; mobile: boolean; first: boolean }) {
   const { t } = useTranslation("library");
   const text =
     note.kind === "skipped"
       ? t("library.notes.skipped", { count: note.count })
       : t(note.kind === "blocked" ? "library.notes.blocked" : "library.notes.mobile");
   return (
-    <div data-library-note={note.kind} className="pt-1 pb-[20px]">
+    <div data-library-note={note.kind} className={mobile ? `pb-3 ${first ? "" : "-mt-1"}` : "pt-[10px] pb-1"}>
       <div className="flex items-start gap-[10px] text-s14 leading-170 text-text-reading">
         <span className="flex text-text-secondary">
           <NoticeIcon className="mt-[6px]" />
@@ -434,7 +487,9 @@ function NoteBlock({ note }: { note: Note }) {
         <span>{text}</span>
       </div>
       {note.kind === "skipped" ? null : (
-        <div className="mt-[10px] border-t border-hairline">
+        <div
+          className={`mt-[10px] overflow-auto border-t border-hairline ${mobile ? "max-h-[38vh] overscroll-contain" : "max-h-[min(40vh,300px)]"}`}
+        >
           {note.links.map((link, index) => (
             <a
               key={link.id}
@@ -470,31 +525,24 @@ interface RowProps {
   onRestore: () => void;
 }
 
-/** 「移出」（設計稿 .txt.rm：13px、第三層字色，滑到或聚焦在那一列時變閱讀字色）；看得到的 28px，按鈕本身 44px。 */
-function RemoveButton({ busy, onRemove, className }: { busy: boolean; onRemove: () => void; className: string }) {
-  const { t } = useTranslation("library");
-  return (
-    <button
-      type="button"
-      data-library="remove"
-      disabled={busy}
-      aria-busy={busy || undefined}
-      onClick={onRemove}
-      className={`-my-2 inline-flex h-tap-target min-w-tap-target cursor-pointer items-center bg-transparent p-[0px] text-s13 tracking-004 whitespace-nowrap text-text-tertiary transition-[color] duration-200 group-focus-within:text-text-reading group-hover:text-text-reading hover:text-text-primary disabled:cursor-default ${className}`}
-    >
-      {t("library.row.remove")}
-    </button>
-  );
-}
-
-/** 一篇論文（設計稿 .lrow）：勾選框、標題（連到論文頁）、期刊 · 年份、「移出」；移出後是「已移出」＋標題＋「復原」。 */
+/**
+ * 一篇論文（設計稿第二版 .lrow）：勾選框、標題（連到論文頁）、期刊 · 年份；右側「移出」＋「開啟全文」（沒有 DOI 的只有「移出」）。
+ * 900px 以上右側一欄寬 120（.lact：「移出」靠左、「開啟全文」靠右）；899px 以下兩個在書目下面一行（間距 24）。
+ * 移出後是「已移出」＋標題＋「復原」。
+ */
 function LibraryRow({ item, first, names, selected, gone, restorable, busy, onSelect, onRemove, onRestore }: RowProps) {
   const { t } = useTranslation("library");
   const paper = item.paper;
+  const doiUrl = externalUrl(paper.doi_url);
+  const remove = (className: string) => (
+    <RemoveText title={paper.title} label={t("library.row.remove")} busy={busy} onRemove={onRemove} className={className} />
+  );
   return (
+    // 沒移出時 li 自己就是一排（勾選框、文字、右側動作；設計稿 .lbody），不多包一層：標題的文字離 li 的上框線不超過
+    // 四層，比對工具才量得到每列上方的髮線（設計稿也是三層）。
     <li
       data-library-row={paper.id}
-      className={`group py-[20px] split:py-[22px] ${first ? "" : "border-t border-hairline"}`}
+      className={`group py-[20px] split:py-[22px] ${first ? "" : "border-t border-hairline"} ${gone ? "" : "flex items-start gap-2 split:gap-3"}`}
     >
       {gone ? (
         <div data-library-gone className="flex min-h-[28px] items-center gap-4">
@@ -516,8 +564,9 @@ function LibraryRow({ item, first, names, selected, gone, restorable, busy, onSe
           ) : null}
         </div>
       ) : (
-        <div className="flex items-start gap-2 split:gap-3">
+        <>
           {/* 看得到的勾選框 16px、可點範圍 28px（設計稿 .ck）；label 與輸入框補到 44×44（ADR-0037），負外距抵掉。
+              框線平常是第三層字色，滑到那一列變第二層、滑到勾選框變主要字色；勾了填主要字色（設計稿第二版「勾選框退到次要」）。
               焦點外框照全站規則（外擴 4px，畫在 44×44 外面；設計稿是勾選框外 3px，ADR-0037 兩條規則同時要守，列進決定紀錄）。 */}
           <label className="relative -my-2 -mr-2 -ml-[14px] inline-flex size-tap-target shrink-0 cursor-pointer items-center justify-center">
             <input
@@ -529,8 +578,10 @@ function LibraryRow({ item, first, names, selected, gone, restorable, busy, onSe
             />
             <span
               aria-hidden="true"
-              className={`inline-flex size-4 items-center justify-center border transition-[background-color,border-color] duration-150 peer-hover:border-text-primary ${
-                selected ? "border-text-primary bg-text-primary" : "border-text-secondary"
+              className={`inline-flex size-4 items-center justify-center border transition-[background-color,border-color] duration-150 ${
+                selected
+                  ? "border-text-primary bg-text-primary"
+                  : "border-text-tertiary group-hover:border-text-secondary peer-hover:border-text-primary"
               }`}
             >
               {selected ? (
@@ -541,25 +592,18 @@ function LibraryRow({ item, first, names, selected, gone, restorable, busy, onSe
             </span>
           </label>
           <div className="min-w-[0px] flex-1">
-            <PaperTitle as="h3" size="row" wrap="pretty" className="max-split:text-s20">
-              {/* 標題一行 27px：上下各補 9px 透明的可點範圍（ADR-0037），負外距抵掉（和找論文的論文列一樣）。 */}
-              <Link
-                to="/papers/$paperId"
-                params={{ paperId: paper.id }}
-                className="-my-[9px] block py-[9px] text-text-primary no-underline decoration-1 underline-offset-[5px] hover:underline"
-              >
-                <span className="block">{paper.title}</span>
-              </Link>
-            </PaperTitle>
+            <RowTitle id={paper.id} title={paper.title} />
             <Meta row={paper} names={names} noAbstract={false} />
-            <div className="mt-2 split:hidden">
-              <RemoveButton busy={busy} onRemove={onRemove} className="justify-start" />
+            <div className="mt-2 flex items-center gap-6 split:hidden">
+              {remove("-ml-[9px]")}
+              {doiUrl === null ? null : <OpenFullText href={doiUrl} size="compact" />}
             </div>
           </div>
-          <div className="hidden w-[56px] shrink-0 justify-end split:flex">
-            <RemoveButton busy={busy} onRemove={onRemove} className="justify-end" />
+          <div className="hidden min-h-[28px] w-[120px] shrink-0 items-center justify-between split:flex">
+            {remove("-ml-[9px]")}
+            {doiUrl === null ? null : <OpenFullText href={doiUrl} size="compact" />}
           </div>
-        </div>
+        </>
       )}
     </li>
   );

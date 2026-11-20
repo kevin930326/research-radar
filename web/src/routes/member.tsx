@@ -1,6 +1,7 @@
 import { queryOptions, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Outlet, createRoute, lazyRouteComponent, redirect, useLocation, useNavigate } from "@tanstack/react-router";
+import { Outlet, createRoute, lazyRouteComponent, redirect, useLocation, useNavigate, useRouter } from "@tanstack/react-router";
 import { useEffect, useRef, useState } from "react";
+import { flushSync } from "react-dom";
 
 import { SiteHeader } from "../components/SiteHeader";
 import type { LibraryControl } from "../components/paper/LibraryBlock";
@@ -17,9 +18,17 @@ import { SearchPage } from "../pages/SearchPage";
 import { isPaperId } from "../pages/paper-format";
 import { validateSearchParams, type SearchParams } from "../pages/search-filters";
 import { libraryShown, useLibraryChange } from "./library-change";
-import { displayNamesQuery, paperSource } from "./paper-queries";
+import { displayNamesQuery, hasHeldRows, paperSource } from "./paper-queries";
 import { PAGE_FRAME_CLASS, PlainMain, rootRoute } from "./root";
-import { FIRST_PAGE, clearMemberQueries, loadMember, validateLoginSearch } from "./session";
+import {
+  FIRST_PAGE,
+  clearMemberQueries,
+  loadMember,
+  memberGeneration,
+  trackMemberCheck,
+  validateLoginSearch,
+  type MemberCheckVerdict,
+} from "./session";
 
 // 成員版的路由表（Story 3.5）：
 // - /login：登入頁（開發與試用期間是假登入頁），不用登入。
@@ -54,7 +63,8 @@ function AppLayout() {
     <div className={`${PAGE_FRAME_CLASS} flex min-h-screen flex-col ${mobileMenuOpen ? "max-split:hidden" : ""}`}>
       <SiteHeader member={member} mobileMenuOpen={mobileMenuOpen} onMobileMenuChange={setMobileMenuOpen} />
       {/* 標題離導覽列：900px 以上 72px、899px 以下 40px（設計稿）；頁尾歸 Story 3.15（Kevin 2026-11-16 決定）。 */}
-      <main className="flex-1 px-gutter-mobile pt-[40px] pb-24 tablet:px-gutter-tablet split:pt-[72px] wide:px-gutter-desktop">
+      {/* main 也是直排的 flex：頁面可以撐滿剩下的高度（我的文獻庫的底部選取列在清單很短時也貼在視窗最下面；審查 R9）。 */}
+      <main className="flex flex-1 flex-col px-gutter-mobile pt-[40px] pb-24 tablet:px-gutter-tablet split:pt-[72px] wide:px-gutter-desktop">
         <Offline />
         <Outlet />
       </main>
@@ -121,8 +131,11 @@ const searchRoute = createRoute({
     const navigate = searchRoute.useNavigate();
     const queryClient = useQueryClient();
     const href = useLocation({ select: (location) => location.href });
+    const memberChanged = useMemberCheckWhileHolding();
     return (
       <SearchPage
+        // 換了人：整頁重新掛上（快取已經清掉，清單照新的人重讀；每一列按過的狀態也不留）。
+        key={memberChanged}
         params={params}
         // 篩選改了：換掉這一筆瀏覽紀錄（不是每勾一個就多一筆），捲動位置不動。下一組條件用函式從最新的網址算
         // （上一次換頁還在等「我是誰」時，畫面拿到的條件是舊的；審查 S1-4）。
@@ -139,6 +152,65 @@ const searchRoute = createRoute({
     );
   },
 });
+
+/**
+ * 範圍「我的文獻庫」有本頁移出暫留的列時，清單切回視窗不重讀（paperListQuery），所以另一個分頁換人登入時這一頁看不出來，
+ * 暫留列的「加入我的文獻庫」會用新登入的人的身分加進他的文獻庫（Gemini 參考審查第 1 條；第 2 輪 G1）。
+ * 切回這個分頁時，有暫留列就先問一次「我是誰」（loadMember，和每次進頁面一樣）：
+ * - 還是同一位：不動，暫留列留著。
+ * - 換了人（loadMember 清了快取）：找論文立刻重新掛上（同步重畫，上一位的清單馬上離開畫面、換成骨架，不等導覽列重問），
+ *   再重跑路由的登入檢查（導覽列換成新的人）。
+ * - 沒有人：和清單回 401 一樣清快取、回登入頁並帶 expired（登入已經過期；確認審查 D2）。
+ * - 問不到（網路、伺服器錯誤）：不動。
+ * 確認進行中這一頁的加入／移出先等結果，換了人或沒有人就不送（trackMemberCheck、sendLibraryChange；確認審查 D1）。
+ */
+function useMemberCheckWhileHolding(): number {
+  const queryClient = useQueryClient();
+  const router = useRouter();
+  // 這個分頁看到換人幾次：給找論文當 key，換人就重新掛上（快取清掉之後，畫面上的查詢不會自己重讀）。
+  const [changes, setChanges] = useState(0);
+  useEffect(() => {
+    const check = () => {
+      if (document.visibilityState === "hidden") return;
+      if (queryClient.getQueryCache().findAll({ queryKey: ["paper-list"], type: "active", predicate: hasHeldRows }).length === 0) return;
+      let settle: (verdict: MemberCheckVerdict) => void = () => {};
+      trackMemberCheck(queryClient, new Promise<MemberCheckVerdict>((resolve) => (settle = resolve)));
+      void (async () => {
+        const generation = memberGeneration(queryClient);
+        let member;
+        try {
+          ({ member } = await loadMember(queryClient));
+        } catch {
+          settle("unknown");
+          return;
+        }
+        if (member !== null && memberGeneration(queryClient) === generation) {
+          settle("same");
+          return;
+        }
+        if (member === null) {
+          // 本來在站內（有暫留列）才會走到這裡，所以是登入過期（和 SearchRoute 的 onSignedOut 一樣）。
+          await clearMemberQueries(queryClient);
+          settle("changed");
+          await router.navigate({ to: "/login", search: { next: router.state.location.href, expired: true as const }, replace: true });
+          return;
+        }
+        // 換了人：先同步重畫（重新掛上），再讓等著的加入／移出知道結果，最後才重問導覽列的人。
+        flushSync(() => setChanges((count) => count + 1));
+        settle("changed");
+        await router.invalidate();
+      })();
+    };
+    // 和 TanStack Query 判斷「切回視窗」一樣聽 window 的 visibilitychange（document 發的會冒泡上來）。
+    window.addEventListener("focus", check);
+    window.addEventListener("visibilitychange", check);
+    return () => {
+      window.removeEventListener("focus", check);
+      window.removeEventListener("visibilitychange", check);
+    };
+  }, [queryClient, router]);
+  return changes;
+}
 
 /** 我的文獻庫的網址參數：只有「目前顯示幾篇」（按過「再載入」才有；正整數）。 */
 export function validateLibrarySearch(search: Record<string, unknown>): { shown?: number } {

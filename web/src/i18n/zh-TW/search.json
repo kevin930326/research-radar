@@ -61,7 +61,10 @@
     },
     "row": {
       "add": "加入我的文獻庫",
-      "added": "已加入"
+      "added": "已加入",
+      "addLabel": "加入我的文獻庫：{{title}}",
+      "remove": "移出",
+      "removeLabel": "移出我的文獻庫：{{title}}"
     }
   }
 }

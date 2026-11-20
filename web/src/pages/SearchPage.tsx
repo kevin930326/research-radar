@@ -12,7 +12,7 @@ import { PaperRowList, SkeletonRows } from "../components/search/PaperRows";
 import { CrossIcon, NoticeIcon } from "../components/search/parts";
 import type { PaperList } from "../datasource/types";
 import type { SnapshotRef } from "../generated/model";
-import { clientConfigQuery, displayNamesQuery, filtersKey, libraryCountQuery, paperListQuery } from "../routes/paper-queries";
+import { clientConfigQuery, displayNamesQuery, filtersKey, hasHeldRows, libraryCountQuery, paperListQuery } from "../routes/paper-queries";
 import { formatCount, splitTemplate } from "./paper-format";
 import {
   START_ROWS,
@@ -107,6 +107,14 @@ export function SearchPage({ params: addressParams, onUpdate, onSignedOut }: Sea
     // 「再載入」（同一組條件、多要一頁）時，新的一頁來之前先留著已經顯示的論文；換條件時不留（顯示骨架）。
     placeholderData: (previous, previousQuery) => (previousQuery?.queryKey[1] === key ? previous : undefined),
   });
+
+  // 換了條件：別組條件（範圍我的文獻庫）裡有本頁移出暫留列的那幾份丟掉。換回來時從伺服器重讀，不先把舊的那一份（移出的列還在、
+  // 篇數是移出前的）秀出來再換掉（PR #114 審查 R1；Kevin 2026-11-20 決定「換條件後才照伺服器」）。從論文頁按上一頁回來不算換條件，留著。
+  // 頁面一掛上也做一次（不只在頁面上換條件時）：到別頁再回來時條件可能已經不同（例如導覽列的「找論文」是預設條件），
+  // 上一組條件的暫留清單還在快取裡，之後換回去會先閃出舊的那一份（確認審查 C1）。
+  useEffect(() => {
+    queryClient.removeQueries({ queryKey: ["paper-list"], predicate: (query) => query.queryKey[1] !== key && hasHeldRows(query) });
+  }, [key, queryClient]);
 
   const found = list.data?.kind === "found" ? list.data.list : null;
   // 範圍是我的文獻庫、沒有條件、0 篇：再讀一次文獻庫的篇數，真的是 0 才說「你的文獻庫還沒有論文」；文獻庫有論文、
