@@ -516,7 +516,13 @@ test.describe("search: page shape", () => {
     await openSearch(page);
     const start = page.locator("[data-state='start']");
     await expect(rows(page)).toHaveCount(START_ROWS);
-    await expect(start.getByRole("button")).toHaveCount(await start.locator("[data-library='add']").count());
+    // 按鈕數從假資料算（E1，Kevin 2026-11-20）：起始的 3 篇裡不在我的文獻庫的那幾篇，各一個「加入我的文獻庫」。
+    const startNotInLibrary = filterListRows(LIST_FIXTURES.rows, new URLSearchParams("this_week=true"))!
+      .slice(0, START_ROWS)
+      .filter((entry) => !entry.personal).length;
+    expect(startNotInLibrary).toBe(1);
+    await expect(start.getByRole("button")).toHaveCount(startNotInLibrary);
+    await expect(start.getByRole("button")).toHaveText(Array(startNotInLibrary).fill(text("search:search.row.add")));
     const rowLinks = await start.locator("[data-paper-row]").getByRole("link").count();
     await expect(start.getByRole("link")).toHaveCount(rowLinks + 1);
     await expect(page.getByRole("textbox")).toHaveCount(0);
@@ -527,12 +533,25 @@ test.describe("search: page shape", () => {
     // 「加入我的文獻庫」按鈕（已加入的是「● 已加入」，不能按）。
     await openSearch(page, "?topic=e_commerce");
     await expect(rows(page)).toHaveCount(expectedTotal("topic=e_commerce"));
+    // 已加入與否從假資料判斷（E1，Kevin 2026-11-20），不從畫面讀；兩種列都至少要有一列。
+    const personal = new Set(LIST_FIXTURES.rows.filter((entry) => entry.personal).map((entry) => entry.row.id));
+    const expectedIds = filterListRows(LIST_FIXTURES.rows, new URLSearchParams("topic=e_commerce"))!.map((entry) => entry.row.id);
+    expect(expectedIds.filter((id) => personal.has(id)).length).toBeGreaterThan(0);
+    expect(expectedIds.filter((id) => !personal.has(id)).length).toBeGreaterThan(0);
     const all = await rows(page).all();
     for (const row of all) {
       const id = await row.getAttribute("data-paper-row");
-      const inLibrary = (await row.locator("[data-library='added']").count()) === 1;
-      await expect(row.getByRole("button")).toHaveCount(inLibrary ? 0 : 1);
-      if (!inLibrary) await expect(row.getByRole("button")).toHaveText(text("search:search.row.add"));
+      expect(expectedIds).toContain(id);
+      const added = row.locator("[data-library='added']");
+      if (personal.has(id!)) {
+        await expect(added).toHaveCount(1);
+        await expect(added).toHaveText(text("search:search.row.added"));
+        await expect(row.getByRole("button")).toHaveCount(0);
+      } else {
+        await expect(added).toHaveCount(0);
+        await expect(row.getByRole("button")).toHaveCount(1);
+        await expect(row.getByRole("button")).toHaveText(text("search:search.row.add"));
+      }
       const links = row.getByRole("link");
       const titleLink = row.locator("h3").getByRole("link");
       await expect(titleLink).toHaveAttribute("href", `/papers/${id}`);
