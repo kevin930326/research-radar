@@ -14,7 +14,7 @@ import { useCallback } from "react";
 
 import type { LibrarySource, PaperPage } from "../datasource/types";
 import { librarySource, markInLibrary } from "./paper-queries";
-import { clearMemberQueries, memberGeneration } from "./session";
+import { clearMemberQueries, memberGeneration, pendingMemberCheck } from "./session";
 
 export type LibraryAction = "add" | "remove" | "restore";
 export type LibraryChangeOutcome = "done" | "alreadyGone" | "failed";
@@ -35,6 +35,12 @@ export async function sendLibraryChange(
 ): Promise<LibraryChangeOutcome> {
   const generation = memberGeneration(queryClient);
   const stillCurrent = () => memberGeneration(queryClient) === generation;
+  // 找論文切回視窗、正在確認登入的人：等結果，換了人（或沒有人）就不送，畫面上的是上一位的清單（PR #114 確認審查 D1）。
+  // 沒有進行中的確認時不等（不多一個 await，其他時候的行為不變）。
+  const check = pendingMemberCheck(queryClient);
+  if (check !== undefined && (await check) === "changed") {
+    return "failed";
+  }
   let result;
   try {
     result = await source[action](paperId);

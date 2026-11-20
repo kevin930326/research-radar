@@ -1,6 +1,7 @@
 import { queryOptions, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Outlet, createRoute, lazyRouteComponent, redirect, useLocation, useNavigate, useRouter } from "@tanstack/react-router";
 import { useEffect, useRef, useState } from "react";
+import { flushSync } from "react-dom";
 
 import { SiteHeader } from "../components/SiteHeader";
 import type { LibraryControl } from "../components/paper/LibraryBlock";
@@ -19,7 +20,15 @@ import { validateSearchParams, type SearchParams } from "../pages/search-filters
 import { libraryShown, useLibraryChange } from "./library-change";
 import { displayNamesQuery, hasHeldRows, paperSource } from "./paper-queries";
 import { PAGE_FRAME_CLASS, PlainMain, rootRoute } from "./root";
-import { FIRST_PAGE, clearMemberQueries, loadMember, memberGeneration, validateLoginSearch } from "./session";
+import {
+  FIRST_PAGE,
+  clearMemberQueries,
+  loadMember,
+  memberGeneration,
+  trackMemberCheck,
+  validateLoginSearch,
+  type MemberCheckVerdict,
+} from "./session";
 
 // 成員版的路由表（Story 3.5）：
 // - /login：登入頁（開發與試用期間是假登入頁），不用登入。
@@ -147,8 +156,13 @@ const searchRoute = createRoute({
 /**
  * 範圍「我的文獻庫」有本頁移出暫留的列時，清單切回視窗不重讀（paperListQuery），所以另一個分頁換人登入時這一頁看不出來，
  * 暫留列的「加入我的文獻庫」會用新登入的人的身分加進他的文獻庫（Gemini 參考審查第 1 條；第 2 輪 G1）。
- * 切回這個分頁時，有暫留列就先問一次「我是誰」（loadMember，和每次進頁面一樣）：換了人（loadMember 清了快取）或沒有人，
- * 就重跑路由的登入檢查（換人：清單照新的人重讀；沒有人：回登入頁）。還是同一位就不動，暫留列留著。
+ * 切回這個分頁時，有暫留列就先問一次「我是誰」（loadMember，和每次進頁面一樣）：
+ * - 還是同一位：不動，暫留列留著。
+ * - 換了人（loadMember 清了快取）：找論文立刻重新掛上（同步重畫，上一位的清單馬上離開畫面、換成骨架，不等導覽列重問），
+ *   再重跑路由的登入檢查（導覽列換成新的人）。
+ * - 沒有人：和清單回 401 一樣清快取、回登入頁並帶 expired（登入已經過期；確認審查 D2）。
+ * - 問不到（網路、伺服器錯誤）：不動。
+ * 確認進行中這一頁的加入／移出先等結果，換了人或沒有人就不送（trackMemberCheck、sendLibraryChange；確認審查 D1）。
  */
 function useMemberCheckWhileHolding(): number {
   const queryClient = useQueryClient();
@@ -159,18 +173,32 @@ function useMemberCheckWhileHolding(): number {
     const check = () => {
       if (document.visibilityState === "hidden") return;
       if (queryClient.getQueryCache().findAll({ queryKey: ["paper-list"], type: "active", predicate: hasHeldRows }).length === 0) return;
+      let settle: (verdict: MemberCheckVerdict) => void = () => {};
+      trackMemberCheck(queryClient, new Promise<MemberCheckVerdict>((resolve) => (settle = resolve)));
       void (async () => {
         const generation = memberGeneration(queryClient);
         let member;
         try {
           ({ member } = await loadMember(queryClient));
         } catch {
+          settle("unknown");
           return;
         }
-        if (member !== null && memberGeneration(queryClient) === generation) return;
-        // 沒有人：重跑登入檢查會回登入頁。換了人：導覽列換成新的人，找論文重新掛上。
+        if (member !== null && memberGeneration(queryClient) === generation) {
+          settle("same");
+          return;
+        }
+        if (member === null) {
+          // 本來在站內（有暫留列）才會走到這裡，所以是登入過期（和 SearchRoute 的 onSignedOut 一樣）。
+          await clearMemberQueries(queryClient);
+          settle("changed");
+          await router.navigate({ to: "/login", search: { next: router.state.location.href, expired: true as const }, replace: true });
+          return;
+        }
+        // 換了人：先同步重畫（重新掛上），再讓等著的加入／移出知道結果，最後才重問導覽列的人。
+        flushSync(() => setChanges((count) => count + 1));
+        settle("changed");
         await router.invalidate();
-        if (member !== null) setChanges((count) => count + 1);
       })();
     };
     // 和 TanStack Query 判斷「切回視窗」一樣聽 window 的 visibilitychange（document 發的會冒泡上來）。

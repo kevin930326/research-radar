@@ -50,6 +50,25 @@ export function memberGeneration(queryClient: QueryClient): number {
   return generations.get(queryClient) ?? 0;
 }
 
+/** 切回視窗時確認登入的人的結果：還是同一位、換了人或沒有人、問不到。 */
+export type MemberCheckVerdict = "same" | "changed" | "unknown";
+
+/** 進行中的「確認登入的人」（找論文有暫留列、切回視窗時；PR #114 確認審查 D1）。 */
+const memberChecks = new WeakMap<QueryClient, Promise<MemberCheckVerdict>>();
+
+/** 記下一次進行中的確認；有結果之後拿掉（之後又開始新的一次就留新的那一次）。 */
+export function trackMemberCheck(queryClient: QueryClient, verdict: Promise<MemberCheckVerdict>): void {
+  memberChecks.set(queryClient, verdict);
+  void verdict.then(() => {
+    if (memberChecks.get(queryClient) === verdict) memberChecks.delete(queryClient);
+  });
+}
+
+/** 進行中的確認（沒有就是 undefined）：加入、移出送出前要等它，結果是換了人就不送（D1）。 */
+export function pendingMemberCheck(queryClient: QueryClient): Promise<MemberCheckVerdict> | undefined {
+  return memberChecks.get(queryClient);
+}
+
 /**
  * 每次進成員版的頁面先問「我是誰」。快取裡原本是另一位成員時（例如在另一個分頁登出、換人登入，cookie 換了），
  * 先清掉所有查詢快取再繼續：快取裡的論文列、文獻庫都是上一位的（審查 F1）。`wasSignedIn` 是問之前快取裡有沒有成員。

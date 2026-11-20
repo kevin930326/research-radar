@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 
 import type { Page } from "@playwright/test";
 
-import { LIST_FIXTURES, MEMBERS, filterListRows, gate, libraryOf, paperId, type ApiRequest, type ListFixtureRow } from "./api-mock.ts";
+import { LIST_FIXTURES, MEMBERS, filterListRows, gate, libraryOf, paperId, type ApiMockState, type ApiRequest, type ListFixtureRow } from "./api-mock.ts";
 import { TEXT } from "./expected.ts";
 import { expect, test } from "./fixtures.ts";
 import { SITES } from "./pages.ts";
@@ -1530,5 +1530,122 @@ test.describe("search rows: remove (review fixes, round 2)", () => {
     await expect(page.locator("[data-paper-row]")).toHaveCount(before.length);
     await expect(searchRow(page, before[0]!).locator("[data-library='add']")).toBeEnabled();
     await expect(heading(page)).toHaveText(found(before.length));
+  });
+});
+
+// PR #114 第 3 輪修正（確認審查 D1、D2）：有暫留列、切回視窗確認登入的人時，上一位的清單不能寫進新登入的人的文獻庫；
+// 確認時已經沒有人要帶「登入已經過期」。
+test.describe("search rows: remove (review fixes, round 3)", () => {
+  const searchRow = (page: Page, id: string) => page.locator(`[data-paper-row="${id}"]`);
+  const heading = (page: Page) => page.locator("main").getByRole("heading", { level: 2 });
+  const found = (count: number) => fill(text("search:search.results.found"), { count });
+  const writes = (requests: ApiRequest[]) => requests.filter((request) => request.method !== "GET" && request.path.startsWith("/api/v1/library/"));
+  const meAsks = (requests: ApiRequest[]) => requests.filter((request) => request.path === "/api/v1/me").length;
+
+  /** 甲：範圍我的文獻庫有 held（移出暫留）與 shared 兩列；乙的文獻庫有 shared（甲也有的那一篇）與 bOnly。 */
+  async function holdAsA(page: Page, apiMock: ApiMockState) {
+    const held = ROWS[0]!.row.id;
+    const shared = ROWS[2]!.row.id;
+    const bOnly = ROWS[1]!.row.id;
+    apiMock.libraryIds = [held, shared];
+    libraryOf(apiMock, MEMBERS[1]!.member_id).items = [
+      { id: shared, addedAt: "2026-11-01T00:00:00.000Z" },
+      { id: bOnly, addedAt: "2026-11-02T00:00:00.000Z" },
+    ];
+    await page.setViewportSize(DESKTOP);
+    await page.goto(`${member.baseURL}/search?scope=personal`);
+    await expect(page.locator("[data-paper-row]")).toHaveCount(2);
+    await searchRow(page, held).locator("[data-library='remove']").click();
+    await expect(searchRow(page, held).locator("[data-library='add']")).toBeFocused();
+    expect(libraryOf(apiMock, MEMBERS[0]!.member_id).items.map((record) => record.id)).toEqual([shared]);
+    const before = writes(apiMock.requests).length;
+    return { held, shared, bOnly, before };
+  }
+
+  /** 甲的清單上還在的按鈕都按一下（不在、停用的不算；和滑鼠點一樣是 click）。 */
+  async function pressOldButtons(page: Page, held: string, shared: string) {
+    await page.evaluate(
+      ([heldId, sharedId]) => {
+        document.querySelector<HTMLButtonElement>(`[data-paper-row="${heldId}"] [data-library='add']`)?.click();
+        document.querySelector<HTMLButtonElement>(`[data-paper-row="${sharedId}"] [data-library='remove']`)?.click();
+      },
+      [held, shared],
+    );
+  }
+
+  test("B signs in from another tab; back to this tab; after /me answers B and before the page asks again: A's buttons send nothing, B's library is unchanged (D1)", async ({ page, apiMock }) => {
+    const { held, shared, bOnly, before } = await holdAsA(page, apiMock);
+    // 切回之後第 1 次「我是誰」照常回答（乙），之後的（重跑登入檢查）先卡住。
+    const asked = meAsks(apiMock.requests);
+    const [laterMe, releaseLaterMe] = gate();
+    await page.route("**/api/v1/me", async (route) => {
+      if (meAsks(apiMock.requests) > asked) await laterMe;
+      await route.fallback();
+    });
+    apiMock.member = MEMBERS[1]!;
+    const firstAnswer = page.waitForResponse((response) => new URL(response.url()).pathname === "/api/v1/me");
+    await page.evaluate(() => window.dispatchEvent(new Event("visibilitychange")));
+    await firstAnswer;
+    await expect.poll(() => meAsks(apiMock.requests)).toBe(asked + 1);
+    await pressOldButtons(page, held, shared);
+    // 甲的清單已經不在畫面上（換成骨架或乙的清單；乙沒有暫留的那一篇），不等第 2 次「我是誰」。
+    await expect(searchRow(page, held)).toHaveCount(0);
+    releaseLaterMe();
+    await expect(searchRow(page, bOnly)).toBeVisible();
+    await expect(heading(page)).toHaveText(found(2));
+    await twoFrames(page);
+    expect(writes(apiMock.requests)).toHaveLength(before);
+    expect(libraryOf(apiMock, MEMBERS[1]!.member_id).items.map((record) => record.id)).toEqual([shared, bOnly]);
+  });
+
+  test("B signs in from another tab; back to this tab; pressing A's buttons while /me is still on the way: nothing is sent, B's library is unchanged (D1)", async ({ page, apiMock }) => {
+    const { held, shared, bOnly, before } = await holdAsA(page, apiMock);
+    const asked = meAsks(apiMock.requests);
+    const [meGate, releaseMe] = gate();
+    apiMock.meGate = meGate;
+    apiMock.member = MEMBERS[1]!;
+    await page.evaluate(() => window.dispatchEvent(new Event("visibilitychange")));
+    await expect.poll(() => meAsks(apiMock.requests)).toBe(asked + 1);
+    // 「我是誰」還在路上：甲的按鈕看起來還能按，按了先等確認。
+    await searchRow(page, held).locator("[data-library='add']").click();
+    await searchRow(page, shared).locator("[data-library='remove']").click();
+    await twoFrames(page);
+    expect(writes(apiMock.requests)).toHaveLength(before);
+    apiMock.meGate = null;
+    releaseMe();
+    await expect(searchRow(page, bOnly)).toBeVisible();
+    await expect(heading(page)).toHaveText(found(2));
+    await expect(searchRow(page, held)).toHaveCount(0);
+    await twoFrames(page);
+    expect(writes(apiMock.requests)).toHaveLength(before);
+    expect(libraryOf(apiMock, MEMBERS[1]!.member_id).items.map((record) => record.id)).toEqual([shared, bOnly]);
+  });
+
+  test("same member, pressing 'add' on the held row while /me is still on the way: sent after the answer, the row is added back (D1)", async ({ page, apiMock }) => {
+    const { held, shared, before } = await holdAsA(page, apiMock);
+    const asked = meAsks(apiMock.requests);
+    const [meGate, releaseMe] = gate();
+    apiMock.meGate = meGate;
+    await page.evaluate(() => window.dispatchEvent(new Event("visibilitychange")));
+    await expect.poll(() => meAsks(apiMock.requests)).toBe(asked + 1);
+    await searchRow(page, held).locator("[data-library='add']").click();
+    await twoFrames(page);
+    expect(writes(apiMock.requests)).toHaveLength(before);
+    apiMock.meGate = null;
+    releaseMe();
+    await expect(searchRow(page, held).locator("[data-library='added']")).toBeVisible();
+    expect(writes(apiMock.requests)).toHaveLength(before + 1);
+    expect(libraryOf(apiMock, MEMBERS[0]!.member_id).items.map((record) => record.id).sort()).toEqual([held, shared].sort());
+  });
+
+  test("signed out from another tab; back to this tab: the login page says the sign-in expired (D2)", async ({ page, apiMock }) => {
+    await holdAsA(page, apiMock);
+    apiMock.member = null;
+    await page.evaluate(() => window.dispatchEvent(new Event("visibilitychange")));
+    await expect(page).toHaveURL(/\/login\?/);
+    const url = new URL(page.url());
+    expect(url.searchParams.get("next")).toBe("/search?scope=personal");
+    expect(url.searchParams.get("expired")).toBe("true");
+    await expect(page.locator("[data-login-note='expired']")).toBeVisible();
   });
 });
