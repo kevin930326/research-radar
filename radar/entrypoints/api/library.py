@@ -2,6 +2,11 @@
 
 - 四個端點都要登入（沒登入 401 `not_authenticated`），回應都帶 `Cache-Control: no-store`；會改資料的
   三個（PUT、DELETE、POST）由 router 的相依項檢查 `Origin`（`check_origin`）。
+- 會改資料的三個共用一個相依項（`acting_member`）認 session 的成員，並比對請求標頭
+  `X-Radar-Expected-Member`（這個分頁以為的成員，ADR-0055）：有帶、和 session 的成員不同 → 409
+  `member_changed`；值不是成員 ID（或重複出現）→ 400 `expected_member_invalid`；兩種都在呼叫
+  services 之前擋下，什麼都不寫。沒帶標頭照常（權限只看 session；這個標頭防的是自己人的舊分頁，
+  不是惡意請求）。
 - `GET /api/v1/library`：自己的文獻庫的一頁（`items`、`next_cursor`、`total`）；別人讀到的是自己的
   （沒有就是空清單）。`cursor` 不是上一頁給的寫法 → 422 `request_invalid`。
 - `PUT /api/v1/library/{paper_id}`：加入（`added_via = manual`）；已經在就回原本那一筆。
@@ -21,10 +26,13 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from functools import partial
+from typing import Annotated, Final
 
+import structlog
 from fastapi import APIRouter, Depends, FastAPI, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
 
+from radar.domain.auth import AuthenticatedMember
 from radar.domain.contracts import PaperRow, UtcDateTime
 from radar.domain.domain_config import JournalsConfig
 from radar.domain.errors import ErrorCode
@@ -50,6 +58,12 @@ from radar.entrypoints.bootstrap import Database
 from radar.services import library as library_service
 
 type LibraryChange = Callable[[MemberViewer, uuid.UUID], LibraryEntry | None]
+
+# 前端送加入、移出、復原時帶的「這個分頁以為的成員」（這一頁載入時 `/me` 回的 member_id；
+# ADR-0055）。
+EXPECTED_MEMBER_HEADER: Final = "X-Radar-Expected-Member"
+
+log = structlog.get_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -135,6 +149,42 @@ def _paper_id(value: str) -> uuid.UUID:
         raise _not_found() from None
 
 
+def _expected_member(value: str) -> uuid.UUID | None:
+    """標頭的值 → 成員 ID；只收標準寫法（36 字、有連字號，大小寫不拘），其他回 None。"""
+    try:
+        parsed = uuid.UUID(value)
+    except ValueError:
+        return None
+    return parsed if str(parsed) == value.lower() else None
+
+
+def check_expected_member(request: Request, member: AuthenticatedMember) -> None:
+    """請求帶了 `X-Radar-Expected-Member` 時，要和這次 session 的成員是同一位（ADR-0055）。
+
+    沒帶就不檢查（照常）。比對的是 session 認出的成員，不看請求裡別的欄位。
+
+    Raises:
+        ApiProblemError: `expected_member_invalid`（值不是成員 ID，或標頭出現不只一次）、
+            `member_changed`（和 session 的成員不同）；都帶 `no-store`。
+    """
+    values = request.headers.getlist(EXPECTED_MEMBER_HEADER)
+    if not values:
+        return
+    expected = _expected_member(values[0]) if len(values) == 1 else None
+    if expected is None:
+        log.warning(
+            "文獻庫寫入的預期成員標頭格式不對，拒絕",
+            method=request.method,
+            path=request.url.path,
+            header_count=len(values),
+        )
+        raise ApiProblemError(ErrorCode.EXPECTED_MEMBER_INVALID, headers=NO_STORE)
+    if expected != member.member_id:
+        # 不記成員 ID：兩位成員的 ID 一起進日誌沒有必要（只要知道擋過）。
+        log.info("文獻庫寫入的預期成員和 session 不同（換了人），不寫", method=request.method)
+        raise ApiProblemError(ErrorCode.MEMBER_CHANGED, headers=NO_STORE)
+
+
 def install_library_routes(app: FastAPI, routes: LibraryRoutes, auth_routes: AuthRoutes) -> None:
     """把文獻庫路由裝到 `app` 上（登入與 `Origin` 檢查用 `auth_routes`）。一定要在 `mount_web`
     之前呼叫。
@@ -147,10 +197,16 @@ def install_library_routes(app: FastAPI, routes: LibraryRoutes, auth_routes: Aut
 
     router = APIRouter(prefix=API_V1_PREFIX, dependencies=[Depends(origin_dependency(auth_routes))])
 
-    def change(
-        request: Request, response: Response, paper_id: str, run: LibraryChange
-    ) -> LibraryItemResponse:
+    def acting_member(request: Request) -> AuthenticatedMember:
+        # 三個寫入共用：先認 session（沒登入 401），再比對預期成員（409／400）；都在呼叫 services
+        # 之前。
         member = current_member(request, auth_routes)
+        check_expected_member(request, member)
+        return member
+
+    def change(
+        member: AuthenticatedMember, response: Response, paper_id: str, run: LibraryChange
+    ) -> LibraryItemResponse:
         entry = run(member.viewer, _paper_id(paper_id))
         if entry is None:
             raise _not_found()
@@ -180,26 +236,37 @@ def install_library_routes(app: FastAPI, routes: LibraryRoutes, auth_routes: Aut
 
     @router.put("/library/{paper_id}")
     def add_library_item(
-        paper_id: str, request: Request, response: Response
+        paper_id: str,
+        member: Annotated[AuthenticatedMember, Depends(acting_member)],
+        response: Response,
     ) -> LibraryItemResponse:
         """把一篇看得到的論文加進自己的文獻庫；已經在就回原本那一筆。看不到、不存在、ID 不是 UUID
-        都回同一個 404，沒登入 401；`Origin` 缺少或不是本站 403 `origin_rejected`。"""
-        return change(request, response, paper_id, routes.add)
+        都回同一個 404，沒登入 401；`Origin` 缺少或不是本站 403 `origin_rejected`；
+        `X-Radar-Expected-Member` 和登入的成員不同 409 `member_changed`、格式不對 400
+        `expected_member_invalid`。"""
+        return change(member, response, paper_id, routes.add)
 
     @router.delete("/library/{paper_id}")
     def remove_library_item(
-        paper_id: str, request: Request, response: Response
+        paper_id: str,
+        member: Annotated[AuthenticatedMember, Depends(acting_member)],
+        response: Response,
     ) -> LibraryItemResponse:
         """把一篇移出自己的文獻庫，回移出前的那一筆；不在自己的文獻庫回 404，沒登入 401；`Origin`
-        缺少或不是本站 403 `origin_rejected`。"""
-        return change(request, response, paper_id, routes.remove)
+        缺少或不是本站 403 `origin_rejected`；`X-Radar-Expected-Member` 和登入的成員不同 409
+        `member_changed`、格式不對 400 `expected_member_invalid`。"""
+        return change(member, response, paper_id, routes.remove)
 
     @router.post("/library/{paper_id}/restore")
     def restore_library_item(
-        paper_id: str, request: Request, response: Response
+        paper_id: str,
+        member: Annotated[AuthenticatedMember, Depends(acting_member)],
+        response: Response,
     ) -> LibraryItemResponse:
         """復原最近一次移出的那一篇（原本的加入方式與時間）；已經在文獻庫就回現在那一筆，不動任何
-        封存。自己沒有移出過回 404，沒登入 401；`Origin` 缺少或不是本站 403 `origin_rejected`。"""
-        return change(request, response, paper_id, routes.restore)
+        封存。自己沒有移出過回 404，沒登入 401；`Origin` 缺少或不是本站 403 `origin_rejected`；
+        `X-Radar-Expected-Member` 和登入的成員不同 409 `member_changed`、格式不對 400
+        `expected_member_invalid`。"""
+        return change(member, response, paper_id, routes.restore)
 
     app.include_router(router)

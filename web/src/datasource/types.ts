@@ -126,20 +126,30 @@ export type LibraryListResult = { kind: "found"; list: LibraryList } | { kind: "
  * - `done`：成功，`item` 是後端回的那一筆（加入、復原是現在那一筆；移出是移出前那一筆）。
  * - `notFound`：看不到、不存在、不在文獻庫、沒有可以復原的（後端回同一個 404）。
  * - `signedOut`：沒登入或登入過期（401）。
+ * - `memberChanged`：帶了「這個分頁以為的成員」，後端說和現在登入的人不同（409 `member_changed`，另一個分頁換了人），
+ *   什麼都沒寫（ADR-0055）。
  * 其他錯誤（網路、伺服器錯誤）丟出例外。
  */
-export type LibraryChangeResult = { kind: "done"; item: LibraryItem } | { kind: "notFound" } | { kind: "signedOut" };
+export type LibraryChangeResult =
+  | { kind: "done"; item: LibraryItem }
+  | { kind: "notFound" }
+  | { kind: "signedOut" }
+  | { kind: "memberChanged" };
 
-/** 我的文獻庫（只有成員版有；示範站沒有文獻庫）。 */
+/**
+ * 我的文獻庫（只有成員版有；示範站沒有文獻庫）。
+ * 加入、移出、復原的 `expectedMemberId`：這個分頁以為的成員（這一頁載入時「我是誰」回的 member_id），放進請求標頭；
+ * 和現在登入的人不同時後端不寫、回 `memberChanged`（ADR-0055）。畫面一律經 useLibraryChange 送，一定會帶。
+ */
 export interface LibrarySource {
   /** 依加入時間新到舊列出，一頁一頁往下讀到有 `limit` 篇或沒有下一頁；給了 `previous` 就接著讀（「再載入」）。 */
   list(limit: number, previous?: LibraryList | null): Promise<LibraryListResult>;
   /** 加入（冪等：已經在了回原本那一筆）。`paperId` 由呼叫端先確認是 UUID。 */
-  add(paperId: string): Promise<LibraryChangeResult>;
+  add(paperId: string, expectedMemberId?: string): Promise<LibraryChangeResult>;
   /** 移出。 */
-  remove(paperId: string): Promise<LibraryChangeResult>;
+  remove(paperId: string, expectedMemberId?: string): Promise<LibraryChangeResult>;
   /** 復原剛移出的那一篇（回到原本那一筆）。 */
-  restore(paperId: string): Promise<LibraryChangeResult>;
+  restore(paperId: string, expectedMemberId?: string): Promise<LibraryChangeResult>;
 }
 
 export interface DataSource {

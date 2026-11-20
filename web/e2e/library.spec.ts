@@ -7,7 +7,19 @@ import { fileURLToPath } from "node:url";
 
 import type { Page } from "@playwright/test";
 
-import { LIST_FIXTURES, MEMBERS, filterListRows, gate, libraryOf, paperId, type ApiMockState, type ApiRequest, type ListFixtureRow } from "./api-mock.ts";
+import {
+  EXPECTED_MEMBER_HEADER,
+  LIST_FIXTURES,
+  MEMBERS,
+  filterListRows,
+  gate,
+  libraryOf,
+  paperId,
+  paperPage,
+  type ApiMockState,
+  type ApiRequest,
+  type ListFixtureRow,
+} from "./api-mock.ts";
 import { TEXT } from "./expected.ts";
 import { expect, test } from "./fixtures.ts";
 import { SITES } from "./pages.ts";
@@ -1647,5 +1659,165 @@ test.describe("search rows: remove (review fixes, round 3)", () => {
     expect(url.searchParams.get("next")).toBe("/search?scope=personal");
     expect(url.searchParams.get("expired")).toBe("true");
     await expect(page.locator("[data-login-note='expired']")).toBeVisible();
+  });
+});
+
+// epic-3h PR 3（ADR-0055）：另一個分頁換成乙登入之後，甲的分頁在發現換人之前按的加入、移出、復原帶著「這個分頁以為的成員」（甲），
+// 後端（替身）和現在登入的乙不同就回 409、什麼都不寫；畫面照「發現換人」換成乙的資料。epic-3g 審查的四個情境（Q8、找論文的加入、
+// 論文頁的加入與移出、我的文獻庫的復原 P3-2）與「我是誰」問不到（L2）各一條；預期都從假資料算或寫死。
+test.describe("writes from a tab that still shows the previous member (ADR-0055)", () => {
+  const A = MEMBERS[0]!;
+  const B = MEMBERS[1]!;
+  const searchRow = (page: Page, id: string) => page.locator(`[data-paper-row="${id}"]`);
+  const heading = (page: Page) => page.locator("main").getByRole("heading", { level: 2 });
+  const found = (count: number) => fill(text("search:search.results.found"), { count });
+  const idsOf = (state: ApiMockState, memberId: string) => libraryOf(state, memberId).items.map((record) => record.id);
+
+  /** 下一個文獻庫寫入（method）送出時帶的標頭與替身的回應狀態。 */
+  function nextWrite(page: Page, method: string) {
+    return page
+      .waitForResponse((response) => response.request().method() === method && new URL(response.url()).pathname.startsWith("/api/v1/library/"))
+      .then(async (response) => ({ expected: (await response.request().allHeaders())[EXPECTED_MEMBER_HEADER], status: response.status() }));
+  }
+
+  test("Q8: no held rows, scope 'my library', A and B both have the paper; B signs in elsewhere and A presses remove at once: B's library is unchanged, the page becomes B's", async ({ page, apiMock: state }) => {
+    const aOnly = ROWS[0]!.row.id;
+    const bOnly = ROWS[1]!.row.id;
+    const shared = ROWS[2]!.row.id;
+    state.libraryIds = [aOnly, shared];
+    libraryOf(state, B.member_id).items = [
+      { id: shared, addedAt: "2026-11-01T00:00:00.000Z" },
+      { id: bOnly, addedAt: "2026-11-02T00:00:00.000Z" },
+    ];
+    await page.setViewportSize(DESKTOP);
+    await page.goto(`${member.baseURL}/search?scope=personal`);
+    await expect(page.locator("[data-paper-row]")).toHaveCount(2);
+    state.member = B;
+    await page.evaluate(() => window.dispatchEvent(new Event("visibilitychange")));
+    const write = nextWrite(page, "DELETE");
+    await searchRow(page, shared).locator("[data-library='remove']").click();
+    expect(await write).toEqual({ expected: A.member_id, status: 409 });
+    await expect(searchRow(page, bOnly)).toBeVisible();
+    await expect(searchRow(page, aOnly)).toHaveCount(0);
+    await expect(heading(page)).toHaveText(found(2));
+    await expect(searchRow(page, shared).locator("[data-library='added']")).toBeVisible();
+    expect(idsOf(state, B.member_id)).toEqual([shared, bOnly]);
+    expect(idsOf(state, A.member_id)).toEqual([aOnly, shared]);
+    expect(libraryOf(state, B.member_id).removed).toEqual([]);
+  });
+
+  test("search: B signs in elsewhere and A presses add: nothing is added to B's library, the page becomes B's", async ({ page, apiMock: state }) => {
+    const query = "topic=e_commerce";
+    const shown = filterListRows(ROWS, new URLSearchParams(query))!;
+    const notMine = shown.filter((entry) => !entry.personal).map((entry) => entry.row.id);
+    const [target, bOnly] = [notMine[0]!, notMine[1]!];
+    libraryOf(state, B.member_id).items = [{ id: bOnly, addedAt: "2026-11-01T00:00:00.000Z" }];
+    await page.setViewportSize(DESKTOP);
+    await page.goto(`${member.baseURL}/search?${query}`);
+    await expect(page.locator("[data-paper-row]")).toHaveCount(shown.length);
+    await expect(searchRow(page, bOnly).locator("[data-library='add']")).toBeVisible();
+    state.member = B;
+    const write = nextWrite(page, "PUT");
+    await searchRow(page, target).locator("[data-library='add']").click();
+    expect(await write).toEqual({ expected: A.member_id, status: 409 });
+    // 乙的資料：乙加過的那一篇是「● 已加入」，甲的那幾篇與按的那一篇是「加入我的文獻庫」，按鈕沒有停在送出中。
+    await expect(searchRow(page, bOnly).locator("[data-library='added']")).toBeVisible();
+    await expect(page.locator("[data-library='added']")).toHaveCount(1);
+    await expect(searchRow(page, target).locator("[data-library='add']")).toBeEnabled();
+    expect(idsOf(state, B.member_id)).toEqual([bOnly]);
+  });
+
+  for (const action of ["add", "remove"] as const) {
+    test(`paper page: B signs in elsewhere and A presses ${action}: B's library is unchanged, the page becomes B's`, async ({ page, apiMock: state }) => {
+      const normal = paperId("normal");
+      const forB = "Paper title member B sees";
+      const inLibrary = action === "remove";
+      state.libraryIds = inLibrary ? [normal] : [];
+      libraryOf(state, B.member_id).items = inLibrary ? [{ id: normal, addedAt: "2026-11-01T00:00:00.000Z" }] : [];
+      await page.setViewportSize(DESKTOP);
+      await page.goto(`${member.baseURL}/papers/${normal}`);
+      const rail = page.locator("[data-library='rail']");
+      const button = rail.getByRole("button", { name: text(`paper:paper.library.${action}`) });
+      await expect(button).toBeVisible();
+      state.member = B;
+      state.paperByMember = { [B.member_id]: { ...paperPage("normal"), paper: { ...paperPage("normal").paper, title: forB }, in_my_library: inLibrary } };
+      const write = nextWrite(page, action === "add" ? "PUT" : "DELETE");
+      await button.click();
+      expect(await write).toEqual({ expected: A.member_id, status: 409 });
+      await expect(page.locator("h1")).toHaveText(forB);
+      if (inLibrary) {
+        await expect(rail).toContainText(text("paper:paper.library.added"));
+        await expect(rail.getByRole("button", { name: text("paper:paper.library.remove") })).toBeEnabled();
+      } else {
+        await expect(rail.getByRole("button", { name: text("paper:paper.library.add") })).toBeEnabled();
+      }
+      expect(idsOf(state, B.member_id)).toEqual(inLibrary ? [normal] : []);
+      expect(libraryOf(state, B.member_id).removed).toEqual([]);
+    });
+  }
+
+  test("my library page: A removes a paper, B signs in elsewhere, A presses undo: B's library and B's removed record are unchanged, the page becomes B's (P3-2)", async ({ page, apiMock: state }) => {
+    const aOnly = ROWS[0]!.row.id;
+    const bOnly = ROWS[1]!.row.id;
+    const shared = ROWS[2]!.row.id;
+    state.libraryIds = [aOnly, shared];
+    // 乙之前也移出過同一篇：沒有保護的話，甲畫面上的「復原」會用乙的身分把它加回乙的文獻庫。
+    const bRemoved = { id: shared, addedAt: "2026-10-01T00:00:00.000Z" };
+    libraryOf(state, B.member_id).items = [{ id: bOnly, addedAt: "2026-11-01T00:00:00.000Z" }];
+    libraryOf(state, B.member_id).removed = [bRemoved];
+    await openLibrary(page);
+    await expect(rows(page)).toHaveCount(2);
+    await row(page, shared).locator("[data-library='remove']:visible").click();
+    await expect(row(page, shared).locator("[data-library='restore']")).toBeFocused();
+    expect(idsOf(state, A.member_id)).toEqual([aOnly]);
+    state.member = B;
+    const write = nextWrite(page, "POST");
+    await row(page, shared).locator("[data-library='restore']").click();
+    expect(await write).toEqual({ expected: A.member_id, status: 409 });
+    await expect(row(page, bOnly)).toBeVisible();
+    await expect(rows(page)).toHaveCount(1);
+    await expect(row(page, aOnly)).toHaveCount(0);
+    expect(idsOf(state, B.member_id)).toEqual([bOnly]);
+    expect(libraryOf(state, B.member_id).removed).toEqual([bRemoved]);
+    expect(idsOf(state, A.member_id)).toEqual([aOnly]);
+    expect(libraryOf(state, A.member_id).removed.map((record) => record.id)).toEqual([shared]);
+  });
+
+  test("L2: back to the tab with a held row, 'who am I' fails (network error), then A presses add: nothing goes into B's library, the page becomes B's", async ({ page, apiMock: state }) => {
+    const held = ROWS[0]!.row.id;
+    const bOnly = ROWS[1]!.row.id;
+    const shared = ROWS[2]!.row.id;
+    state.libraryIds = [held, shared];
+    libraryOf(state, B.member_id).items = [
+      { id: shared, addedAt: "2026-11-01T00:00:00.000Z" },
+      { id: bOnly, addedAt: "2026-11-02T00:00:00.000Z" },
+    ];
+    await page.setViewportSize(DESKTOP);
+    await page.goto(`${member.baseURL}/search?scope=personal`);
+    await expect(page.locator("[data-paper-row]")).toHaveCount(2);
+    await searchRow(page, held).locator("[data-library='remove']").click();
+    await expect(searchRow(page, held).locator("[data-library='add']")).toBeFocused();
+    // 切回時的「我是誰」網路錯（問不到：照常送出，L2）；之後的照常回答（乙）。
+    let failNext = true;
+    await page.route("**/api/v1/me", async (route) => {
+      if (failNext) {
+        failNext = false;
+        await route.abort("internetdisconnected");
+        return;
+      }
+      await route.fallback();
+    });
+    state.member = B;
+    const failed = page.waitForEvent("requestfailed", (request) => new URL(request.url()).pathname === "/api/v1/me");
+    await page.evaluate(() => window.dispatchEvent(new Event("visibilitychange")));
+    await failed;
+    await twoFrames(page);
+    const write = nextWrite(page, "PUT");
+    await searchRow(page, held).locator("[data-library='add']").click();
+    expect(await write).toEqual({ expected: A.member_id, status: 409 });
+    await expect(searchRow(page, bOnly)).toBeVisible();
+    await expect(searchRow(page, held)).toHaveCount(0);
+    await expect(heading(page)).toHaveText(found(2));
+    expect(idsOf(state, B.member_id)).toEqual([shared, bOnly]);
   });
 });

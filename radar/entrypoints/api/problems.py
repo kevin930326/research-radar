@@ -37,7 +37,9 @@ PROBLEM_STATUS: Final[Mapping[ErrorCode, HTTPStatus]] = MappingProxyType(
         ErrorCode.ORIGIN_REJECTED: HTTPStatus.FORBIDDEN,
         ErrorCode.LOGIN_REJECTED: HTTPStatus.FORBIDDEN,
         ErrorCode.ADMIN_MEMBER_MISSING: HTTPStatus.FORBIDDEN,
+        ErrorCode.EXPECTED_MEMBER_INVALID: HTTPStatus.BAD_REQUEST,
         ErrorCode.NOT_FOUND: HTTPStatus.NOT_FOUND,
+        ErrorCode.MEMBER_CHANGED: HTTPStatus.CONFLICT,
         ErrorCode.METHOD_NOT_ALLOWED: HTTPStatus.METHOD_NOT_ALLOWED,
         ErrorCode.INTERNAL_ERROR: HTTPStatus.INTERNAL_SERVER_ERROR,
     }
@@ -59,8 +61,10 @@ _FRAMEWORK_CODES: Final[Mapping[int, ErrorCode]] = MappingProxyType(
 # openapi.json 變動。
 ProblemCode = Literal[
     "admin_member_missing",
+    "expected_member_invalid",
     "internal_error",
     "login_rejected",
+    "member_changed",
     "method_not_allowed",
     "not_authenticated",
     "not_found",

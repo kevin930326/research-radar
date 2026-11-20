@@ -157,12 +157,19 @@ const papers: PaperSource = {
   },
 };
 
-/** 加入、移出、復原共用：200 回那一筆、404 notFound、401 signedOut，其他丟例外。 */
+/** 加入、移出、復原帶「這個分頁以為的成員」的請求標頭（和後端 `EXPECTED_MEMBER_HEADER` 同名；ADR-0055）。 */
+export const EXPECTED_MEMBER_HEADER = "X-Radar-Expected-Member";
+
+/**
+ * 加入、移出、復原三種寫入都從這裡送出（標頭只在這裡加）：給了 `expectedMemberId` 就帶上 `EXPECTED_MEMBER_HEADER`。
+ * 200 回那一筆、404 notFound、401 signedOut、409 `member_changed` 是 memberChanged（換了人，後端什麼都沒寫），其他丟例外。
+ */
 async function change(
   name: string,
-  call: () => Promise<{ status: number; data: unknown }>,
+  expectedMemberId: string | undefined,
+  call: (options: RequestInit) => Promise<{ status: number; data: unknown }>,
 ): Promise<LibraryChangeResult> {
-  const response = await call();
+  const response = await call(expectedMemberId === undefined ? {} : { headers: { [EXPECTED_MEMBER_HEADER]: expectedMemberId } });
   if (response.status === 200) {
     return { kind: "done", item: response.data as LibraryItemResponse };
   }
@@ -171,6 +178,9 @@ async function change(
   }
   if (response.status === 401) {
     return { kind: "signedOut" };
+  }
+  if (response.status === 409 && (response.data as { code?: unknown } | null)?.code === "member_changed") {
+    return { kind: "memberChanged" };
   }
   throw new Error(`${name}: HTTP ${response.status}`);
 }
@@ -199,10 +209,14 @@ const library: LibrarySource = {
   },
 
   // 路徑參數一定要編碼（同論文頁）。
-  add: (paperId) => change(`PUT ${API_BASE}/library/{id}`, () => addLibraryItem(encodeURIComponent(paperId))),
-  remove: (paperId) => change(`DELETE ${API_BASE}/library/{id}`, () => removeLibraryItem(encodeURIComponent(paperId))),
-  restore: (paperId) =>
-    change(`POST ${API_BASE}/library/{id}/restore`, () => restoreLibraryItem(encodeURIComponent(paperId))),
+  add: (paperId, expectedMemberId) =>
+    change(`PUT ${API_BASE}/library/{id}`, expectedMemberId, (options) => addLibraryItem(encodeURIComponent(paperId), options)),
+  remove: (paperId, expectedMemberId) =>
+    change(`DELETE ${API_BASE}/library/{id}`, expectedMemberId, (options) => removeLibraryItem(encodeURIComponent(paperId), options)),
+  restore: (paperId, expectedMemberId) =>
+    change(`POST ${API_BASE}/library/{id}/restore`, expectedMemberId, (options) =>
+      restoreLibraryItem(encodeURIComponent(paperId), options),
+    ),
 };
 
 const impl = {

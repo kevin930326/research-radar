@@ -11,6 +11,9 @@
 // 預設登入的那一位）的文獻庫一開始是假清單裡 personal 的那幾列，測試用 state.libraryIds／libraryRemoved 讀寫；
 // 其他成員一開始是空的。復原照 ADR-0049：已經在文獻庫 → 200、不動封存；不在 → 用最新一筆封存寫回原本的加入時間
 // （回到原本的位置）；沒有封存 → 404（審查 F13）。
+// epic-3h PR 3（ADR-0055）：加入、移出、復原要帶「這個分頁以為的成員」（標頭 X-Radar-Expected-Member）。和接到請求時
+// 登入的人不同 → 409 member_changed、值不是成員 ID → 400 expected_member_invalid，都不寫。沒帶標頭的照常回應（和後端一樣），
+// 但記進 state.writesWithoutExpectedMember，fixtures.ts 在每個測試結束時要求它是空的：新增一種寫入卻沒帶標頭，測試就失敗。
 // 其他 /api/ 路徑不處理（交給後面的 route 或預設行為）。
 import type { Page, Route } from "@playwright/test";
 
@@ -246,7 +249,13 @@ export interface ApiMockState {
   libraryChangeGate: Promise<void> | null;
   /** 收到的請求（依序）。 */
   requests: ApiRequest[];
+  /** 沒帶 X-Radar-Expected-Member 的加入、移出、復原（fixtures.ts 在測試結束時要求是空的；ADR-0055）。 */
+  writesWithoutExpectedMember: ApiRequest[];
 }
+
+/** 加入、移出、復原帶的「這個分頁以為的成員」標頭（小寫：Playwright 給的標頭名稱都是小寫）。 */
+export const EXPECTED_MEMBER_HEADER = "x-radar-expected-member";
+const MEMBER_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /** 這位成員的文獻庫（沒有就建一個空的）。 */
 export function libraryOf(state: ApiMockState, memberId: string): MemberLibrary {
@@ -298,6 +307,7 @@ export function createApiState(): ApiMockState {
     libraryChange: "ok",
     libraryChangeGate: null,
     requests: [],
+    writesWithoutExpectedMember: [],
   };
 }
 
@@ -313,7 +323,9 @@ export function gate(): [Promise<void>, () => void] {
 const TITLES: Record<number, string> = {
   401: "Unauthorized",
   403: "Forbidden",
+  400: "Bad Request",
   404: "Not Found",
+  409: "Conflict",
   422: "Unprocessable Entity",
   500: "Internal Server Error",
 };
@@ -412,8 +424,13 @@ export async function installApiMock(page: Page, state: ApiMockState): Promise<v
       state.requests.push({ method, path, body });
       // 請求是誰送的，看接到時的 cookie（審查 G2）；閘門放行後才寫（看送出中）。
       const asker = state.member;
+      const expected = (await request.allHeaders())[EXPECTED_MEMBER_HEADER];
+      if (expected === undefined) state.writesWithoutExpectedMember.push({ method, path, body });
       await state.libraryChangeGate;
       if (asker === null || state.libraryChange === "expired") return problem(route, 401, "not_authenticated");
+      // 和後端一樣：登入檢查之後、寫入之前比對（ADR-0055）。
+      if (expected !== undefined && !MEMBER_ID_PATTERN.test(expected)) return problem(route, 400, "expected_member_invalid");
+      if (expected !== undefined && expected.toLowerCase() !== asker.member_id) return problem(route, 409, "member_changed");
       if (state.libraryChange === "failed") return problem(route, 500, "internal_error");
       const id = decodeURIComponent(libraryMatch[1]!);
       if (libraryItem(state.listRows, id) === undefined) return problem(route, 404, "not_found");

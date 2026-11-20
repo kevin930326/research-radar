@@ -81,3 +81,36 @@ describe("library changes", () => {
     await expect(library.restore("x")).rejects.toThrow("HTTP 500");
   });
 });
+
+// epic-3h PR 3（ADR-0055）：三種寫入都從同一個函式送出，給了預期成員就帶 X-Radar-Expected-Member；409 member_changed 是 memberChanged。
+describe("library changes carry the expected member", () => {
+  const MEMBER = "00000000-0000-4000-8000-00000000000a";
+
+  it.each(["add", "remove", "restore"] as const)("%s sends the expected member header", async (action) => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(respond(200, item(1)));
+    vi.stubGlobal("fetch", fetchMock);
+    await library[action]("a/b", MEMBER);
+    const [, init] = fetchMock.mock.calls[0]! as [string, RequestInit];
+    expect(new Headers(init.headers).get("X-Radar-Expected-Member")).toBe(MEMBER);
+  });
+
+  it.each(["add", "remove", "restore"] as const)("%s without an expected member sends no such header", async (action) => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(respond(200, item(1)));
+    vi.stubGlobal("fetch", fetchMock);
+    await library[action]("a/b");
+    const [, init] = fetchMock.mock.calls[0]! as [string, RequestInit];
+    expect(new Headers(init.headers).has("X-Radar-Expected-Member")).toBe(false);
+  });
+
+  it("409 member_changed is memberChanged; any other 409 is thrown", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValueOnce(respond(409, { type: "about:blank", title: "Conflict", status: 409, code: "member_changed" })));
+    expect(await library.remove("x", MEMBER)).toEqual({ kind: "memberChanged" });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValueOnce(respond(409, { type: "about:blank", title: "Conflict", status: 409, code: "request_rejected" })));
+    await expect(library.add("x", MEMBER)).rejects.toThrow("HTTP 409");
+  });
+
+  it("400 expected_member_invalid is thrown (the page never sends a malformed one)", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValueOnce(respond(400, { type: "about:blank", title: "Bad Request", status: 400, code: "expected_member_invalid" })));
+    await expect(library.restore("x", "not-a-member")).rejects.toThrow("HTTP 400");
+  });
+});

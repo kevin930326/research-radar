@@ -591,7 +591,9 @@ export const getAddLibraryItemUrl = (paperId: string,) => {
 
 /**
  * 把一篇看得到的論文加進自己的文獻庫；已經在就回原本那一筆。看不到、不存在、ID 不是 UUID
- * 都回同一個 404，沒登入 401；`Origin` 缺少或不是本站 403 `origin_rejected`。
+ * 都回同一個 404，沒登入 401；`Origin` 缺少或不是本站 403 `origin_rejected`；
+ * `X-Radar-Expected-Member` 和登入的成員不同 409 `member_changed`、格式不對 400
+ * `expected_member_invalid`。
  * @summary Add Library Item
  */
 export const addLibraryItem = async (paperId: string, options?: RequestInit): Promise<addLibraryItemResponse> => {
@@ -643,7 +645,8 @@ export const getRemoveLibraryItemUrl = (paperId: string,) => {
 
 /**
  * 把一篇移出自己的文獻庫，回移出前的那一筆；不在自己的文獻庫回 404，沒登入 401；`Origin`
- * 缺少或不是本站 403 `origin_rejected`。
+ * 缺少或不是本站 403 `origin_rejected`；`X-Radar-Expected-Member` 和登入的成員不同 409
+ * `member_changed`、格式不對 400 `expected_member_invalid`。
  * @summary Remove Library Item
  */
 export const removeLibraryItem = async (paperId: string, options?: RequestInit): Promise<removeLibraryItemResponse> => {
@@ -695,7 +698,9 @@ export const getRestoreLibraryItemUrl = (paperId: string,) => {
 
 /**
  * 復原最近一次移出的那一篇（原本的加入方式與時間）；已經在文獻庫就回現在那一筆，不動任何
- * 封存。自己沒有移出過回 404，沒登入 401；`Origin` 缺少或不是本站 403 `origin_rejected`。
+ * 封存。自己沒有移出過回 404，沒登入 401；`Origin` 缺少或不是本站 403 `origin_rejected`；
+ * `X-Radar-Expected-Member` 和登入的成員不同 409 `member_changed`、格式不對 400
+ * `expected_member_invalid`。
  * @summary Restore Library Item
  */
 export const restoreLibraryItem = async (paperId: string, options?: RequestInit): Promise<restoreLibraryItemResponse> => {

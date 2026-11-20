@@ -956,3 +956,82 @@ def test_public_reads_of_a_visible_paper_never_say_in_my_library(
     assert public_page.in_my_library is False
     # 同一篇在乙自己讀的時候是真（確定上面的假不是因為根本沒加進去）。
     assert other_rows[paper_id].in_my_library is True
+
+
+# --- 這個分頁以為的成員（epic-3h PR 3、ADR-0055）---------------------------------------------
+# 情境：同一個瀏覽器，cookie 已經換成乙，分頁還以為是甲。三種寫入 × 標頭相符（照常）、不相符（409、
+# 甲乙的文獻庫、封存、稽核都沒變）、格式不對（400、沒變）、沒帶（照常，和現在一樣）。
+
+EXPECTED_MEMBER = "X-Radar-Expected-Member"
+
+
+def _write_expecting(
+    api: Api, method: str, path: str, token: str, expected: str | None
+) -> Response:
+    api.client.cookies.clear()
+    headers = {"Cookie": f"{SESSION_COOKIE}={token}", "Origin": DEV_ORIGIN}
+    if expected is not None:
+        headers[EXPECTED_MEMBER] = expected
+    return api.client.request(method, path, headers=headers)
+
+
+def _library_state(db: TestDatabase) -> tuple[list[tuple[Any, ...]], ...]:
+    records = execute(
+        db,
+        "SELECT id, source_table, source_id, owner_id, deleted_by_member_id FROM deleted_record"
+        " ORDER BY id",
+    )
+    return _items(db), records, _audits(db)
+
+
+@pytest.mark.parametrize("action", ["add", "remove", "restore"])
+@pytest.mark.parametrize("header", ["match", "mismatch", "malformed", "absent"])
+def test_writes_compare_the_expected_member_with_the_session(
+    db: TestDatabase, database: Database, api: Api, action: str, header: str
+) -> None:
+    # 甲、乙都有 shared；乙移出過 removed（有封存，可以復原）；fresh 誰都沒有。
+    shared = create_paper(database, doi="10.1/shared", openalex_id="W91")
+    removed = create_paper(database, doi="10.1/removed", openalex_id="W92")
+    fresh = create_paper(database, doi="10.1/fresh", openalex_id="W93")
+    for token in (api.owner_token, api.other_token):
+        assert api.add(shared, token).status_code == 200
+    assert api.add(removed, api.other_token).status_code == 200
+    assert api.remove(removed, api.other_token).status_code == 200
+    method, path, paper_id = {
+        "add": ("PUT", f"/api/v1/library/{fresh}", fresh),
+        "remove": ("DELETE", f"/api/v1/library/{shared}", shared),
+        "restore": ("POST", f"/api/v1/library/{removed}/restore", removed),
+    }[action]
+    expected = {
+        "match": str(api.other_id),
+        "mismatch": str(api.owner_id),
+        "malformed": "not-a-member-id",
+        "absent": None,
+    }[header]
+    before = _library_state(db)
+
+    response = _write_expecting(api, method, path, api.other_token, expected)
+
+    if header in ("mismatch", "malformed"):
+        status, code = (
+            (409, "member_changed") if header == "mismatch" else (400, "expected_member_invalid")
+        )
+        assert response.status_code == status, response.text
+        assert response.json()["code"] == code
+        assert response.headers["cache-control"] == "no-store"
+        assert _library_state(db) == before
+        return
+    assert response.status_code == 200, response.text
+    assert response.json()["paper"]["id"] == str(paper_id)
+    other_papers = {row[2] for row in _items(db) if row[1] == api.other_id}
+    owner_papers = {row[2] for row in _items(db) if row[1] == api.owner_id}
+    assert (
+        other_papers
+        == {
+            "add": {shared, fresh},
+            "remove": set(),
+            "restore": {shared, removed},
+        }[action]
+    )
+    # 甲的文獻庫一直只有 shared（乙的寫入不會動到甲）。
+    assert owner_papers == {shared}

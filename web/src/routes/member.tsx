@@ -26,6 +26,7 @@ import {
   loadMember,
   memberGeneration,
   trackMemberCheck,
+  useMemberSwaps,
   validateLoginSearch,
   type MemberCheckVerdict,
 } from "./session";
@@ -132,10 +133,12 @@ const searchRoute = createRoute({
     const queryClient = useQueryClient();
     const href = useLocation({ select: (location) => location.href });
     const memberChanged = useMemberCheckWhileHolding();
+    // 寫入時後端說換了人（409，ADR-0055）的次數：和切回視窗確認到換人一樣，整頁重新掛上。
+    const swaps = useMemberSwaps(queryClient);
     return (
       <SearchPage
         // 換了人：整頁重新掛上（快取已經清掉，清單照新的人重讀；每一列按過的狀態也不留）。
-        key={memberChanged}
+        key={`${memberChanged}-${swaps}`}
         params={params}
         // 篩選改了：換掉這一筆瀏覽紀錄（不是每勾一個就多一筆），捲動位置不動。下一組條件用函式從最新的網址算
         // （上一次換頁還在等「我是誰」時，畫面拿到的條件是舊的；審查 S1-4）。
@@ -227,8 +230,11 @@ const libraryRoute = createRoute({
     const navigate = libraryRoute.useNavigate();
     const queryClient = useQueryClient();
     const href = useLocation({ select: (location) => location.href });
+    // 寫入時後端說換了人（409，ADR-0055）：整頁重新掛上，清單照現在的人重讀（移出留在原地的列也不留）。
+    const swaps = useMemberSwaps(queryClient);
     return (
       <LibraryPage
+        key={swaps}
         shown={shown}
         onMore={(next) => void navigate({ search: { shown: next }, replace: true, resetScroll: false })}
         onSignedOut={() =>

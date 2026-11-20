@@ -34,7 +34,11 @@ from radar.domain.paper_rows import PaperRowFacts
 from radar.domain.viewer import MemberViewer
 from radar.entrypoints.api.app import REQUEST_ID_HEADER, create_app
 from radar.entrypoints.api.auth import SESSION_COOKIE
-from radar.entrypoints.api.library import LibraryRoutes, install_library_routes
+from radar.entrypoints.api.library import (
+    EXPECTED_MEMBER_HEADER,
+    LibraryRoutes,
+    install_library_routes,
+)
 from radar.entrypoints.api.web import mount_web
 from tests.unit.test_api_auth import GOOD_TOKEN, MEMBER, MEMBER_ID, ORIGIN, SHELL, FakeAuth
 
@@ -290,3 +294,119 @@ def test_installing_after_the_web_shell_is_an_error(tmp_path: Path) -> None:
 
     with pytest.raises(RuntimeError, match="mount_web"):
         install_library_routes(app, FakeLibrary().routes(), FakeAuth().routes())
+
+
+# --- 這個分頁以為的成員（epic-3h PR 3、ADR-0055）---------------------------------------------
+# 會改資料的三個：`X-Radar-Expected-Member` 和 session 的成員相同照常；不同 409
+# `member_changed`、格式不對 400 `expected_member_invalid`，兩種都不呼叫 services；沒帶照常
+# （既有測試）；沒登入先 401。
+
+OTHER_MEMBER_ID = uuid.UUID("00000000-0000-7000-8000-00000000000b")
+
+
+def _send_expecting(
+    client: TestClient,
+    method: str,
+    path: str,
+    expected: list[str],
+    *,
+    token: str | None = GOOD_TOKEN,
+) -> Response:
+    headers: list[tuple[str, str]] = [("Origin", ORIGIN)]
+    if token is not None:
+        headers.append(("Cookie", f"{SESSION_COOKIE}={token}"))
+    headers.extend((EXPECTED_MEMBER_HEADER, value) for value in expected)
+    client.cookies.clear()
+    return client.request(method, path, headers=headers)
+
+
+@pytest.mark.parametrize(("method", "path", "name"), CHANGES)
+@pytest.mark.parametrize("expected", [str(MEMBER_ID), str(MEMBER_ID).upper()])
+def test_changes_with_the_session_member_expected_go_through(
+    method: str, path: str, name: str, expected: str
+) -> None:
+    library = FakeLibrary()
+
+    response = _send_expecting(_client(library), method, path.format(id=PAPER_ID), [expected])
+
+    assert response.status_code == 200
+    assert response.json() == ENTRY_JSON
+    assert library.calls == [(name, MEMBER.viewer, PAPER_ID)]
+
+
+@pytest.mark.parametrize(("method", "path", "_name"), CHANGES)
+def test_changes_expecting_another_member_are_409_and_write_nothing(
+    method: str, path: str, _name: str
+) -> None:
+    library = FakeLibrary()
+
+    response = _send_expecting(
+        _client(library), method, path.format(id=PAPER_ID), [str(OTHER_MEMBER_ID)]
+    )
+
+    assert response.status_code == 409
+    assert response.headers["content-type"] == "application/problem+json"
+    assert response.headers["cache-control"] == "no-store"
+    assert response.json() == {
+        "type": "about:blank",
+        "title": "Conflict",
+        "status": 409,
+        "code": "member_changed",
+    }
+    assert library.calls == []
+
+
+@pytest.mark.parametrize(("method", "path", "_name"), CHANGES)
+@pytest.mark.parametrize(
+    "expected",
+    [
+        ["not-a-member-id"],
+        [""],
+        [MEMBER_ID.hex],
+        [f"{{{MEMBER_ID}}}"],
+        [f"urn:uuid:{MEMBER_ID}"],
+        [str(MEMBER_ID), str(MEMBER_ID)],
+        [str(MEMBER_ID), str(OTHER_MEMBER_ID)],
+    ],
+)
+def test_changes_with_a_malformed_expected_member_are_400_and_write_nothing(
+    method: str, path: str, _name: str, expected: list[str]
+) -> None:
+    library = FakeLibrary()
+
+    response = _send_expecting(_client(library), method, path.format(id=PAPER_ID), expected)
+
+    assert response.status_code == 400
+    assert response.headers["cache-control"] == "no-store"
+    assert response.json() == {
+        "type": "about:blank",
+        "title": "Bad Request",
+        "status": 400,
+        "code": "expected_member_invalid",
+    }
+    assert library.calls == []
+
+
+@pytest.mark.parametrize(("method", "path", "_name"), CHANGES)
+def test_signing_in_is_checked_before_the_expected_member(
+    method: str, path: str, _name: str
+) -> None:
+    library = FakeLibrary()
+
+    response = _send_expecting(
+        _client(library), method, path.format(id=PAPER_ID), ["not-a-member-id"], token=None
+    )
+
+    assert response.status_code == 401
+    assert response.json()["code"] == "not_authenticated"
+    assert library.calls == []
+
+
+def test_reading_the_library_ignores_the_expected_member() -> None:
+    # 只有會改資料的三個比對；讀清單帶了別人的 ID 也照常（讀的一定是 session 的成員自己的）。
+    library = FakeLibrary()
+
+    response = _send_expecting(_client(library), "GET", "/api/v1/library", [str(OTHER_MEMBER_ID)])
+
+    assert response.status_code == 200
+    assert library.calls == [("list", MEMBER.viewer, None)]

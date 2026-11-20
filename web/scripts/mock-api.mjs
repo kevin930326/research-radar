@@ -201,7 +201,9 @@ function json(res, status, value, headers = {}) {
 const TITLES = {
   401: "Unauthorized",
   403: "Forbidden",
+  400: "Bad Request",
   404: "Not Found",
+  409: "Conflict",
   422: "Unprocessable Entity",
   500: "Internal Server Error",
 };
@@ -367,12 +369,21 @@ async function libraryList(req, res, query) {
 }
 
 /** 加入（PUT）、移出（DELETE）、復原（POST …/restore）。是誰送的、結果是什麼在收到時就決定，等 libraryChangeDelay 之後才寫、才回。 */
+// 文獻庫寫入帶的「這個分頁以為的成員」（ADR-0055）：和登入的人不同 409、值不是成員 ID 400，都不寫；沒帶照常。
+const EXPECTED_MEMBER_HEADER = "x-radar-expected-member";
+const MEMBER_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 async function libraryChange(req, res, id, restore) {
   const member = currentMember(req);
+  const expected = req.headers[EXPECTED_MEMBER_HEADER];
   const outcome = scenario.libraryChange;
   await sleep(scenario.libraryChangeDelay);
   if (res.destroyed || req.socket.destroyed) return undefined;
   if (member === null || outcome === "expired") return problem(res, 401, "not_authenticated");
+  if (expected !== undefined && (typeof expected !== "string" || !MEMBER_ID_PATTERN.test(expected))) {
+    return problem(res, 400, "expected_member_invalid");
+  }
+  if (expected !== undefined && expected.toLowerCase() !== member.member_id) return problem(res, 409, "member_changed");
   if (outcome === "failed") return problem(res, 500, "internal_error");
   if (libraryItem(id) === undefined) return problem(res, 404, "not_found");
   const library = libraryOf(member);
