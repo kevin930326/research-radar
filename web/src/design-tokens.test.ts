@@ -175,7 +175,7 @@ describe("DESIGN.md tokens equal the Tailwind theme", () => {
     expect(Object.keys(spacing)).toHaveLength(18);
     expect(Object.keys(rounded)).toHaveLength(2);
     expect(Object.keys(fontSizes)).toHaveLength(26);
-    expect(Object.keys(lineHeights)).toHaveLength(17);
+    expect(Object.keys(lineHeights)).toHaveLength(18);
     expect(Object.keys(letterSpacings)).toHaveLength(11);
     for (const [name, properties] of Object.entries(typography)) {
       expect(properties, name).toHaveProperty("fontFamily");
