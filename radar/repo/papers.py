@@ -9,6 +9,8 @@
   ADR-0011「快照」第 3 點）；`upsert_by_external_id` 不碰這個欄位。
 - 關鍵字由 `update_paper_keywords` 整批覆寫（每週套用與 `reparse` 在不是 STALE 時呼叫）。
   這個模組只寫 `paper_keyword`、不讀它（讀的查詢只放之後的 `repo/keyword_stats.py`，AD-31）。
+- `demo_eligible` 由 `upsert_by_external_id` 依 `is_demo_eligible` 寫；另外只有
+  `update_papers_not_demo_eligible`（`reparse` 結束時的重判）把 true 改成 false（ADR-0052）。
 - `lab_visible` 只由這個模組寫：追蹤範圍內的論文、引用擴展（之後加上傳批次勾了分享）設為真，
   設為真之後不改回去。
 - 寫入一律用 `text()` SQL（架構測試掃字串裡的 `INSERT INTO` 等，確認一張表一個寫入者）。
@@ -49,6 +51,7 @@ from radar.domain.papers import (
     PaperOrigin,
     ParsedKeyword,
     ParsedPaper,
+    StoredDemoFacts,
     StoredPaper,
     UpsertOutcome,
     UpsertResult,
@@ -104,7 +107,9 @@ paper_table = Table(
     Column("source_changed_at", DateTime(timezone=True)),
     # 由遷移 0021 加（Story 3.7a、ADR-0052）：出版社自己那一版（OpenAlex `primary_location`）的
     # 授權原字串、出版社 ID 與名稱（含 lineage），以及由 `domain/policy.is_demo_eligible` 算好的
-    # 「示範站可用」。都只由 `upsert_by_external_id` 寫；都不算進 `source_hash`。
+    # 「示範站可用」。都由 `upsert_by_external_id` 寫；`demo_eligible` 另外只有
+    # `update_papers_not_demo_eligible`（reparse 結束時的重判）會把 true 改成 false。都不算進
+    # `source_hash`。
     Column("primary_license", Text),
     Column("publisher_ids", ARRAY(Text), nullable=False, server_default=_EMPTY_TEXT_ARRAY),
     Column("publisher_names", ARRAY(Text), nullable=False, server_default=_EMPTY_TEXT_ARRAY),
@@ -1056,6 +1061,61 @@ def update_paper_keywords(
             "names": [keyword.display_name for keyword in keywords],
         },
     )
+
+
+def list_demo_eligible_facts(
+    viewer: SystemViewer, connection: Connection, *, after_id: uuid.UUID | None, limit: int
+) -> list[StoredDemoFacts]:
+    """依論文 id 順序讀一頁 `demo_eligible` 為真的論文（`after_id` 之後、最多 `limit` 篇）存下的
+    授權與出版社欄位。`reparse` 結束時重判用（ADR-0052 第 9 點）；判定由呼叫端經
+    `is_demo_eligible` 算，這裡不判斷。
+
+    Raises:
+        TypeError: `viewer` 不是 `SystemViewer`。
+        ValueError: `limit` 不是正整數。
+    """
+    if type(limit) is not int or limit < 1:
+        raise ValueError("limit 要是正整數")
+    visible_to_system_only(viewer)
+    visible = visible_papers(viewer, alias="paper")
+    after = "" if after_id is None else " AND paper.id > :after_id"
+    rows = connection.execute(
+        text(
+            "SELECT paper.id, paper.primary_license, paper.publisher_ids, paper.publisher_names"
+            f" FROM paper WHERE {visible} AND paper.demo_eligible{after}"
+            " ORDER BY paper.id LIMIT :limit"
+        ),
+        {"after_id": after_id, "limit": limit},
+    )
+    return [
+        StoredDemoFacts(
+            paper_id=paper_id,
+            primary_license=primary_license,
+            publisher_ids=tuple(publisher_ids),
+            publisher_names=tuple(publisher_names),
+        )
+        for paper_id, primary_license, publisher_ids, publisher_names in rows
+    ]
+
+
+def update_papers_not_demo_eligible(connection: Connection, paper_ids: Sequence[uuid.UUID]) -> int:
+    """把這幾篇的 `demo_eligible` 從 true 改成 false；回傳改了幾篇（ADR-0052 第 6、9 點）。
+
+    只有 `reparse` 結束時的重判呼叫：哪幾篇要改由呼叫端經 `is_demo_eligible` 算好，這裡不判斷、
+    不寫任何授權清單或名稱比對。`WHERE demo_eligible`：只會把 true 改成 false，原本就是 false 的
+    不動。只寫 `demo_eligible`，`updated_at` 也不動（ADR-0052 第 9 點只准重判寫這一欄）。在呼叫端
+    開好的交易裡做，不 commit。
+    """
+    if not paper_ids:
+        return 0
+    rows = connection.execute(
+        text(
+            "UPDATE paper SET demo_eligible = false"
+            " WHERE id = ANY(CAST(:ids AS uuid[])) AND demo_eligible"
+        ),
+        {"ids": list(paper_ids)},
+    )
+    return rows.rowcount
 
 
 def update_papers_first_snapshot(connection: Connection, snapshot_id: uuid.UUID) -> int:

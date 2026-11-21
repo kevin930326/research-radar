@@ -70,8 +70,8 @@ export function Meta({ row, names, noAbstract = true }: { row: PaperRow; names: 
   if (parts.length === 0) return null;
   return (
     // 一般的行內文字（不是 flex）：期刊全名太長時在字之間換行（換行時各行長度平均，設計稿 text-wrap: balance），
-    // 「· 年份」接在一個空白後面、和分隔點綁在一起不拆開（設計稿 .meta .nw）。
-    <div className="mt-2 font-mono text-s13 leading-normal tracking-004 text-balance text-text-secondary">
+    // 「· 年份」接在一個空白後面、和分隔點綁在一起不拆開（設計稿 .meta .nw）。行高 1.55 是設計稿的 .meta（Kevin 2026-11-21 決定加代幣）。
+    <div className="mt-2 font-mono text-s13 leading-155 tracking-004 text-balance text-text-secondary">
       {parts.map(({ key, node }, index) =>
         index === 0 ? (
           <Fragment key={key}>{node}</Fragment>

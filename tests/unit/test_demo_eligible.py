@@ -610,3 +610,161 @@ def test_broken_demo_publishers_file_is_reported(tmp_path: Path) -> None:
 
     [problem] = caught.value.problems
     assert problem.startswith("demo_publishers.yaml：excluded：")
+
+
+# --- IEEE 的出版社 ID（2026-11-21：Kevin 用唯讀查詢查到 P4310319808） --------------------------
+
+IEEE_PUBLISHER_ID = "P4310319808"
+
+
+def test_real_config_has_the_verified_ieee_id() -> None:
+    config = load_domain_config({"RADAR_CONFIG_DIR": str(ROOT / "config")})
+    entries = {entry.name: entry.id for entry in config.demo_publishers.excluded}
+
+    assert entries == {
+        "Institute of Electrical and Electronics Engineers": IEEE_PUBLISHER_ID,
+        "IEEE": None,
+        "IEEE Computer Society": None,
+    }
+    assert config.demo_publishers.exclusions().ids == frozenset({IEEE_PUBLISHER_ID})
+
+
+@pytest.mark.parametrize(
+    "ids",
+    [
+        (IEEE_PUBLISHER_ID,),
+        (f"https://openalex.org/{IEEE_PUBLISHER_ID}",),
+        ("https://openalex.org/p4310319808",),
+        ("P1", IEEE_PUBLISHER_ID),
+    ],
+)
+def test_ieee_id_with_another_name_is_not_eligible(ids: tuple[str, ...]) -> None:
+    exclusions = load_domain_config(
+        {"RADAR_CONFIG_DIR": str(ROOT / "config")}
+    ).demo_publishers.exclusions()
+
+    # 名稱是別的寫法（不在排除清單）：靠 ID 排除。
+    assert is_demo_eligible("cc-by", ids, ("Some Other Press",), exclusions) is False
+    # 只有 ID、沒有名稱：名稱是必要條件，一樣不可用（ADR-0052 第 4 點）。
+    assert is_demo_eligible("cc-by", ids, (), exclusions) is False
+    # 對照：同樣的名稱、不是 IEEE 的 ID，是可用的。
+    assert is_demo_eligible("cc-by", ("P1",), ("Some Other Press",), exclusions) is True
+
+
+# --- PublisherExclusions 建立時自己正規化 ---------------------------------------------------
+
+
+def test_exclusions_normalize_names_and_ids_when_built() -> None:
+    built = PublisherExclusions(
+        ids=frozenset({"https://openalex.org/p42", " p7 ", " not an id! "}),
+        names=frozenset({"IEEE-Computer​Society", "  Excluded ENGINEERING society "}),
+    )
+
+    assert built.ids == frozenset({"P42", "P7", "NOT AN ID!"})
+    assert built.names == frozenset({"ieeecomputersociety", "excludedengineeringsociety"})
+    assert built == PublisherExclusions(
+        ids=frozenset({"P42", "P7", "NOT AN ID!"}),
+        names=frozenset({"ieeecomputersociety", "excludedengineeringsociety"}),
+    )
+    # 直接用原字串建的清單，比對結果和設定檔載入的一樣。
+    assert built.matches(("P42",), ()) is True
+    assert built.matches(("not an id!",), ()) is True
+    assert built.matches((), ("IEEE Computer Society",)) is True
+    assert is_demo_eligible("cc-by", (), ("Excluded Engineering Society",), built) is False
+
+
+def test_exclusions_reject_names_or_ids_that_normalize_to_nothing() -> None:
+    with pytest.raises(ValueError, match="名稱"):
+        PublisherExclusions(ids=frozenset(), names=frozenset({"A", "...​"}))
+    with pytest.raises(ValueError, match="ID"):
+        PublisherExclusions(ids=frozenset({"  "}), names=frozenset({"A"}))
+
+
+def test_config_and_direct_construction_give_the_same_exclusions() -> None:
+    config = DemoPublishersConfig.model_validate(
+        {
+            "excluded": [
+                {"id": "https://openalex.org/p42", "name": "IEEE-Computer Society", "note": "x"},
+                {"id": None, "name": "I.E.E.E.", "note": "x"},
+            ]
+        }
+    )
+
+    assert config.exclusions() == PublisherExclusions(
+        ids=frozenset({"https://openalex.org/p42"}),
+        names=frozenset({"IEEE-Computer Society", "I.E.E.E."}),
+    )
+    assert config.exclusions() == PublisherExclusions(
+        ids=frozenset({"P42"}), names=frozenset({"ieeecomputersociety", "ieee"})
+    )
+
+
+_RAW_NAMES = st.lists(
+    st.one_of(
+        st.sampled_from(
+            [EXCLUDED_PUBLISHER_NAME, EXCLUDED_PARENT_NAME.swapcase(), "I.E.E.E.", "IEEE​"]
+        ),
+        st.text(min_size=1, max_size=20),
+    ),
+    max_size=5,
+).filter(lambda names: all(normalize_publisher_name(name) for name in names))
+_RAW_IDS = st.lists(
+    st.one_of(
+        st.sampled_from(["P42", "p42", "https://openalex.org/P9000000002", " w5 "]),
+        st.text(min_size=1, max_size=12),
+    ),
+    max_size=5,
+).filter(lambda ids: all(value.strip() for value in ids))
+
+
+@given(ids=_RAW_IDS, names=_RAW_NAMES)
+def test_property_building_twice_is_stable(ids: list[str], names: list[str]) -> None:
+    first = PublisherExclusions(ids=frozenset(ids), names=frozenset(names))
+    again = PublisherExclusions(ids=frozenset(ids), names=frozenset(names))
+    rebuilt = PublisherExclusions(ids=first.ids, names=first.names)
+
+    assert first == again
+    # 用正規化後的字串再建一次（等於原字串與正規化後的字串建出來相等）。
+    assert rebuilt == first
+
+
+@given(ids=_RAW_IDS, names=_RAW_NAMES, paper_names=_NAMES)
+def test_property_raw_and_normalized_exclusions_match_the_same_papers(
+    ids: list[str], names: list[str], paper_names: tuple[str, ...]
+) -> None:
+    raw = PublisherExclusions(ids=frozenset(ids), names=frozenset(names))
+    normalized_names = frozenset(normalize_publisher_name(name) for name in names)
+
+    assert raw.names == normalized_names
+    assert raw.matches((), paper_names) == any(
+        normalize_publisher_name(name) in normalized_names for name in paper_names
+    )
+    for name in names:
+        assert raw.matches((), (name,)) is True
+
+
+# Codex 審查 PR #118 的反例：拿掉分隔字元後 NFKC 會把韓文字母組成音節，只做一輪時要兩次才穩定。
+_RECOMPOSING_NAME = "ᄀ-ᅡ"  # ᄀ-ᅡ
+_SYLLABLE = "가"  # 가
+
+
+def test_name_key_that_recomposes_is_stable_in_one_call() -> None:
+    assert normalize_publisher_name(_RECOMPOSING_NAME) == normalize_publisher_name(_SYLLABLE)
+    assert normalize_publisher_name(_RECOMPOSING_NAME) == _SYLLABLE
+    key = normalize_publisher_name(_RECOMPOSING_NAME)
+    assert normalize_publisher_name(key) == key
+
+
+def test_exclusion_written_with_separator_matches_the_composed_name() -> None:
+    exclusions = PublisherExclusions(ids=frozenset(), names=frozenset({_RECOMPOSING_NAME}))
+
+    assert exclusions.names == frozenset({_SYLLABLE})
+    assert exclusions.matches((), (_SYLLABLE,)) is True
+    assert PublisherExclusions(ids=frozenset(), names=exclusions.names) == exclusions
+
+
+@given(name=st.text(max_size=20))
+def test_property_name_key_is_idempotent(name: str) -> None:
+    key = normalize_publisher_name(name)
+
+    assert normalize_publisher_name(key) == key
