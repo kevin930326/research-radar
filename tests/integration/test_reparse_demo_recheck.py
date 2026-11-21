@@ -18,7 +18,7 @@ from radar.adapters.fake import FakeObjectStore
 from radar.domain.domain_config import ExclusionRulesConfig
 from radar.domain.papers import PaperOrigin, ParsedPaper
 from radar.domain.parsers.openalex import parse_openalex_work
-from radar.domain.policy import PublisherExclusions
+from radar.domain.policy import PublisherExclusions, is_demo_eligible
 from radar.domain.raw_records import RawRecord, RawSource, compress_raw
 from radar.domain.scope import ScopeSettings
 from radar.domain.storage_keys import RAW_CONTENT_TYPE, raw_object_key
@@ -335,3 +335,86 @@ def test_finish_log_carries_the_recheck_numbers(demo_db: TestDatabase, database:
 
     [finished] = [log for log in logs if log["event"] == "重新解析結束"]
     assert (finished["demo_rechecked"], finished["demo_revoked"]) == (1, 1)
+
+
+# 識別碼分屬兩篇 × 依期刊排除（epic-3h3 PR 3）：出版社那一道新舊一樣，只有期刊清單多一本。
+EXCLUDED_JOURNAL_ISSN_L = "0018-9391"
+JOURNAL_OLD_SCOPE = ScopeSettings(
+    frozenset({ISSN, EXCLUDED_JOURNAL_ISSN_L}), demo_publishers=OLD_EXCLUSIONS
+)
+JOURNAL_NEW_EXCLUSIONS = PublisherExclusions(
+    ids=OLD_EXCLUSIONS.ids,
+    names=OLD_EXCLUSIONS.names,
+    journal_issn_ls=frozenset({EXCLUDED_JOURNAL_ISSN_L}),
+)
+JOURNAL_NEW_SCOPE = ScopeSettings(
+    frozenset({ISSN, EXCLUDED_JOURNAL_ISSN_L}), demo_publishers=JOURNAL_NEW_EXCLUSIONS
+)
+
+
+def _stored_facts(db: TestDatabase, paper_id: uuid.UUID) -> tuple[Any, ...]:
+    with db.connect(APP_ROLE) as connection:
+        [row] = connection.execute(
+            "SELECT primary_license, publisher_ids, publisher_names, journal_issn_l"
+            " FROM paper WHERE id = %s",
+            (paper_id,),
+        ).fetchall()
+    return tuple(row)
+
+
+def test_identifiers_split_paper_in_excluded_journal_is_rechecked_false(
+    demo_db: TestDatabase, database: Database
+) -> None:
+    """識別碼分屬兩篇的兩方都原本 true、都沒重寫到，只經結束時的重判。
+
+    - 「DOI 那篇」：有原始資料的 DOI、OpenAlex ID 是別的；存下的期刊是排除清單裡的那本。
+    - 「OpenAlex ID 那篇」（另一篇）：原始資料的 OpenAlex ID 屬於它、沒有 DOI；存下的期刊不在清單。
+    兩篇授權（CC BY）、出版社（Example Open Press）一樣，新舊排除清單只差期刊，所以 DOI 那篇變
+    false 只能是因為存下的 journal_issn_l；OpenAlex ID 那篇維持 true。
+    """
+    store = FakeObjectStore()
+    work = demo_work(1, issn_l=ISSN)
+    doi_owner_work = {
+        **demo_work(1, issn_l=EXCLUDED_JOURNAL_ISSN_L),
+        "id": f"https://openalex.org/{_key(701)}",
+    }
+    doi_owner = _write(database, doi_owner_work, fetched_at=T1, scope=JOURNAL_OLD_SCOPE)
+    openalex_owner = _write(database, {**work, "doi": None}, fetched_at=T1, scope=JOURNAL_OLD_SCOPE)
+    _seed_raw(database, store, _key(1), demo_work_bytes(work), T2)
+    assert _eligible(demo_db, doi_owner) is True
+    assert _eligible(demo_db, openalex_owner) is True
+
+    # 前提：用重判那份排除設定，DOI 那篇拿掉期刊就是 True、帶存下的期刊是 False；另一篇是 True。
+    license_, ids, names, journal = _stored_facts(demo_db, doi_owner)
+    assert (license_, journal) == ("cc-by", EXCLUDED_JOURNAL_ISSN_L)
+    assert is_demo_eligible(license_, ids, names, JOURNAL_NEW_EXCLUSIONS) is True
+    assert (
+        is_demo_eligible(license_, ids, names, JOURNAL_NEW_EXCLUSIONS, journal_issn_l=journal)
+        is False
+    )
+    other_license, other_ids, other_names, other_journal = _stored_facts(demo_db, openalex_owner)
+    assert (other_license, other_journal) == ("cc-by", ISSN)
+    assert (
+        is_demo_eligible(
+            other_license,
+            other_ids,
+            other_names,
+            JOURNAL_NEW_EXCLUSIONS,
+            journal_issn_l=other_journal,
+        )
+        is True
+    )
+    before = {row[0]: row for row in _all_rows(demo_db)}
+
+    result = _reparse(database, store, JOURNAL_NEW_SCOPE)
+
+    assert result.identifiers_split == 1
+    assert result.updated == 0
+    assert _eligible(demo_db, doi_owner) is False
+    assert _eligible(demo_db, openalex_owner) is True
+    # 兩篇都重判、只撤銷 DOI 那篇。
+    assert (result.demo_rechecked, result.demo_revoked) == (2, 1)
+    # 兩篇都沒被重寫：除了 demo_eligible，授權、出版社、updated_at 都沒變。
+    after = {row[0]: row for row in _all_rows(demo_db)}
+    assert after[doi_owner][2:] == before[doi_owner][2:]
+    assert after[openalex_owner] == before[openalex_owner]
