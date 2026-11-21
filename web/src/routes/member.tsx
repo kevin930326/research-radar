@@ -1,4 +1,4 @@
-import { queryOptions, useQuery, useQueryClient } from "@tanstack/react-query";
+import { queryOptions, useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import { Outlet, createRoute, lazyRouteComponent, redirect, useLocation, useNavigate, useRouter } from "@tanstack/react-router";
 import { useEffect, useRef, useState } from "react";
 import { flushSync } from "react-dom";
@@ -17,8 +17,9 @@ import { PaperPage } from "../pages/PaperPage";
 import { SearchPage } from "../pages/SearchPage";
 import { isPaperId } from "../pages/paper-format";
 import { validateSearchParams, type SearchParams } from "../pages/search-filters";
-import { libraryShown, useLibraryChange } from "./library-change";
-import { displayNamesQuery, hasHeldRows, paperSource } from "./paper-queries";
+import type { ReadAs } from "../datasource/types";
+import { libraryShown, useFollowMemberChange, useLibraryChange } from "./library-change";
+import { displayNamesQuery, hasHeldRows, paperKey, paperSource } from "./paper-queries";
 import { PAGE_FRAME_CLASS, PlainMain, rootRoute } from "./root";
 import {
   FIRST_PAGE,
@@ -26,6 +27,8 @@ import {
   loadMember,
   memberGeneration,
   trackMemberCheck,
+  useCachedMemberId,
+  useMemberSwaps,
   validateLoginSearch,
   type MemberCheckVerdict,
 } from "./session";
@@ -132,10 +135,19 @@ const searchRoute = createRoute({
     const queryClient = useQueryClient();
     const href = useLocation({ select: (location) => location.href });
     const memberChanged = useMemberCheckWhileHolding();
+    // 寫入時後端說換了人（409，ADR-0055）的次數：和切回視窗確認到換人一樣，整頁重新掛上。
+    const swaps = useMemberSwaps(queryClient);
+    const { member } = searchRoute.useRouteContext();
+    const follow = useFollowMemberChange();
+    const paused = useMemberSwapPending(queryClient, member.member_id);
     return (
       <SearchPage
-        // 換了人：整頁重新掛上（快取已經清掉，清單照新的人重讀；每一列按過的狀態也不留）。
-        key={memberChanged}
+        // 換了人：整頁重新掛上（快取已經清掉，清單照新的人重讀；每一列按過的狀態也不留）。路由的成員換了（換網址時
+        // 「我是誰」認到別人）也一樣：不留上一位的 placeholder 與列的狀態（審查 fix1 H1）。
+        key={`${member.member_id}-${memberChanged}-${swaps}`}
+        memberId={member.member_id}
+        paused={paused}
+        onMemberChanged={follow}
         params={params}
         // 篩選改了：換掉這一筆瀏覽紀錄（不是每勾一個就多一筆），捲動位置不動。下一組條件用函式從最新的網址算
         // （上一次換頁還在等「我是誰」時，畫面拿到的條件是舊的；審查 S1-4）。
@@ -152,6 +164,16 @@ const searchRoute = createRoute({
     );
   },
 });
+
+/**
+ * 換人進行中：快取裡「我是誰」已經是另一位（loadMember、換人流程問到的），路由的 context 還是上一位（路由還沒重跑完）。
+ * 這段期間找論文、我的文獻庫不讀成員專屬的資料（清單是骨架）：用 context 的成員讀一定是 409，還會再觸發一輪換人流程
+ * （審查 fix2 N1）。路由換成新的人之後頁面因 key 重新掛上，一掛上就用新的人讀。快取裡沒有「我是誰」（登出、清快取的途中）不算。
+ */
+function useMemberSwapPending(queryClient: QueryClient, memberId: string): boolean {
+  const cached = useCachedMemberId(queryClient);
+  return cached !== undefined && cached !== memberId;
+}
 
 /**
  * 範圍「我的文獻庫」有本頁移出暫留的列時，清單切回視窗不重讀（paperListQuery），所以另一個分頁換人登入時這一頁看不出來，
@@ -227,8 +249,18 @@ const libraryRoute = createRoute({
     const navigate = libraryRoute.useNavigate();
     const queryClient = useQueryClient();
     const href = useLocation({ select: (location) => location.href });
+    // 寫入時後端說換了人（409，ADR-0055）：整頁重新掛上，清單照現在的人重讀（移出留在原地的列也不留）。
+    // 路由的成員換了（換網址時「我是誰」認到別人）也一樣：不留上一位的 placeholder、「已移出」與「復原」（審查 fix1 H1）。
+    const swaps = useMemberSwaps(queryClient);
+    const { member } = libraryRoute.useRouteContext();
+    const follow = useFollowMemberChange();
+    const paused = useMemberSwapPending(queryClient, member.member_id);
     return (
       <LibraryPage
+        key={`${member.member_id}-${swaps}`}
+        memberId={member.member_id}
+        paused={paused}
+        onMemberChanged={follow}
         shown={shown}
         onMore={(next) => void navigate({ search: { shown: next }, replace: true, resetScroll: false })}
         onSignedOut={() =>
@@ -267,11 +299,15 @@ function devRoutes() {
   ] as const;
 }
 
-const paperQuery = (paperId: string) =>
-  queryOptions({ queryKey: ["papers", paperId], queryFn: () => paperSource().paper(paperId), retry: false });
+// 讀取帶這一頁認定的成員當預期成員（ADR-0055）；讀到的結果記下是用誰讀的（readAs）。鍵最後一段是這一位（審查 fix2 N1）。
+const paperQuery = (paperId: string, memberId: string) =>
+  queryOptions({ queryKey: paperKey(paperId, memberId), queryFn: () => paperSource().paper(paperId, memberId), retry: false });
 
-/** 論文頁＋顯示名稱：顯示名稱沒讀到時只有分類那一行顯示訊息條；按「重試」回 401 時照登入過期處理。 */
-function PaperWithNames({ page }: { page: PaperPageData }) {
+/**
+ * 論文頁＋顯示名稱：顯示名稱沒讀到時只有分類那一行顯示訊息條；按「重試」回 401 時照登入過期處理。
+ * `readAs`：這份論文頁資料是用誰的身分讀的（loader 記下的），加入／移出帶它（ADR-0055）。
+ */
+function PaperWithNames({ page, readAs }: { page: PaperPageData; readAs: ReadAs }) {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
   const href = useLocation({ select: (location) => location.href });
@@ -284,7 +320,7 @@ function PaperWithNames({ page }: { page: PaperPageData }) {
       await navigate({ to: "/login", search: { next: href, expired: true as const }, replace: true });
     })();
   }, [signedOut, queryClient, navigate, href]);
-  const library = usePaperLibrary(page);
+  const library = usePaperLibrary(page, readAs);
   if (signedOut) {
     return null;
   }
@@ -303,9 +339,11 @@ function PaperWithNames({ page }: { page: PaperPageData }) {
  * （快取裡這一篇也跟著改，見 useLibraryChange）。送出中再按不會再送一次。
  * 按過之後的結果只對「按的時候那一份論文頁資料」有效：路由換了一篇論文或重讀了（`page` 換成新的一份），
  * 就照新的 `in_my_library` 顯示，不沿用舊的狀態（審查 F9）。移出時已經不在（404）也算移出了。
+ * 寫入帶 `readAs`（loader 讀這一頁時的成員），不是路由 context 現在的成員：409 之後路由先換成下一位、論文頁在背景重讀，
+ * 重讀回來之前畫面還是上一位的資料，這時再按一次也要帶上一位（後端回 409，不會寫進下一位的文獻庫；審查 fix1 H2）。
  */
-function usePaperLibrary(page: PaperPageData): LibraryControl {
-  const change = useLibraryChange();
+function usePaperLibrary(page: PaperPageData, readAs: ReadAs): LibraryControl {
+  const change = useLibraryChange(readAs);
   const [changed, setChanged] = useState<{ page: PaperPageData; inLibrary: boolean } | null>(null);
   const [busy, setBusy] = useState(false);
   const [focusToken, setFocusToken] = useState(0);
@@ -346,7 +384,7 @@ const paperRoute = createRoute({
     // 兩個請求一起送。任一個回 401（登入過期）都回登入頁；論文其他錯誤是整頁「載入失敗」。
     // 顯示名稱的其他錯誤不擋整頁：結果留在查詢快取裡，畫面（PaperWithNames）讀它決定分類那一行怎麼顯示。
     const [paper, names] = await Promise.allSettled([
-      queryClient.fetchQuery(paperQuery(params.paperId)),
+      queryClient.fetchQuery(paperQuery(params.paperId, context.member.member_id)),
       queryClient.fetchQuery(displayNamesQuery),
     ]);
     const paperSignedOut = paper.status === "fulfilled" && paper.value.kind === "signedOut";
@@ -359,21 +397,44 @@ const paperRoute = createRoute({
       throw paper.reason;
     }
     const result = paper.value;
+    // 帶的預期成員和現在登入的人不同（409，ADR-0055）：畫面照「發現換人」處理（FollowMemberChange）。
+    if (result.kind === "memberChanged") {
+      return { kind: "memberChanged" as const };
+    }
     // signedOut 上面已經處理，剩下的只有 notFound。
     if (result.kind !== "found") {
       return { kind: "notFound" as const };
     }
-    return { kind: "found" as const, page: result.page };
+    // 記下這份資料是用誰的身分讀的（結果的 readAs；不是 context：快取裡同一篇可能是別次讀的）。
+    return { kind: "found" as const, page: result.page, readAs: result.readAs };
   },
   component: function PaperRoute() {
     const data = paperRoute.useLoaderData();
     if (data.kind === "notFound") {
       return <NotFound />;
     }
-    // 換一篇論文時整塊重新掛上（送出中、焦點等元件內的狀態不帶到下一篇；審查 F9）。
-    return <PaperWithNames key={data.page.paper.id} page={data.page} />;
+    if (data.kind === "memberChanged") {
+      return <FollowMemberChange result={data} />;
+    }
+    // 換一篇論文、或換成另一位讀的資料時整塊重新掛上（送出中、焦點等元件內的狀態不帶過去；審查 F9、fix1 H2）。
+    return <PaperWithNames key={`${data.readAs ?? ""}-${data.page.paper.id}`} page={data.page} readAs={data.readAs} />;
   },
 });
+
+/**
+ * 論文頁的讀取回 409 member_changed（ADR-0055）：照「發現換人」處理（和寫入的 409 同一個流程），等待期間是載入中。
+ * 每拿到一次新的結果（`result` 換了一份）就處理一次。
+ */
+function FollowMemberChange({ result }: { result: object }) {
+  const follow = useFollowMemberChange();
+  const handled = useRef<object | null>(null);
+  useEffect(() => {
+    if (handled.current === result) return;
+    handled.current = result;
+    void follow();
+  }, [result, follow]);
+  return <PageLoading />;
+}
 
 const appTree = appRoute.addChildren([indexRoute, noticeRoute, searchRoute, libraryRoute, paperRoute]);
 

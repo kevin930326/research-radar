@@ -23,6 +23,8 @@ export const test = base.extend<{ cspViolations: string[]; apiMock: ApiMockState
       );
       await installApiMock(page, state);
       await use(state);
+      // 加入、移出、復原都要帶「這個分頁以為的成員」（ADR-0055）：有一個沒帶就算失敗。
+      expect(state.writesWithoutExpectedMember, "library writes without X-Radar-Expected-Member").toEqual([]);
     },
     { auto: true },
   ],

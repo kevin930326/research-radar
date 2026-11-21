@@ -4,11 +4,11 @@ import { focusManager, QueryClient, QueryObserver } from "@tanstack/react-query"
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { LibraryChangeResult, LibraryItem, LibrarySource, PaperList, PaperListFilters, PaperPage } from "../datasource/types";
-import { libraryShown, sendLibraryChange } from "./library-change";
+import { followMemberChange, libraryShown, sendLibraryChange } from "./library-change";
 import { datasource } from "../datasource";
 import { toApiParams } from "../pages/search-filters";
-import { filtersKey, isPersonalList, markInLibrary, paperListQuery } from "./paper-queries";
-import { clearMemberQueries, memberGeneration } from "./session";
+import { filtersKey, isPersonalList, libraryCountQuery, libraryListQuery, markInLibrary, paperKey, paperListKey, paperListQuery } from "./paper-queries";
+import { clearMemberQueries, meQuery, memberGeneration } from "./session";
 
 const PAPER = "00000000-0000-4000-8000-000000000001";
 
@@ -536,5 +536,345 @@ describe("paperListQuery 'my library': the real continuation path against a fake
     await vi.waitFor(() => expect(calls).toHaveLength(2));
     stop();
     queryClient.unmount();
+  });
+});
+
+// epic-3h PR 3（ADR-0055）：寫入帶「這個分頁以為的成員」；後端說換了人（memberChanged）時不改快取、不重試、回 "failed"，
+// 交給「整頁換成現在的人」（followMemberChange）。
+describe("writes carry the member this tab expects (ADR-0055)", () => {
+  const A = { member_id: "00000000-0000-4000-8000-00000000000a", display_name: "Test Member A" };
+  const B = { member_id: "00000000-0000-4000-8000-00000000000b", display_name: "Test Member B" };
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it.each(["add", "remove", "restore"] as const)("%s: the expected member goes to the source", async (action) => {
+    const queryClient = new QueryClient();
+    const call = vi.fn<LibrarySource["add"]>(async () => ({ kind: "done", item: ITEM }));
+    const recording: LibrarySource = { list: () => Promise.reject(new Error("not used")), add: call, remove: call, restore: call };
+    await sendLibraryChange(queryClient, recording, PAPER, action, () => {}, { expectedMemberId: A.member_id });
+    expect(call.mock.calls).toEqual([[PAPER, A.member_id]]);
+  });
+
+  it("memberChanged: the cache is not touched, no retry, 'failed', and the page follows the change once", async () => {
+    const queryClient = new QueryClient();
+    queryClient.setQueryData(LIST_KEY, list(true));
+    const call = vi.fn(async (): Promise<LibraryChangeResult> => ({ kind: "memberChanged" }));
+    const recording: LibrarySource = { list: () => Promise.reject(new Error("not used")), add: call, remove: call, restore: call };
+    const onMemberChanged = vi.fn();
+    const toLogin = vi.fn();
+    const outcome = await sendLibraryChange(queryClient, recording, PAPER, "remove", toLogin, { expectedMemberId: A.member_id, onMemberChanged });
+    expect(outcome).toBe("failed");
+    expect(call).toHaveBeenCalledTimes(1);
+    expect(onMemberChanged).toHaveBeenCalledTimes(1);
+    expect(toLogin).not.toHaveBeenCalled();
+    expect(queryClient.getQueryData<ReturnType<typeof list>>(LIST_KEY)!.list.items[0]!.in_my_library).toBe(true);
+  });
+
+  it("memberChanged that comes back after the cache was already cleared: nothing more to do", async () => {
+    const queryClient = new QueryClient();
+    const [hold, release] = gate();
+    const onMemberChanged = vi.fn();
+    const pending = sendLibraryChange(queryClient, source({ kind: "memberChanged" }, hold), PAPER, "add", () => {}, { onMemberChanged });
+    await clearMemberQueries(queryClient);
+    release();
+    expect(await pending).toBe("failed");
+    expect(onMemberChanged).not.toHaveBeenCalled();
+  });
+
+  it("followMemberChange: B answers 'who am I': A's cache is cleared, the page is swapped, then reloaded", async () => {
+    const queryClient = new QueryClient();
+    queryClient.setQueryData(meQuery.queryKey, A);
+    queryClient.setQueryData(LIST_KEY, list(true));
+    vi.spyOn(datasource.session!, "me").mockResolvedValue(B);
+    const reload = vi.fn(() => {
+      expect(queryClient.getQueryData(LIST_KEY)).toBeUndefined();
+    });
+    const toLogin = vi.fn();
+    await followMemberChange(queryClient, { toLogin, reload });
+    expect(reload).toHaveBeenCalledTimes(1);
+    expect(toLogin).not.toHaveBeenCalled();
+    expect(queryClient.getQueryData(meQuery.queryKey)).toEqual(B);
+    expect(memberGeneration(queryClient)).toBe(1);
+  });
+
+  it("followMemberChange: 'who am I' already says B in the cache: still cleared (the backend said this page is A's)", async () => {
+    const queryClient = new QueryClient();
+    queryClient.setQueryData(meQuery.queryKey, B);
+    queryClient.setQueryData(LIST_KEY, list(true));
+    vi.spyOn(datasource.session!, "me").mockResolvedValue(B);
+    await followMemberChange(queryClient, { toLogin: () => {}, reload: () => {} });
+    expect(queryClient.getQueryData(LIST_KEY)).toBeUndefined();
+    expect(queryClient.getQueryData(meQuery.queryKey)).toEqual(B);
+    expect(memberGeneration(queryClient)).toBe(1);
+  });
+
+  it("followMemberChange: nobody is signed in: cleared, then back to the login page (no reload)", async () => {
+    const queryClient = new QueryClient();
+    queryClient.setQueryData(meQuery.queryKey, A);
+    queryClient.setQueryData(LIST_KEY, list(true));
+    vi.spyOn(datasource.session!, "me").mockResolvedValue(null);
+    const toLogin = vi.fn();
+    const reload = vi.fn();
+    await followMemberChange(queryClient, { toLogin, reload });
+    expect(toLogin).toHaveBeenCalledTimes(1);
+    expect(reload).not.toHaveBeenCalled();
+    expect(queryClient.getQueryData(LIST_KEY)).toBeUndefined();
+  });
+
+  it("followMemberChange: 'who am I' fails: still cleared, then reloaded (the page shows load-failed or the new member)", async () => {
+    const queryClient = new QueryClient();
+    queryClient.setQueryData(meQuery.queryKey, A);
+    queryClient.setQueryData(LIST_KEY, list(true));
+    vi.spyOn(datasource.session!, "me").mockRejectedValue(new Error("network"));
+    const reload = vi.fn();
+    await followMemberChange(queryClient, { toLogin: () => {}, reload });
+    expect(reload).toHaveBeenCalledTimes(1);
+    expect(queryClient.getQueryData(LIST_KEY)).toBeUndefined();
+    expect(memberGeneration(queryClient)).toBe(1);
+  });
+
+  it("followMemberChange: several 409s at once follow the change only once", async () => {
+    const queryClient = new QueryClient();
+    queryClient.setQueryData(meQuery.queryKey, A);
+    const me = vi.spyOn(datasource.session!, "me").mockResolvedValue(B);
+    const reload = vi.fn();
+    await Promise.all([1, 2, 3].map(() => followMemberChange(queryClient, { toLogin: () => {}, reload })));
+    expect(me).toHaveBeenCalledTimes(1);
+    expect(reload).toHaveBeenCalledTimes(1);
+  });
+});
+
+// epic-3h2 PR 1 fix1：409 之後不等「整頁換成現在的人」做完（M3）；它失敗時不留沒人接的 rejection、下一次 409 重新開始（L3）；
+// 「再載入」只接同一位讀的那一份（readAs）。
+describe("after a 409 (fix1)", () => {
+  const A = { member_id: "00000000-0000-4000-8000-00000000000a", display_name: "Test Member A" };
+  const B = { member_id: "00000000-0000-4000-8000-00000000000b", display_name: "Test Member B" };
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("M3: the press is over ('failed') while following the change is still going on", async () => {
+    const queryClient = new QueryClient();
+    const [hold, release] = gate();
+    let finished = false;
+    const onMemberChanged = vi.fn(async () => {
+      await hold;
+      finished = true;
+    });
+    const outcome = await sendLibraryChange(queryClient, source({ kind: "memberChanged" }), PAPER, "add", () => {}, {
+      expectedMemberId: A.member_id,
+      onMemberChanged,
+    });
+    expect(outcome).toBe("failed");
+    expect(onMemberChanged).toHaveBeenCalledTimes(1);
+    expect(finished).toBe(false);
+    release();
+  });
+
+  it("L3: reloading fails: the promise still settles without an error, and the next 409 follows again", async () => {
+    const queryClient = new QueryClient();
+    queryClient.setQueryData(meQuery.queryKey, A);
+    const me = vi.spyOn(datasource.session!, "me").mockResolvedValue(B);
+    const reload = vi.fn().mockRejectedValueOnce(new Error("router")).mockResolvedValueOnce(undefined);
+    await expect(followMemberChange(queryClient, { toLogin: () => {}, reload })).resolves.toBeUndefined();
+    await expect(followMemberChange(queryClient, { toLogin: () => {}, reload })).resolves.toBeUndefined();
+    expect(me).toHaveBeenCalledTimes(2);
+    expect(reload).toHaveBeenCalledTimes(2);
+  });
+
+  it("load more continues only from a list read as the same member", async () => {
+    const queryClient = new QueryClient();
+    const filters = toApiParams({});
+    const byA = { items: [row("a", false)], pending: [], next_cursor: "c1", total: 9 } as unknown as PaperList;
+    queryClient.setQueryData(["paper-list", filtersKey(filters), 1], { kind: "found", list: byA, readAs: A.member_id });
+    const fresh = { items: [row("b", false), row("c", false)], pending: [], next_cursor: null, total: 2 } as unknown as PaperList;
+    const list = vi.spyOn(datasource.papers!, "list").mockResolvedValue({ kind: "found", list: fresh, readAs: B.member_id });
+    await (paperListQuery(queryClient, filters, 2, B.member_id).queryFn as () => Promise<unknown>)();
+    expect(list).toHaveBeenCalledWith(filters, 2, null, B.member_id);
+    await (paperListQuery(queryClient, filters, 2, A.member_id).queryFn as () => Promise<unknown>)();
+    expect(list).toHaveBeenLastCalledWith(filters, 2, byA, A.member_id);
+  });
+});
+
+// epic-3h2 PR 1 fix2：成員專屬查詢的鍵含成員（N1）：上一位的讀取還沒回來、換成下一位時，下一位發自己的讀取、拿自己的結果；
+// 換人流程收尾時，這一輪進行中才回來的 409 照現在的身分重讀（N1）；「再載入」確認暫留列的補查回 409 時整份清單照換人處理（N2）。
+describe("member-specific queries after a member change (fix2)", () => {
+  const A = { member_id: "00000000-0000-4000-8000-00000000000a", display_name: "Test Member A" };
+  const B = { member_id: "00000000-0000-4000-8000-00000000000b", display_name: "Test Member B" };
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("N1 search list: A's read has not come back and the page is now B's: B sends its own read and gets B's list", async () => {
+    const queryClient = new QueryClient();
+    const filters = toApiParams({ scope: "personal" });
+    const [hold, release] = gate();
+    const byB = { items: [row("b", true)], pending: [], next_cursor: null, total: 1 } as unknown as PaperList;
+    const list = vi.spyOn(datasource.papers!, "list").mockImplementation(async (_filters, _limit, _previous, expected) => {
+      if (expected === A.member_id) {
+        await hold;
+        return { kind: "memberChanged" };
+      }
+      return { kind: "found", list: byB, readAs: B.member_id };
+    });
+    const asA = queryClient.fetchQuery(paperListQuery(queryClient, filters, 20, A.member_id));
+    const asB = await queryClient.fetchQuery(paperListQuery(queryClient, filters, 20, B.member_id));
+    expect(list).toHaveBeenCalledTimes(2);
+    expect(list).toHaveBeenLastCalledWith(filters, 20, null, B.member_id);
+    expect(asB).toEqual({ kind: "found", list: byB, readAs: B.member_id });
+    release();
+    expect(await asA).toEqual({ kind: "memberChanged" });
+    // A 的 409 留在 A 的那一份，B 的那一份照樣是 B 的清單。
+    expect(queryClient.getQueryData(paperListQuery(queryClient, filters, 20, B.member_id).queryKey)).toEqual(asB);
+  });
+
+  it("N1 my library list and count: A's read has not come back and the page is now B's: B sends its own read", async () => {
+    const queryClient = new QueryClient();
+    const [hold, release] = gate();
+    const byB = { items: [], pending: [], next_cursor: null, total: 4 };
+    const read = vi.spyOn(datasource.library!, "list").mockImplementation(async (_limit, _previous, expected) => {
+      if (expected === A.member_id) {
+        await hold;
+        return { kind: "memberChanged" };
+      }
+      return { kind: "found", list: byB, readAs: B.member_id };
+    });
+    const listAsA = queryClient.fetchQuery(libraryListQuery(queryClient, 20, A.member_id));
+    const countAsA = queryClient.fetchQuery(libraryCountQuery(A.member_id));
+    expect(await queryClient.fetchQuery(libraryListQuery(queryClient, 20, B.member_id))).toEqual({ kind: "found", list: byB, readAs: B.member_id });
+    expect(await queryClient.fetchQuery(libraryCountQuery(B.member_id))).toEqual({ kind: "found", total: 4 });
+    expect(read).toHaveBeenCalledTimes(4);
+    expect(read.mock.calls.filter((call) => call[2] === B.member_id)).toHaveLength(2);
+    release();
+    await Promise.all([listAsA, countAsA]);
+  });
+
+  it("N1 paper page: the query key ends with the member it was read as", () => {
+    expect(paperKey(PAPER, A.member_id)).not.toEqual(paperKey(PAPER, B.member_id));
+    expect(paperKey(PAPER, A.member_id).slice(0, 2)).toEqual(["papers", PAPER]);
+  });
+
+  it("N1 markInLibrary updates the paper page read as the current member (the key ends with the member)", async () => {
+    const queryClient = new QueryClient();
+    const page = { paper: { id: PAPER }, in_my_library: false } as unknown as PaperPage;
+    queryClient.setQueryData(paperKey(PAPER, B.member_id), { kind: "found", page, readAs: B.member_id });
+    expect(await markInLibrary(queryClient, PAPER, true)).toBe(true);
+    expect(queryClient.getQueryData<{ page: PaperPage }>(paperKey(PAPER, B.member_id))!.page.in_my_library).toBe(true);
+  });
+
+  it("N1 followMemberChange: a 409 that came back during the round is read again once the round is over, as a new round", async () => {
+    const queryClient = new QueryClient();
+    queryClient.setQueryData(meQuery.queryKey, A);
+    const me = vi.spyOn(datasource.session!, "me").mockResolvedValue(B);
+    let answer = { kind: "memberChanged" };
+    const queryFn = vi.fn(async () => answer);
+    const observer = new QueryObserver(queryClient, { queryKey: ["paper-list", "[]", 20, B.member_id], queryFn, retry: false, staleTime: Infinity });
+    const reload = vi.fn(async () => {
+      // 這一輪進行中：用上一位送出的讀取回 409，留在畫面正在用的那一份。
+      observer.subscribe(() => {});
+      await vi.waitFor(() => expect(observer.getCurrentResult().data).toEqual({ kind: "memberChanged" }));
+      answer = { kind: "found" };
+    });
+    await followMemberChange(queryClient, { toLogin: () => {}, reload });
+    await vi.waitFor(() => expect(observer.getCurrentResult().data).toEqual({ kind: "found" }));
+    expect(queryFn).toHaveBeenCalledTimes(2);
+    expect(me).toHaveBeenCalledTimes(1);
+    // 收尾時已經拿掉進行中的那一輪：之後的 409 是新的一輪。
+    await followMemberChange(queryClient, { toLogin: () => {}, reload: () => {} });
+    expect(me).toHaveBeenCalledTimes(2);
+    observer.destroy();
+  });
+
+  it("N2 load more on 'my library' with a held row: the main list is read as A, then the check of the held row says the member changed: the list is memberChanged", async () => {
+    const queryClient = new QueryClient();
+    const filters = toApiParams({ scope: "personal" });
+    const held = row("held", false);
+    const previous = { items: [held, row("a2", true)], pending: [], next_cursor: "c1", total: 30 } as unknown as PaperList;
+    queryClient.setQueryData(paperListKey(filtersKey(filters), 2, A.member_id), { kind: "found", list: previous, readAs: A.member_id });
+    const more = { ...previous, items: [held, row("a2", true), row("a3", true)], next_cursor: null } as unknown as PaperList;
+    vi.spyOn(datasource.papers!, "list").mockResolvedValue({ kind: "found", list: more, readAs: A.member_id });
+    const paper = vi.spyOn(datasource.papers!, "paper").mockResolvedValue({ kind: "memberChanged" });
+    const result = await (paperListQuery(queryClient, filters, 3, A.member_id).queryFn as () => Promise<unknown>)();
+    expect(paper).toHaveBeenCalledWith("held", A.member_id);
+    expect(result).toEqual({ kind: "memberChanged" });
+  });
+});
+
+// epic-3h2 PR 1 fix3（Gemini 參考審查 G2）：換人流程已經做完、畫面已是新的人之後才回來的舊 409 不再跑一次換人流程（a）；
+// 「我是誰」說沒有人時，世代號還是這一輪的才回登入頁（b）。
+describe("after the member change was followed (fix3 G2)", () => {
+  const A = { member_id: "00000000-0000-4000-8000-00000000000a", display_name: "Test Member A" };
+  const B = { member_id: "00000000-0000-4000-8000-00000000000b", display_name: "Test Member B" };
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function send(queryClient: QueryClient, routeMemberId: string | undefined, onMemberChanged: () => void) {
+    return sendLibraryChange(queryClient, source({ kind: "memberChanged" }), PAPER, "add", () => {}, {
+      expectedMemberId: A.member_id,
+      routeMemberId: () => routeMemberId,
+      onMemberChanged,
+    });
+  }
+
+  it("G2a: a 409 for A comes back after 'who am I' and the route are both B, with no round going on: 'failed', no second round", async () => {
+    const queryClient = new QueryClient();
+    queryClient.setQueryData(meQuery.queryKey, B);
+    const onMemberChanged = vi.fn();
+    expect(await send(queryClient, B.member_id, onMemberChanged)).toBe("failed");
+    expect(onMemberChanged).not.toHaveBeenCalled();
+  });
+
+  it("G2a: the page is still A's (the route or 'who am I' still says A): the 409 is followed", async () => {
+    for (const [cached, route] of [
+      [A, A],
+      [B, A],
+      [A, B],
+    ] as const) {
+      const queryClient = new QueryClient();
+      queryClient.setQueryData(meQuery.queryKey, cached);
+      const onMemberChanged = vi.fn();
+      expect(await send(queryClient, route.member_id, onMemberChanged)).toBe("failed");
+      expect(onMemberChanged).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  it("G2a: a round is going on: the 409 joins it (followed as usual)", async () => {
+    const queryClient = new QueryClient();
+    queryClient.setQueryData(meQuery.queryKey, A);
+    const [hold, release] = gate();
+    vi.spyOn(datasource.session!, "me").mockImplementation(async () => {
+      await hold;
+      return B;
+    });
+    const round = followMemberChange(queryClient, { toLogin: () => {}, reload: () => {} });
+    queryClient.setQueryData(meQuery.queryKey, B);
+    const onMemberChanged = vi.fn();
+    expect(await send(queryClient, B.member_id, onMemberChanged)).toBe("failed");
+    expect(onMemberChanged).toHaveBeenCalledTimes(1);
+    release();
+    await round;
+  });
+
+  it("G2b: 'who am I' says nobody, but someone signed in (the cache was cleared again) while this round was clearing: not sent to the login page", async () => {
+    const queryClient = new QueryClient();
+    queryClient.setQueryData(meQuery.queryKey, A);
+    vi.spyOn(datasource.session!, "me").mockResolvedValue(null);
+    // 這一輪清快取、等取消進行中的讀取時，有人登入（又清了一次，世代號再加 1）。
+    vi.spyOn(queryClient, "cancelQueries").mockImplementationOnce(async () => {
+      await clearMemberQueries(queryClient);
+      queryClient.setQueryData(meQuery.queryKey, B);
+    });
+    const toLogin = vi.fn();
+    const reload = vi.fn();
+    await followMemberChange(queryClient, { toLogin, reload });
+    expect(memberGeneration(queryClient)).toBe(2);
+    expect(toLogin).not.toHaveBeenCalled();
+    expect(reload).not.toHaveBeenCalled();
   });
 });

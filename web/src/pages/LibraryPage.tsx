@@ -8,7 +8,7 @@ import { NoticeIcon } from "../components/search/parts";
 import { DESKTOP_QUERY } from "../hooks/use-close-across-breakpoint";
 import type { LibraryItem } from "../datasource/types";
 import { useLibraryChange, type LibraryAction } from "../routes/library-change";
-import { clientConfigQuery, displayNamesQuery, libraryListQuery } from "../routes/paper-queries";
+import { clientConfigQuery, displayNamesQuery, libraryListKey, libraryListQuery } from "../routes/paper-queries";
 import { externalUrl, formatCount, splitTemplate } from "./paper-format";
 import { ErrorBar, More } from "./SearchPage";
 
@@ -54,6 +54,12 @@ interface LibraryPageProps {
   shown: number | undefined;
   onMore: (shown: number) => void;
   onSignedOut: () => void;
+  /** 這一頁認定的成員（路由的 context）：清單的讀取帶它當預期成員（ADR-0055）。 */
+  memberId: string;
+  /** 清單的讀取回 409 member_changed（另一個分頁換了人；ADR-0055）。 */
+  onMemberChanged: () => void | Promise<void>;
+  /** 換人進行中（路由還沒換成新的人）：清單先不讀，是骨架（審查 fix2 N1）。 */
+  paused?: boolean;
 }
 
 type Note = { kind: "skipped"; count: number } | { kind: "blocked" | "mobile"; links: { id: string; title: string; url: string }[] };
@@ -70,7 +76,7 @@ function openTab(url: string): boolean {
   return true;
 }
 
-export function LibraryPage({ shown, onMore, onSignedOut }: LibraryPageProps) {
+export function LibraryPage({ shown, onMore, onSignedOut, memberId, onMemberChanged, paused = false }: LibraryPageProps) {
   const { t } = useTranslation("library");
   const { t: tc } = useTranslation("common");
   const queryClient = useQueryClient();
@@ -79,11 +85,12 @@ export function LibraryPage({ shown, onMore, onSignedOut }: LibraryPageProps) {
   const pageSize = config.data?.kind === "found" ? config.data.config.library_page_size : null;
   const limit = pageSize === null ? null : Math.max(shown ?? pageSize, pageSize);
   const list = useQuery({
-    ...libraryListQuery(queryClient, limit ?? 0),
-    enabled: limit !== null,
+    ...libraryListQuery(queryClient, limit ?? 0, memberId),
+    enabled: limit !== null && !paused,
     placeholderData: (previous) => previous,
   });
-  const change = useLibraryChange();
+  // 移出、復原帶「這份清單是用誰的身分讀的」（ADR-0055）。
+  const change = useLibraryChange(list.data?.kind === "found" ? list.data.readAs : undefined);
   const desktop = useSyncExternalStore(subscribeDesktop, isDesktop, () => true);
 
   // 離開這一頁就丟掉清單的快取：再回來時重讀，移出的那幾篇不再出現（State Patterns「離開頁面後消失」）。
@@ -112,6 +119,16 @@ export function LibraryPage({ shown, onMore, onSignedOut }: LibraryPageProps) {
     notified.current = true;
     onSignedOut();
   }, [signedOut, onSignedOut]);
+  // 讀取時後端說換了人（409，ADR-0055）：照「發現換人」處理；這段期間清單是骨架。每一份 409 的結果只處理一次
+  // （同 SearchPage；審查 fix2 N1）。用這次結果的時間（dataUpdatedAt）認是哪一份，不用結果物件：結構共享在內容相同時
+  // 沿用同一個物件，重讀又是 409 時會被當成處理過（審查 fix3 N1）。
+  const memberChanged = list.data?.kind === "memberChanged" ? list.dataUpdatedAt : undefined;
+  const followed = useRef<number | undefined>(undefined);
+  useEffect(() => {
+    if (memberChanged === undefined || followed.current === memberChanged) return;
+    followed.current = memberChanged;
+    void onMemberChanged();
+  }, [memberChanged, onMemberChanged]);
 
   // 直接打開（重新整理）網址時最多讀 MAX_SHOWN 篇（libraryListQuery）：網址的 shown 比讀到的多、後面還有的時候，
   // 把 shown 對齊成讀到的篇數。不對齊的話 shown 剛好是 MAX_SHOWN＋一頁時，「再載入」算出來的篇數就是現在的 shown，
@@ -120,9 +137,9 @@ export function LibraryPage({ shown, onMore, onSignedOut }: LibraryPageProps) {
   const alignedFrom = useRef<number | null>(null);
   useEffect(() => {
     if (alignedFrom.current === null || limit === alignedFrom.current) return;
-    queryClient.removeQueries({ queryKey: ["library", alignedFrom.current], exact: true });
+    queryClient.removeQueries({ queryKey: libraryListKey(alignedFrom.current, memberId), exact: true });
     alignedFrom.current = null;
-  }, [limit, queryClient]);
+  }, [limit, queryClient, memberId]);
   const capped =
     list.data?.kind === "found" &&
     !list.isPlaceholderData &&

@@ -378,7 +378,9 @@ export const getPaperUrl = (paperId: string,) => {
 }
 
 /**
- * 一篇論文的論文頁資料；看不到、不存在、ID 不是 UUID 都回同一個 404，沒登入 401。
+ * 一篇論文的論文頁資料；看不到、不存在、ID 不是 UUID 都回同一個 404，沒登入 401；
+ * `X-Radar-Expected-Member` 和登入的成員不同 409 `member_changed`、格式不對 400
+ * `expected_member_invalid`（回應含 `in_my_library`，ADR-0055）。
  * @summary Paper
  */
 export const paper = async (paperId: string, options?: RequestInit): Promise<paperResponse> => {
@@ -539,7 +541,8 @@ export const getListLibraryUrl = (params?: ListLibraryParams,) => {
 
 /**
  * 自己的文獻庫的一頁（一頁的篇數見 `client-config`）；`cursor` 是上一頁的 `next_cursor`，
- * 格式不對 422，沒登入 401。
+ * 格式不對 422，沒登入 401；`X-Radar-Expected-Member` 和登入的成員不同 409 `member_changed`、
+ * 格式不對 400 `expected_member_invalid`。
  * @summary List Library
  */
 export const listLibrary = async (params?: ListLibraryParams, options?: RequestInit): Promise<listLibraryResponse> => {
@@ -591,7 +594,9 @@ export const getAddLibraryItemUrl = (paperId: string,) => {
 
 /**
  * 把一篇看得到的論文加進自己的文獻庫；已經在就回原本那一筆。看不到、不存在、ID 不是 UUID
- * 都回同一個 404，沒登入 401；`Origin` 缺少或不是本站 403 `origin_rejected`。
+ * 都回同一個 404，沒登入 401；`Origin` 缺少或不是本站 403 `origin_rejected`；
+ * `X-Radar-Expected-Member` 和登入的成員不同 409 `member_changed`、格式不對 400
+ * `expected_member_invalid`。
  * @summary Add Library Item
  */
 export const addLibraryItem = async (paperId: string, options?: RequestInit): Promise<addLibraryItemResponse> => {
@@ -642,8 +647,10 @@ export const getRemoveLibraryItemUrl = (paperId: string,) => {
 }
 
 /**
- * 把一篇移出自己的文獻庫，回移出前的那一筆；不在自己的文獻庫回 404，沒登入 401；`Origin`
- * 缺少或不是本站 403 `origin_rejected`。
+ * 把一篇移出自己的文獻庫，回移出前的那一筆（`paper.in_my_library` 是假）；不在自己的文獻庫
+ * 回 404，沒登入 401；`Origin` 缺少或不是本站 403 `origin_rejected`；
+ * `X-Radar-Expected-Member` 和登入的成員不同 409 `member_changed`、格式不對 400
+ * `expected_member_invalid`。
  * @summary Remove Library Item
  */
 export const removeLibraryItem = async (paperId: string, options?: RequestInit): Promise<removeLibraryItemResponse> => {
@@ -695,7 +702,9 @@ export const getRestoreLibraryItemUrl = (paperId: string,) => {
 
 /**
  * 復原最近一次移出的那一篇（原本的加入方式與時間）；已經在文獻庫就回現在那一筆，不動任何
- * 封存。自己沒有移出過回 404，沒登入 401；`Origin` 缺少或不是本站 403 `origin_rejected`。
+ * 封存。自己沒有移出過回 404，沒登入 401；`Origin` 缺少或不是本站 403 `origin_rejected`；
+ * `X-Radar-Expected-Member` 和登入的成員不同 409 `member_changed`、格式不對 400
+ * `expected_member_invalid`。
  * @summary Restore Library Item
  */
 export const restoreLibraryItem = async (paperId: string, options?: RequestInit): Promise<restoreLibraryItemResponse> => {
@@ -763,7 +772,8 @@ export const getListPapersUrl = (params?: ListPapersParams,) => {
 /**
  * 依條件列出論文的一頁（一頁的篇數見 `client-config`）。期刊、年份給多個值是「或」，主題、
  * 方法給多個值是「且」，不同欄位之間是「且」；`cursor` 是上一頁的 `next_cursor`。條件不合法
- * 422，沒登入 401。
+ * 422，沒登入 401；`X-Radar-Expected-Member` 和登入的成員不同 409 `member_changed`、格式
+ * 不對 400 `expected_member_invalid`（每一列含 `in_my_library`，ADR-0055）。
  * @summary List Papers
  */
 export const listPapers = async (params?: ListPapersParams, options?: RequestInit): Promise<listPapersResponse> => {

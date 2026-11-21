@@ -195,7 +195,7 @@
     "/api/v1/papers/{paper_id}": {
       "get": {
         "summary": "Paper",
-        "description": "一篇論文的論文頁資料；看不到、不存在、ID 不是 UUID 都回同一個 404，沒登入 401。",
+        "description": "一篇論文的論文頁資料；看不到、不存在、ID 不是 UUID 都回同一個 404，沒登入 401；\n`X-Radar-Expected-Member` 和登入的成員不同 409 `member_changed`、格式不對 400\n`expected_member_invalid`（回應含 `in_my_library`，ADR-0055）。",
         "operationId": "paper",
         "parameters": [
           {
@@ -293,7 +293,7 @@
     "/api/v1/library": {
       "get": {
         "summary": "List Library",
-        "description": "自己的文獻庫的一頁（一頁的篇數見 `client-config`）；`cursor` 是上一頁的 `next_cursor`，\n格式不對 422，沒登入 401。",
+        "description": "自己的文獻庫的一頁（一頁的篇數見 `client-config`）；`cursor` 是上一頁的 `next_cursor`，\n格式不對 422，沒登入 401；`X-Radar-Expected-Member` 和登入的成員不同 409 `member_changed`、\n格式不對 400 `expected_member_invalid`。",
         "operationId": "list_library",
         "parameters": [
           {
@@ -340,7 +340,7 @@
     "/api/v1/library/{paper_id}": {
       "put": {
         "summary": "Add Library Item",
-        "description": "把一篇看得到的論文加進自己的文獻庫；已經在就回原本那一筆。看不到、不存在、ID 不是 UUID\n都回同一個 404，沒登入 401；`Origin` 缺少或不是本站 403 `origin_rejected`。",
+        "description": "把一篇看得到的論文加進自己的文獻庫；已經在就回原本那一筆。看不到、不存在、ID 不是 UUID\n都回同一個 404，沒登入 401；`Origin` 缺少或不是本站 403 `origin_rejected`；\n`X-Radar-Expected-Member` 和登入的成員不同 409 `member_changed`、格式不對 400\n`expected_member_invalid`。",
         "operationId": "add_library_item",
         "parameters": [
           {
@@ -378,7 +378,7 @@
       },
       "delete": {
         "summary": "Remove Library Item",
-        "description": "把一篇移出自己的文獻庫，回移出前的那一筆；不在自己的文獻庫回 404，沒登入 401；`Origin`\n缺少或不是本站 403 `origin_rejected`。",
+        "description": "把一篇移出自己的文獻庫，回移出前的那一筆（`paper.in_my_library` 是假）；不在自己的文獻庫\n回 404，沒登入 401；`Origin` 缺少或不是本站 403 `origin_rejected`；\n`X-Radar-Expected-Member` 和登入的成員不同 409 `member_changed`、格式不對 400\n`expected_member_invalid`。",
         "operationId": "remove_library_item",
         "parameters": [
           {
@@ -418,7 +418,7 @@
     "/api/v1/library/{paper_id}/restore": {
       "post": {
         "summary": "Restore Library Item",
-        "description": "復原最近一次移出的那一篇（原本的加入方式與時間）；已經在文獻庫就回現在那一筆，不動任何\n封存。自己沒有移出過回 404，沒登入 401；`Origin` 缺少或不是本站 403 `origin_rejected`。",
+        "description": "復原最近一次移出的那一篇（原本的加入方式與時間）；已經在文獻庫就回現在那一筆，不動任何\n封存。自己沒有移出過回 404，沒登入 401；`Origin` 缺少或不是本站 403 `origin_rejected`；\n`X-Radar-Expected-Member` 和登入的成員不同 409 `member_changed`、格式不對 400\n`expected_member_invalid`。",
         "operationId": "restore_library_item",
         "parameters": [
           {
@@ -458,7 +458,7 @@
     "/api/v1/papers": {
       "get": {
         "summary": "List Papers",
-        "description": "依條件列出論文的一頁（一頁的篇數見 `client-config`）。期刊、年份給多個值是「或」，主題、\n方法給多個值是「且」，不同欄位之間是「且」；`cursor` 是上一頁的 `next_cursor`。條件不合法\n422，沒登入 401。",
+        "description": "依條件列出論文的一頁（一頁的篇數見 `client-config`）。期刊、年份給多個值是「或」，主題、\n方法給多個值是「且」，不同欄位之間是「且」；`cursor` 是上一頁的 `next_cursor`。條件不合法\n422，沒登入 401；`X-Radar-Expected-Member` 和登入的成員不同 409 `member_changed`、格式\n不對 400 `expected_member_invalid`（每一列含 `in_my_library`，ADR-0055）。",
         "operationId": "list_papers",
         "parameters": [
           {
@@ -1717,8 +1717,10 @@
             "type": "string",
             "enum": [
               "admin_member_missing",
+              "expected_member_invalid",
               "internal_error",
               "login_rejected",
+              "member_changed",
               "method_not_allowed",
               "not_authenticated",
               "not_found",
