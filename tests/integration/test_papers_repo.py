@@ -26,7 +26,7 @@ from radar.domain.policy import PublisherExclusions, is_demo_eligible
 from radar.domain.scope import ScopeSettings
 from radar.domain.viewer import MemberViewer, PublicViewer, SystemViewer
 from radar.repo import papers as papers_module
-from radar.repo.db import Database
+from radar.repo.db import Connection, Database
 from radar.repo.papers import get_paper, upsert_by_external_id
 from tests.database import APP_ROLE, OWNER_ROLE, TestDatabase, connect_admin, migrate
 
@@ -164,13 +164,56 @@ def test_identifier_owned_by_another_paper_is_reported_not_moved(
 # --- 識別碼分屬兩篇：兩篇都不寫（ADR-0020 更新 2026-11-22） ------------------------------------
 
 
+WRITE_TARGET_TABLES = ("paper", "external_id", "paper_abstract", "paper_keyword")
+
+
 def _write_targets(db: TestDatabase) -> dict[str, list[tuple[Any, ...]]]:
     """論文的四張表，整列、依主鍵排序（逐欄比對寫入前後用）。"""
     with db.connect(APP_ROLE) as connection:
         return {
             table: connection.execute(f"SELECT * FROM {table} ORDER BY id").fetchall()
-            for table in ("paper", "external_id", "paper_abstract", "paper_keyword")
+            for table in WRITE_TARGET_TABLES
         }
+
+
+def _paper_target_sql(table: str) -> str:
+    column = "id" if table == "paper" else "paper_id"
+    return f"SELECT * FROM {table} WHERE {column} = %s ORDER BY id"
+
+
+def _paper_targets(db: TestDatabase, paper_id: uuid.UUID) -> dict[str, list[tuple[Any, ...]]]:
+    """一篇論文在四張表的整列（論文列、識別碼、摘要、關鍵字），依主鍵排序。"""
+    with db.connect(APP_ROLE) as connection:
+        return {
+            table: connection.execute(_paper_target_sql(table), (paper_id,)).fetchall()
+            for table in WRITE_TARGET_TABLES
+        }
+
+
+def _paper_targets_in(
+    connection: Connection, paper_id: uuid.UUID
+) -> dict[str, list[tuple[Any, ...]]]:
+    """同 `_paper_targets`，但在還沒 commit 的交易連線上讀（直接給 psycopg，值的型別相同）。"""
+    return {
+        table: [
+            tuple(row)
+            for row in connection.exec_driver_sql(_paper_target_sql(table), (paper_id,)).fetchall()
+        ]
+        for table in WRITE_TARGET_TABLES
+    }
+
+
+def _assert_only_these_papers_unchanged(
+    db: TestDatabase, snapshots: dict[uuid.UUID, dict[str, list[tuple[Any, ...]]]]
+) -> None:
+    """每篇論文四張表的整列和快照逐欄相同，而且四張表裡沒有這幾篇以外的列。"""
+    for paper_id, snapshot in snapshots.items():
+        assert _paper_targets(db, paper_id) == snapshot
+    totals = {table: len(rows) for table, rows in _write_targets(db).items()}
+    assert totals == {
+        table: sum(len(snapshot[table]) for snapshot in snapshots.values())
+        for table in WRITE_TARGET_TABLES
+    }
 
 
 def _split_result(
@@ -298,6 +341,32 @@ def test_split_identifiers_win_over_stale(papers_db: TestDatabase, database: Dat
 
     assert _write_targets(papers_db) == before
     assert result == _split_result(paper_b.paper_id, "10.1/b", paper_a.paper_id, "W2")
+
+
+def test_split_identifiers_keep_out_of_scope_paper_private(
+    papers_db: TestDatabase, database: Database
+) -> None:
+    # A 在追蹤範圍外、匯入的（lab_visible = false），B 在範圍內。這筆 (10.1/a, W2) 是引用擴展：
+    # 以前會寫進 A（DOI 優先），A 的 lab_visible 變成 true；現在兩篇都不動。
+    paper_a = _upsert(
+        database,
+        _paper(doi="10.1/a", openalex_id=None, title="A", journal_issn_l="1234-5678"),
+        origin=PaperOrigin.IMPORT,
+    )
+    paper_b = _upsert(database, _paper(doi=None, openalex_id="W2", title="B"))
+    assert _paper_row(papers_db, paper_a.paper_id)["lab_visible"] is False
+    before = _write_targets(papers_db)
+
+    result = _upsert(
+        database,
+        _paper(doi="10.1/a", openalex_id="W2", title="Other work", fetched_at=T2),
+        origin=PaperOrigin.EXPANSION,
+    )
+
+    assert result == _split_result(paper_a.paper_id, "10.1/a", paper_b.paper_id, "W2")
+    assert result.outcome is UpsertOutcome.IDENTIFIERS_SPLIT
+    assert _paper_row(papers_db, paper_a.paper_id)["lab_visible"] is False
+    assert _write_targets(papers_db) == before
 
 
 def test_found_by_doi_gets_the_new_openalex_id(papers_db: TestDatabase, database: Database) -> None:
@@ -548,17 +617,29 @@ def test_withdrawn_insert_releases_identifiers_before_waiting_for_paper_lock(
 
 def _hold_uncommitted(
     database: Database, paper: ParsedPaper, written: threading.Event, release: threading.Event
-) -> tuple[threading.Thread, dict[str, UpsertResult], list[BaseException]]:
-    """另開一個執行緒寫 `paper`、寫完先不 commit，等 `release` 才結束交易。"""
+) -> tuple[
+    threading.Thread,
+    dict[str, UpsertResult],
+    dict[str, dict[str, list[tuple[Any, ...]]]],
+    list[BaseException],
+]:
+    """另開一個執行緒寫 `paper`、寫完先不 commit，等 `release` 才結束交易。
+
+    寫完時在同一個交易裡把這篇四張表的整列存進 `snapshots["rows"]`：commit 不會改這些列，
+    所以它就是這篇 commit 後的樣子（兩篇都在第三筆寫入開始之後才 commit，沒有別的時間點能存）。
+    """
     results: dict[str, UpsertResult] = {}
+    snapshots: dict[str, dict[str, list[tuple[Any, ...]]]] = {}
     errors: list[BaseException] = []
 
     def run() -> None:
         try:
             with database.transaction() as connection:
-                results["result"] = upsert_by_external_id(
+                result = upsert_by_external_id(
                     connection, paper, origin=PaperOrigin.TRACKED, excluded_reason=None, scope=SCOPE
                 )
+                results["result"] = result
+                snapshots["rows"] = _paper_targets_in(connection, result.paper_id)
                 written.set()
                 assert release.wait(30)
         except BaseException as exc:
@@ -568,7 +649,7 @@ def _hold_uncommitted(
 
     thread = threading.Thread(target=run)
     thread.start()
-    return thread, results, errors
+    return thread, results, snapshots, errors
 
 
 def test_concurrent_split_found_after_withdrawn_insert_writes_nothing(
@@ -584,11 +665,25 @@ def test_concurrent_split_found_after_withdrawn_insert_writes_nothing(
     database = Database(papers_db.app_url, connect_timeout=5, pool_size=3)
     release_first, release_second = threading.Event(), threading.Event()
     first_written, second_written = threading.Event(), threading.Event()
-    first, first_results, first_errors = _hold_uncommitted(
-        database, _paper(doi="10.1/a", openalex_id=None, title="A"), first_written, release_first
+    first, first_results, first_rows, first_errors = _hold_uncommitted(
+        database,
+        _paper(
+            doi="10.1/a",
+            openalex_id=None,
+            title="A",
+            abstract="A abstract",
+            abstract_source="openalex",
+        ),
+        first_written,
+        release_first,
     )
-    second, second_results, second_errors = _hold_uncommitted(
-        database, _paper(doi=None, openalex_id="W2", title="B"), second_written, release_second
+    second, second_results, second_rows, second_errors = _hold_uncommitted(
+        database,
+        _paper(
+            doi=None, openalex_id="W2", title="B", abstract="B abstract", abstract_source="openalex"
+        ),
+        second_written,
+        release_second,
     )
     results: dict[str, UpsertResult] = {}
     errors: list[BaseException] = []
@@ -596,7 +691,15 @@ def test_concurrent_split_found_after_withdrawn_insert_writes_nothing(
     def mine() -> None:
         try:
             results["mine"] = _upsert(
-                database, _paper(doi="10.1/a", openalex_id="W2", title="Mine", fetched_at=T2)
+                database,
+                _paper(
+                    doi="10.1/a",
+                    openalex_id="W2",
+                    title="Mine",
+                    fetched_at=T2,
+                    abstract="Mine abstract",
+                    abstract_source="openalex",
+                ),
             )
         except BaseException as exc:
             errors.append(exc)
@@ -625,6 +728,11 @@ def test_concurrent_split_found_after_withdrawn_insert_writes_nothing(
         ("openalex", "W2", paper_b),
     ]
     assert sorted(_rows(papers_db, "SELECT title FROM paper")) == [("A",), ("B",)]
+    assert first_rows["rows"]["paper_abstract"]
+    assert second_rows["rows"]["paper_abstract"]
+    _assert_only_these_papers_unchanged(
+        papers_db, {paper_a: first_rows["rows"], paper_b: second_rows["rows"]}
+    )
 
 
 def test_concurrent_split_found_while_claiming_writes_nothing(
@@ -639,10 +747,16 @@ def test_concurrent_split_found_while_claiming_writes_nothing(
     database = Database(papers_db.app_url, connect_timeout=5, pool_size=3)
     paper_b = _upsert(database, _paper(doi="10.1/b", openalex_id=None, title="B"))
     before_b = _rows(papers_db, "SELECT * FROM paper WHERE id = %s", paper_b.paper_id)
+    targets_b = _paper_targets(papers_db, paper_b.paper_id)
     release = threading.Event()
     written = threading.Event()
-    other, other_results, other_errors = _hold_uncommitted(
-        database, _paper(doi=None, openalex_id="W2", title="A"), written, release
+    other, other_results, other_rows, other_errors = _hold_uncommitted(
+        database,
+        _paper(
+            doi=None, openalex_id="W2", title="A", abstract="A abstract", abstract_source="openalex"
+        ),
+        written,
+        release,
     )
     results: dict[str, UpsertResult] = {}
     errors: list[BaseException] = []
@@ -650,7 +764,15 @@ def test_concurrent_split_found_while_claiming_writes_nothing(
     def mine() -> None:
         try:
             results["mine"] = _upsert(
-                database, _paper(doi="10.1/b", openalex_id="W2", title="Mine", fetched_at=T2)
+                database,
+                _paper(
+                    doi="10.1/b",
+                    openalex_id="W2",
+                    title="Mine",
+                    fetched_at=T2,
+                    abstract="Mine abstract",
+                    abstract_source="openalex",
+                ),
             )
         except BaseException as exc:
             errors.append(exc)
@@ -674,6 +796,10 @@ def test_concurrent_split_found_while_claiming_writes_nothing(
         ("openalex", "W2", paper_a),
     ]
     assert _rows(papers_db, "SELECT title FROM paper WHERE id = %s", paper_a) == [("A",)]
+    assert other_rows["rows"]["paper_abstract"]
+    _assert_only_these_papers_unchanged(
+        papers_db, {paper_b.paper_id: targets_b, paper_a: other_rows["rows"]}
+    )
 
 
 def _wait_until_a_backend_waits_on_a_lock(db: TestDatabase) -> None:
