@@ -693,15 +693,70 @@ def test_identifier_conflict_is_counted(
     parsed = _old_parse(work, T1)
     assert parsed.doi is not None
     # A 掛著這篇的 OpenAlex ID、沒有 DOI；B 掛著這篇的 DOI 和另一個 OpenAlex ID。
-    _seed_paper(database, _changed(parsed, doi=None))
-    _seed_paper(database, _changed(parsed, openalex_id="W999999999"))
+    # 識別碼分屬兩篇：兩篇都不寫，計進 identifiers_split（ADR-0020 更新 2026-11-22；
+    # 原本是更新 B、conflicts 計 1）。
+    paper_a = _seed_paper(database, _changed(parsed, doi=None))
+    paper_b = _seed_paper(database, _changed(parsed, openalex_id="W999999999"))
     _seed_raw(database, store, _key(work), work_bytes(work), T1)
+    before = _full_rows(reparse_db)
 
-    result = _reparse(database, store)
+    with capture_logs() as logs:
+        result = _reparse(database, store)
 
-    assert result.updated == 1
-    assert result.conflicts == 1
+    assert _full_rows(reparse_db) == before
+    assert (result.updated, result.conflicts, result.identifiers_split) == (0, 0, 1)
     assert _rows(reparse_db, "SELECT count(*) FROM paper") == [(2,)]
+    [split] = [log for log in logs if log["event"].startswith("DOI 與 OpenAlex ID 屬於兩篇")]
+    assert (split["doi_paper_id"], split["openalex_paper_id"]) == (
+        str(paper_b.paper_id),
+        str(paper_a.paper_id),
+    )
+    [done] = [log for log in logs if log["event"] == "重新解析結束"]
+    assert done["identifiers_split"] == 1
+
+
+def _full_rows(db: TestDatabase) -> dict[str, list[tuple[Any, ...]]]:
+    """論文四張表的整列（逐欄比對寫入前後用）。"""
+    return {
+        table: _rows(db, f"SELECT * FROM {table} ORDER BY id")
+        for table in ("paper", "external_id", "paper_abstract", "paper_keyword")
+    }
+
+
+def test_split_identifiers_row_is_skipped_and_the_rest_is_applied(
+    reparse_db: TestDatabase, database: TrackingDatabase, store: GuardedStore
+) -> None:
+    # 一批 3 篇：第 1 篇的 DOI 與 OpenAlex ID 分屬兩篇（略過、兩篇都不動），另外 2 篇照常更新。
+    works = _works(3)
+    parsed = _old_parse(works[0], T1)
+    paper_a = _seed_paper(database, _changed(parsed, doi=None))
+    paper_b = _seed_paper(database, _changed(parsed, openalex_id="W999999999"))
+    others = [_seed_paper(database, _old_parse(work, T1)).paper_id for work in works[1:]]
+    for work in works:
+        _seed_raw(database, store, _key(work), work_bytes(work), T1)
+    split_ids = [paper_a.paper_id, paper_b.paper_id]
+    before = {
+        table: [row for row in rows if row[0] in split_ids or row[1] in split_ids]
+        for table, rows in _full_rows(reparse_db).items()
+    }
+
+    with capture_logs() as logs:
+        result = _reparse(database, store)
+
+    after = {
+        table: [row for row in rows if row[0] in split_ids or row[1] in split_ids]
+        for table, rows in _full_rows(reparse_db).items()
+    }
+    assert after == before
+    assert result == ReparseResult(
+        raw_keys=3, staged=3, updated=2, stale=0, conflicts=0, identifiers_split=1
+    )
+    for work, paper_id in zip(works[1:], others, strict=True):
+        assert _rows(reparse_db, "SELECT referenced_works FROM paper WHERE id = %s", paper_id) == [
+            (list(parse_openalex_work(work_bytes(work), fetched_at=T1).referenced_works),)
+        ]
+    [done] = [log for log in logs if log["event"] == "重新解析結束"]
+    assert (done["identifiers_split"], done["updated"]) == (1, 2)
 
 
 def test_creating_a_paper_while_applying_rolls_back(

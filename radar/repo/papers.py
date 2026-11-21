@@ -51,6 +51,7 @@ from radar.domain.papers import (
     PaperOrigin,
     ParsedKeyword,
     ParsedPaper,
+    SplitIdentifiers,
     StoredDemoFacts,
     StoredPaper,
     UpsertOutcome,
@@ -702,6 +703,14 @@ def upsert_by_external_id(
        兩個交易依序執行時一樣。
     4. 識別碼已經屬於另一篇論文時不搬、不合併：放在結果的 `conflicts`，並記警告日誌。
        判成 `stale` 時不掛任何識別碼，也不回報衝突。
+    5. DOI 與 OpenAlex ID 屬於兩篇不同的既有論文（「識別碼分屬兩篇」，ADR-0020 更新 2026-11-22）：
+       兩篇都什麼都不寫（欄位、識別碼、抓取時間、`demo_eligible`、`lab_visible`、摘要），回
+       `identifiers_split`（`split` 帶兩個識別碼與各自的論文），記一行警告日誌（只帶 id 與識別碼）。
+       三個地方會發現：第 1 步找的時候（在比新舊之前，所以比較舊的資料也回這個、不回 `stale`）；
+       第 3 步退回保存點後重查的時候；第 2 步認領還沒有主人的識別碼、卻被並行的交易搶先掛到別篇
+       的時候（這一步在寫論文之前做，所以那時也還沒寫任何東西；已經判成 `stale` 的不會走到這裡）。
+       因為只有 DOI 與 OpenAlex ID 兩種識別碼，第 2 步至少有一個識別碼屬於目標論文，最多只認領
+       一個，認領失敗時手上沒有掛上任何識別碼。
 
     鎖的順序（ADR-0020）：先鎖論文、再佔識別碼，識別碼依優先序佔；第 3 步改走第 2 步之前先退回
     保存點，手上不留任何識別碼，才去等論文的鎖。所以每個交易只寫一篇時，不論幾個交易同時寫、
@@ -782,10 +791,38 @@ def upsert_by_external_id(
         target = _first_owner(ids, owners)
         if target is None:
             raise RuntimeError("識別碼認領失敗，卻找不到擁有它的論文")
+    split = _split_result(owners)
+    if split is not None:
+        return split
     result = _update_existing(connection, target, ids, owners, values, paper.fetched_at)
     if result.outcome is UpsertOutcome.UPDATED:
         _write_abstract(connection, result.paper_id, paper)
     return result
+
+
+def _split_result(owners: Mapping[ExternalId, uuid.UUID]) -> UpsertResult | None:
+    """DOI 與 OpenAlex ID 都有主人、而且是兩篇不同的論文時，記警告並回「識別碼分屬兩篇」。
+
+    日誌只帶兩篇論文的 id 與兩個識別碼（不帶標題、摘要等內容）。
+    """
+    doi = next((i for i in owners if i.scheme is IdentifierScheme.DOI), None)
+    openalex = next((i for i in owners if i.scheme is IdentifierScheme.OPENALEX), None)
+    if doi is None or openalex is None or owners[doi] == owners[openalex]:
+        return None
+    split = SplitIdentifiers(
+        doi=doi,
+        doi_paper_id=owners[doi],
+        openalex_id=openalex,
+        openalex_paper_id=owners[openalex],
+    )
+    log.warning(
+        "DOI 與 OpenAlex ID 屬於兩篇不同的論文，這一筆略過不寫",
+        doi=doi.value_norm,
+        doi_paper_id=str(split.doi_paper_id),
+        openalex_id=openalex.value_norm,
+        openalex_paper_id=str(split.openalex_paper_id),
+    )
+    return UpsertResult(split.doi_paper_id, UpsertOutcome.IDENTIFIERS_SPLIT, split=split)
 
 
 def _first_owner(
@@ -894,7 +931,11 @@ def _update_existing(
     fetched_at: datetime,
 ) -> UpsertResult:
     """先鎖住論文再比抓取時間；比較舊就不寫（`stale`，不掛識別碼、不回報衝突），
-    否則更新並掛上還沒有主人的識別碼。
+    否則先掛上還沒有主人的識別碼、再更新論文。
+
+    掛識別碼時被並行的交易搶先掛到另一篇（認領失敗、主人不是這篇）：DOI 與 OpenAlex ID 分屬兩篇，
+    什麼都不寫、回 `identifiers_split`（ADR-0020 更新 2026-11-22）。所以先掛識別碼、後寫論文：
+    寫論文之前就知道要不要略過。鎖的順序不變（先鎖論文、再依優先序佔識別碼）。
 
     鎖論文時一起讀舊的 `source_hash`：要寫的不同（含舊的是 NULL）就把 `source_changed_at` 設成
     `clock_timestamp()`、結果的 `source_changed` 為真；相同就保留原值（ADR-0028）。被引用次數、
@@ -912,6 +953,20 @@ def _update_existing(
     if stored is not None and fetched_at < stored:
         return UpsertResult(paper_id, UpsertOutcome.STALE)
     source_changed = stored_hash != values["source_hash"]
+
+    # 只有 DOI 與 OpenAlex ID 兩種識別碼，而且至少一個屬於這篇（找到它的那一個），所以這裡最多
+    # 認領一個；認領失敗時手上沒有掛上任何識別碼，直接回「分屬兩篇」就什麼都沒寫。
+    current = dict(owners)
+    for external_id in ids:
+        if external_id in current:
+            continue
+        if _claim(connection, paper_id, external_id):
+            current[external_id] = paper_id
+            continue
+        current[external_id] = _owner_of(connection, external_id)
+        split = _split_result(current)
+        if split is not None:
+            return split
 
     connection.execute(
         text(
@@ -945,13 +1000,11 @@ def _update_existing(
         {**values, "id": paper_id, "source_changed": source_changed},
     )
 
+    # 識別碼屬於別篇的情況都在上面判成「分屬兩篇」了，`conflicts` 照舊算（ADR-0020 更新
+    # 2026-11-22：現在不會有值，欄位留著）。
     conflicts: list[ExternalId] = []
     for external_id in ids:
-        owner = owners.get(external_id)
-        if owner is None:
-            if _claim(connection, paper_id, external_id):
-                continue
-            owner = _owner_of(connection, external_id)
+        owner = current[external_id]
         if owner != paper_id:
             _warn_conflict(paper_id, external_id, owner)
             conflicts.append(external_id)

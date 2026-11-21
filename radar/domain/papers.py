@@ -301,6 +301,18 @@ class UpsertOutcome(StrEnum):
     CREATED = "created"  # 新增了一篇論文
     UPDATED = "updated"  # 更新了既有的論文（要寫的資料一樣新或比較新）
     STALE = "stale"  # 要寫的資料比資料庫裡的舊，什麼都沒寫
+    # DOI 與 OpenAlex ID 屬於兩篇不同的既有論文：兩篇都不寫、識別碼不搬（ADR-0020 更新 2026-11-22）
+    IDENTIFIERS_SPLIT = "identifiers_split"
+
+
+@dataclass(frozen=True)
+class SplitIdentifiers:
+    """「識別碼分屬兩篇」時的兩個識別碼與各自所屬的論文（ADR-0020 更新 2026-11-22）。"""
+
+    doi: ExternalId
+    doi_paper_id: uuid.UUID
+    openalex_id: ExternalId
+    openalex_paper_id: uuid.UUID
 
 
 @dataclass(frozen=True)
@@ -308,10 +320,14 @@ class UpsertResult:
     """寫入的結果。`conflicts`：已經屬於另一篇論文、所以沒有掛到這篇的識別碼（不搬、不合併）。
 
     `source_changed`：更新既有論文時 `source_hash` 變了（含原本是 NULL；ADR-0028）；CREATED、
-    STALE 一律 False。不參與相等比較：兩個結果相等仍只看（論文, 結果, 衝突）。
+    STALE 一律 False。不參與相等比較：兩個結果相等仍只看（論文, 結果, 衝突, 分屬兩篇）。
+
+    `split`：只有 `IDENTIFIERS_SPLIT` 時有值，帶兩個識別碼與各自所屬的論文；這時 `paper_id` 是
+    DOI 所屬的那篇（照優先序本來會寫的那篇），但這筆資料沒有寫進任何論文，呼叫端當作略過。
     """
 
     paper_id: uuid.UUID
     outcome: UpsertOutcome
     conflicts: tuple[ExternalId, ...] = ()
     source_changed: bool = dataclasses.field(default=False, compare=False)
+    split: SplitIdentifiers | None = None
