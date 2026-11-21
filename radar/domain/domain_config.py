@@ -252,10 +252,10 @@ class DemoPublishersConfig(BaseModel):
     excluded: tuple[DemoExcludedPublisher, ...] = Field(min_length=1)
 
     def exclusions(self) -> PublisherExclusions:
-        """`is_demo_eligible` 用的排除清單（ID 與正規化過的名稱）。"""
+        """`is_demo_eligible` 用的排除清單（`PublisherExclusions` 建立時自己正規化 ID 與名稱）。"""
         return PublisherExclusions(
             ids=frozenset(entry.id for entry in self.excluded if entry.id is not None),
-            names=frozenset(normalize_publisher_name(entry.name) for entry in self.excluded),
+            names=frozenset(entry.name for entry in self.excluded),
         )
 
 

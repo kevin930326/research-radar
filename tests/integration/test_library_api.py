@@ -171,6 +171,12 @@ def _z(value: datetime) -> str:
     return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
 
 
+def _without_in_my_library(body: dict[str, Any]) -> dict[str, Any]:
+    """回應拿掉論文列的 `in_my_library` 之後的其餘全部（其他欄位照樣逐一比）。"""
+    paper = {key: value for key, value in body["paper"].items() if key != "in_my_library"}
+    return {**body, "paper": paper}
+
+
 # --- 加入 -------------------------------------------------------------------------------------
 
 
@@ -292,7 +298,10 @@ def test_remove_copies_to_deleted_record_then_deletes(
 
     assert response.status_code == 200, response.text
     assert response.headers["cache-control"] == "no-store"
-    assert response.json() == added
+    # 移出的回應＝加入時回的那一筆，只有 `in_my_library` 是假（ADR-0053 更新 2026-11-21）。
+    assert added["paper"]["in_my_library"] is True
+    assert response.json()["paper"]["in_my_library"] is False
+    assert _without_in_my_library(response.json()) == _without_in_my_library(added)
     assert _items(db) == []
     ((record_id, source, source_id, content, owner_id, deleted_by),) = execute(
         db,
@@ -363,7 +372,10 @@ def test_restore_brings_back_the_same_item(db: TestDatabase, database: Database,
 
     assert response.status_code == 200, response.text
     assert response.headers["cache-control"] == "no-store"
-    assert response.json() == removed.json()
+    # 復原的回應＝移出的回應，只有 `in_my_library` 是真（ADR-0053 更新 2026-11-21）。
+    assert removed.json()["paper"]["in_my_library"] is False
+    assert response.json()["paper"]["in_my_library"] is True
+    assert _without_in_my_library(response.json()) == _without_in_my_library(removed.json())
     assert response.json()["added_via"] == "upload"
     assert _items(db) == original
     assert execute(db, "SELECT count(*) FROM deleted_record") == [(0,)]
@@ -629,7 +641,10 @@ def test_item_whose_paper_was_excluded_later_is_still_listed_and_removable(
 
     assert (listed["items"], listed["total"]) == ([added], 1)
     assert removed.status_code == 200, removed.text
-    assert removed.json() == added
+    # 移出的回應＝加入的回應，只有 `in_my_library` 是假（ADR-0053 更新 2026-11-21）。
+    assert added["paper"]["in_my_library"] is True
+    assert removed.json()["paper"]["in_my_library"] is False
+    assert _without_in_my_library(removed.json()) == _without_in_my_library(added)
     assert _items(db) == []
 
 
@@ -791,6 +806,29 @@ def test_in_my_library_follows_add_remove_and_restore(database: Database, api: A
     assert page_flag() is False
     assert api.restore(paper_id, api.owner_token).json()["paper"]["in_my_library"] is True
     assert page_flag() is True
+
+
+def test_remove_says_not_in_my_library_add_and_restore_say_in_it(
+    database: Database, api: Api
+) -> None:
+    # F19（ADR-0053 更新 2026-11-21）：移出的回應是假，加入、復原的回應是真；私人論文（移出之後
+    # 就看不到）也一樣。
+    visible_id = create_paper(database)
+    private_id = _private_paper_of(database, api.owner_id)
+
+    added = api.add(visible_id, api.owner_token)
+    removed_visible = api.remove(visible_id, api.owner_token)
+    removed_private = api.remove(private_id, api.owner_token)
+    restored_visible = api.restore(visible_id, api.owner_token)
+    restored_private = api.restore(private_id, api.owner_token)
+
+    for response in (added, removed_visible, removed_private, restored_visible, restored_private):
+        assert response.status_code == 200, response.text
+    assert added.json()["paper"]["in_my_library"] is True
+    assert removed_visible.json()["paper"]["in_my_library"] is False
+    assert removed_private.json()["paper"]["in_my_library"] is False
+    assert restored_visible.json()["paper"]["in_my_library"] is True
+    assert restored_private.json()["paper"]["in_my_library"] is True
 
 
 def test_library_list_rows_are_all_in_my_library(database: Database, api: Api) -> None:

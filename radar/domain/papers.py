@@ -282,6 +282,19 @@ class StoredPaper:
     source_changed_at: datetime | None = None
 
 
+@dataclass(frozen=True)
+class StoredDemoFacts:
+    """資料庫裡存下的、`is_demo_eligible` 要看的欄位（reparse 結束時重判用，ADR-0052 第 9 點）。
+
+    `primary_license`、`publisher_ids`、`publisher_names` 是寫入時照存的值（遷移 0021）。
+    """
+
+    paper_id: uuid.UUID
+    primary_license: str | None
+    publisher_ids: tuple[str, ...]
+    publisher_names: tuple[str, ...]
+
+
 class UpsertOutcome(StrEnum):
     """`upsert_by_external_id` 做了什麼。"""
 
