@@ -50,7 +50,8 @@ Kevin 2026-11-19 決定：授權只看**出版社自己那一版**（OpenAlex �
 3. **授權對照**（`domain/policy.openalex_license`）：沿用 `ContentLicense`。字串完全相同才算（不改大小寫）；OpenAlex 把 CC0 與公眾領域併成 `public-domain`（官方授權清單顯示名稱「public domain (CC0)」），對到 `CC0`；其他（`mit`、`apache-2-0`、`gpl-*`、`isc`、`publisher-specific-oa`、看不懂的、沒有）一律 `UNKNOWN`。`public-domain` 對到 CC0、算可用：Kevin 2026-11-20 已同意。
 4. **判定**（`domain/policy.is_demo_eligible`，全專案唯一）：授權在 `DEMO_ELIGIBLE_LICENSES`（CC BY、CC BY-SA、CC0）、**至少一個出版社名稱正規化後不是空的**、而且沒有任何 ID 或名稱在排除清單裡，才是 True。**沒有出版社欄位＝False**（無法確認不是被排除的出版社，寧可不放；Kevin 2026-11-20 已同意）。排除清單沒有載入（`ScopeSettings.demo_publishers` 是 None）也是 False。
    - **名稱是必要條件，只有 ID 不夠**（PR #108 審查後加）：排除清單目前只靠名稱（設定檔的 `id` 都是 null），只有出版社 ID（看得懂或看不懂都一樣）、或名稱正規化後全部是空的（沒有任何字母或數字，例如只有空白、標點或看不見的字元；正規化規則見第 5 點）時，比不到名稱不代表不是 IEEE，一律 False。這比 Kevin 同意的「沒有出版社欄位＝不可用」更嚴，只會讓可用的變少（**保守方向，列給 Kevin 確認**）。之後排除清單補上實際的 ID 時再檢討這個條件。
-5. **排除清單** `config/demo_publishers.yaml`：每筆 `id`（OpenAlex 出版社 ID，可以是 null）、`name`（`host_organization_name` 的完整寫法）、`note`；至少一筆。名稱比對前兩邊（設定檔的名稱與論文的名稱）都經同一個函式 `normalize_publisher_name` 算出比對鍵，**只比字母與數字**：(1) NFKC；(2) `casefold`；(3) 只留 Unicode 類別以 `L`（字母）或 `N`（數字）開頭的字元，其他全部拿掉，包括空白、標點、符號（`So` 等，例如點字空白 U+2800）、格式字元 `Cf`（零寬空白、BOM、軟連字號等）、控制字元 `Cc`、組字符號 `Mn`（組字連接符 U+034F、異體字選擇符等）、私用區 `Co`、未指派 `Cn`；(4) 另外拿掉韓文填充字 U+115F、U+1160、U+3164、U+FFA0（類別是 `Lo`，但畫面上看不見）。所以 `IEEE Computer Society`、`IEEE-Computer Society`、字與字之間夾零寬空白或直接黏在一起的寫法都得到同一個鍵 `ieeecomputersociety`，`I.E.E.E.` 和 `IEEE` 同鍵；名稱沒有任何字母或數字時鍵是空字串，第 4 點不算它是名稱。**這是「寧可多排除」的選擇**（PR #108 第 3 輪確認審查後改）：不同的名稱可能撞成同一個鍵（例如只差標點或空白的兩家出版社），撞到排除清單只會讓可用的變少，不會讓該排除的漏掉；換來的是不必逐一列舉各種看不見或分隔用的字元。設定檔裡兩筆名稱得到同一個鍵不算錯（合併成一筆）；名稱沒有任何字母或數字的設定檔項目算寫錯。存進資料庫的 `publisher_names` 照舊是原字串，只有比對與「有沒有名稱」用這個鍵。檔案壞掉或不見時，api、worker、CLI 的啟動檢查列出問題、不啟動（和其他領域設定檔一樣）。
+   - 2026-11-22 起多一道「依期刊 ISSN-L 排除」，和出版社 ID、名稱是「任一個對上就排除」，見「更新（2026-11-22）」。
+5. **排除清單** `config/demo_publishers.yaml`：每筆 `id`（OpenAlex 出版社 ID，可以是 null）、`name`（`host_organization_name` 的完整寫法）、`note`；至少一筆。名稱比對前兩邊（設定檔的名稱與論文的名稱）都經同一個函式 `normalize_publisher_name` 算出比對鍵，**只比字母與數字**：(1) NFKC；(2) `casefold`；(3) 只留 Unicode 類別以 `L`（字母）或 `N`（數字）開頭的字元，其他全部拿掉，包括空白、標點、符號（`So` 等，例如點字空白 U+2800）、格式字元 `Cf`（零寬空白、BOM、軟連字號等）、控制字元 `Cc`、組字符號 `Mn`（組字連接符 U+034F、異體字選擇符等）、私用區 `Co`、未指派 `Cn`；(4) 另外拿掉韓文填充字 U+115F、U+1160、U+3164、U+FFA0（類別是 `Lo`，但畫面上看不見）。所以 `IEEE Computer Society`、`IEEE-Computer Society`、字與字之間夾零寬空白或直接黏在一起的寫法都得到同一個鍵 `ieeecomputersociety`，`I.E.E.E.` 和 `IEEE` 同鍵；名稱沒有任何字母或數字時鍵是空字串，第 4 點不算它是名稱。**這是「寧可多排除」的選擇**（PR #108 第 3 輪確認審查後改）：不同的名稱可能撞成同一個鍵（例如只差標點或空白的兩家出版社），撞到排除清單只會讓可用的變少，不會讓該排除的漏掉；換來的是不必逐一列舉各種看不見或分隔用的字元。設定檔裡兩筆名稱得到同一個鍵不算錯（合併成一筆）；名稱沒有任何字母或數字的設定檔項目算寫錯。存進資料庫的 `publisher_names` 照舊是原字串，只有比對與「有沒有名稱」用這個鍵。檔案壞掉或不見時，api、worker、CLI 的啟動檢查列出問題、不啟動（和其他領域設定檔一樣）。2026-11-22 起同一個檔多一個期刊清單 `excluded_journals`，見「更新（2026-11-22）」。
 6. **寫入**：`demo_eligible` 由 `repo/papers.upsert_by_external_id` 寫，另有 `radar reparse` 結束時的重判（第 9 點，經 `repo/papers.update_papers_not_demo_eligible`）**只會把 true 改成 false**；值一律只由 `is_demo_eligible` 算。三條寫入路徑（每週更新、第一次匯入＝第一次每週更新、`radar reparse`）都經這個函式；排除清單放在它本來就收的 `ScopeSettings`（`demo_publishers`；Kevin 2026-11-20 已同意），正式路徑用 `DomainConfig.scope_settings()` 建（worker 的 `load_scope`、`radar reparse`）。CREATED、UPDATED 時四欄整欄覆寫，STALE 不寫。
 7. **變動偵測不改（ADR-0028）**：授權或出版社變了、`source_hash` 沒變時，四欄照樣更新，但 `source_changed_at` 不動、`source_changed` 是 False，不會讓向量化或 AI 工作重做。
 8. **view `demo_full_paper`**：`counted_paper` ∩ `demo_eligible` ∩ 有目前用的摘要（`paper_abstract.is_current`）∩ 摘要來源允許公開。**「摘要來源允許公開」只在這個 view 定義**：只有 `openalex`（Semantic Scholar 還沒有書面授權；`uploaded_pdf` 永遠不是目前的摘要）。欄位明列、撤掉應用程式角色的寫入權限。
@@ -73,6 +74,43 @@ Kevin 2026-11-19 決定：授權只看**出版社自己那一版**（OpenAlex �
 - **`PublisherExclusions` 建立時自己正規化**：ID 經 `normalize_openalex_id`（看不懂的照原字串去頭尾空白、轉大寫，和比對論文 ID 時一樣），名稱經 `normalize_publisher_name`；正規化後是空字串的丟 `ValueError`（和設定檔載入把沒有字母或數字的名稱當寫錯一致）。從設定檔載入的結果不變。
 - **名稱比對鍵做到結果不再變**：`normalize_publisher_name` 的一輪（NFKC → casefold → 只留字母數字）重複做到結果不變，所以正規化兩次和一次一樣；只做一輪時，拿掉分隔字元後可能還能再組字（例如 `ᄀ-ᅡ`），排除清單和論文名稱會停在不同的鍵而漏排。這只會讓更多寫法對到同一個鍵（更保守）。
 
+## 更新（2026-11-22）：依期刊 ISSN-L 排除
+
+背景：PR #118 審查 C3。排除 IEEE 原本只靠出版社欄位；IEEE 的論文如果出版社名稱是清單外的寫法（例如前面多一個 `The`）、又沒有對上的出版社 ID，會被判成示範站可用。Kevin 2026-11-21 決定另開一項處理，方向是多一道依期刊排除。
+
+### 考慮過的做法
+
+| | 做法 | 優點 | 缺點 |
+|---|---|---|---|
+| A | 多列幾種出版社名稱寫法 | 不改程式 | 寫法列不完，漏一種就放出去 |
+| B | 依期刊 ISSN-L 排除，和出版社那一道「任一個對上就排除」 | 期刊 ISSN-L 是穩定的識別碼（追蹤範圍本來就靠它），不受出版社欄位怎麼寫影響 | 只擋列出來的期刊；IEEE 之後新加的期刊要記得補 |
+| C | 依期刊名稱排除 | 不用查 ISSN-L | 期刊會改名，名稱寫法一樣會變（原本選項 2-A 的缺點） |
+
+### 決定
+
+選 B。
+
+- **鍵名**：`config/demo_publishers.yaml` 多一個清單 `excluded_journals`，每筆 `issn_l`、`name`（只給人看）、`note`。先放一筆：IEEE Transactions on Engineering Management，ISSN-L `0018-9391`（Kevin 2026-11-20 用唯讀查詢從資料庫查到，同「更新（2026-11-21）」那一次）。清單可以是空的或整個不寫（等於不依期刊排除，行為和加這一道之前完全一樣）；`excluded`（出版社）照舊至少一筆。
+- **正規化**：設定檔的 `issn_l` 與論文的期刊 ISSN-L 都經既有的 `normalize_issn_l`（有無連字號、小寫 x、`ISSN` 前綴都收）。設定檔寫錯格式時啟動檢查列出問題、不啟動；兩筆正規化後相同不算錯（合併成一筆）。`PublisherExclusions` 多一個欄位 `journal_issn_ls`（預設空的），建立時自己正規化（和名稱、ID 一樣），看不懂的丟 `ValueError`。類別不改名。
+- **判定**：`is_demo_eligible` 多收論文的期刊 ISSN-L（關鍵字參數 `journal_issn_l`，預設 None）；對到排除的期刊就是 False。其他判定一條都不變（授權、名稱是必要條件、出版社 ID 與名稱的比對）。
+- **沒有期刊 ISSN-L**：這一道不算對上，結果照其他條件算。
+- **和出版社那一道的關係**：任一個（出版社 ID、出版社名稱、期刊 ISSN-L）對上就排除。
+- **寫入路徑**：判定仍然只有 `is_demo_eligible` 一份。`upsert_by_external_id` 帶解析出的 `journal_issn_l`；reparse 結束時的重判帶資料庫存下的 `paper.journal_issn_l`，仍然只往 false 改。不需要遷移（`journal_issn_l` 本來就存）。
+
+### 理由
+
+- 期刊 ISSN-L 是這個專案追蹤範圍本來就在用的識別碼，比出版社名稱穩定；IEEE TEM 是目前追蹤的期刊裡唯一的 IEEE 期刊。
+- 排除方向多一道只會少放，不會多放（和第 2 點選 D 的理由一樣）。
+- 放在既有的 `PublisherExclusions`／`ScopeSettings.demo_publishers` 這條路上：寫入函式、每週更新、reparse 本來就一路傳它，不必另開參數或建新的 interface。
+
+### 取捨
+
+- **沒有期刊 ISSN-L 的論文這一道擋不到**：OpenAlex 沒給期刊、或期刊欄位壞掉的論文，只靠出版社那一道。選這樣是因為「沒有 ISSN-L 就當作對上」會把所有沒有期刊的論文都排除，和這一道的目的（擋特定期刊）無關；而且這種論文本來就不在追蹤範圍（`is_in_scope` 要有 ISSN-L）。
+- **`is_demo_eligible` 的新參數有預設值 None**（等於「沒有期刊 ISSN-L」）：既有的呼叫不用改；代價是之後新的呼叫端忘了帶，期刊這一道不會生效。兩條正式寫入路徑都有整合測試守著（每週更新與 reparse 重判都用 IEEE TEM 的論文驗證）。
+- **只擋列出來的期刊**：IEEE 之後如果有別本期刊進追蹤範圍，要記得加進 `excluded_journals`。
+- 清單改了一樣要跑 `radar reparse` 才會套到已經存下的論文（第 9 點）。
+- **換版不會重算已經存下的 `demo_eligible`**：換上這一版之前，舊版每週更新可能把「出版社名稱與 ID 都沒對上的 IEEE TEM CC BY 論文」存成 true（2026-11-21 的核對查詢是 0 篇，但那只代表當時的資料，之後的寫入不在裡面，所以不拿它當「可以不跑」的依據）。合併後不必馬上重跑：目前示範站還沒有匯出，沒有任何內容公開。**Story 3.7 真的匯出示範站之前，一定先跑一次 `radar reparse`**（用正式判定 `is_demo_eligible` 重算存下的論文、只往 false 改），確認指令成功、日誌有「重新解析結束」，再跑核對查詢。核對查詢的 SQL 只是輔助：它寫死期刊與出版社清單、名稱正規化也比正式規則簡單（例如不會拿掉韓文填充字這類看不見的字元），和正式判定可能有落差；正式的關卡是匯出前那一次 reparse。
+
 ## 理由
 
 - 授權只看出版社那一版：我們要放的是出版社版本的摘要與 AI 產出，典藏版的授權不能拿來替出版社版本背書（Kevin 2026-11-19 決定）。
@@ -90,7 +128,7 @@ Kevin 2026-11-19 決定：授權只看**出版社自己那一版**（OpenAlex �
 
 ## 已知限制
 
-- **IEEE 的 ID 與名稱都沒有經過 OpenAlex 實際資料查證；Kevin 2026-11-20 已同意先用名稱排除（`id` 留空），補資料後由 Kevin 跑核對查詢，再另開小 PR 把實際 ID 與名稱補上。核對出 IEEE 是 0 篇（被算成可用的 IEEE 論文）之前不做 3.7 匯出。** 這一輪不准連 OpenAlex；OpenAlex 放在 GitHub 的官方文件（見下面出處）沒有寫 IEEE 的出版社 ID 或 `host_organization_name` 的寫法。設定檔先寫三筆名稱（Institute of Electrical and Electronics Engineers、IEEE、IEEE Computer Society），`id` 都是 null。Kevin 補資料後用唯讀查詢核對資料庫裡 IEEE 期刊論文實際的 `publisher_ids`、`publisher_names`，把 ID 補上、名稱改成實際寫法。補上之前，名稱寫法對不上的 IEEE 論文**可能被算成可用**：補資料後、匯出（Story 3.7）之前一定要核對。
+- **IEEE 論文的出版社欄位寫法對不上時**：IEEE 的出版社 ID 已查證（「更新（2026-11-21）」）；名稱寫法對不上、又沒有對上 ID 的 IEEE TEM 論文，現在由依期刊排除擋住（「更新（2026-11-22）」）。**還沒擋住的**：不在 `excluded_journals` 裡的 IEEE 期刊（目前追蹤的期刊裡沒有別本），以及沒有期刊 ISSN-L 的 IEEE 論文，這兩種仍然只靠出版社 ID 與名稱。匯出（Story 3.7）之前先跑一次 reparse（用正式判定重算存下的論文；換版本身不會重算），確認成功後再跑核對查詢，確認被算成可用的 IEEE 論文是 0 篇（「更新（2026-11-22）」取捨）。
 - **只有出版社 ID、沒有名稱的論文一律不可用**（第 4 點）：排除清單補上 ID 之前，這類論文就算授權是 CC BY 也不放。保守方向，等 Kevin 確認。
 - **排除清單再改時，reparse 沒重寫到的論文可能留著舊的 true**（第 9 點）：靠核對查詢擋，程式的補法等 Kevin 決定。
 - `public-domain` 當 CC0：OpenAlex 的官方清單把兩者併成一個值，分不開；公眾領域的作品本來就可以轉載。
