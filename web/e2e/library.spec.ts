@@ -2040,3 +2040,123 @@ test.describe("the expected member is whoever the shown data was read as (ADR-00
 function requestsOfNow(requests: ApiRequest[], method: string, prefix: string): ApiRequest[] {
   return requests.filter((request) => request.method === method && request.path.startsWith(prefix));
 }
+
+// epic-3h2 PR 1 fix2：換人流程只跑一輪、換人後的頁面一掛上就用新的人讀（N1）；「再載入」確認暫留列的補查回 409 時走換人流程（N2）。
+test.describe("following a member change reads only as the new member (ADR-0055, fix2)", () => {
+  const A = MEMBERS[0]!;
+  const B = MEMBERS[1]!;
+  const searchRow = (page: Page, id: string) => page.locator(`[data-paper-row="${id}"]`);
+  const idsOf = (state: ApiMockState, memberId: string) => libraryOf(state, memberId).items.map((record) => record.id);
+  const meAsks = (state: ApiMockState) => state.requests.filter((request) => request.path === "/api/v1/me").length;
+  const ALL = ROWS.map((entry) => entry.row.id);
+
+  /** 從現在起，路徑以 `prefix` 開頭的 GET 回應：帶的預期成員與狀態（依序）。 */
+  function readsFrom(page: Page, prefix: string): { expected: string | undefined; status: number }[] {
+    const seen: { expected: string | undefined; status: number }[] = [];
+    page.on("response", (response) => {
+      const url = new URL(response.url());
+      if (response.request().method() !== "GET" || !`${url.pathname}${url.search}`.startsWith(prefix)) return;
+      seen.push({ expected: response.request().headers()[EXPECTED_MEMBER_HEADER], status: response.status() });
+    });
+    return seen;
+  }
+
+  test("N1 search: A's load more is still on its way, B signs in elsewhere, A presses remove: one round of 'who am I', every list read after the 409 goes out as B, the page ends as B's", async ({ page, apiMock: state }) => {
+    state.libraryIds = ALL;
+    const shared = filterListRows(ROWS, new URLSearchParams("scope=personal"), ALL)![0]!.row.id;
+    libraryOf(state, B.member_id).items = [{ id: shared, addedAt: "2026-11-01T00:00:00.000Z" }];
+    await page.setViewportSize(DESKTOP);
+    await page.goto(`${member.baseURL}/search?scope=personal`);
+    await expect(page.locator("[data-paper-row]")).toHaveCount(20);
+    // 甲按「再載入」，讀取擋著（甲的讀取還沒回來）；這時乙在別的分頁登入。
+    const [listGate, releaseList] = gate();
+    state.listGate = listGate;
+    const reads = listReads(state.requests);
+    await page.getByRole("button", { name: fill(text("search:search.results.more"), { count: 20 }) }).click();
+    await expect.poll(() => listReads(state.requests)).toBeGreaterThan(reads);
+    state.member = B;
+    const meBefore = meAsks(state);
+    const after = readsFrom(page, "/api/v1/papers?");
+    const write = page
+      .waitForResponse((response) => response.request().method() === "DELETE" && new URL(response.url()).pathname.startsWith("/api/v1/library/"))
+      .then(async (response) => ({ expected: (await response.request().allHeaders())[EXPECTED_MEMBER_HEADER], status: response.status() }));
+    await searchRow(page, shared).locator("[data-library='remove']").click();
+    expect(await write).toEqual({ expected: A.member_id, status: 409 });
+    // 換人流程問完「我是誰」、路由換成乙：乙的讀取送出（也擋著），畫面是骨架、不是甲的列。
+    await expect.poll(() => meAsks(state)).toBe(meBefore + 2);
+    await expect.poll(() => listReads(state.requests)).toBe(reads + 2);
+    await expect(page.locator("[data-paper-row]")).toHaveCount(0);
+    await expect(page.locator("[data-state='loading']")).toBeVisible();
+    state.listGate = null;
+    releaseList();
+    await expect(searchRow(page, shared).locator("[data-library='added']")).toBeVisible();
+    await expect(page.locator("[data-paper-row]")).toHaveCount(1);
+    await expect(page.locator("[data-state='loading']")).toHaveCount(0);
+    await twoFrames(page);
+    await page.waitForTimeout(300);
+    // 只跑一輪：換人流程問一次、路由重跑問一次。換人之後送出的清單讀取只有乙的一個（甲擋著的那一個放行後才回應，畫面不用）。
+    expect(meAsks(state)).toBe(meBefore + 2);
+    expect(listReads(state.requests)).toBe(reads + 2);
+    expect(after.filter((read) => read.expected === B.member_id)).toEqual([{ expected: B.member_id, status: 200 }]);
+    expect(after.filter((read) => read.expected !== B.member_id)).toEqual([{ expected: A.member_id, status: 200 }]);
+    expect(idsOf(state, B.member_id)).toEqual([shared]);
+    expect(libraryOf(state, B.member_id).removed).toEqual([]);
+  });
+
+  test("N1 my library: B signs in elsewhere and A presses remove: one round of 'who am I', every list read after the 409 goes out as B, the page ends as B's", async ({ page, apiMock: state }) => {
+    const aOnly = ROWS[0]!.row.id;
+    const bOnly = ROWS[1]!.row.id;
+    state.libraryIds = [aOnly];
+    libraryOf(state, B.member_id).items = [{ id: bOnly, addedAt: "2026-11-01T00:00:00.000Z" }];
+    await openLibrary(page);
+    await expect(rows(page)).toHaveCount(1);
+    state.member = B;
+    const meBefore = meAsks(state);
+    const after = readsFrom(page, "/api/v1/library");
+    const write = page
+      .waitForResponse((response) => response.request().method() === "DELETE" && new URL(response.url()).pathname.startsWith("/api/v1/library/"))
+      .then(async (response) => ({ expected: (await response.request().allHeaders())[EXPECTED_MEMBER_HEADER], status: response.status() }));
+    await row(page, aOnly).locator("[data-library='remove']:visible").click();
+    expect(await write).toEqual({ expected: A.member_id, status: 409 });
+    await expect(row(page, bOnly)).toBeVisible();
+    await expect(rows(page)).toHaveCount(1);
+    await twoFrames(page);
+    await page.waitForTimeout(300);
+    expect(meAsks(state)).toBe(meBefore + 2);
+    expect(after).toEqual([{ expected: B.member_id, status: 200 }]);
+    expect(idsOf(state, B.member_id)).toEqual([bOnly]);
+    expect(idsOf(state, A.member_id)).toEqual([aOnly]);
+  });
+
+  test("N2 search 'my library' holding a removed row: load more is read as A, then B signs in before the held row is checked: the check is refused, the page becomes B's", async ({ page, apiMock: state }) => {
+    state.libraryIds = ALL;
+    const all = filterListRows(ROWS, new URLSearchParams("scope=personal"), ALL)!.map((entry) => entry.row.id);
+    const bOnly = all[25]!;
+    libraryOf(state, B.member_id).items = [{ id: bOnly, addedAt: "2026-11-01T00:00:00.000Z" }];
+    await page.setViewportSize(DESKTOP);
+    await page.goto(`${member.baseURL}/search?scope=personal`);
+    await expect(page.locator("[data-paper-row]")).toHaveCount(20);
+    const held = all[0]!;
+    await searchRow(page, held).locator("[data-library='remove']").click();
+    await expect(searchRow(page, held).locator("[data-library='add']")).toBeFocused();
+    // 主清單（甲）照常讀完；確認暫留列的那一篇送到之前，登入的人換成乙。
+    let switched = false;
+    await page.route(new RegExp(`/api/v1/papers/${held}$`), async (route) => {
+      if (!switched) {
+        switched = true;
+        state.member = B;
+      }
+      await route.fallback();
+    });
+    const check = page
+      .waitForResponse((response) => new URL(response.url()).pathname === `/api/v1/papers/${held}`)
+      .then(async (response) => ({ expected: (await response.request().allHeaders())[EXPECTED_MEMBER_HEADER], status: response.status() }));
+    await page.getByRole("button", { name: fill(text("search:search.results.more"), { count: 20 }) }).click();
+    expect(await check).toEqual({ expected: A.member_id, status: 409 });
+    await expect(searchRow(page, bOnly)).toBeVisible();
+    await expect(page.locator("[data-paper-row]")).toHaveCount(1);
+    await expect(searchRow(page, held)).toHaveCount(0);
+    expect(idsOf(state, B.member_id)).toEqual([bOnly]);
+    expect(libraryOf(state, B.member_id).removed).toEqual([]);
+  });
+});

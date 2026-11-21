@@ -1,4 +1,4 @@
-import { queryOptions, useQuery, useQueryClient } from "@tanstack/react-query";
+import { queryOptions, useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import { Outlet, createRoute, lazyRouteComponent, redirect, useLocation, useNavigate, useRouter } from "@tanstack/react-router";
 import { useEffect, useRef, useState } from "react";
 import { flushSync } from "react-dom";
@@ -19,7 +19,7 @@ import { isPaperId } from "../pages/paper-format";
 import { validateSearchParams, type SearchParams } from "../pages/search-filters";
 import type { ReadAs } from "../datasource/types";
 import { libraryShown, useFollowMemberChange, useLibraryChange } from "./library-change";
-import { displayNamesQuery, hasHeldRows, paperSource } from "./paper-queries";
+import { displayNamesQuery, hasHeldRows, paperKey, paperSource } from "./paper-queries";
 import { PAGE_FRAME_CLASS, PlainMain, rootRoute } from "./root";
 import {
   FIRST_PAGE,
@@ -27,6 +27,7 @@ import {
   loadMember,
   memberGeneration,
   trackMemberCheck,
+  useCachedMemberId,
   useMemberSwaps,
   validateLoginSearch,
   type MemberCheckVerdict,
@@ -138,13 +139,15 @@ const searchRoute = createRoute({
     const swaps = useMemberSwaps(queryClient);
     const { member } = searchRoute.useRouteContext();
     const follow = useFollowMemberChange();
+    const paused = useMemberSwapPending(queryClient, member.member_id);
     return (
       <SearchPage
         // 換了人：整頁重新掛上（快取已經清掉，清單照新的人重讀；每一列按過的狀態也不留）。路由的成員換了（換網址時
         // 「我是誰」認到別人）也一樣：不留上一位的 placeholder 與列的狀態（審查 fix1 H1）。
         key={`${member.member_id}-${memberChanged}-${swaps}`}
         memberId={member.member_id}
-        onMemberChanged={() => void follow()}
+        paused={paused}
+        onMemberChanged={follow}
         params={params}
         // 篩選改了：換掉這一筆瀏覽紀錄（不是每勾一個就多一筆），捲動位置不動。下一組條件用函式從最新的網址算
         // （上一次換頁還在等「我是誰」時，畫面拿到的條件是舊的；審查 S1-4）。
@@ -161,6 +164,16 @@ const searchRoute = createRoute({
     );
   },
 });
+
+/**
+ * 換人進行中：快取裡「我是誰」已經是另一位（loadMember、換人流程問到的），路由的 context 還是上一位（路由還沒重跑完）。
+ * 這段期間找論文、我的文獻庫不讀成員專屬的資料（清單是骨架）：用 context 的成員讀一定是 409，還會再觸發一輪換人流程
+ * （審查 fix2 N1）。路由換成新的人之後頁面因 key 重新掛上，一掛上就用新的人讀。快取裡沒有「我是誰」（登出、清快取的途中）不算。
+ */
+function useMemberSwapPending(queryClient: QueryClient, memberId: string): boolean {
+  const cached = useCachedMemberId(queryClient);
+  return cached !== undefined && cached !== memberId;
+}
 
 /**
  * 範圍「我的文獻庫」有本頁移出暫留的列時，清單切回視窗不重讀（paperListQuery），所以另一個分頁換人登入時這一頁看不出來，
@@ -241,11 +254,13 @@ const libraryRoute = createRoute({
     const swaps = useMemberSwaps(queryClient);
     const { member } = libraryRoute.useRouteContext();
     const follow = useFollowMemberChange();
+    const paused = useMemberSwapPending(queryClient, member.member_id);
     return (
       <LibraryPage
         key={`${member.member_id}-${swaps}`}
         memberId={member.member_id}
-        onMemberChanged={() => void follow()}
+        paused={paused}
+        onMemberChanged={follow}
         shown={shown}
         onMore={(next) => void navigate({ search: { shown: next }, replace: true, resetScroll: false })}
         onSignedOut={() =>
@@ -284,9 +299,9 @@ function devRoutes() {
   ] as const;
 }
 
-// 讀取帶這一頁認定的成員當預期成員（ADR-0055）；讀到的結果記下是用誰讀的（readAs）。
+// 讀取帶這一頁認定的成員當預期成員（ADR-0055）；讀到的結果記下是用誰讀的（readAs）。鍵最後一段是這一位（審查 fix2 N1）。
 const paperQuery = (paperId: string, memberId: string) =>
-  queryOptions({ queryKey: ["papers", paperId], queryFn: () => paperSource().paper(paperId, memberId), retry: false });
+  queryOptions({ queryKey: paperKey(paperId, memberId), queryFn: () => paperSource().paper(paperId, memberId), retry: false });
 
 /**
  * 論文頁＋顯示名稱：顯示名稱沒讀到時只有分類那一行顯示訊息條；按「重試」回 401 時照登入過期處理。

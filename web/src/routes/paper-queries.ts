@@ -41,6 +41,26 @@ const LIST_STALE_MS = 5 * 60 * 1000;
  */
 const LIST_GC_MS = 30 * 60 * 1000;
 
+/** 成員專屬查詢的鍵最後一段：讀取帶的預期成員（沒有就不加；ADR-0055）。不同成員的讀取是不同的查詢，不會接到別人進行中的讀取或結果（審查 fix2 N1）。 */
+function memberKey(memberId: string | undefined): [] | [string] {
+  return memberId === undefined ? [] : [memberId];
+}
+
+/** 找論文清單的查詢鍵（`filters` 是 filtersKey 的結果）。 */
+export function paperListKey(filters: string, limit: number, memberId?: string): QueryKey {
+  return ["paper-list", filters, limit, ...memberKey(memberId)];
+}
+
+/** 我的文獻庫清單的查詢鍵。 */
+export function libraryListKey(limit: number, memberId?: string): QueryKey {
+  return ["library", limit, ...memberKey(memberId)];
+}
+
+/** 論文頁的查詢鍵。 */
+export function paperKey(paperId: string, memberId?: string): QueryKey {
+  return ["papers", paperId, ...memberKey(memberId)];
+}
+
 /** 篩選條件的鍵：排好順序的字串（物件當鍵時 TanStack 會做部分比對，不同條件可能被當成同一組）。 */
 export function filtersKey(filters: PaperListFilters): string {
   return JSON.stringify(Object.entries(filters).sort(([a], [b]) => a.localeCompare(b)));
@@ -60,12 +80,14 @@ export function filtersKey(filters: PaperListFilters): string {
  *
  * `memberId`：這一頁認定的成員（路由的 context）。每一個讀取都帶它當預期成員（ADR-0055）：讀到的就是這一位的（結果的
  * `readAs`），不是就回 memberChanged。接著讀只接同一位讀的那一份（`readAs` 相同）：不把上一位的列接到這一位的清單裡。
+ * 查詢鍵最後一段是這一位（paperListKey）：換人後的頁面不會接到上一位進行中的讀取或留下的 409（審查 fix2 N1）。
+ * 接著讀時確認暫留列的補查回 memberChanged：整份清單回 memberChanged（走換人流程），不當成查不到（審查 fix2 N2）。
  */
 export function paperListQuery(queryClient: QueryClient, filters: PaperListFilters, limit: number, memberId?: string) {
   const key = filtersKey(filters);
   const personal = isPersonalList(["paper-list", key]);
   return queryOptions({
-    queryKey: ["paper-list", key, limit],
+    queryKey: paperListKey(key, limit, memberId),
     queryFn: async () => {
       let previous: PaperList | null = null;
       for (const [queryKey, data] of queryClient.getQueriesData<{ kind: string; list?: PaperList; readAs?: ReadAs }>({
@@ -85,6 +107,7 @@ export function paperListQuery(queryClient: QueryClient, filters: PaperListFilte
       const held = heldRows(previous);
       if (held.length === 0) return result;
       const back = await addedElsewhere(held.map((row) => row.id), memberId);
+      if (back === "memberChanged") return { kind: "memberChanged" as const };
       // 新讀到的一頁裡又出現的暫留列：伺服器回的列一定在文獻庫裡，也算加回去了（論文 ID 的確認讀不到時，照畫面算，
       // 篇數才不會比列多；確認審查 C3）。
       const fresh = new Set([...result.list.items, ...result.list.pending].slice(listSize(previous)).map((row) => row.id));
@@ -137,10 +160,11 @@ export function hasHeldRows(query: HeldCheck): boolean {
 
 /**
  * 這幾篇裡，伺服器說已經在我的文獻庫的（別的分頁又加回去了）。讀不到的當成還不在（照畫面）。
- * 帶同一個預期成員：換了人（memberChanged）也當成讀不到（清單本身的讀取會回 memberChanged）。
+ * 帶同一個預期成員：任一篇回 memberChanged（主清單讀完、補查之前換了人）就回 "memberChanged"，清單照換人處理（審查 fix2 N2）。
  */
-async function addedElsewhere(ids: readonly string[], memberId: string | undefined): Promise<Set<string>> {
+async function addedElsewhere(ids: readonly string[], memberId: string | undefined): Promise<Set<string> | "memberChanged"> {
   const answers = await Promise.allSettled(ids.map((id) => paperSource().paper(id, memberId)));
+  if (answers.some((answer) => answer.status === "fulfilled" && answer.value.kind === "memberChanged")) return "memberChanged";
   return new Set(
     ids.filter((_, index) => {
       const answer = answers[index];
@@ -164,11 +188,11 @@ export function librarySource(): LibrarySource {
  * 我的文獻庫的清單（要 `limit` 篇）。規則同 `paperListQuery`：快取裡有篇數不同的一份就接著讀（「再載入」）。
  * 每次打開這一頁都重讀（`refetchOnMount: "always"`）；頁面開著的時候不自動重讀（切回視窗、重新連線都不讀）：
  * 移出的那一列要留在原地顯示「已移出」＋「復原」，離開頁面後才消失（State Patterns「13. 我的文獻庫」）。
- * `memberId`：同 `paperListQuery`（讀取帶預期成員、只接同一位讀的那一份；ADR-0055）。
+ * `memberId`：同 `paperListQuery`（讀取帶預期成員、只接同一位讀的那一份、鍵最後一段是這一位；ADR-0055）。
  */
 export function libraryListQuery(queryClient: QueryClient, limit: number, memberId?: string) {
   return queryOptions({
-    queryKey: ["library", limit],
+    queryKey: libraryListKey(limit, memberId),
     queryFn: () => {
       let previous: LibraryList | null = null;
       const size = (list: LibraryList) => list.items.length + list.pending.length;
@@ -197,11 +221,11 @@ export type LibraryCountResult = { kind: "found"; total: number } | { kind: "sig
  * 鍵不放在 `["library", …]` 底下：那一組是文獻庫清單，`libraryListQuery` 會把同一組的每一份當成可以接著讀的上一份。
  * 每次用到都重讀（`staleTime` 0、`gcTime` 0）：別的分頁、我的文獻庫那一頁改過的篇數不會留著舊的。
  * 只要總篇數，但 API 沒有只回篇數的寫法，照樣讀第一頁（不改後端）。
- * `memberId`：讀取帶的預期成員（同 `paperListQuery`；ADR-0055）。
+ * `memberId`：讀取帶的預期成員（同 `paperListQuery`，鍵最後一段也是這一位；ADR-0055）。
  */
 export function libraryCountQuery(memberId?: string) {
   return queryOptions({
-    queryKey: ["library-count"],
+    queryKey: ["library-count", ...memberKey(memberId)],
     queryFn: async (): Promise<LibraryCountResult> => {
       const result = await librarySource().list(0, null, memberId);
       return result.kind === "found" ? { kind: "found", total: result.list.total } : result;
@@ -229,7 +253,8 @@ export async function markInLibrary(
 ): Promise<boolean> {
   await queryClient.cancelQueries({ queryKey: ["paper-list"] });
   if (!stillCurrent()) return false;
-  queryClient.setQueryData<PaperResult>(["papers", paperId], (data) =>
+  // 論文頁的鍵最後一段是讀的成員（paperKey）：這一篇的每一份都改（換人時快取已經清過，只會有現在這一位的）。
+  queryClient.setQueriesData<PaperResult>({ queryKey: ["papers", paperId] }, (data) =>
     data?.kind === "found" ? { ...data, page: { ...data.page, in_my_library: inLibrary } } : data,
   );
   const mark = (rows: PaperList["items"]) =>

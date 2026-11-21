@@ -87,6 +87,10 @@ const following = new WeakMap<QueryClient, Promise<void>>();
  * 2. 沒有人：回登入頁並帶「登入已經過期」（`toLogin`）。
  * 3. 有人（或問不到）：找論文、我的文獻庫同步重新掛上（noteMemberSwap；上一位的列馬上離開畫面），再 `reload`
  *    （重跑路由的登入檢查與資料讀取：導覽列、論文頁換成現在的人；問不到就是全站共用的「載入失敗」）。
+ *    重新掛上時路由的 context 還是上一位、快取裡的「我是誰」已經是現在的人：頁面這段期間不讀（member.tsx 的
+ *    useMemberSwapPending），路由換人後因 key 再掛上一次、一掛上就用現在的人讀，不會先用上一位讀一次 409（審查 fix2 N1）。
+ * 4. 收尾：這一輪進行中才回來的 409（流程開始前、用上一位送出的讀取）還留在快取裡的，畫面在用的照現在的身分重讀
+ *    （畫面停在骨架；重讀又是 409 才表示又換了人，頁面會再呼叫一次）。
  * 回傳的 promise 不會 reject（`reload`／`toLogin` 失敗也收掉：畫面已經在換，沒有人能處理這個錯誤）；結束（成功或失敗）
  * 就拿掉進行中的那一次，下一個 409 會重新開始（審查 fix1 L3）。
  */
@@ -116,7 +120,11 @@ export function followMemberChange(
     await actions.reload();
   })()
     .catch(() => {})
-    .finally(() => following.delete(queryClient));
+    .finally(() => {
+      following.delete(queryClient);
+      // 拿掉進行中的這一輪之後才重讀：重讀又是 409 時，頁面呼叫的是新的一輪，不是接到這一輪（已經結束）的 promise。
+      void queryClient.invalidateQueries({ predicate: (query) => (query.state.data as { kind?: string } | undefined)?.kind === "memberChanged" });
+    });
   following.set(queryClient, job);
   return job;
 }

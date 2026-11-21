@@ -109,6 +109,16 @@ export function useMemberSwaps(queryClient: QueryClient): number {
 }
 
 /**
+ * 快取裡「我是誰」的成員 ID（沒有、或是沒有人時是 undefined）；換了就重畫。路由的 context 要等路由重跑完才換，
+ * 快取在問到的那一刻就換：兩個不同表示換人進行中（審查 fix2 N1）。
+ */
+export function useCachedMemberId(queryClient: QueryClient): string | undefined {
+  const subscribe = useCallback((listener: () => void) => queryClient.getQueryCache().subscribe(listener), [queryClient]);
+  const read = useCallback(() => queryClient.getQueryData(meQuery.queryKey)?.member_id, [queryClient]);
+  return useSyncExternalStore(subscribe, read, read);
+}
+
+/**
  * 每次進成員版的頁面先問「我是誰」。快取裡原本是另一位成員時（例如在另一個分頁登出、換人登入，cookie 換了），
  * 先清掉所有查詢快取再繼續：快取裡的論文列、文獻庫都是上一位的（審查 F1）。`wasSignedIn` 是問之前快取裡有沒有成員。
  */
