@@ -3,8 +3,8 @@
 - 加入：看得到的論文 → 200（`added_via = manual`）＋一筆稽核；再加一次（任何 `added_via`）回原本
   那一筆、不寫稽核。B 加入 A 也有的論文：B 自己的一筆，A 那一筆不變。
 - 加看不到的（別人的私人論文）、不存在、壞 ID、被排除的非研究文章：完全相同的 404，沒有寫入。
-- 移出：200 回移出前那一筆、`deleted_record` 一筆（整列的 jsonb）、稽核；清單不再有它。移出不在的
-  （別人的、沒加過的）404，別人的那一筆不動。
+- 移出：200 回移出前那一筆（`in_my_library` 是假）、`deleted_record` 一筆（整列的 jsonb）、稽核；
+  清單不再有它。移出不在的（別人的、沒加過的）404，別人的那一筆不動。
 - 復原：200，`id`／`added_via`／`added_at` 同原本，封存刪掉、稽核；別人的封存、沒有封存 404，不寫
   稽核；那篇已經在文獻庫時回現在那一筆、不動任何封存（重送復原不會吃掉另一次移出的封存）。
 - 清單：51 篇 → 第一頁 50＋`next_cursor`＋`total` 51，第二頁 1 篇、`next_cursor` null；照
@@ -801,7 +801,7 @@ def test_in_my_library_follows_add_remove_and_restore(database: Database, api: A
     assert page_flag() is False
     assert api.add(paper_id, api.owner_token).json()["paper"]["in_my_library"] is True
     assert page_flag() is True
-    # 移出回的是移出前那一筆（那時還在），之後就不在了。
+    # 移出回的那一筆已經說不在（F19，ADR-0053 更新），之後讀論文頁也不在。
     assert api.remove(paper_id, api.owner_token).status_code == 200
     assert page_flag() is False
     assert api.restore(paper_id, api.owner_token).json()["paper"]["in_my_library"] is True

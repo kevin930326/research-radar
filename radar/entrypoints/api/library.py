@@ -10,8 +10,8 @@
 - `GET /api/v1/library`：自己的文獻庫的一頁（`items`、`next_cursor`、`total`）；別人讀到的是自己的
   （沒有就是空清單）。`cursor` 不是上一頁給的寫法 → 422 `request_invalid`。
 - `PUT /api/v1/library/{paper_id}`：加入（`added_via = manual`）；已經在就回原本那一筆。
-- `DELETE /api/v1/library/{paper_id}`：移出，回移出前的那一筆（200，不是 204：換人測試的對照要有
-  本文）。
+- `DELETE /api/v1/library/{paper_id}`：移出，回移出前的那一筆，但 `paper.in_my_library` 是假
+  （ADR-0053 更新 2026-11-21；200，不是 204：換人測試的對照要有本文）。
 - `POST /api/v1/library/{paper_id}/restore`：復原最近一次移出的那一筆；已經在文獻庫就回現在那一筆、
   不動封存。
 - 看不到、不存在、被排除、別人的、路徑參數不是 UUID：一律丟同一個
@@ -252,9 +252,10 @@ def install_library_routes(app: FastAPI, routes: LibraryRoutes, auth_routes: Aut
         member: Annotated[AuthenticatedMember, Depends(acting_member)],
         response: Response,
     ) -> LibraryItemResponse:
-        """把一篇移出自己的文獻庫，回移出前的那一筆；不在自己的文獻庫回 404，沒登入 401；`Origin`
-        缺少或不是本站 403 `origin_rejected`；`X-Radar-Expected-Member` 和登入的成員不同 409
-        `member_changed`、格式不對 400 `expected_member_invalid`。"""
+        """把一篇移出自己的文獻庫，回移出前的那一筆（`paper.in_my_library` 是假）；不在自己的文獻庫
+        回 404，沒登入 401；`Origin` 缺少或不是本站 403 `origin_rejected`；
+        `X-Radar-Expected-Member` 和登入的成員不同 409 `member_changed`、格式不對 400
+        `expected_member_invalid`。"""
         return change(member, response, paper_id, routes.remove)
 
     @router.post("/library/{paper_id}/restore")

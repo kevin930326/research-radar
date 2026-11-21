@@ -644,9 +644,10 @@ export const getRemoveLibraryItemUrl = (paperId: string,) => {
 }
 
 /**
- * 把一篇移出自己的文獻庫，回移出前的那一筆；不在自己的文獻庫回 404，沒登入 401；`Origin`
- * 缺少或不是本站 403 `origin_rejected`；`X-Radar-Expected-Member` 和登入的成員不同 409
- * `member_changed`、格式不對 400 `expected_member_invalid`。
+ * 把一篇移出自己的文獻庫，回移出前的那一筆（`paper.in_my_library` 是假）；不在自己的文獻庫
+ * 回 404，沒登入 401；`Origin` 缺少或不是本站 403 `origin_rejected`；
+ * `X-Radar-Expected-Member` 和登入的成員不同 409 `member_changed`、格式不對 400
+ * `expected_member_invalid`。
  * @summary Remove Library Item
  */
 export const removeLibraryItem = async (paperId: string, options?: RequestInit): Promise<removeLibraryItemResponse> => {

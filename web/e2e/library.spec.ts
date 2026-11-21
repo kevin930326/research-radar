@@ -1200,7 +1200,7 @@ test.describe("search rows: remove (review fixes)", () => {
     await expect(heading(page)).toHaveText(found(before.length));
   });
 
-  test("scope 'my library', A and B each with their own paper: switching members never shows A's rows to B; a remove on A's screen after the cookie changed goes out as B (R3)", async ({ page, apiMock }) => {
+  test("scope 'my library', A and B each with their own paper: switching members never shows A's rows to B; a remove on A's screen after the cookie changed is refused with 409 and the page switches to B (R3)", async ({ page, apiMock }) => {
     const aOnly = ROWS[0]!.row.id;
     const bOnly = ROWS[1]!.row.id;
     apiMock.libraryIds = [aOnly];
@@ -1209,24 +1209,36 @@ test.describe("search rows: remove (review fixes)", () => {
     await page.goto(`${member.baseURL}/search?scope=personal`);
     await expect(page.locator("[data-paper-row]")).toHaveCount(1);
     await expect(searchRow(page, aOnly)).toBeVisible();
-    // 另一個分頁換成乙（cookie 換了），這個分頁還是甲的畫面；這時按甲那一列的「移出」：請求帶的是乙的 cookie。
+    // 另一個分頁換成乙（cookie 換了），這個分頁還是甲的畫面；這時按甲那一列的「移出」：請求帶的預期成員是甲，替身回 409（ADR-0055）。
     apiMock.member = MEMBERS[1]!;
+    const write = page
+      .waitForResponse((response) => response.request().method() === "DELETE" && new URL(response.url()).pathname.startsWith("/api/v1/library/"))
+      .then(async (response) => ({ expected: (await response.request().allHeaders())[EXPECTED_MEMBER_HEADER], status: response.status(), body: (await response.json()) as { code?: string } }));
     await searchRow(page, aOnly).locator("[data-library='remove']").click();
     const [sent] = await requestsOf(apiMock.requests, "DELETE", "/api/v1/library/");
     expect(sent!.path).toBe(`/api/v1/library/${aOnly}`);
-    await expect(searchRow(page, aOnly).locator("[data-library='add']")).toBeEnabled();
-    // 乙的文獻庫沒有這篇（替身回 404，照「已經不在」處理）；甲、乙的文獻庫都沒被動到。
+    const answer = await write;
+    expect(answer.expected).toBe(MEMBERS[0]!.member_id);
+    expect(answer.status).toBe(409);
+    expect(answer.body.code).toBe("member_changed");
+    // 甲、乙的文獻庫都沒被動到。
     expect(libraryOf(apiMock, MEMBERS[0]!.member_id).items.map((record) => record.id)).toEqual([aOnly]);
     expect(libraryOf(apiMock, MEMBERS[1]!.member_id).items.map((record) => record.id)).toEqual([bOnly]);
-    // 站內換頁：發現換了人，清快取；回到範圍我的文獻庫時，乙的清單來之前不出現甲的列。
+    // 畫面換成乙的清單：乙的那一列看得到，甲的那一列看不到。
+    await expect(searchRow(page, bOnly)).toBeVisible();
+    await expect(searchRow(page, aOnly)).toHaveCount(0);
+    await expect(page.locator("[data-paper-row]")).toHaveCount(1);
+    // 站內換頁（從乙的畫面開始），再回到範圍我的文獻庫：乙的清單已經讀過，回來（清單請求還擋著）看到的就是乙的清單、沒有甲的列。
     await page.locator("header").getByRole("link", { name: text("nav:nav.links.library") }).click();
     await expect(rows(page)).toHaveCount(1);
+    await expect(row(page, bOnly)).toBeVisible();
     const [listGate, releaseList] = gate();
     apiMock.listGate = listGate;
     await page.goBack();
     await expect(page).toHaveURL(`${member.baseURL}/search?scope=personal`);
-    await expect(page.locator("[data-state='loading']")).toBeVisible();
+    await expect(searchRow(page, bOnly)).toBeVisible();
     await expect(searchRow(page, aOnly)).toHaveCount(0);
+    await expect(page.locator("[data-paper-row]")).toHaveCount(1);
     apiMock.listGate = null;
     releaseList();
     await expect(searchRow(page, bOnly)).toBeVisible();
