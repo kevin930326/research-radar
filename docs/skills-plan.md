@@ -15,7 +15,7 @@
 | 第一個前端 Story 開始前 | `frontend-design` | [anthropics/skills](https://github.com/anthropics/skills) | 照設計稿寫 React | [x] 2026-11-15，來源 commit `1780c5e` |
 | 第一個前端 Story 開始前 | `react-best-practices` | [vercel-labs/agent-skills](https://github.com/vercel-labs/agent-skills) | React 效能（部分規則針對 Next.js，不適用的略過） | [x] 2026-11-15，來源 commit `1a2c79d` |
 | 第一個前端 Story 開始前 | `playwright-cli` | [Playwright 官方](https://playwright.dev/agent-cli/skills) | 開瀏覽器測試網站（`playwright-cli install --skills`） | [x] 2026-11-15，來源 commit `b217248`（只裝說明檔，工具本身在第一個前端 Story 加進開發相依套件） |
-| 主要畫面做完之後 | `impeccable` | [pbakaus/impeccable](https://github.com/pbakaus/impeccable) | 審查與修飾現有畫面：手機版、對比、點擊範圍 | [ ] |
+| 主要畫面做完之後 | `impeccable` | [pbakaus/impeccable](https://github.com/pbakaus/impeccable) | 審查與修飾現有畫面：手機版、對比、點擊範圍 | [x] 2026-11-21，來源 commit `b49177d`（只裝說明文件，沒裝腳本與 hook；它的啟動腳本會下載引擎到家目錄，見 skill 資料夾的 `SOURCE.md`） |
 | 做摘要、問答功能時 | `llm-evaluation` | [wshobson/agents](https://github.com/wshobson/agents) | 建立 eval 題組、比較模型與 prompt | [x] 2026-11-14，來源 commit `9c61ab2` |
 | 寫 DOI 正規化、去重複等函式時 | `property-based-testing` | [trailofbits/skills](https://github.com/trailofbits/skills) | 測輸入千變萬化的函式 | [x] 2026-11-14，來源 commit `149d7b2`（只裝 skill，沒裝 evals 與腳本） |
 | 第一次部署上線之前 | `insecure-defaults`、`differential-review`、`supply-chain-risk-auditor` | [trailofbits/skills](https://github.com/trailofbits/skills) | 資安檢查、PyPI 套件風險 | [ ] |
