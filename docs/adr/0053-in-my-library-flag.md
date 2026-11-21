@@ -44,3 +44,20 @@
   | `tests/unit/test_api_paper_list.py` | `ROW_JSON` | 多 `"in_my_library": False` |
   | `tests/unit/test_api_papers.py` | `test_paper_reads_as_the_session_member_and_returns_the_page` 的回應鍵集合 | 多 `in_my_library` |
   | `tests/unit/test_library_domain.py` | `test_paper_row_from_facts` | 多 `"in_my_library": False` |
+
+## 更新（2026-11-21）
+
+Kevin 2026-11-21 決定（epic-3h PR 2，3.17 審查 F19）：**移出的回應裡 `paper.in_my_library` 改成假**，加入與復原的回應維持真。上面「決定」裡「移出的回應是移出前的那一筆，所以是真」那一點由這一節取代；其餘不變。
+
+- **放在 service 層**：`radar/services/library.remove_library_item` 刪掉那一筆、寫完稽核之後，把回應的論文列換成 `in_my_library = False` 的一份（其他欄位、`added_via`、`added_at` 照舊是移出前那一筆）。論文列仍在刪除前讀（私人論文移出之後就讀不到），不另外多查一次；api 只做形狀轉換，不判斷。
+- 加入、復原的論文列在同一個交易裡、寫入之後才讀，`EXISTS` 本來就是真，沒有改。
+- 回應格式沒變（欄位與型別相同），只是值。前端不拿這個值更新狀態，行為不變；兩個測試替身（`web/e2e/api-mock.ts`、`web/scripts/mock-api.mjs`）的移出回應跟著改成假。
+- 既有整合測試照 Kevin 點名的三條改：兩邊各自斷言 `in_my_library`（寫死真／假），再比拿掉這個欄位之後完全相等。
+
+  | 檔案 | 測試 | 原本的預期 | 新的預期 |
+  |---|---|---|---|
+  | `tests/integration/test_library_api.py` | `test_remove_copies_to_deleted_record_then_deletes` | 移出的回應＝加入的回應 | 加入真、移出假；其餘完全相等 |
+  | 同上 | `test_restore_brings_back_the_same_item` | 復原的回應＝移出的回應 | 移出假、復原真；其餘完全相等 |
+  | 同上 | `test_item_whose_paper_was_excluded_later_is_still_listed_and_removable` | 移出的回應＝加入的回應 | 加入真、移出假；其餘完全相等 |
+
+  新加 `test_remove_says_not_in_my_library_add_and_restore_say_in_it`（看得到的論文與私人論文各走一次加入／移出／復原）。
