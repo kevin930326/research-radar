@@ -8,13 +8,18 @@
 //   State Patterns 沒有「加入／移出失敗」的句子，這一輪不顯示新的文字（列給 Kevin 決定，3.17 決定紀錄）。
 // - 送出之後才登出、登入過期或換了人（快取清過，世代號不同）：回應是上一位的，不改快取、回 "failed"（審查 F2）。
 //   寫快取前還要等取消進行中的清單讀取，那段期間換人也一樣（審查 G1）。
+// - 每次寫入都帶「這個分頁以為的成員」＝畫面上那份資料是用誰的身分讀的（資料的 readAs：讀取時帶的預期成員，後端比對過；
+//   ADR-0055），不是「路由現在認定的人」：路由的 context 可能比畫面上的資料早換成下一位（審查 fix1 H1、H2）。
+//   另一個分頁換了人時後端什麼都不寫、回 409：不重試、回 "failed"（按鈕不留在等待中），照「發現換人」處理——
+//   清掉上一位的快取、整頁換成現在登入的人（followMemberChange）。讀取回 409 也走同一個流程（useFollowMemberChange）。
 import { useQueryClient, type QueryClient } from "@tanstack/react-query";
-import { useLocation, useNavigate } from "@tanstack/react-router";
-import { useCallback } from "react";
+import { useLocation, useNavigate, useRouter } from "@tanstack/react-router";
+import { createContext, useCallback } from "react";
+import { flushSync } from "react-dom";
 
-import type { LibrarySource, PaperPage } from "../datasource/types";
+import type { LibrarySource, Member, PaperPage, ReadAs } from "../datasource/types";
 import { librarySource, markInLibrary } from "./paper-queries";
-import { clearMemberQueries, memberGeneration, pendingMemberCheck } from "./session";
+import { clearMemberQueries, loadMember, meQuery, memberGeneration, noteMemberSwap, pendingMemberCheck } from "./session";
 
 export type LibraryAction = "add" | "remove" | "restore";
 export type LibraryChangeOutcome = "done" | "alreadyGone" | "failed";
@@ -25,6 +30,10 @@ export type LibraryChangeOutcome = "done" | "alreadyGone" | "failed";
  * 處理 401 之前與之後（清快取要等）。任何一次和送出時不同，表示中間登出、登入過期或換了人：回應是上一位的，
  * 不改快取、不清快取、不回登入頁，回 "failed"。
  * 401 而且還是同一位：清快取，再呼叫 `onSignedOut`（回登入頁）；清的期間又換了人（例如有人登入）就不呼叫。
+ * `member.expectedMemberId`：這個分頁以為的成員，交給 `source` 放進請求標頭（ADR-0055）。後端說換了人（memberChanged）而且
+ * 還是同一代：呼叫 `member.onMemberChanged`（不等它做完，按鈕馬上恢復）、回 "failed"；不重試、不改快取。
+ * 例外：這筆 409 是換人流程已經做完之後才回來的舊回應（`alreadyFollowed`）時只回 "failed"，不再跑一次換人流程
+ * （不清掉已經載好的新成員的快取、畫面不多閃一次骨架；審查 fix3 G2a）。`member.routeMemberId`：回應回來當下路由認定的成員。
  */
 export async function sendLibraryChange(
   queryClient: QueryClient,
@@ -32,6 +41,11 @@ export async function sendLibraryChange(
   paperId: string,
   action: LibraryAction,
   onSignedOut: () => Promise<void> | void = () => {},
+  member: {
+    expectedMemberId?: string;
+    routeMemberId?: () => string | undefined;
+    onMemberChanged?: () => Promise<void> | void;
+  } = {},
 ): Promise<LibraryChangeOutcome> {
   const generation = memberGeneration(queryClient);
   const stillCurrent = () => memberGeneration(queryClient) === generation;
@@ -43,11 +57,15 @@ export async function sendLibraryChange(
   }
   let result;
   try {
-    result = await source[action](paperId);
+    result = await source[action](paperId, member.expectedMemberId);
   } catch {
     return "failed";
   }
   if (!stillCurrent()) {
+    return "failed";
+  }
+  if (result.kind === "memberChanged") {
+    if (!alreadyFollowed(queryClient, member.expectedMemberId, member.routeMemberId?.())) void member.onMemberChanged?.();
     return "failed";
   }
   if (result.kind === "signedOut") {
@@ -65,17 +83,127 @@ export async function sendLibraryChange(
   return (await markInLibrary(queryClient, paperId, action !== "remove", stillCurrent)) ? "done" : "failed";
 }
 
-/** 回一個函式：對 `paperId` 做 `action`，回 "done"、"alreadyGone"（只有移出）或 "failed"（不丟例外）。401 時回登入頁。 */
-export function useLibraryChange(): (paperId: string, action: LibraryAction) => Promise<LibraryChangeOutcome> {
+/** 進行中的「整頁換成現在的人」（同時收到好幾個 409 時只做一次）。 */
+const following = new WeakMap<QueryClient, Promise<void>>();
+
+/**
+ * 這筆 409（請求帶的預期成員是 `expected`）是不是換人流程已經做完之後才回來的舊回應：沒有進行中的換人流程，而且快取的
+ * 「我是誰」與路由認定的成員（`routeMember`）都已經是別人（不是 `expected`）。是的話畫面已經換成新的人（或路由正在換），
+ * 不用再跑一次（審查 fix3 G2a）。三個任一個不知道（沒帶預期成員、快取沒有「我是誰」、拿不到路由的成員）都不算，照常跑。
+ * 這不會漏掉真的又換了人：畫面上那一位的下一次讀取或寫入帶的是他自己，後端不符一樣回 409，那一筆就不是舊回應。
+ */
+function alreadyFollowed(queryClient: QueryClient, expected: string | undefined, routeMember: string | undefined): boolean {
+  if (expected === undefined || routeMember === undefined || following.has(queryClient)) return false;
+  const cached = queryClient.getQueryData(meQuery.queryKey)?.member_id;
+  return cached !== undefined && cached !== expected && routeMember !== expected;
+}
+
+/**
+ * 寫入時後端說換了人（409 member_changed）之後：照「發現換人」處理（和找論文切回視窗確認時一樣，PR #114）。
+ * 1. 問一次「我是誰」（loadMember；換了人它會清掉上一位的查詢快取）。loadMember 沒有清（快取裡的已經是現在的人、或問不到）
+ *    也照樣清：後端已經說了這一頁是上一位的。
+ * 2. 沒有人：回登入頁並帶「登入已經過期」（`toLogin`）。
+ * 3. 有人（或問不到）：找論文、我的文獻庫同步重新掛上（noteMemberSwap；上一位的列馬上離開畫面），再 `reload`
+ *    （重跑路由的登入檢查與資料讀取：導覽列、論文頁換成現在的人；問不到就是全站共用的「載入失敗」）。
+ *    重新掛上時路由的 context 還是上一位、快取裡的「我是誰」已經是現在的人：頁面這段期間不讀（member.tsx 的
+ *    useMemberSwapPending），路由換人後因 key 再掛上一次、一掛上就用現在的人讀，不會先用上一位讀一次 409（審查 fix2 N1）。
+ * 4. 收尾：這一輪進行中才回來的 409（流程開始前、用上一位送出的讀取）還留在快取裡的，畫面在用的照現在的身分重讀
+ *    （畫面停在骨架；重讀又是 409 才表示又換了人，頁面會再呼叫一次）。
+ * 回傳的 promise 不會 reject（`reload`／`toLogin` 失敗也收掉：畫面已經在換，沒有人能處理這個錯誤）；結束（成功或失敗）
+ * 就拿掉進行中的那一次，下一個 409 會重新開始（審查 fix1 L3）。
+ */
+export function followMemberChange(
+  queryClient: QueryClient,
+  actions: { toLogin: () => Promise<void> | void; reload: () => Promise<void> | void },
+): Promise<void> {
+  const running = following.get(queryClient);
+  if (running !== undefined) return running;
+  const job = (async () => {
+    const generation = memberGeneration(queryClient);
+    let member: Member | null | undefined;
+    try {
+      ({ member } = await loadMember(queryClient));
+    } catch {
+      member = undefined;
+    }
+    // 這一輪自己清的快取，清完之後還是這一代（中間沒有別人登入、又清過一次）。
+    let stillMine = false;
+    if (memberGeneration(queryClient) === generation) {
+      await clearMemberQueries(queryClient);
+      // clearMemberQueries 一開始把世代號加 1（同 sendLibraryChange 的 401）。
+      stillMine = memberGeneration(queryClient) === generation + 1;
+      if (member != null) queryClient.setQueryData(meQuery.queryKey, member);
+    }
+    if (member === null) {
+      // 比照 401（sendLibraryChange）：世代號還是這一輪的才回登入頁；問「我是誰」或清快取的期間有人登入就不回（審查 fix3 G2b）。
+      if (stillMine) await actions.toLogin();
+      return;
+    }
+    flushSync(() => noteMemberSwap(queryClient));
+    await actions.reload();
+  })()
+    .catch(() => {})
+    .finally(() => {
+      following.delete(queryClient);
+      // 拿掉進行中的這一輪之後才重讀：重讀又是 409 時，頁面呼叫的是新的一輪，不是接到這一輪（已經結束）的 promise。
+      void queryClient.invalidateQueries({ predicate: (query) => (query.state.data as { kind?: string } | undefined)?.kind === "memberChanged" });
+    });
+  following.set(queryClient, job);
+  return job;
+}
+
+/**
+ * 找論文的列（PaperRowList 底下的 LibraryToggle）用的「這幾列是用誰的身分讀的」：找論文把清單資料的 `readAs` 放進來。
+ * 沒有放（undefined）時列上的寫入不送（useLibraryChange）。
+ */
+export const RowsReadAs = createContext<ReadAs>(undefined);
+
+/**
+ * 回一個函式：讀取或寫入時後端說換了人（409 member_changed，ADR-0055）之後，照「發現換人」處理（followMemberChange）：
+ * 沒有人就回登入頁並帶「登入已經過期」，有人就整頁換成現在的人。
+ */
+export function useFollowMemberChange(): () => Promise<void> {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
+  const router = useRouter();
   const href = useLocation({ select: (location) => location.href });
   return useCallback(
-    (paperId, action) =>
-      sendLibraryChange(queryClient, librarySource(), paperId, action, async () => {
-        await navigate({ to: "/login", search: { next: href, expired: true as const }, replace: true });
+    () =>
+      followMemberChange(queryClient, {
+        toLogin: async () => {
+          await navigate({ to: "/login", search: { next: href, expired: true as const }, replace: true });
+        },
+        reload: () => router.invalidate(),
       }),
-    [queryClient, navigate, href],
+    [queryClient, navigate, router, href],
+  );
+}
+
+/**
+ * 回一個函式：對 `paperId` 做 `action`，回 "done"、"alreadyGone"（只有移出）或 "failed"（不丟例外）。401 時回登入頁。
+ * `readAs`：畫面上那份資料是用誰的身分讀的（論文頁的 loader、清單的查詢結果記下的；ADR-0055）。請求帶它當預期成員，
+ * 所以畫面上是上一位的資料時，按下去一定是 409、不會寫進現在登入的人的文獻庫；後端說換了人時整頁換成現在的人。
+ * 沒有 `readAs`（資料不是帶預期成員讀的；成員版沒有這種畫面）就不送、回 "failed"：不知道這份資料是誰的，不寫。
+ */
+export function useLibraryChange(readAs: ReadAs): (paperId: string, action: LibraryAction) => Promise<LibraryChangeOutcome> {
+  const queryClient = useQueryClient();
+  const navigate = useNavigate();
+  const router = useRouter();
+  const href = useLocation({ select: (location) => location.href });
+  const follow = useFollowMemberChange();
+  return useCallback(
+    (paperId, action) => {
+      if (readAs === undefined) return Promise.resolve("failed" as const);
+      const toLogin = async () => {
+        await navigate({ to: "/login", search: { next: href, expired: true as const }, replace: true });
+      };
+      return sendLibraryChange(queryClient, librarySource(), paperId, action, toLogin, {
+        expectedMemberId: readAs,
+        routeMemberId: () => (router.state.matches.at(-1)?.context as { member?: Member } | undefined)?.member?.member_id,
+        onMemberChanged: follow,
+      });
+    },
+    [queryClient, navigate, router, href, readAs, follow],
   );
 }
 

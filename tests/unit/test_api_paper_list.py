@@ -40,10 +40,10 @@ from radar.domain.snapshot import Snapshot, SnapshotStatus
 from radar.domain.taxonomy import Taxonomy, TaxonomyItem
 from radar.domain.viewer import MemberViewer
 from radar.entrypoints.api.app import create_app
-from radar.entrypoints.api.auth import SESSION_COOKIE
+from radar.entrypoints.api.auth import EXPECTED_MEMBER_HEADER, SESSION_COOKIE
 from radar.entrypoints.api.paper_list import PaperListRoutes, install_paper_list_routes
 from radar.entrypoints.api.web import mount_web
-from tests.unit.test_api_auth import GOOD_TOKEN, MEMBER, ORIGIN, SHELL, FakeAuth
+from tests.unit.test_api_auth import GOOD_TOKEN, MEMBER, MEMBER_ID, ORIGIN, SHELL, FakeAuth
 
 PAPER_ID = uuid.UUID("018f0000-0000-7000-8000-0000000000c3")
 AS_OF = datetime(2026, 11, 16, 2, 30, 0, 123456, tzinfo=UTC)
@@ -313,3 +313,37 @@ def test_installing_after_the_web_shell_is_an_error(tmp_path: Path) -> None:
 
     with pytest.raises(RuntimeError, match="mount_web"):
         install_paper_list_routes(app, FakePaperList().routes(), FakeAuth().routes())
+
+
+# --- 這個分頁以為的成員（epic-3h2 PR 1 fix1 H3、ADR-0055）-------------------------------------
+# 每一列的 `in_my_library` 是成員專屬的：帶了 `X-Radar-Expected-Member` 要和 session 的成員相同；
+# 不同 409、格式不對 400，都不解析不讀；沒帶照常（上面的測試）。
+
+OTHER_MEMBER_ID = uuid.UUID("00000000-0000-7000-8000-00000000000b")
+
+
+@pytest.mark.parametrize(
+    ("expected", "status", "code"),
+    [
+        (str(MEMBER_ID), 200, None),
+        (str(OTHER_MEMBER_ID), 409, "member_changed"),
+        ("not-a-member-id", 400, "expected_member_invalid"),
+    ],
+)
+def test_list_compares_the_expected_member(expected: str, status: int, code: str | None) -> None:
+    fake = FakePaperList()
+    client = _client(fake.routes())
+    client.cookies.clear()
+
+    response = client.get(
+        "/api/v1/papers",
+        headers={"Cookie": f"{SESSION_COOKIE}={GOOD_TOKEN}", EXPECTED_MEMBER_HEADER: expected},
+    )
+
+    assert response.status_code == status
+    assert response.headers["cache-control"] == "no-store"
+    if code is None:
+        assert fake.calls == [(MEMBER.viewer, PARSED, None)]
+    else:
+        assert response.json()["code"] == code
+        assert (fake.parsed, fake.calls) == ([], [])

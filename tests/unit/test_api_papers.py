@@ -26,7 +26,7 @@ from radar.domain.contracts import DisplayName, DisplayNames, build_client_confi
 from radar.domain.paper_page import PaperPage
 from radar.domain.viewer import MemberViewer
 from radar.entrypoints.api.app import REQUEST_ID_HEADER, create_app
-from radar.entrypoints.api.auth import SESSION_COOKIE
+from radar.entrypoints.api.auth import EXPECTED_MEMBER_HEADER, SESSION_COOKIE
 from radar.entrypoints.api.papers import PaperRoutes, install_paper_routes
 from radar.entrypoints.api.web import mount_web
 from tests.llm_support import ROOT
@@ -296,3 +296,47 @@ def test_installing_after_the_web_shell_is_rejected(web_dist: Path) -> None:
 
     with pytest.raises(RuntimeError, match="mount_web"):
         install_paper_routes(app, FakePapers().routes(), FakeAuth().routes())
+
+
+# --- 這個分頁以為的成員（epic-3h2 PR 1 fix1 H3、ADR-0055）-------------------------------------
+# 論文頁回 `in_my_library`（成員專屬）：帶了 `X-Radar-Expected-Member` 要和 session 的成員相同；
+# 不同 409、格式不對 400，都不讀；沒帶照常。顯示名稱與設定值不是成員專屬的，帶了別人的也照常。
+
+OTHER_MEMBER_ID = uuid.UUID("00000000-0000-7000-8000-00000000000b")
+
+
+def _get_expecting(client: TestClient, path: str, expected: str) -> Response:
+    client.cookies.clear()
+    return client.get(
+        path,
+        headers={"Cookie": f"{SESSION_COOKIE}={GOOD_TOKEN}", EXPECTED_MEMBER_HEADER: expected},
+    )
+
+
+@pytest.mark.parametrize(
+    ("expected", "status", "code"),
+    [
+        (str(MEMBER_ID), 200, None),
+        (str(OTHER_MEMBER_ID), 409, "member_changed"),
+        ("not-a-member-id", 400, "expected_member_invalid"),
+    ],
+)
+def test_paper_compares_the_expected_member(expected: str, status: int, code: str | None) -> None:
+    papers = FakePapers()
+
+    response = _get_expecting(_client(papers), f"/api/v1/papers/{VISIBLE_ID}", expected)
+
+    assert response.status_code == status
+    assert response.headers["cache-control"] == "no-store"
+    if code is None:
+        assert papers.calls == [(MEMBER.viewer, VISIBLE_ID)]
+    else:
+        assert response.json()["code"] == code
+        assert papers.calls == []
+
+
+@pytest.mark.parametrize("path", ["/api/v1/display-names", "/api/v1/client-config"])
+def test_settings_do_not_compare_the_expected_member(path: str) -> None:
+    response = _get_expecting(_client(FakePapers()), path, str(OTHER_MEMBER_ID))
+
+    assert response.status_code == 200

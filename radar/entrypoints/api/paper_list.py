@@ -2,7 +2,9 @@
 
 - `GET /api/v1/papers`：依期刊、年份、主題、方法、有沒有摘要、本週新增、範圍列出論文的一頁
   （`items`、`next_cursor`、`total`、`snapshot`）。要登入（沒登入 401 `not_authenticated`），回應帶
-  `Cache-Control: no-store`。
+  `Cache-Control: no-store`。每一列的 `in_my_library` 與範圍「我的文獻庫」是成員專屬的：認完 session
+  再比對 `X-Radar-Expected-Member`（`auth.member_as_expected`，不符 409、格式不對 400、沒帶照常，
+  ADR-0055）。
 - 不認得的期刊、主題、方法代碼，年份超出範圍，任一個多值參數超過 50 個值，`cursor` 不是上一頁給的
   寫法 → 422 `request_invalid`（`ApiProblemError`，帶 `no-store`）；型別不對（`year=abc`、不認得的
   `scope`）由框架擋下，一樣是 422 `request_invalid`。
@@ -38,7 +40,7 @@ from radar.entrypoints.api.auth import (
     API_V1_PREFIX,
     NO_STORE,
     AuthRoutes,
-    current_member,
+    member_as_expected,
     origin_dependency,
 )
 from radar.entrypoints.api.problems import ApiProblemError
@@ -135,8 +137,9 @@ def install_paper_list_routes(
     ) -> PaperListResponse:
         """依條件列出論文的一頁（一頁的篇數見 `client-config`）。期刊、年份給多個值是「或」，主題、
         方法給多個值是「且」，不同欄位之間是「且」；`cursor` 是上一頁的 `next_cursor`。條件不合法
-        422，沒登入 401。"""
-        member = current_member(request, auth_routes)
+        422，沒登入 401；`X-Radar-Expected-Member` 和登入的成員不同 409 `member_changed`、格式
+        不對 400 `expected_member_invalid`（每一列含 `in_my_library`，ADR-0055）。"""
+        member = member_as_expected(request, auth_routes)
         query = PaperListQuery(
             journals=tuple(journal),
             years=tuple(year),

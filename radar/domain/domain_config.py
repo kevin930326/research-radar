@@ -4,7 +4,7 @@
 - `openalex.yaml`：OpenAlex 的呼叫設定（`OpenAlexConfig`）。
 - `exclusion_rules.yaml`：標記非研究文章的排除規則（`ExclusionRulesConfig`，PRD FR-8）。
 - `keyword_sources.yaml`：目前用哪個關鍵字來源（`KeywordSourcesConfig`，ADR-0016）。
-- `demo_publishers.yaml`：示範站不放完整內容的出版社（`DemoPublishersConfig`，ADR-0052）。
+- `demo_publishers.yaml`：示範站不放完整內容的出版社與期刊（`DemoPublishersConfig`，ADR-0052）。
 
 檔案只由 `radar/config.py` 讀（YAML safe load、重複的鍵也算錯），讀進來後用這裡的模型驗證；
 api、worker 啟動時與 CLI 每個指令執行前都驗證一次，錯了就不啟動。
@@ -241,21 +241,55 @@ class DemoExcludedPublisher(BaseModel):
         return value
 
 
-class DemoPublishersConfig(BaseModel):
-    """`config/demo_publishers.yaml`：示範站不放完整內容的出版社（ADR-0007 第 5 點、ADR-0052）。
+class DemoExcludedJournal(BaseModel):
+    """一本示範站不放完整內容的期刊：論文的期刊 ISSN-L 對上就排除（ADR-0052 更新 2026-11-22）。
 
-    清單至少一筆（Kevin 2026-11-14 決定先放 IEEE；整個清單不見等於全部放行，所以不收空清單）。
+    `issn_l` 經 `normalize_issn_l`（有無連字號、小寫 x 都收；看不懂算寫錯）；兩筆正規化後相同不算
+    錯（合併成一筆）。`name`、`note` 只給人看，不參與比對。
+    """
+
+    model_config = _FROZEN
+
+    issn_l: str
+    name: str = Field(min_length=1, max_length=300)
+    note: str = Field(min_length=1, max_length=500)
+
+    @field_validator("issn_l", mode="before")
+    @classmethod
+    def _normalize_issn_l(cls, value: object) -> object:
+        # 只處理字串；其他型別交給 pydantic 回報「要是字串」。
+        return normalize_issn_l(value) if isinstance(value, str) else value
+
+    @field_validator("name", "note")
+    @classmethod
+    def _not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("不能是空白")
+        return value
+
+
+class DemoPublishersConfig(BaseModel):
+    """`config/demo_publishers.yaml`：示範站不放完整內容的出版社與期刊（ADR-0007 第 5 點、
+    ADR-0052）。
+
+    `excluded`（出版社）至少一筆（Kevin 2026-11-14 決定先放 IEEE；整個清單不見等於全部放行，所以
+    不收空清單）。`excluded_journals`（期刊）可以是空的或不寫＝不依期刊排除；和出版社那一道是
+    「任一個對上就排除」（ADR-0052 更新 2026-11-22）。
     """
 
     model_config = _FROZEN
 
     excluded: tuple[DemoExcludedPublisher, ...] = Field(min_length=1)
+    excluded_journals: tuple[DemoExcludedJournal, ...] = ()
 
     def exclusions(self) -> PublisherExclusions:
-        """`is_demo_eligible` 用的排除清單（`PublisherExclusions` 建立時自己正規化 ID 與名稱）。"""
+        """`is_demo_eligible` 用的排除清單（`PublisherExclusions` 建立時自己正規化 ID、名稱、
+        ISSN-L）。
+        """
         return PublisherExclusions(
             ids=frozenset(entry.id for entry in self.excluded if entry.id is not None),
             names=frozenset(entry.name for entry in self.excluded),
+            journal_issn_ls=frozenset(entry.issn_l for entry in self.excluded_journals),
         )
 
 
@@ -271,7 +305,7 @@ class DomainConfig(BaseModel):
     demo_publishers: DemoPublishersConfig
 
     def scope_settings(self) -> ScopeSettings:
-        """寫入論文用的設定：追蹤範圍（`journals.yaml`）＋示範站排除的出版社。
+        """寫入論文用的設定：追蹤範圍（`journals.yaml`）＋示範站排除的出版社與期刊。
 
         正式的寫入路徑（每週更新、reparse）一律用這個，不用 `JournalsConfig.scope_settings()`
         （那個不帶排除清單，寫入的論文一律不算示範站可用）。

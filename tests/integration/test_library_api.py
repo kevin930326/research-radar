@@ -3,8 +3,8 @@
 - 加入：看得到的論文 → 200（`added_via = manual`）＋一筆稽核；再加一次（任何 `added_via`）回原本
   那一筆、不寫稽核。B 加入 A 也有的論文：B 自己的一筆，A 那一筆不變。
 - 加看不到的（別人的私人論文）、不存在、壞 ID、被排除的非研究文章：完全相同的 404，沒有寫入。
-- 移出：200 回移出前那一筆、`deleted_record` 一筆（整列的 jsonb）、稽核；清單不再有它。移出不在的
-  （別人的、沒加過的）404，別人的那一筆不動。
+- 移出：200 回移出前那一筆（`in_my_library` 是假）、`deleted_record` 一筆（整列的 jsonb）、稽核；
+  清單不再有它。移出不在的（別人的、沒加過的）404，別人的那一筆不動。
 - 復原：200，`id`／`added_via`／`added_at` 同原本，封存刪掉、稽核；別人的封存、沒有封存 404，不寫
   稽核；那篇已經在文獻庫時回現在那一筆、不動任何封存（重送復原不會吃掉另一次移出的封存）。
 - 清單：51 篇 → 第一頁 50＋`next_cursor`＋`total` 51，第二頁 1 篇、`next_cursor` null；照
@@ -801,7 +801,7 @@ def test_in_my_library_follows_add_remove_and_restore(database: Database, api: A
     assert page_flag() is False
     assert api.add(paper_id, api.owner_token).json()["paper"]["in_my_library"] is True
     assert page_flag() is True
-    # 移出回的是移出前那一筆（那時還在），之後就不在了。
+    # 移出回的那一筆已經說不在（F19，ADR-0053 更新），之後讀論文頁也不在。
     assert api.remove(paper_id, api.owner_token).status_code == 200
     assert page_flag() is False
     assert api.restore(paper_id, api.owner_token).json()["paper"]["in_my_library"] is True
@@ -956,3 +956,164 @@ def test_public_reads_of_a_visible_paper_never_say_in_my_library(
     assert public_page.in_my_library is False
     # 同一篇在乙自己讀的時候是真（確定上面的假不是因為根本沒加進去）。
     assert other_rows[paper_id].in_my_library is True
+
+
+# --- 這個分頁以為的成員（epic-3h PR 3、ADR-0055）---------------------------------------------
+# 情境：同一個瀏覽器，cookie 已經換成乙，分頁還以為是甲。三種寫入 × 標頭相符（照常）、不相符（409、
+# 甲乙的文獻庫、封存、稽核都沒變）、格式不對（400、沒變）、沒帶（照常，和現在一樣）。
+
+EXPECTED_MEMBER = "X-Radar-Expected-Member"
+
+
+def _write_expecting(
+    api: Api, method: str, path: str, token: str, expected: str | None
+) -> Response:
+    api.client.cookies.clear()
+    headers = {"Cookie": f"{SESSION_COOKIE}={token}", "Origin": DEV_ORIGIN}
+    if expected is not None:
+        headers[EXPECTED_MEMBER] = expected
+    return api.client.request(method, path, headers=headers)
+
+
+def _library_state(db: TestDatabase) -> tuple[list[tuple[Any, ...]], ...]:
+    records = execute(
+        db,
+        "SELECT id, source_table, source_id, owner_id, deleted_by_member_id FROM deleted_record"
+        " ORDER BY id",
+    )
+    return _items(db), records, _audits(db), _deleted_rows(db)
+
+
+def _deleted_rows(db: TestDatabase) -> list[tuple[Any, ...]]:
+    # 封存的整列（含復原用的 `content` 與刪除時間；fix1 M4）：400／409 前後要完全一樣。
+    return execute(
+        db,
+        "SELECT id, source_table, source_id, content, owner_id, deleted_by_member_id, deleted_at"
+        " FROM deleted_record ORDER BY id",
+    )
+
+
+@pytest.mark.parametrize("action", ["add", "remove", "restore"])
+@pytest.mark.parametrize("header", ["match", "mismatch", "malformed", "absent"])
+def test_writes_compare_the_expected_member_with_the_session(
+    db: TestDatabase, database: Database, api: Api, action: str, header: str
+) -> None:
+    # 甲、乙都有 shared；乙移出過 removed（有封存，可以復原）；fresh 誰都沒有。
+    shared = create_paper(database, doi="10.1/shared", openalex_id="W91")
+    removed = create_paper(database, doi="10.1/removed", openalex_id="W92")
+    fresh = create_paper(database, doi="10.1/fresh", openalex_id="W93")
+    for token in (api.owner_token, api.other_token):
+        assert api.add(shared, token).status_code == 200
+    assert api.add(removed, api.other_token).status_code == 200
+    assert api.remove(removed, api.other_token).status_code == 200
+    method, path, paper_id = {
+        "add": ("PUT", f"/api/v1/library/{fresh}", fresh),
+        "remove": ("DELETE", f"/api/v1/library/{shared}", shared),
+        "restore": ("POST", f"/api/v1/library/{removed}/restore", removed),
+    }[action]
+    expected = {
+        "match": str(api.other_id),
+        "mismatch": str(api.owner_id),
+        "malformed": "not-a-member-id",
+        "absent": None,
+    }[header]
+    before = _library_state(db)
+    # 比對封存整列之前先確定真的有一筆（乙移出 removed 的那一筆，內容是乙那一列）。
+    assert [(row[3]["owner_id"], row[3]["paper_id"]) for row in _deleted_rows(db)] == [
+        (str(api.other_id), str(removed))
+    ]
+
+    response = _write_expecting(api, method, path, api.other_token, expected)
+
+    if header in ("mismatch", "malformed"):
+        status, code = (
+            (409, "member_changed") if header == "mismatch" else (400, "expected_member_invalid")
+        )
+        assert response.status_code == status, response.text
+        assert response.json()["code"] == code
+        assert response.headers["cache-control"] == "no-store"
+        assert _library_state(db) == before
+        return
+    assert response.status_code == 200, response.text
+    assert response.json()["paper"]["id"] == str(paper_id)
+    other_papers = {row[2] for row in _items(db) if row[1] == api.other_id}
+    owner_papers = {row[2] for row in _items(db) if row[1] == api.owner_id}
+    assert (
+        other_papers
+        == {
+            "add": {shared, fresh},
+            "remove": set(),
+            "restore": {shared, removed},
+        }[action]
+    )
+    # 甲的文獻庫一直只有 shared（乙的寫入不會動到甲）。
+    assert owner_papers == {shared}
+
+
+# --- 成員專屬的讀取也比對預期成員（epic-3h2 PR 1 fix1 H3、ADR-0055）------------------------------
+# 情境：cookie 已經換成乙，分頁還以為是甲。論文頁（`in_my_library`）、找論文清單（範圍我的文獻庫、
+# 每一列的 `in_my_library`）、文獻庫清單都是成員專屬的：帶了甲 → 409（不回乙的資料）；帶了乙、沒帶 →
+# 照常、回乙的資料；格式不對 → 400。顯示名稱、設定值、我是誰不比對。
+
+
+@pytest.mark.parametrize("read", ["paper", "paper_list", "library"])
+@pytest.mark.parametrize("header", ["match", "mismatch", "malformed", "absent"])
+def test_member_reads_compare_the_expected_member_with_the_session(
+    database: Database, api: Api, read: str, header: str
+) -> None:
+    # 甲有 owner_paper；乙有 other_paper。
+    owner_paper = create_paper(database, doi="10.1/owner", openalex_id="W94")
+    other_paper = create_paper(database, doi="10.1/other", openalex_id="W95")
+    assert api.add(owner_paper, api.owner_token).status_code == 200
+    assert api.add(other_paper, api.other_token).status_code == 200
+    path, params = {
+        "paper": (f"/api/v1/papers/{other_paper}", None),
+        "paper_list": ("/api/v1/papers", {"scope": "personal"}),
+        "library": ("/api/v1/library", None),
+    }[read]
+    expected = {
+        "match": str(api.other_id),
+        "mismatch": str(api.owner_id),
+        "malformed": "not-a-member-id",
+        "absent": None,
+    }[header]
+    api.client.cookies.clear()
+    headers = {"Cookie": f"{SESSION_COOKIE}={api.other_token}"}
+    if expected is not None:
+        headers[EXPECTED_MEMBER] = expected
+
+    response = api.client.get(path, headers=headers, params=params)
+
+    assert response.headers["cache-control"] == "no-store"
+    if header in ("mismatch", "malformed"):
+        status, code = (
+            (409, "member_changed") if header == "mismatch" else (400, "expected_member_invalid")
+        )
+        assert response.status_code == status, response.text
+        assert response.json() == {
+            "type": "about:blank",
+            "title": {409: "Conflict", 400: "Bad Request"}[status],
+            "status": status,
+            "code": code,
+        }
+        return
+    assert response.status_code == 200, response.text
+    body = response.json()
+    if read == "paper":
+        assert body["paper"]["id"] == str(other_paper)
+        assert body["in_my_library"] is True
+    elif read == "paper_list":
+        assert _flags(body["items"]) == {str(other_paper): True}
+    else:
+        assert [item["paper"]["id"] for item in body["items"]] == [str(other_paper)]
+
+
+@pytest.mark.parametrize("path", ["/api/v1/me", "/api/v1/display-names", "/api/v1/client-config"])
+def test_reads_that_are_not_member_data_ignore_the_expected_member(api: Api, path: str) -> None:
+    # 我是誰（就是用來問現在是誰的）與設定值（大家都一樣）不比對：帶了別人的照常。
+    api.client.cookies.clear()
+    headers = {"Cookie": f"{SESSION_COOKIE}={api.other_token}", EXPECTED_MEMBER: str(api.owner_id)}
+
+    response = api.client.get(path, headers=headers)
+
+    assert response.status_code == 200, response.text

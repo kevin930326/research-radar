@@ -4,7 +4,8 @@
   `Origin` 缺少或不在允許清單一律 403（ADR-0008 第 3 項）。不做成全站中介層：`/api/` 底下沒註冊的
   路徑不管什麼方法都要回 404（`web.py`）。GET 不改業務資料（session 的最後使用時間除外）。
   `check_origin`（相依項 `origin_dependency`）與 `current_member` 是模組函式，`/api/v1` 底下其他
-  router（論文頁，`papers.py`）也用同一份（Story 3.6）。
+  router（論文頁，`papers.py`）也用同一份（Story 3.6）。成員專屬的讀取與文獻庫的寫入改用
+  `member_as_expected`：認完 session 再比對 `X-Radar-Expected-Member`（ADR-0055）。
 - 一定要在 `mount_web` 之前裝：頁面殼的「其餘路徑」會蓋掉之後才加的路由，所以頁面殼已經掛上時
   `install_auth_routes` 直接丟錯。
 - session 的 cookie：`__Host-radar_session`、HttpOnly、Secure、SameSite=Lax、Path=/、沒有 Domain；
@@ -62,6 +63,9 @@ API_V1_PREFIX: Final = "/api/v1"
 SAFE_METHODS: Final = frozenset({"GET", "HEAD", "OPTIONS"})
 # 登入狀態的回應不給任何快取存。
 NO_STORE: Final = {"Cache-Control": "no-store"}
+# 前端在成員專屬的讀取與文獻庫的寫入帶的「這個分頁以為的成員」（畫面上那份資料是用誰的身分讀的；
+# ADR-0055）。
+EXPECTED_MEMBER_HEADER: Final = "X-Radar-Expected-Member"
 
 log = structlog.get_logger(__name__)
 
@@ -223,6 +227,55 @@ def current_member(request: Request, routes: AuthRoutes) -> AuthenticatedMember:
     member = routes.authenticate(request.cookies.get(SESSION_COOKIE))
     if member is None:
         raise ApiProblemError(ErrorCode.NOT_AUTHENTICATED, headers=NO_STORE)
+    return member
+
+
+def _expected_member(value: str) -> uuid.UUID | None:
+    """標頭的值 → 成員 ID；只收標準寫法（36 字、有連字號，大小寫不拘），其他回 None。"""
+    try:
+        parsed = uuid.UUID(value)
+    except ValueError:
+        return None
+    return parsed if str(parsed) == value.lower() else None
+
+
+def check_expected_member(request: Request, member: AuthenticatedMember) -> None:
+    """請求帶了 `X-Radar-Expected-Member` 時，要和這次 session 的成員是同一位（ADR-0055）。
+
+    沒帶就不檢查（照常）。比對的是 session 認出的成員，不看請求裡別的欄位。文獻庫的三個寫入與成員
+    專屬的讀取（論文頁、找論文清單、文獻庫清單）都經 `member_as_expected` 用這一個函式。
+
+    Raises:
+        ApiProblemError: `expected_member_invalid`（值不是成員 ID，或標頭出現不只一次）、
+            `member_changed`（和 session 的成員不同）；都帶 `no-store`。
+    """
+    values = request.headers.getlist(EXPECTED_MEMBER_HEADER)
+    if not values:
+        return
+    expected = _expected_member(values[0]) if len(values) == 1 else None
+    if expected is None:
+        log.warning(
+            "預期成員標頭格式不對，拒絕",
+            method=request.method,
+            path=request.url.path,
+            header_count=len(values),
+        )
+        raise ApiProblemError(ErrorCode.EXPECTED_MEMBER_INVALID, headers=NO_STORE)
+    if expected != member.member_id:
+        # 不記成員 ID：兩位成員的 ID 一起進日誌沒有必要（只要知道擋過）。
+        log.info(
+            "預期成員和 session 不同（換了人），不讀不寫",
+            method=request.method,
+            path=request.url.path,
+        )
+        raise ApiProblemError(ErrorCode.MEMBER_CHANGED, headers=NO_STORE)
+
+
+def member_as_expected(request: Request, routes: AuthRoutes) -> AuthenticatedMember:
+    """先認 session（`current_member`，沒登入 401），再比對預期成員（`check_expected_member`，
+    409／400）；回 session 的成員。都在呼叫 services 之前。"""
+    member = current_member(request, routes)
+    check_expected_member(request, member)
     return member
 
 

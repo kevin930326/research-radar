@@ -1,7 +1,10 @@
 """api 的論文頁路由：一篇論文、顯示名稱、前端的設定值（Story 3.6、ADR-0048）。
 
 - 三個端點都要登入（沒登入 401 `not_authenticated`），回應都帶 `Cache-Control: no-store`。
-- `GET /api/v1/papers/{paper_id}`：看不到、不存在、路徑參數不是 UUID，一律丟同一個
+- `GET /api/v1/papers/{paper_id}`：先認 session 再比對 `X-Radar-Expected-Member`（回應的
+  `in_my_library` 是成員專屬的；`auth.member_as_expected`，不符 409、格式不對 400、沒帶照常，
+  ADR-0055）。顯示名稱與設定值不是成員專屬的資料，不比對。
+  看不到、不存在、路徑參數不是 UUID，一律丟同一個
   `ApiProblemError(not_found, headers=NO_STORE)`，狀態碼、本文、標頭都一樣（ADR-0002）。看不到與
   不存在的區分只在 services 的一句帶可見條件的查詢裡（這裡不判斷）；路徑參數宣告成字串、自己轉
   UUID，轉不了也走同一個 404（不讓框架回 422）。
@@ -37,6 +40,7 @@ from radar.entrypoints.api.auth import (
     NO_STORE,
     AuthRoutes,
     current_member,
+    member_as_expected,
     origin_dependency,
 )
 from radar.entrypoints.api.problems import ApiProblemError
@@ -127,8 +131,10 @@ def install_paper_routes(app: FastAPI, routes: PaperRoutes, auth_routes: AuthRou
 
     @router.get("/papers/{paper_id}")
     def paper(paper_id: str, request: Request, response: Response) -> PaperPageResponse:
-        """一篇論文的論文頁資料；看不到、不存在、ID 不是 UUID 都回同一個 404，沒登入 401。"""
-        member = current_member(request, auth_routes)
+        """一篇論文的論文頁資料；看不到、不存在、ID 不是 UUID 都回同一個 404，沒登入 401；
+        `X-Radar-Expected-Member` 和登入的成員不同 409 `member_changed`、格式不對 400
+        `expected_member_invalid`（回應含 `in_my_library`，ADR-0055）。"""
+        member = member_as_expected(request, auth_routes)
         try:
             parsed = uuid.UUID(paper_id)
         except ValueError:

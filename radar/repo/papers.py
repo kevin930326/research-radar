@@ -720,7 +720,8 @@ def upsert_by_external_id(
 
     `in_scope` 由 `is_in_scope` 算；`lab_visible`＝原本的值 OR `in_scope` OR `origin` 是
     `expansion`；`origin` 只在新增時寫；`excluded_reason` 由呼叫端明確決定、整欄覆寫。
-    `demo_eligible` 由 `is_demo_eligible` 算（授權、出版社、`scope.demo_publishers`；ADR-0052），
+    `demo_eligible` 由 `is_demo_eligible` 算（授權、出版社、期刊 ISSN-L、`scope.demo_publishers`；
+    ADR-0052），
     和授權、出版社欄位在 CREATED／UPDATED 時一起整欄覆寫；STALE 時都不寫。
 
     CREATED／UPDATED 時一併寫摘要（`_write_abstract`）：有摘要就「有就更新、沒有才新增」這個
@@ -753,7 +754,11 @@ def upsert_by_external_id(
     ids = paper.external_ids()
     in_scope = is_in_scope(paper.journal_issn_l, paper.publication_year, scope)
     demo_eligible = is_demo_eligible(
-        paper.primary_license, paper.publisher_ids, paper.publisher_names, scope.demo_publishers
+        paper.primary_license,
+        paper.publisher_ids,
+        paper.publisher_names,
+        scope.demo_publishers,
+        journal_issn_l=paper.journal_issn_l,
     )
     values: dict[str, object] = {
         "title": paper.title,
@@ -1120,7 +1125,7 @@ def list_demo_eligible_facts(
     viewer: SystemViewer, connection: Connection, *, after_id: uuid.UUID | None, limit: int
 ) -> list[StoredDemoFacts]:
     """依論文 id 順序讀一頁 `demo_eligible` 為真的論文（`after_id` 之後、最多 `limit` 篇）存下的
-    授權與出版社欄位。`reparse` 結束時重判用（ADR-0052 第 9 點）；判定由呼叫端經
+    授權、出版社與期刊 ISSN-L 欄位。`reparse` 結束時重判用（ADR-0052 第 9 點）；判定由呼叫端經
     `is_demo_eligible` 算，這裡不判斷。
 
     Raises:
@@ -1134,7 +1139,8 @@ def list_demo_eligible_facts(
     after = "" if after_id is None else " AND paper.id > :after_id"
     rows = connection.execute(
         text(
-            "SELECT paper.id, paper.primary_license, paper.publisher_ids, paper.publisher_names"
+            "SELECT paper.id, paper.primary_license, paper.publisher_ids, paper.publisher_names,"
+            " paper.journal_issn_l"
             f" FROM paper WHERE {visible} AND paper.demo_eligible{after}"
             " ORDER BY paper.id LIMIT :limit"
         ),
@@ -1146,8 +1152,9 @@ def list_demo_eligible_facts(
             primary_license=primary_license,
             publisher_ids=tuple(publisher_ids),
             publisher_names=tuple(publisher_names),
+            journal_issn_l=journal_issn_l,
         )
-        for paper_id, primary_license, publisher_ids, publisher_names in rows
+        for paper_id, primary_license, publisher_ids, publisher_names, journal_issn_l in rows
     ]
 
 

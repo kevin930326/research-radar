@@ -2,11 +2,16 @@
 
 - 四個端點都要登入（沒登入 401 `not_authenticated`），回應都帶 `Cache-Control: no-store`；會改資料的
   三個（PUT、DELETE、POST）由 router 的相依項檢查 `Origin`（`check_origin`）。
+- 四個端點共用一個相依項（`acting_member`，即 `auth.member_as_expected`）認 session 的成員，並比對
+  請求標頭 `X-Radar-Expected-Member`（這個分頁以為的成員，ADR-0055）：有帶、和 session 的成員不同
+  → 409 `member_changed`；值不是成員 ID（或重複出現）→ 400 `expected_member_invalid`；兩種都在呼叫
+  services 之前擋下，什麼都不讀不寫。沒帶標頭照常（權限只看 session；這個標頭防的是自己人的舊
+  分頁，不是惡意請求）。論文頁與找論文清單用同一個比對。
 - `GET /api/v1/library`：自己的文獻庫的一頁（`items`、`next_cursor`、`total`）；別人讀到的是自己的
   （沒有就是空清單）。`cursor` 不是上一頁給的寫法 → 422 `request_invalid`。
 - `PUT /api/v1/library/{paper_id}`：加入（`added_via = manual`）；已經在就回原本那一筆。
-- `DELETE /api/v1/library/{paper_id}`：移出，回移出前的那一筆（200，不是 204：換人測試的對照要有
-  本文）。
+- `DELETE /api/v1/library/{paper_id}`：移出，回移出前的那一筆，但 `paper.in_my_library` 是假
+  （ADR-0053 更新 2026-11-21；200，不是 204：換人測試的對照要有本文）。
 - `POST /api/v1/library/{paper_id}/restore`：復原最近一次移出的那一筆；已經在文獻庫就回現在那一筆、
   不動封存。
 - 看不到、不存在、被排除、別人的、路徑參數不是 UUID：一律丟同一個
@@ -21,10 +26,12 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from functools import partial
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, FastAPI, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
 
+from radar.domain.auth import AuthenticatedMember
 from radar.domain.contracts import PaperRow, UtcDateTime
 from radar.domain.domain_config import JournalsConfig
 from radar.domain.errors import ErrorCode
@@ -41,7 +48,7 @@ from radar.entrypoints.api.auth import (
     API_V1_PREFIX,
     NO_STORE,
     AuthRoutes,
-    current_member,
+    member_as_expected,
     origin_dependency,
 )
 from radar.entrypoints.api.problems import ApiProblemError
@@ -147,10 +154,14 @@ def install_library_routes(app: FastAPI, routes: LibraryRoutes, auth_routes: Aut
 
     router = APIRouter(prefix=API_V1_PREFIX, dependencies=[Depends(origin_dependency(auth_routes))])
 
+    def acting_member(request: Request) -> AuthenticatedMember:
+        # 三個寫入與清單共用（和論文頁、找論文清單同一個比對，`auth.member_as_expected`）：先認
+        # session（沒登入 401），再比對預期成員（409／400）；都在呼叫 services 之前。
+        return member_as_expected(request, auth_routes)
+
     def change(
-        request: Request, response: Response, paper_id: str, run: LibraryChange
+        member: AuthenticatedMember, response: Response, paper_id: str, run: LibraryChange
     ) -> LibraryItemResponse:
-        member = current_member(request, auth_routes)
         entry = run(member.viewer, _paper_id(paper_id))
         if entry is None:
             raise _not_found()
@@ -159,11 +170,13 @@ def install_library_routes(app: FastAPI, routes: LibraryRoutes, auth_routes: Aut
 
     @router.get("/library")
     def list_library(
-        request: Request, response: Response, cursor: str | None = None
+        member: Annotated[AuthenticatedMember, Depends(acting_member)],
+        response: Response,
+        cursor: str | None = None,
     ) -> LibraryPageResponse:
         """自己的文獻庫的一頁（一頁的篇數見 `client-config`）；`cursor` 是上一頁的 `next_cursor`，
-        格式不對 422，沒登入 401。"""
-        member = current_member(request, auth_routes)
+        格式不對 422，沒登入 401；`X-Radar-Expected-Member` 和登入的成員不同 409 `member_changed`、
+        格式不對 400 `expected_member_invalid`。"""
         after = None
         if cursor is not None:
             try:
@@ -180,26 +193,38 @@ def install_library_routes(app: FastAPI, routes: LibraryRoutes, auth_routes: Aut
 
     @router.put("/library/{paper_id}")
     def add_library_item(
-        paper_id: str, request: Request, response: Response
+        paper_id: str,
+        member: Annotated[AuthenticatedMember, Depends(acting_member)],
+        response: Response,
     ) -> LibraryItemResponse:
         """把一篇看得到的論文加進自己的文獻庫；已經在就回原本那一筆。看不到、不存在、ID 不是 UUID
-        都回同一個 404，沒登入 401；`Origin` 缺少或不是本站 403 `origin_rejected`。"""
-        return change(request, response, paper_id, routes.add)
+        都回同一個 404，沒登入 401；`Origin` 缺少或不是本站 403 `origin_rejected`；
+        `X-Radar-Expected-Member` 和登入的成員不同 409 `member_changed`、格式不對 400
+        `expected_member_invalid`。"""
+        return change(member, response, paper_id, routes.add)
 
     @router.delete("/library/{paper_id}")
     def remove_library_item(
-        paper_id: str, request: Request, response: Response
+        paper_id: str,
+        member: Annotated[AuthenticatedMember, Depends(acting_member)],
+        response: Response,
     ) -> LibraryItemResponse:
-        """把一篇移出自己的文獻庫，回移出前的那一筆；不在自己的文獻庫回 404，沒登入 401；`Origin`
-        缺少或不是本站 403 `origin_rejected`。"""
-        return change(request, response, paper_id, routes.remove)
+        """把一篇移出自己的文獻庫，回移出前的那一筆（`paper.in_my_library` 是假）；不在自己的文獻庫
+        回 404，沒登入 401；`Origin` 缺少或不是本站 403 `origin_rejected`；
+        `X-Radar-Expected-Member` 和登入的成員不同 409 `member_changed`、格式不對 400
+        `expected_member_invalid`。"""
+        return change(member, response, paper_id, routes.remove)
 
     @router.post("/library/{paper_id}/restore")
     def restore_library_item(
-        paper_id: str, request: Request, response: Response
+        paper_id: str,
+        member: Annotated[AuthenticatedMember, Depends(acting_member)],
+        response: Response,
     ) -> LibraryItemResponse:
         """復原最近一次移出的那一篇（原本的加入方式與時間）；已經在文獻庫就回現在那一筆，不動任何
-        封存。自己沒有移出過回 404，沒登入 401；`Origin` 缺少或不是本站 403 `origin_rejected`。"""
-        return change(request, response, paper_id, routes.restore)
+        封存。自己沒有移出過回 404，沒登入 401；`Origin` 缺少或不是本站 403 `origin_rejected`；
+        `X-Radar-Expected-Member` 和登入的成員不同 409 `member_changed`、格式不對 400
+        `expected_member_invalid`。"""
+        return change(member, response, paper_id, routes.restore)
 
     app.include_router(router)

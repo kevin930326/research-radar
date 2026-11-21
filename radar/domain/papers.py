@@ -286,13 +286,15 @@ class StoredPaper:
 class StoredDemoFacts:
     """資料庫裡存下的、`is_demo_eligible` 要看的欄位（reparse 結束時重判用，ADR-0052 第 9 點）。
 
-    `primary_license`、`publisher_ids`、`publisher_names` 是寫入時照存的值（遷移 0021）。
+    `primary_license`、`publisher_ids`、`publisher_names` 是寫入時照存的值（遷移 0021）；
+    `journal_issn_l` 是 `paper.journal_issn_l`（依期刊排除用，ADR-0052 更新 2026-11-22）。
     """
 
     paper_id: uuid.UUID
     primary_license: str | None
     publisher_ids: tuple[str, ...]
     publisher_names: tuple[str, ...]
+    journal_issn_l: str | None
 
 
 class UpsertOutcome(StrEnum):
