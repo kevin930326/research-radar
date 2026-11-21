@@ -157,10 +157,10 @@ def reparse_papers(
        暫存列的 `excluded_reason`），不是 STALE 時整批覆寫 OpenAlex 的關鍵字；全部寫完在同一個
        交易刪掉這一批的暫存列。接著在**同一個交易**重判示範站可用（ADR-0052 第 9 點）：
        `demo_eligible` 為真、而這次沒有寫到（UPDATED）的論文（沒有原始資料紀錄、各種失敗略過、
-       STALE），用存下的授權與出版社欄位經 `is_demo_eligible`（同一份 `scope.demo_publishers`）
-       再算一次，算出 False 的才改成 false；只往 false 改。中途失敗整個交易退回（論文、摘要、
-       關鍵字、`demo_eligible` 都不變），暫存列留著，下次執行一開始清掉；套用與重判在同一個交易，
-       不會有「套用了、還沒重判」的中間狀態，重跑幾次結果一樣。
+       STALE），用存下的授權、出版社與期刊 ISSN-L 經 `is_demo_eligible`（同一份
+       `scope.demo_publishers`）再算一次，算出 False 的才改成 false；只往 false 改。中途失敗
+       整個交易退回（論文、摘要、關鍵字、`demo_eligible` 都不變），暫存列留著，下次執行一開始
+       清掉；套用與重判在同一個交易，不會有「套用了、還沒重判」的中間狀態，重跑幾次結果一樣。
 
     Raises:
         PermissionDeniedError: `actor` 不是系統工作（不碰資料庫與物件儲存）。
@@ -363,10 +363,11 @@ def _recheck_demo_eligible(
 ) -> None:
     """重判這次沒有重寫到的論文的 `demo_eligible`，只把 true 改成 false（ADR-0052 第 6、9 點）。
 
-    判定只經 `is_demo_eligible`，用存下的 `primary_license`、`publisher_ids`、`publisher_names` 與
-    套用用的同一份 `scope.demo_publishers`。排除清單沒有載入（None）時 `is_demo_eligible` 一律
-    False，所以全部改成 false：和同一次套用寫到的論文一致（`upsert_by_external_id` 也會寫 false），
-    方向是「少放」；正式路徑（`radar reparse`）一定帶 `DomainConfig.scope_settings()`。
+    判定只經 `is_demo_eligible`，用存下的 `primary_license`、`publisher_ids`、`publisher_names`、
+    `journal_issn_l` 與套用用的同一份 `scope.demo_publishers`。排除清單沒有載入（None）時
+    `is_demo_eligible` 一律 False，所以全部改成 false：和同一次套用寫到的論文一致
+    （`upsert_by_external_id` 也會寫 false），方向是「少放」；正式路徑（`radar reparse`）一定帶
+    `DomainConfig.scope_settings()`。
     """
     after_id: uuid.UUID | None = None
     while True:
@@ -383,6 +384,7 @@ def _recheck_demo_eligible(
                 facts.publisher_ids,
                 facts.publisher_names,
                 scope.demo_publishers,
+                journal_issn_l=facts.journal_issn_l,
             ):
                 revoke.append(facts.paper_id)
         counts.demo_revoked += update_papers_not_demo_eligible(connection, revoke)

@@ -348,6 +348,52 @@ def test_weekly_update_marks_demo_eligible_with_the_real_exclusion_list(
     ]
 
 
+def test_weekly_update_excludes_ieee_tem_by_journal_with_the_real_config(
+    weekly_db: TestDatabase, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # C3（ADR-0052 更新 2026-11-22）：照正式的 register_tasks 跑、讀正式
+    # config/demo_publishers.yaml 的期刊清單。IEEE TEM（0018-9391）的 CC BY 論文，出版社名稱
+    # 是清單外的寫法、ID 不在清單裡，也不算可用；同樣的出版社欄位在別的期刊算可用。
+    tem, other = "0018-9391", "1471-7727"
+    unlisted_id = "https://openalex.org/P9000000001"
+    unlisted_name = "The Institute of Electrical and Electronics Engineers"
+    fetched_at = datetime(2026, 11, 16, 2, 0, tzinfo=UTC)
+    tem_record = RawRecord(
+        RawSource.OPENALEX,
+        "W800000001",
+        demo_work_bytes(
+            demo_work(1, issn_l=tem, publisher_id=unlisted_id, publisher_name=unlisted_name)
+        ),
+        fetched_at,
+    )
+    other_record = RawRecord(
+        RawSource.OPENALEX,
+        "W800000002",
+        demo_work_bytes(
+            demo_work(2, issn_l=other, publisher_id=unlisted_id, publisher_name=unlisted_name)
+        ),
+        fetched_at,
+    )
+    source = FakePaperSource({tem: [[tem_record]], other: [[other_record]]})
+    task = _task(weekly_db, monkeypatch, ROOT / "config")
+    monkeypatch.setattr(
+        worker_tasks, "build_paper_source", lambda *_: contextlib.nullcontext(source)
+    )
+    monkeypatch.setattr(worker_tasks, "build_object_store", lambda *_: FakeObjectStore())
+    run_id, _before = _fetching_run(weekly_db)
+
+    task(weekly_run_id=str(run_id))
+
+    with weekly_db.connect(APP_ROLE) as connection:
+        papers = connection.execute(
+            "SELECT title, journal_issn_l, primary_license, demo_eligible FROM paper ORDER BY title"
+        ).fetchall()
+    assert papers == [
+        ("Made up demo study 1", tem, "cc-by", False),
+        ("Made up demo study 2", other, "cc-by", True),
+    ]
+
+
 BAD_HOST = "bad host!.abc123account.r2.example"
 
 

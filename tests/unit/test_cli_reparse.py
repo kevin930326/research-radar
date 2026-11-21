@@ -9,6 +9,7 @@ from typer.testing import CliRunner
 import radar.entrypoints.cli as cli
 from radar.adapters.fake import FakeObjectStore
 from radar.domain.domain_config import ExclusionRulesConfig
+from radar.domain.policy import is_demo_eligible
 from radar.domain.scope import ScopeSettings
 from radar.domain.viewer import SystemViewer
 from radar.services.reparse import AdvisoryLockLostError, ReparseResult
@@ -272,3 +273,20 @@ def test_reparse_passes_the_demo_publisher_exclusions(calls: dict[str, Any]) -> 
     exclusions = calls["reparse"]["scope"].demo_publishers
     assert exclusions is not None
     assert "ieee" in exclusions.names
+
+
+@pytest.mark.usefixtures("env")
+def test_reparse_exclusions_drop_cc_by_papers_in_ieee_tem(calls: dict[str, Any]) -> None:
+    # C3（ADR-0052 更新 2026-11-22）：正式 config/demo_publishers.yaml 的期刊清單一路傳到 reparse；
+    # 期刊是 IEEE TEM（0018-9391）的 CC BY 論文，出版社名稱是清單外的寫法、ID 不在清單裡也不算。
+    result = runner.invoke(cli.app, ["reparse"])
+
+    assert result.exit_code == 0, result.output
+    exclusions = calls["reparse"]["scope"].demo_publishers
+    assert exclusions is not None
+    assert exclusions.journal_issn_ls == frozenset({"0018-9391"})
+    name = ("The Institute of Electrical and Electronics Engineers",)
+    ids = ("P9000000001",)
+    assert is_demo_eligible("cc-by", ids, name, exclusions, journal_issn_l="0018-9391") is False
+    # 對照：同樣的論文換成別的期刊（Information and Organization）就算可用。
+    assert is_demo_eligible("cc-by", ids, name, exclusions, journal_issn_l="1471-7727") is True

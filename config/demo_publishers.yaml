@@ -1,4 +1,4 @@
-# 示範站不放完整內容的出版社（AD-18 領域設定；api、worker、CLI 啟動時由 radar/config.py 驗證，
+# 示範站不放完整內容的出版社與期刊（AD-18 領域設定；api、worker、CLI 啟動時由 radar/config.py 驗證，
 # 錯了就不啟動）。ADR-0007 第 5 點、ADR-0052。
 #
 # 這些出版社的論文就算是 CC BY，也不算「示範站可用」（paper.demo_eligible 是 false），
@@ -16,6 +16,16 @@
 #   同一家可以寫好幾筆（不同寫法的名稱各一筆）。排除方向多對上只會更保守。
 # - excluded 至少一筆。
 #
+# excluded_journals：依期刊排除（ADR-0052「更新（2026-11-22）」）。論文的期刊 ISSN-L
+# （paper.journal_issn_l）對上就排除，和上面出版社那一道是「任一個對上就排除」：出版社名稱是清單外的
+# 寫法（例如前面多一個 The）、又沒有對上的 ID 時，靠這一道擋住。
+# - issn_l：期刊的 ISSN-L。有無連字號、小寫 x 都收（同 normalize_issn_l，例如 "00189391" 等於
+#   0018-9391）；沒有連字號時要加引號，不然 YAML 會讀成數字、算寫錯。看不懂的格式算寫錯（啟動
+#   檢查列出、不啟動）。
+# - name：期刊名稱（只給人看，不參與比對）。
+# - note：為什麼列、出處（只給人看）。
+# - 這個清單可以是空的或整個不寫（等於不依期刊排除）。論文沒有期刊 ISSN-L 時這一道不算對上。
+#
 # 清單改了之後，已經存下的 demo_eligible 不會自己變：要跑 `radar reparse` 重算（ADR-0052）。
 #
 # IEEE 的出版社 ID P4310319808 已查證：Kevin 2026-11-20 用唯讀查詢從資料庫查到（IEEE Transactions on
@@ -32,3 +42,7 @@ excluded:
   - id: null
     name: IEEE Computer Society
     note: 同上，IEEE 底下的學會出版品。名稱未經 OpenAlex 資料查證。
+excluded_journals:
+  - issn_l: 0018-9391
+    name: IEEE Transactions on Engineering Management
+    note: Kevin 2026-11-20 用唯讀查詢從資料庫查到的 ISSN-L（同 ADR-0052「更新（2026-11-21）」那一次查詢）；IEEE 的期刊，出版社名稱寫法對不上時靠這一筆排除。

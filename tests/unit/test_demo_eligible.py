@@ -13,6 +13,7 @@ from pydantic import ValidationError
 
 from radar.config import ConfigError, load_domain_config
 from radar.domain.domain_config import DemoPublishersConfig
+from radar.domain.identifiers import InvalidIdentifierError, normalize_openalex_id
 from radar.domain.papers import ParsedPaper
 from radar.domain.parsers.openalex import parse_openalex_work
 from radar.domain.policy import (
@@ -741,14 +742,30 @@ def test_property_raw_and_normalized_exclusions_match_the_same_papers(
     )
     for name in names:
         assert raw.matches((), (name,)) is True
+    # ID 也一樣（#118 審查 G4 補的斷言）：建立時正規化成和比對論文 ID 時同一個鍵，原字串對得上。
+    assert raw.ids == frozenset(_expected_id_key(value) for value in ids)
+    for value in ids:
+        assert raw.matches((value,), ()) is True
+
+
+def _expected_id_key(value: str) -> str:
+    """測試自己照 ADR-0052 寫一份 ID 的比對鍵（不呼叫 policy 的私有函式）。"""
+    try:
+        return normalize_openalex_id(value)
+    except InvalidIdentifierError:
+        return value.strip().upper()
 
 
 # Codex 審查 PR #118 的反例：拿掉分隔字元後 NFKC 會把韓文字母組成音節，只做一輪時要兩次才穩定。
-_RECOMPOSING_NAME = "ᄀ-ᅡ"  # ᄀ-ᅡ
-_SYLLABLE = "가"  # 가
+# 韓文字母在畫面上和音節幾乎分不出來，所以用 \u 寫法（#118 審查 L3；值和原本的字面一樣）。
+_RECOMPOSING_NAME = "\u1100-\u1161"  # U+1100 初聲 ㄱ（KIYEOK）、連字號、U+1161 中聲 ㅏ（A）
+_SYLLABLE = "\uac00"  # U+AC00 音節「가」（上面兩個字母組起來的結果）
 
 
 def test_name_key_that_recomposes_is_stable_in_one_call() -> None:
+    # 字面確實是這幾個 code point（改成 \u 寫法後值沒變）。
+    assert [ord(ch) for ch in _RECOMPOSING_NAME] == [0x1100, 0x2D, 0x1161]
+    assert [ord(ch) for ch in _SYLLABLE] == [0xAC00]
     assert normalize_publisher_name(_RECOMPOSING_NAME) == normalize_publisher_name(_SYLLABLE)
     assert normalize_publisher_name(_RECOMPOSING_NAME) == _SYLLABLE
     key = normalize_publisher_name(_RECOMPOSING_NAME)
@@ -768,3 +785,237 @@ def test_property_name_key_is_idempotent(name: str) -> None:
     key = normalize_publisher_name(name)
 
     assert normalize_publisher_name(key) == key
+
+
+# --- 依期刊 ISSN-L 排除（C3、ADR-0052 更新 2026-11-22） ---------------------------------
+
+IEEE_TEM_ISSN_L = "0018-9391"
+# 不在排除清單裡的 IEEE 名稱寫法（前面多一個 The），出版社 ID 也是編的、不在清單裡。
+UNLISTED_IEEE_NAME = "The Institute of Electrical and Electronics Engineers"
+
+
+def test_real_config_excludes_ieee_tem_by_journal_even_with_an_unlisted_name() -> None:
+    exclusions = load_domain_config(
+        {"RADAR_CONFIG_DIR": str(ROOT / "config")}
+    ).demo_publishers.exclusions()
+
+    assert (
+        is_demo_eligible(
+            "cc-by",
+            ("P9000000001",),
+            (UNLISTED_IEEE_NAME,),
+            exclusions,
+            journal_issn_l=IEEE_TEM_ISSN_L,
+        )
+        is False
+    )
+    # 對照：同樣的論文換成別的期刊就可用（證明期刊這一道沒有多擋）。
+    assert (
+        is_demo_eligible(
+            "cc-by",
+            ("P9000000001",),
+            (UNLISTED_IEEE_NAME,),
+            exclusions,
+            journal_issn_l=ISSN,
+        )
+        is True
+    )
+
+
+def test_real_config_lists_ieee_tem_as_an_excluded_journal() -> None:
+    config = load_domain_config({"RADAR_CONFIG_DIR": str(ROOT / "config")})
+
+    assert [entry.issn_l for entry in config.demo_publishers.excluded_journals] == [IEEE_TEM_ISSN_L]
+    assert config.demo_publishers.exclusions().journal_issn_ls == frozenset({IEEE_TEM_ISSN_L})
+    assert config.scope_settings().demo_publishers == config.demo_publishers.exclusions()
+
+
+# 測試用的排除清單多一本編的期刊（出版社與名稱和 TEST_EXCLUSIONS 一樣）。
+EXCLUDED_JOURNAL_ISSN_L = "9999-999X"
+JOURNAL_EXCLUSIONS = PublisherExclusions(
+    ids=TEST_EXCLUSIONS.ids,
+    names=TEST_EXCLUSIONS.names,
+    journal_issn_ls=frozenset({EXCLUDED_JOURNAL_ISSN_L}),
+)
+
+
+def test_paper_in_an_excluded_journal_is_not_eligible() -> None:
+    assert (
+        is_demo_eligible(
+            "cc-by",
+            (OPEN_PUBLISHER_ID,),
+            (OPEN_PUBLISHER_NAME,),
+            JOURNAL_EXCLUSIONS,
+            journal_issn_l=EXCLUDED_JOURNAL_ISSN_L,
+        )
+        is False
+    )
+    assert JOURNAL_EXCLUSIONS.matches((), (), journal_issn_l=EXCLUDED_JOURNAL_ISSN_L) is True
+
+
+@pytest.mark.parametrize("issn_l", [None, ISSN])
+@pytest.mark.parametrize(
+    ("license", "ids", "names", "expected"),
+    [
+        ("cc-by", (OPEN_PUBLISHER_ID,), (OPEN_PUBLISHER_NAME,), True),
+        ("cc-by", (EXCLUDED_PUBLISHER_ID,), (OPEN_PUBLISHER_NAME,), False),
+        ("cc-by", (), (EXCLUDED_PUBLISHER_NAME,), False),
+        ("cc-by", (OPEN_PUBLISHER_ID,), (), False),
+        ("cc-by-nc", (OPEN_PUBLISHER_ID,), (OPEN_PUBLISHER_NAME,), False),
+        (None, (OPEN_PUBLISHER_ID,), (OPEN_PUBLISHER_NAME,), False),
+    ],
+)
+def test_journal_that_is_missing_or_not_listed_keeps_the_original_result(
+    issn_l: str | None,
+    license: str | None,
+    ids: tuple[str, ...],
+    names: tuple[str, ...],
+    expected: bool,
+) -> None:
+    # 論文沒有期刊 ISSN-L、或期刊不在清單裡：期刊這一道不算對上，結果和沒有期刊清單時一樣。
+    assert (
+        is_demo_eligible(license, ids, names, JOURNAL_EXCLUSIONS, journal_issn_l=issn_l) is expected
+    )
+    assert is_demo_eligible(license, ids, names, TEST_EXCLUSIONS) is expected
+
+
+def test_without_a_journal_list_the_journal_is_ignored() -> None:
+    # 設定檔沒有 excluded_journals：行為和加這一道之前完全一樣（期刊是什麼都不影響）。
+    config = DemoPublishersConfig.model_validate(
+        {"excluded": [{"id": None, "name": EXCLUDED_PUBLISHER_NAME, "note": "x"}]}
+    )
+    exclusions = config.exclusions()
+
+    assert config.excluded_journals == ()
+    assert exclusions.journal_issn_ls == frozenset()
+    assert exclusions == PublisherExclusions(
+        ids=frozenset(), names=frozenset({EXCLUDED_PUBLISHER_NAME})
+    )
+    for issn_l in (None, ISSN, IEEE_TEM_ISSN_L, EXCLUDED_JOURNAL_ISSN_L):
+        assert (
+            is_demo_eligible("cc-by", (), (OPEN_PUBLISHER_NAME,), exclusions, journal_issn_l=issn_l)
+            is True
+        )
+        assert (
+            is_demo_eligible(
+                "cc-by", (), (EXCLUDED_PUBLISHER_NAME,), exclusions, journal_issn_l=issn_l
+            )
+            is False
+        )
+
+
+@pytest.mark.parametrize("written", ["0018-9391", "00189391", " 0018-9391 ", "ISSN 0018-9391"])
+@pytest.mark.parametrize("paper", ["0018-9391", "00189391"])
+def test_issn_l_spellings_match(written: str, paper: str) -> None:
+    config = DemoPublishersConfig.model_validate(
+        {
+            "excluded": [{"id": None, "name": "A", "note": "x"}],
+            "excluded_journals": [{"issn_l": written, "name": "J", "note": "x"}],
+        }
+    )
+
+    assert config.excluded_journals[0].issn_l == "0018-9391"
+    assert config.exclusions().matches((), (), journal_issn_l=paper) is True
+
+
+@pytest.mark.parametrize("written", ["0960-085x", "0960085x", "0960-085X", "0960085X"])
+@pytest.mark.parametrize("paper", ["0960-085X", "0960-085x", "0960085x"])
+def test_issn_l_lowercase_x_matches(written: str, paper: str) -> None:
+    exclusions = PublisherExclusions(
+        ids=frozenset(), names=frozenset({"A"}), journal_issn_ls=frozenset({written})
+    )
+
+    assert exclusions.journal_issn_ls == frozenset({"0960-085X"})
+    assert exclusions.matches((), (), journal_issn_l=paper) is True
+    assert (
+        is_demo_eligible("cc-by", (), (OPEN_PUBLISHER_NAME,), exclusions, journal_issn_l=paper)
+        is False
+    )
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        {"excluded_journals": [{"issn_l": "not an issn", "name": "J", "note": "x"}]},
+        {"excluded_journals": [{"issn_l": "0018-939", "name": "J", "note": "x"}]},
+        {"excluded_journals": [{"issn_l": 189391, "name": "J", "note": "x"}]},
+        {"excluded_journals": [{"issn_l": "0018-9391", "name": " ", "note": "x"}]},
+        {"excluded_journals": [{"issn_l": "0018-9391", "name": "J"}]},
+        {"excluded_journals": [{"issn_l": "0018-9391", "name": "J", "note": "x", "extra": 1}]},
+    ],
+)
+def test_excluded_journals_reject_bad_entries(data: dict[str, object]) -> None:
+    with pytest.raises(ValidationError):
+        DemoPublishersConfig.model_validate(
+            {"excluded": [{"id": None, "name": "A", "note": "x"}], **data}
+        )
+
+
+def test_excluded_journals_with_the_same_issn_l_are_not_an_error() -> None:
+    config = DemoPublishersConfig.model_validate(
+        {
+            "excluded": [{"id": None, "name": "A", "note": "x"}],
+            "excluded_journals": [
+                {"issn_l": "0018-9391", "name": "J", "note": "x"},
+                {"issn_l": "00189391", "name": "J again", "note": "x"},
+            ],
+        }
+    )
+
+    assert config.exclusions().journal_issn_ls == frozenset({"0018-9391"})
+
+
+def test_exclusions_reject_issn_l_that_cannot_be_read() -> None:
+    with pytest.raises(ValueError, match="ISSN-L"):
+        PublisherExclusions(
+            ids=frozenset(), names=frozenset({"A"}), journal_issn_ls=frozenset({"nope"})
+        )
+
+
+def test_broken_excluded_journal_in_the_config_file_is_reported(tmp_path: Path) -> None:
+    target = tmp_path / "config"
+    shutil.copytree(ROOT / "config", target)
+    file = target / "demo_publishers.yaml"
+    file.write_text(
+        file.read_text(encoding="utf-8").replace("issn_l: 0018-9391", "issn_l: 0018-93X1"),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError) as caught:
+        load_domain_config({"RADAR_CONFIG_DIR": str(target)})
+
+    [problem] = caught.value.problems
+    assert problem.startswith("demo_publishers.yaml：excluded_journals.0.issn_l：")
+
+
+_RAW_ISSN_LS = st.lists(
+    st.builds(
+        lambda digits, check, hyphen, prefix: f"{prefix}{digits[:4]}{hyphen}{digits[4:]}{check}",
+        st.text(alphabet="0123456789", min_size=7, max_size=7),
+        st.sampled_from([*"0123456789", "x", "X"]),
+        st.sampled_from(["", "-"]),
+        st.sampled_from(["", " ", "ISSN ", "issn-l: "]),
+    ),
+    max_size=5,
+)
+
+
+@given(ids=_RAW_IDS, names=_RAW_NAMES, issn_ls=_RAW_ISSN_LS)
+def test_property_journal_list_built_twice_is_stable(
+    ids: list[str], names: list[str], issn_ls: list[str]
+) -> None:
+    first = PublisherExclusions(
+        ids=frozenset(ids), names=frozenset(names), journal_issn_ls=frozenset(issn_ls)
+    )
+    again = PublisherExclusions(
+        ids=frozenset(ids), names=frozenset(names), journal_issn_ls=frozenset(issn_ls)
+    )
+    rebuilt = PublisherExclusions(
+        ids=first.ids, names=first.names, journal_issn_ls=first.journal_issn_ls
+    )
+
+    assert first == again
+    assert rebuilt == first
+    assert first.journal_issn_ls == again.journal_issn_ls == rebuilt.journal_issn_ls
+    for issn_l in issn_ls:
+        assert first.matches((), (), journal_issn_l=issn_l) is True
