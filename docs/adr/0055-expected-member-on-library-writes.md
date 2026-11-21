@@ -1,6 +1,6 @@
-# ADR-0055：文獻庫的寫入帶「這個分頁以為的成員」，後端在寫入那一刻比對
+# ADR-0055：文獻庫的寫入與成員專屬的讀取帶「這個分頁以為的成員」，後端在那一刻比對
 
-- 狀態：提議（epic-3h PR 3，2026-11-21）
+- 狀態：提議（epic-3h PR 3，2026-11-21；epic-3h2 PR 1 審查修正同日更新：讀取也比對、標頭跟資料走）
 - 相關：ADR-0008（session 與 `Origin`）、ADR-0046（成員版的登入）、ADR-0047（錯誤回應）、ADR-0049（文獻庫的三個寫入端點）、PR #114（找論文有暫留列時切回視窗先確認）
 
 ## 背景
@@ -19,21 +19,32 @@
 
 選 1。
 
-- **標頭**：`X-Radar-Expected-Member`，值是這一頁載入時 `GET /api/v1/me` 回的 `member_id`（標準 UUID 寫法）。前端是路由 context 的 `member`（`appRoute` 的 `beforeLoad` 每次進頁面都問一次「我是誰」放進去的那一位）。
-- **後端**：`radar/entrypoints/api/library.py` 的三個寫入（`PUT`、`DELETE /api/v1/library/{paper_id}`、`POST …/restore`）共用一個 FastAPI 相依項 `acting_member`：先認 session（沒登入 401，順序不變），再呼叫 `check_expected_member`：
+- **標頭**：`X-Radar-Expected-Member`，值是成員 ID（標準 UUID 寫法）。原則：**寫入帶的值＝畫面上那份資料是用誰的身分讀的**，不是「路由現在認定的人」（見下面「前端」與「兩個方向」）。
+- **後端**：比對只有一個函式 `radar/entrypoints/api/auth.py` 的 `check_expected_member`，經 `member_as_expected`（先認 session、再比對）用在：
+  - 文獻庫的三個寫入（`PUT`、`DELETE /api/v1/library/{paper_id}`、`POST …/restore`）；
+  - 成員專屬的讀取：論文頁 `GET /api/v1/papers/{paper_id}`（回 `in_my_library`）、找論文清單 `GET /api/v1/papers`（每一列的 `in_my_library`、範圍我的文獻庫）、文獻庫清單 `GET /api/v1/library`。
+  
+  `library.py` 的四個端點共用相依項 `acting_member`（就是 `member_as_expected`），`papers.py`、`paper_list.py` 直接呼叫。行為：先認 session（沒登入 401，順序不變），再比對：
   - 沒帶標頭：不檢查，行為和以前完全一樣。
   - 帶了、和 session 的成員相同：照常。
-  - 帶了、和 session 的成員不同：**409 `member_changed`**，不呼叫 services，什麼都不寫。
+  - 帶了、和 session 的成員不同：**409 `member_changed`**，不呼叫 services，什麼都不讀不寫（讀取不回任何資料）。
   - 值不是標準 UUID（含空字串、沒有連字號、大括號、`urn:uuid:` 前綴），或標頭出現不只一次：**400 `expected_member_invalid`**，不呼叫 services。大小寫不拘。
-  - 兩種錯誤都帶 `Cache-Control: no-store`，格式照 `problems.py`（RFC 9457）。比對的是 session 認出的成員，不看請求裡別的欄位。讀清單（`GET /api/v1/library`）不比對。
-  - 標頭沒有寫進 OpenAPI 的參數（相依項直接讀 `request.headers`，和 `Origin` 檢查一樣；要能分辨「出現兩次」）；端點說明與錯誤代碼列舉有更新。
+  - 兩種錯誤都帶 `Cache-Control: no-store`，格式照 `problems.py`（RFC 9457）。比對的是 session 認出的成員，不看請求裡別的欄位。
+  - **不比對的讀取**：`GET /api/v1/me`（它就是用來問「現在是誰」的，比對了就問不出換人）、`GET /api/v1/display-names` 與 `GET /api/v1/client-config`（設定值，每位成員都一樣，沒有誰的資料可以錯置）、登入登出（還沒有或正要結束 session）。之後新增回成員專屬資料的讀取，要改用 `member_as_expected`。
+  - 標頭沒有寫進 OpenAPI 的參數（直接讀 `request.headers`，和 `Origin` 檢查一樣；要能分辨「出現兩次」）；端點說明與錯誤代碼列舉有更新。400／409 也沒有逐一寫進各端點的回應宣告：全站的 API 一律只宣告 `default` 的 problem 回應（`app.py` 的 `PROBLEM_RESPONSES`，`/readyz` 的 503 例外），不為這兩個破例（審查 M2）。
 - **前端**：
-  - 三種寫入都從 `web/src/datasource/api/index.ts` 的 `change` 送出，標頭只在那裡加；409 `member_changed` 變成結果 `memberChanged`。
-  - `useLibraryChange`（論文頁、找論文、我的文獻庫共用）帶上路由 context 的 `member_id`。收到 `memberChanged`：不重試、不改快取、回 `"failed"`（按鈕馬上恢復，不留在等待中），同時照「發現換人」處理（`followMemberChange`）：問一次「我是誰」→ 清掉上一位的查詢快取 → 找論文與我的文獻庫同步重新掛上 → 重跑路由的登入檢查與資料讀取（導覽列、論文頁換成現在的人）；沒有人就回登入頁並帶「登入已經過期」。同時收到好幾個 409 只處理一次。
-  - **頁面一開始就沒拿到 `member_id` 的路徑**：成員版要登入的頁面都在 `appRoute` 底下，`beforeLoad` 拿不到成員就導到登入頁（401）或顯示「載入失敗」（問不到），頁面不會畫出來，所以按得到寫入按鈕時一定有 `member_id`。萬一有畫面不在 `appRoute` 底下卻用了 `useLibraryChange`（程式寫錯），**不送、回 `"failed"`**：不知道這一頁是誰的就不寫。
-  - L2（切回視窗時「我是誰」問不到）：頁面載入時已經拿到過 `member_id`，照樣帶舊的值，後端會擋。
+  - 標頭只在 `web/src/datasource/api/index.ts` 加（`expecting`；三種寫入的 `change` 與三個讀取共用）；409 `member_changed` 變成結果 `memberChanged`。讀取帶了預期成員時，讀到的結果記下 `readAs`（＝帶的那一位；後端比對過，所以這份資料就是這一位的）。
+  - **讀取帶誰**：這一頁認定的成員（路由 context 的 `member`）。找論文、我的文獻庫把它交給清單的查詢（`paperListQuery`／`libraryListQuery`／`libraryCountQuery` 的 `memberId`）；論文頁的 loader 用 loader 執行當下的 context。「再載入」只接同一位讀的那一份（`readAs` 相同）。
+  - **寫入帶誰**：那份資料的 `readAs`，不是 context 現在的值。論文頁：loader 回傳結果的 `readAs`，`usePaperLibrary` 交給 `useLibraryChange(readAs)`；找論文：清單資料的 `readAs` 放進 `RowsReadAs`（React context），每一列的 `LibraryToggle` 取用；我的文獻庫：清單資料的 `readAs`。沒有 `readAs`（資料不是帶預期成員讀的，成員版沒有這種畫面）就**不送、回 `"failed"`**。
+  - **頁面跟著成員重新掛上**：找論文與我的文獻庫的 key 含 context 的 `member_id`（再加上 409 與 #114 的換人次數），論文頁那一塊的 key 含資料的 `readAs`。換人時上一位的 `placeholderData`、「已移出」「復原」（`gone`）、移出中（`removing`）等元件狀態一律不留。
+  - 寫入或讀取收到 `memberChanged`：不重試、不改快取；寫入回 `"failed"`（按鈕馬上恢復，不等換人做完）。同時照「發現換人」處理（`followMemberChange`，讀取經 `useFollowMemberChange`）：問一次「我是誰」→ 清掉上一位的查詢快取 → 找論文與我的文獻庫同步重新掛上 → 重跑路由的登入檢查與資料讀取（導覽列、論文頁換成現在的人）；沒有人就回登入頁並帶「登入已經過期」。同時收到好幾個 409 只處理一次；這個流程失敗（例如重跑路由丟錯）不留沒人接的 rejection，下一個 409 重新開始。讀取 409 期間清單是骨架、論文頁是載入中。
+  - L2（切回視窗時「我是誰」問不到）：畫面上的資料仍是上一位讀的，寫入照樣帶上一位，後端會擋。
+- **兩個方向怎麼保證「標頭＝資料的主人」**（審查 M6）：
+  - **資料先換、context 後換**（#114 的流程先重新掛上、再重跑登入檢查）：新讀到的資料是用 context 那一位讀的、`readAs` 是那一位，寫入帶它。讀取時 cookie 已經是別人就 409，不會讀進來。結果是「少讀少寫」，不是寫錯人。
+  - **context 先換、資料後換**（同一頁換網址時 `beforeLoad` 先認到下一位；409 之後 `router.invalidate()` 讓論文頁在背景重讀）：畫面上還沒換掉的資料（placeholder、元件狀態、背景重讀前的論文頁）`readAs` 仍是上一位，寫入帶上一位 → 409，不會寫進下一位的文獻庫。找論文與我的文獻庫另外因為 key 含成員而立刻重新掛上，上一位的列直接離開畫面。
+  - **讀取途中 cookie 又換了**（「我是誰」認到甲、讀取送出時已經是乙）：讀取帶甲 → 409，資料不進畫面，照換人處理（審查 H3）。
 - **#114 的「有暫留列時切回視窗先確認」留著不拆、不擴大**：它讓畫面早一點換成對的人；有了後端的保護之後，它裡面「確認期間寫入先等」那段等待變成多餘的保護，要不要拿掉由 Kevin 決定。
-- **測試守著**：e2e 的替身 API 對三個寫入路徑記下沒帶標頭的請求，`e2e/fixtures.ts` 在每個測試結束時要求是空的（新增一種寫入卻沒帶標頭，測試就失敗）。
+- **測試守著**：e2e 的替身 API 對三個寫入路徑記下沒帶標頭的請求，`e2e/fixtures.ts` 在每個測試結束時要求是空的（新增一種寫入卻沒帶標頭，測試就失敗）；替身的三個讀取也照後端比對（不符 409）。「值是不是資料的主人」由 `library.spec.ts` 的 fix1 那一組守（同頁換網址、409 後背景重讀時再按、讀取途中換 cookie）。
 
 ## 理由
 
@@ -48,5 +59,6 @@
 
 - 每個寫入多一個標頭、後端多一次字串比對，成本可以忽略；session 只認一次（相依項回傳的成員直接給路由用，不重複查資料庫）。
 - 換人之後第一次按下去會「沒反應」一下（按鈕恢復、整頁換成新的人），不顯示新的文字：State Patterns 沒有這種句子，沒有設計稿就不加（照 AGENTS.md）。
-- 頁面在換人之前已經畫好、之後才換掉 context 的極短時間裡（#114 的流程：先重新掛上、再重跑登入檢查），新的人的列上按下去會帶舊的 `member_id`，後端回 409、再換一次；方向是「少寫」不是「寫錯人」。
-- 既有 e2e 測試 `library.spec.ts` 的 R3（「a remove on A's screen after the cookie changed goes out as B」）寫的正是這個 ADR 要擋掉的行為，改它不屬於這一輪「既有測試可以怎麼改」的四種情況，列給 Kevin 決定。
+- 成員專屬的讀取也多一個標頭與一次比對；換人時讀取會先拿到一次 409、再照新的人重讀一次（多一個來回），換來「讀到的資料一定是標頭那一位的」。
+- 寫入的標頭跟著資料走，所以每個寫入點都要拿得到那份資料的 `readAs`（新增寫入點時要接上；沒接就不送，不會寫錯人）。
+- 既有 e2e 測試 `library.spec.ts` 的 R3 寫的是這個 ADR 要擋掉的行為：**Kevin 2026-11-21 核准只改 R3**——甲的畫面上按移出，送出的標頭是甲、替身回 409，甲乙的文獻庫都不變，畫面換成乙的清單（後半段「站內換頁再回來」從乙的畫面開始）。其他既有測試不改。

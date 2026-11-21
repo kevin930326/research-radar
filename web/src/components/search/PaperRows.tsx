@@ -1,10 +1,10 @@
 import { Link } from "@tanstack/react-router";
-import { Fragment, useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import { Fragment, useContext, useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { DisplayNames, PaperRow } from "../../generated/model";
 import { externalUrl } from "../../pages/paper-format";
-import { useLibraryChange } from "../../routes/library-change";
+import { RowsReadAs, useLibraryChange } from "../../routes/library-change";
 import { ExternalArrow, NEW_TAB_NOTE_ID } from "../ExternalArrow";
 import { PaperTitle } from "../PaperText";
 import { PlusIcon } from "../paper/LibraryBlock";
@@ -172,7 +172,8 @@ let lastPress: object | null = null;
  */
 export function LibraryToggle({ row }: { row: PaperRow }) {
   const { t } = useTranslation("search");
-  const change = useLibraryChange();
+  // 寫入帶「這幾列是用誰的身分讀的」（找論文放進 RowsReadAs；ADR-0055）。
+  const change = useLibraryChange(useContext(RowsReadAs));
   const [busy, setBusy] = useState(false);
   // 按了移出：送出中（pending）一律顯示成已經移出；成功後快取還沒換過來的那一下（列還是按的時候那一份資料）也一樣，不閃回「已加入」。
   // 之後這一列換了一份資料（快取改成不在、或之後又加回去）就照資料。

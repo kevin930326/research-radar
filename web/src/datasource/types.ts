@@ -46,13 +46,25 @@ export type PaperPage = PaperPageResponse;
 export type { DisplayNames };
 
 /**
+ * 成員專屬的讀取（論文頁、找論文清單、我的文獻庫清單）讀到的資料是用誰的身分讀的：讀取時帶的「這個分頁以為的成員」
+ * （`X-Radar-Expected-Member`），後端比對過和 session 的成員相同才回（ADR-0055）。沒帶就是 undefined（沒有比對）。
+ * 畫面上的寫入用它當預期成員：標頭＝這份資料的主人，不是「路由現在認定的人」。
+ */
+export type ReadAs = string | undefined;
+
+/**
  * 讀一篇論文的結果（Story 3.8）：
- * - `found`：讀到了。
+ * - `found`：讀到了；`readAs` 見 ReadAs。
  * - `notFound`：看不到、不存在（後端回同一個 404，分不出來）。
  * - `signedOut`：沒登入或登入過期（401）。
+ * - `memberChanged`：帶的預期成員和現在登入的人不同（409 `member_changed`，另一個分頁換了人），後端沒回資料（ADR-0055）。
  * 其他錯誤（網路、伺服器錯誤、回應看不懂）丟出例外，畫面顯示「載入失敗」。
  */
-export type PaperResult = { kind: "found"; page: PaperPage } | { kind: "notFound" } | { kind: "signedOut" };
+export type PaperResult =
+  | { kind: "found"; page: PaperPage; readAs?: ReadAs }
+  | { kind: "notFound" }
+  | { kind: "signedOut" }
+  | { kind: "memberChanged" };
 
 /**
  * 讀顯示名稱的結果（Story 3.8）：
@@ -82,16 +94,17 @@ export interface PaperList extends PaperListResponse {
 
 /**
  * 列出論文的結果（Story 3.14）：
- * - `found`：讀到了（`items` 最多到要求的篇數，多讀到的放在 `pending`）。
+ * - `found`：讀到了（`items` 最多到要求的篇數，多讀到的放在 `pending`）；`readAs` 見 ReadAs。
  * - `signedOut`：沒登入或登入過期（401）。
+ * - `memberChanged`：帶的預期成員和現在登入的人不同（409，ADR-0055）。
  * 條件不合法（422 `request_invalid`，ADR-0047）與其他錯誤丟出例外，畫面顯示 State Patterns「12. 找論文」的「錯誤」。
  */
-export type PaperListResult = { kind: "found"; list: PaperList } | { kind: "signedOut" };
+export type PaperListResult = { kind: "found"; list: PaperList; readAs?: ReadAs } | { kind: "signedOut" } | { kind: "memberChanged" };
 
 /** 論文頁與找論文用的讀取函式（只有成員版有；示範站的論文頁是 Story 3.9、論文清單在 3.14 的示範站部分）。 */
 export interface PaperSource {
-  /** 讀一篇論文。`paperId` 由呼叫端先確認是 UUID。 */
-  paper(paperId: string): Promise<PaperResult>;
+  /** 讀一篇論文。`paperId` 由呼叫端先確認是 UUID。給了 `expectedMemberId` 就帶上預期成員的標頭（ADR-0055）。 */
+  paper(paperId: string, expectedMemberId?: string): Promise<PaperResult>;
   /** 顯示名稱；401 回 `signedOut`，其他沒有成功時丟出例外。 */
   displayNames(): Promise<DisplayNamesResult>;
   /** 設定值；401 回 `signedOut`，其他沒有成功時丟出例外。 */
@@ -99,9 +112,9 @@ export interface PaperSource {
   /**
    * 依條件列出論文，一頁一頁往下讀，直到有 `limit` 篇或沒有下一頁（AD-21：網址只記目前顯示幾篇，
    * 重新整理時一次拿回來）。給了 `previous`（同一組條件上一次拿到的清單）就從它的下一頁接著讀（「再載入」）。
-   * 總篇數與快照用最後一次回應的。
+   * 總篇數與快照用最後一次回應的。每一頁都帶 `expectedMemberId`（給了的話；ADR-0055）。
    */
-  list(filters: PaperListFilters, limit: number, previous?: PaperList | null): Promise<PaperListResult>;
+  list(filters: PaperListFilters, limit: number, previous?: PaperList | null, expectedMemberId?: string): Promise<PaperListResult>;
 }
 
 /**
@@ -116,10 +129,11 @@ export interface LibraryList extends LibraryPageResponse {
 export type LibraryItem = LibraryItemResponse;
 
 /**
- * 列出我的文獻庫的結果：`found`（`items` 最多到要求的篇數）／`signedOut`（401）。
+ * 列出我的文獻庫的結果：`found`（`items` 最多到要求的篇數；`readAs` 見 ReadAs）／`signedOut`（401）／
+ * `memberChanged`（帶的預期成員和現在登入的人不同，409，ADR-0055）。
  * 其他錯誤丟出例外，畫面顯示 State Patterns「13. 我的文獻庫」的「錯誤」。
  */
-export type LibraryListResult = { kind: "found"; list: LibraryList } | { kind: "signedOut" };
+export type LibraryListResult = { kind: "found"; list: LibraryList; readAs?: ReadAs } | { kind: "signedOut" } | { kind: "memberChanged" };
 
 /**
  * 加入、移出、復原一篇的結果（Story 3.16 的三個端點）：
@@ -138,12 +152,15 @@ export type LibraryChangeResult =
 
 /**
  * 我的文獻庫（只有成員版有；示範站沒有文獻庫）。
- * 加入、移出、復原的 `expectedMemberId`：這個分頁以為的成員（這一頁載入時「我是誰」回的 member_id），放進請求標頭；
+ * 加入、移出、復原的 `expectedMemberId`：畫面上那份資料是用誰的身分讀的（資料的 `readAs`），放進請求標頭；
  * 和現在登入的人不同時後端不寫、回 `memberChanged`（ADR-0055）。畫面一律經 useLibraryChange 送，一定會帶。
  */
 export interface LibrarySource {
-  /** 依加入時間新到舊列出，一頁一頁往下讀到有 `limit` 篇或沒有下一頁；給了 `previous` 就接著讀（「再載入」）。 */
-  list(limit: number, previous?: LibraryList | null): Promise<LibraryListResult>;
+  /**
+   * 依加入時間新到舊列出，一頁一頁往下讀到有 `limit` 篇或沒有下一頁；給了 `previous` 就接著讀（「再載入」）。
+   * 每一頁都帶 `expectedMemberId`（給了的話；ADR-0055）。
+   */
+  list(limit: number, previous?: LibraryList | null, expectedMemberId?: string): Promise<LibraryListResult>;
   /** 加入（冪等：已經在了回原本那一筆）。`paperId` 由呼叫端先確認是 UUID。 */
   add(paperId: string, expectedMemberId?: string): Promise<LibraryChangeResult>;
   /** 移出。 */

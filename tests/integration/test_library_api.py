@@ -981,7 +981,16 @@ def _library_state(db: TestDatabase) -> tuple[list[tuple[Any, ...]], ...]:
         "SELECT id, source_table, source_id, owner_id, deleted_by_member_id FROM deleted_record"
         " ORDER BY id",
     )
-    return _items(db), records, _audits(db)
+    return _items(db), records, _audits(db), _deleted_rows(db)
+
+
+def _deleted_rows(db: TestDatabase) -> list[tuple[Any, ...]]:
+    # 封存的整列（含復原用的 `content` 與刪除時間；fix1 M4）：400／409 前後要完全一樣。
+    return execute(
+        db,
+        "SELECT id, source_table, source_id, content, owner_id, deleted_by_member_id, deleted_at"
+        " FROM deleted_record ORDER BY id",
+    )
 
 
 @pytest.mark.parametrize("action", ["add", "remove", "restore"])
@@ -1009,6 +1018,10 @@ def test_writes_compare_the_expected_member_with_the_session(
         "absent": None,
     }[header]
     before = _library_state(db)
+    # 比對封存整列之前先確定真的有一筆（乙移出 removed 的那一筆，內容是乙那一列）。
+    assert [(row[3]["owner_id"], row[3]["paper_id"]) for row in _deleted_rows(db)] == [
+        (str(api.other_id), str(removed))
+    ]
 
     response = _write_expecting(api, method, path, api.other_token, expected)
 
@@ -1035,3 +1048,72 @@ def test_writes_compare_the_expected_member_with_the_session(
     )
     # 甲的文獻庫一直只有 shared（乙的寫入不會動到甲）。
     assert owner_papers == {shared}
+
+
+# --- 成員專屬的讀取也比對預期成員（epic-3h2 PR 1 fix1 H3、ADR-0055）------------------------------
+# 情境：cookie 已經換成乙，分頁還以為是甲。論文頁（`in_my_library`）、找論文清單（範圍我的文獻庫、
+# 每一列的 `in_my_library`）、文獻庫清單都是成員專屬的：帶了甲 → 409（不回乙的資料）；帶了乙、沒帶 →
+# 照常、回乙的資料；格式不對 → 400。顯示名稱、設定值、我是誰不比對。
+
+
+@pytest.mark.parametrize("read", ["paper", "paper_list", "library"])
+@pytest.mark.parametrize("header", ["match", "mismatch", "malformed", "absent"])
+def test_member_reads_compare_the_expected_member_with_the_session(
+    database: Database, api: Api, read: str, header: str
+) -> None:
+    # 甲有 owner_paper；乙有 other_paper。
+    owner_paper = create_paper(database, doi="10.1/owner", openalex_id="W94")
+    other_paper = create_paper(database, doi="10.1/other", openalex_id="W95")
+    assert api.add(owner_paper, api.owner_token).status_code == 200
+    assert api.add(other_paper, api.other_token).status_code == 200
+    path, params = {
+        "paper": (f"/api/v1/papers/{other_paper}", None),
+        "paper_list": ("/api/v1/papers", {"scope": "personal"}),
+        "library": ("/api/v1/library", None),
+    }[read]
+    expected = {
+        "match": str(api.other_id),
+        "mismatch": str(api.owner_id),
+        "malformed": "not-a-member-id",
+        "absent": None,
+    }[header]
+    api.client.cookies.clear()
+    headers = {"Cookie": f"{SESSION_COOKIE}={api.other_token}"}
+    if expected is not None:
+        headers[EXPECTED_MEMBER] = expected
+
+    response = api.client.get(path, headers=headers, params=params)
+
+    assert response.headers["cache-control"] == "no-store"
+    if header in ("mismatch", "malformed"):
+        status, code = (
+            (409, "member_changed") if header == "mismatch" else (400, "expected_member_invalid")
+        )
+        assert response.status_code == status, response.text
+        assert response.json() == {
+            "type": "about:blank",
+            "title": {409: "Conflict", 400: "Bad Request"}[status],
+            "status": status,
+            "code": code,
+        }
+        return
+    assert response.status_code == 200, response.text
+    body = response.json()
+    if read == "paper":
+        assert body["paper"]["id"] == str(other_paper)
+        assert body["in_my_library"] is True
+    elif read == "paper_list":
+        assert _flags(body["items"]) == {str(other_paper): True}
+    else:
+        assert [item["paper"]["id"] for item in body["items"]] == [str(other_paper)]
+
+
+@pytest.mark.parametrize("path", ["/api/v1/me", "/api/v1/display-names", "/api/v1/client-config"])
+def test_reads_that_are_not_member_data_ignore_the_expected_member(api: Api, path: str) -> None:
+    # 我是誰（就是用來問現在是誰的）與設定值（大家都一樣）不比對：帶了別人的照常。
+    api.client.cookies.clear()
+    headers = {"Cookie": f"{SESSION_COOKIE}={api.other_token}", EXPECTED_MEMBER: str(api.owner_id)}
+
+    response = api.client.get(path, headers=headers)
+
+    assert response.status_code == 200, response.text

@@ -195,7 +195,7 @@
     "/api/v1/papers/{paper_id}": {
       "get": {
         "summary": "Paper",
-        "description": "一篇論文的論文頁資料；看不到、不存在、ID 不是 UUID 都回同一個 404，沒登入 401。",
+        "description": "一篇論文的論文頁資料；看不到、不存在、ID 不是 UUID 都回同一個 404，沒登入 401；\n`X-Radar-Expected-Member` 和登入的成員不同 409 `member_changed`、格式不對 400\n`expected_member_invalid`（回應含 `in_my_library`，ADR-0055）。",
         "operationId": "paper",
         "parameters": [
           {
@@ -293,7 +293,7 @@
     "/api/v1/library": {
       "get": {
         "summary": "List Library",
-        "description": "自己的文獻庫的一頁（一頁的篇數見 `client-config`）；`cursor` 是上一頁的 `next_cursor`，\n格式不對 422，沒登入 401。",
+        "description": "自己的文獻庫的一頁（一頁的篇數見 `client-config`）；`cursor` 是上一頁的 `next_cursor`，\n格式不對 422，沒登入 401；`X-Radar-Expected-Member` 和登入的成員不同 409 `member_changed`、\n格式不對 400 `expected_member_invalid`。",
         "operationId": "list_library",
         "parameters": [
           {
@@ -458,7 +458,7 @@
     "/api/v1/papers": {
       "get": {
         "summary": "List Papers",
-        "description": "依條件列出論文的一頁（一頁的篇數見 `client-config`）。期刊、年份給多個值是「或」，主題、\n方法給多個值是「且」，不同欄位之間是「且」；`cursor` 是上一頁的 `next_cursor`。條件不合法\n422，沒登入 401。",
+        "description": "依條件列出論文的一頁（一頁的篇數見 `client-config`）。期刊、年份給多個值是「或」，主題、\n方法給多個值是「且」，不同欄位之間是「且」；`cursor` 是上一頁的 `next_cursor`。條件不合法\n422，沒登入 401；`X-Radar-Expected-Member` 和登入的成員不同 409 `member_changed`、格式\n不對 400 `expected_member_invalid`（每一列含 `in_my_library`，ADR-0055）。",
         "operationId": "list_papers",
         "parameters": [
           {

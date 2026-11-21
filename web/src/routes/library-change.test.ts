@@ -645,3 +645,56 @@ describe("writes carry the member this tab expects (ADR-0055)", () => {
     expect(reload).toHaveBeenCalledTimes(1);
   });
 });
+
+// epic-3h2 PR 1 fix1：409 之後不等「整頁換成現在的人」做完（M3）；它失敗時不留沒人接的 rejection、下一次 409 重新開始（L3）；
+// 「再載入」只接同一位讀的那一份（readAs）。
+describe("after a 409 (fix1)", () => {
+  const A = { member_id: "00000000-0000-4000-8000-00000000000a", display_name: "Test Member A" };
+  const B = { member_id: "00000000-0000-4000-8000-00000000000b", display_name: "Test Member B" };
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("M3: the press is over ('failed') while following the change is still going on", async () => {
+    const queryClient = new QueryClient();
+    const [hold, release] = gate();
+    let finished = false;
+    const onMemberChanged = vi.fn(async () => {
+      await hold;
+      finished = true;
+    });
+    const outcome = await sendLibraryChange(queryClient, source({ kind: "memberChanged" }), PAPER, "add", () => {}, {
+      expectedMemberId: A.member_id,
+      onMemberChanged,
+    });
+    expect(outcome).toBe("failed");
+    expect(onMemberChanged).toHaveBeenCalledTimes(1);
+    expect(finished).toBe(false);
+    release();
+  });
+
+  it("L3: reloading fails: the promise still settles without an error, and the next 409 follows again", async () => {
+    const queryClient = new QueryClient();
+    queryClient.setQueryData(meQuery.queryKey, A);
+    const me = vi.spyOn(datasource.session!, "me").mockResolvedValue(B);
+    const reload = vi.fn().mockRejectedValueOnce(new Error("router")).mockResolvedValueOnce(undefined);
+    await expect(followMemberChange(queryClient, { toLogin: () => {}, reload })).resolves.toBeUndefined();
+    await expect(followMemberChange(queryClient, { toLogin: () => {}, reload })).resolves.toBeUndefined();
+    expect(me).toHaveBeenCalledTimes(2);
+    expect(reload).toHaveBeenCalledTimes(2);
+  });
+
+  it("load more continues only from a list read as the same member", async () => {
+    const queryClient = new QueryClient();
+    const filters = toApiParams({});
+    const byA = { items: [row("a", false)], pending: [], next_cursor: "c1", total: 9 } as unknown as PaperList;
+    queryClient.setQueryData(["paper-list", filtersKey(filters), 1], { kind: "found", list: byA, readAs: A.member_id });
+    const fresh = { items: [row("b", false), row("c", false)], pending: [], next_cursor: null, total: 2 } as unknown as PaperList;
+    const list = vi.spyOn(datasource.papers!, "list").mockResolvedValue({ kind: "found", list: fresh, readAs: B.member_id });
+    await (paperListQuery(queryClient, filters, 2, B.member_id).queryFn as () => Promise<unknown>)();
+    expect(list).toHaveBeenCalledWith(filters, 2, null, B.member_id);
+    await (paperListQuery(queryClient, filters, 2, A.member_id).queryFn as () => Promise<unknown>)();
+    expect(list).toHaveBeenLastCalledWith(filters, 2, byA, A.member_id);
+  });
+});

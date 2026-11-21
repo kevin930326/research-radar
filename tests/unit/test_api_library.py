@@ -33,12 +33,8 @@ from radar.domain.library import (
 from radar.domain.paper_rows import PaperRowFacts
 from radar.domain.viewer import MemberViewer
 from radar.entrypoints.api.app import REQUEST_ID_HEADER, create_app
-from radar.entrypoints.api.auth import SESSION_COOKIE
-from radar.entrypoints.api.library import (
-    EXPECTED_MEMBER_HEADER,
-    LibraryRoutes,
-    install_library_routes,
-)
+from radar.entrypoints.api.auth import EXPECTED_MEMBER_HEADER, SESSION_COOKIE
+from radar.entrypoints.api.library import LibraryRoutes, install_library_routes
 from radar.entrypoints.api.web import mount_web
 from tests.unit.test_api_auth import GOOD_TOKEN, MEMBER, MEMBER_ID, ORIGIN, SHELL, FakeAuth
 
@@ -297,7 +293,7 @@ def test_installing_after_the_web_shell_is_an_error(tmp_path: Path) -> None:
 
 
 # --- 這個分頁以為的成員（epic-3h PR 3、ADR-0055）---------------------------------------------
-# 會改資料的三個：`X-Radar-Expected-Member` 和 session 的成員相同照常；不同 409
+# 會改資料的三個與清單：`X-Radar-Expected-Member` 和 session 的成員相同照常；不同 409
 # `member_changed`、格式不對 400 `expected_member_invalid`，兩種都不呼叫 services；沒帶照常
 # （既有測試）；沒登入先 401。
 
@@ -402,11 +398,29 @@ def test_signing_in_is_checked_before_the_expected_member(
     assert library.calls == []
 
 
-def test_reading_the_library_ignores_the_expected_member() -> None:
-    # 只有會改資料的三個比對；讀清單帶了別人的 ID 也照常（讀的一定是 session 的成員自己的）。
+@pytest.mark.parametrize(
+    ("expected", "status", "calls"),
+    [
+        ([str(MEMBER_ID)], 200, [("list", MEMBER.viewer, None)]),
+        ([], 200, [("list", MEMBER.viewer, None)]),
+        ([str(OTHER_MEMBER_ID)], 409, []),
+        (["not-a-member-id"], 400, []),
+    ],
+)
+def test_reading_the_library_compares_the_expected_member(
+    expected: list[str], status: int, calls: list[object]
+) -> None:
+    # 清單是成員專屬的資料，和寫入用同一個比對（fix1 H3）：相符、沒帶照常；不同 409、格式不對 400，
+    # 都不呼叫 services。
     library = FakeLibrary()
 
-    response = _send_expecting(_client(library), "GET", "/api/v1/library", [str(OTHER_MEMBER_ID)])
+    response = _send_expecting(_client(library), "GET", "/api/v1/library", expected)
 
-    assert response.status_code == 200
-    assert library.calls == [("list", MEMBER.viewer, None)]
+    assert response.status_code == status
+    assert response.headers["cache-control"] == "no-store"
+    if status != 200:
+        assert (
+            response.json()["code"]
+            == {409: "member_changed", 400: "expected_member_invalid"}[status]
+        )
+    assert library.calls == calls

@@ -378,7 +378,9 @@ export const getPaperUrl = (paperId: string,) => {
 }
 
 /**
- * 一篇論文的論文頁資料；看不到、不存在、ID 不是 UUID 都回同一個 404，沒登入 401。
+ * 一篇論文的論文頁資料；看不到、不存在、ID 不是 UUID 都回同一個 404，沒登入 401；
+ * `X-Radar-Expected-Member` 和登入的成員不同 409 `member_changed`、格式不對 400
+ * `expected_member_invalid`（回應含 `in_my_library`，ADR-0055）。
  * @summary Paper
  */
 export const paper = async (paperId: string, options?: RequestInit): Promise<paperResponse> => {
@@ -539,7 +541,8 @@ export const getListLibraryUrl = (params?: ListLibraryParams,) => {
 
 /**
  * 自己的文獻庫的一頁（一頁的篇數見 `client-config`）；`cursor` 是上一頁的 `next_cursor`，
- * 格式不對 422，沒登入 401。
+ * 格式不對 422，沒登入 401；`X-Radar-Expected-Member` 和登入的成員不同 409 `member_changed`、
+ * 格式不對 400 `expected_member_invalid`。
  * @summary List Library
  */
 export const listLibrary = async (params?: ListLibraryParams, options?: RequestInit): Promise<listLibraryResponse> => {
@@ -769,7 +772,8 @@ export const getListPapersUrl = (params?: ListPapersParams,) => {
 /**
  * 依條件列出論文的一頁（一頁的篇數見 `client-config`）。期刊、年份給多個值是「或」，主題、
  * 方法給多個值是「且」，不同欄位之間是「且」；`cursor` 是上一頁的 `next_cursor`。條件不合法
- * 422，沒登入 401。
+ * 422，沒登入 401；`X-Radar-Expected-Member` 和登入的成員不同 409 `member_changed`、格式
+ * 不對 400 `expected_member_invalid`（每一列含 `in_my_library`，ADR-0055）。
  * @summary List Papers
  */
 export const listPapers = async (params?: ListPapersParams, options?: RequestInit): Promise<listPapersResponse> => {

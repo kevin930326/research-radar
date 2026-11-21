@@ -88,12 +88,33 @@ const session: MemberSession = {
   },
 };
 
+/** 加入、移出、復原與成員專屬的讀取帶「這個分頁以為的成員」的請求標頭（和後端 `EXPECTED_MEMBER_HEADER` 同名；ADR-0055）。 */
+export const EXPECTED_MEMBER_HEADER = "X-Radar-Expected-Member";
+
+/** 給了預期成員就帶上標頭（標頭只在這裡加：讀取與寫入共用）；沒給就是空的選項（不帶）。 */
+function expecting(expectedMemberId: string | undefined): RequestInit {
+  return expectedMemberId === undefined ? {} : { headers: { [EXPECTED_MEMBER_HEADER]: expectedMemberId } };
+}
+
+/** 後端說帶的預期成員和現在登入的人不同（409 `member_changed`）。其他 409 不算。 */
+function memberChanged(response: { status: number; data: unknown }): boolean {
+  return response.status === 409 && (response.data as { code?: unknown } | null)?.code === "member_changed";
+}
+
+/** 讀到的資料記下是用誰的身分讀的（沒帶預期成員就不放這個欄位）。 */
+function readAs(expectedMemberId: string | undefined): { readAs?: string } {
+  return expectedMemberId === undefined ? {} : { readAs: expectedMemberId };
+}
+
 const papers: PaperSource = {
-  async paper(paperId: string): Promise<PaperResult> {
+  async paper(paperId: string, expectedMemberId?: string): Promise<PaperResult> {
     // 路徑參數一定要編碼：呼叫端已確認是 UUID，這裡再保險一次，不讓 ../ 之類的字跑出這個路徑。
-    const response = await getPaper(encodeURIComponent(paperId));
+    const response = await getPaper(encodeURIComponent(paperId), expecting(expectedMemberId));
     if (response.status === 200) {
-      return { kind: "found", page: response.data };
+      return { kind: "found", page: response.data, ...readAs(expectedMemberId) };
+    }
+    if (memberChanged(response)) {
+      return { kind: "memberChanged" };
     }
     if (response.status === 404) {
       return { kind: "notFound" };
@@ -127,7 +148,7 @@ const papers: PaperSource = {
     throw new Error(`GET ${API_BASE}/client-config: HTTP ${response.status}`);
   },
 
-  async list(filters: PaperListFilters, limit: number, previous?: PaperList | null): Promise<PaperListResult> {
+  async list(filters: PaperListFilters, limit: number, previous?: PaperList | null, expectedMemberId?: string): Promise<PaperListResult> {
     // 「再載入」：從上一次的清單接著讀（先用它多讀到的 pending，再照 next_cursor 讀下一頁）。
     let rows: PaperRow[] = previous ? [...previous.items, ...previous.pending] : [];
     let last: Omit<PaperListResponse, "items"> | null = previous
@@ -135,9 +156,12 @@ const papers: PaperSource = {
       : null;
     while (last === null || (rows.length < limit && last.next_cursor !== null)) {
       const cursor: string | undefined = last?.next_cursor ?? undefined;
-      const response = await listPapers(cursor === undefined ? filters : { ...filters, cursor });
+      const response = await listPapers(cursor === undefined ? filters : { ...filters, cursor }, expecting(expectedMemberId));
       if (response.status === 401) {
         return { kind: "signedOut" };
+      }
+      if (memberChanged(response)) {
+        return { kind: "memberChanged" };
       }
       if (response.status !== 200) {
         // 422（條件不合法，ADR-0047）與其他錯誤：畫面顯示「錯誤」。
@@ -153,12 +177,9 @@ const papers: PaperSource = {
       };
     }
     // 只放要求的篇數（型別的約定），多讀到的留在 pending，下一次接著用。
-    return { kind: "found", list: { ...last, items: rows.slice(0, limit), pending: rows.slice(limit) } };
+    return { kind: "found", list: { ...last, items: rows.slice(0, limit), pending: rows.slice(limit) }, ...readAs(expectedMemberId) };
   },
 };
-
-/** 加入、移出、復原帶「這個分頁以為的成員」的請求標頭（和後端 `EXPECTED_MEMBER_HEADER` 同名；ADR-0055）。 */
-export const EXPECTED_MEMBER_HEADER = "X-Radar-Expected-Member";
 
 /**
  * 加入、移出、復原三種寫入都從這裡送出（標頭只在這裡加）：給了 `expectedMemberId` 就帶上 `EXPECTED_MEMBER_HEADER`。
@@ -169,7 +190,7 @@ async function change(
   expectedMemberId: string | undefined,
   call: (options: RequestInit) => Promise<{ status: number; data: unknown }>,
 ): Promise<LibraryChangeResult> {
-  const response = await call(expectedMemberId === undefined ? {} : { headers: { [EXPECTED_MEMBER_HEADER]: expectedMemberId } });
+  const response = await call(expecting(expectedMemberId));
   if (response.status === 200) {
     return { kind: "done", item: response.data as LibraryItemResponse };
   }
@@ -179,14 +200,14 @@ async function change(
   if (response.status === 401) {
     return { kind: "signedOut" };
   }
-  if (response.status === 409 && (response.data as { code?: unknown } | null)?.code === "member_changed") {
+  if (memberChanged(response)) {
     return { kind: "memberChanged" };
   }
   throw new Error(`${name}: HTTP ${response.status}`);
 }
 
 const library: LibrarySource = {
-  async list(limit: number, previous?: LibraryList | null): Promise<LibraryListResult> {
+  async list(limit: number, previous?: LibraryList | null, expectedMemberId?: string): Promise<LibraryListResult> {
     // 同找論文的 list：先用上一次多讀到的 pending，不夠才照 next_cursor 讀下一頁。
     let rows: LibraryItemResponse[] = previous ? [...previous.items, ...previous.pending] : [];
     let last: Omit<LibraryPageResponse, "items"> | null = previous
@@ -194,9 +215,12 @@ const library: LibrarySource = {
       : null;
     while (last === null || (rows.length < limit && last.next_cursor !== null)) {
       const cursor: string | undefined = last?.next_cursor ?? undefined;
-      const response = await listLibrary(cursor === undefined ? undefined : { cursor });
+      const response = await listLibrary(cursor === undefined ? undefined : { cursor }, expecting(expectedMemberId));
       if (response.status === 401) {
         return { kind: "signedOut" };
+      }
+      if (memberChanged(response)) {
+        return { kind: "memberChanged" };
       }
       if (response.status !== 200) {
         throw new Error(`GET ${API_BASE}/library: HTTP ${response.status}`);
@@ -205,7 +229,7 @@ const library: LibrarySource = {
       rows = [...rows, ...page.items];
       last = { next_cursor: page.items.length === 0 ? null : page.next_cursor, total: page.total };
     }
-    return { kind: "found", list: { ...last, items: rows.slice(0, limit), pending: rows.slice(limit) } };
+    return { kind: "found", list: { ...last, items: rows.slice(0, limit), pending: rows.slice(limit) }, ...readAs(expectedMemberId) };
   },
 
   // 路徑參數一定要編碼（同論文頁）。
