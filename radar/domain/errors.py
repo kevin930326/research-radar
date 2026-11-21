@@ -175,3 +175,7 @@ class ErrorCode(StrEnum):
     REQUEST_INVALID = "request_invalid"  # 請求的內容或參數不合格式（422）
     REQUEST_REJECTED = "request_rejected"  # 框架擋下、沒有專屬代碼的其他 4xx
     INTERNAL_ERROR = "internal_error"  # 未預期的錯誤（500）；回應不帶任何內部細節
+
+    # 文獻庫的寫入帶了「這個分頁以為的成員」（epic-3h PR 3、ADR-0055）：api 回應的代碼
+    MEMBER_CHANGED = "member_changed"  # 和 session 的成員不同（另一個分頁換了人），不寫（409）
+    EXPECTED_MEMBER_INVALID = "expected_member_invalid"  # 值不是成員 ID 或重複出現，不寫（400）

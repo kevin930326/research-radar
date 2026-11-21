@@ -10,8 +10,10 @@ export type ProblemDetailsCode = typeof ProblemDetailsCode[keyof typeof ProblemD
 
 export const ProblemDetailsCode = {
   admin_member_missing: 'admin_member_missing',
+  expected_member_invalid: 'expected_member_invalid',
   internal_error: 'internal_error',
   login_rejected: 'login_rejected',
+  member_changed: 'member_changed',
   method_not_allowed: 'method_not_allowed',
   not_authenticated: 'not_authenticated',
   not_found: 'not_found',

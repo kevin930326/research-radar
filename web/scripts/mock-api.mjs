@@ -201,7 +201,9 @@ function json(res, status, value, headers = {}) {
 const TITLES = {
   401: "Unauthorized",
   403: "Forbidden",
+  400: "Bad Request",
   404: "Not Found",
+  409: "Conflict",
   422: "Unprocessable Entity",
   500: "Internal Server Error",
 };
@@ -216,6 +218,24 @@ function cookieToken(req) {
   const header = req.headers.cookie ?? "";
   const match = header.split(/;\s*/).find((part) => part.startsWith(`${COOKIE}=`));
   return match === undefined ? null : match.slice(COOKIE.length + 1);
+}
+
+// 文獻庫寫入與成員專屬的讀取（論文頁、找論文清單、文獻庫清單）帶的「這個分頁以為的成員」（ADR-0055）：和登入的人不同 409、
+// 值不是成員 ID 400，都不讀不寫；沒帶照常。
+const EXPECTED_MEMBER_HEADER = "x-radar-expected-member";
+const MEMBER_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** 帶的預期成員不對時回錯誤（回 true 表示已經回了）；沒帶或和登入的人相同回 false。登入檢查之後才呼叫。 */
+function rejectExpectedMember(req, res, member) {
+  const expected = req.headers[EXPECTED_MEMBER_HEADER];
+  if (expected === undefined) return false;
+  if (typeof expected !== "string" || !MEMBER_ID_PATTERN.test(expected)) {
+    problem(res, 400, "expected_member_invalid");
+    return true;
+  }
+  if (expected.toLowerCase() === member.member_id) return false;
+  problem(res, 409, "member_changed");
+  return true;
 }
 
 function currentMember(req) {
@@ -279,6 +299,7 @@ async function api(req, res, path, query) {
   if (req.method === "GET" && path.startsWith("/api/v1/papers/")) {
     const member = currentMember(req);
     if (member === null) return problem(res, 401, "not_authenticated");
+    if (rejectExpectedMember(req, res, member)) return undefined;
     return paper(res, decodeURIComponent(path.slice("/api/v1/papers/".length)), member);
   }
   if (req.method === "GET" && path === "/api/v1/library") {
@@ -353,6 +374,7 @@ async function libraryList(req, res, query) {
   await sleep(scenario.libraryDelay);
   if (res.destroyed || req.socket.destroyed) return undefined;
   if (outcome === "expired") return problem(res, 401, "not_authenticated");
+  if (rejectExpectedMember(req, res, member)) return undefined;
   if (outcome === "failed") return problem(res, 500, "internal_error");
   const size = LIST.clientConfig.library_page_size;
   const cursor = query.get("cursor");
@@ -367,12 +389,18 @@ async function libraryList(req, res, query) {
 }
 
 /** 加入（PUT）、移出（DELETE）、復原（POST …/restore）。是誰送的、結果是什麼在收到時就決定，等 libraryChangeDelay 之後才寫、才回。 */
+
 async function libraryChange(req, res, id, restore) {
   const member = currentMember(req);
+  const expected = req.headers[EXPECTED_MEMBER_HEADER];
   const outcome = scenario.libraryChange;
   await sleep(scenario.libraryChangeDelay);
   if (res.destroyed || req.socket.destroyed) return undefined;
   if (member === null || outcome === "expired") return problem(res, 401, "not_authenticated");
+  if (expected !== undefined && (typeof expected !== "string" || !MEMBER_ID_PATTERN.test(expected))) {
+    return problem(res, 400, "expected_member_invalid");
+  }
+  if (expected !== undefined && expected.toLowerCase() !== member.member_id) return problem(res, 409, "member_changed");
   if (outcome === "failed") return problem(res, 500, "internal_error");
   if (libraryItem(id) === undefined) return problem(res, 404, "not_found");
   const library = libraryOf(member);
@@ -448,6 +476,7 @@ async function paperList(req, res, query) {
   if (listRequests > scenario.listDelayAfter) await sleep(scenario.listDelay);
   if (res.destroyed || req.socket.destroyed) return undefined;
   if (outcome === "expired") return problem(res, 401, "not_authenticated");
+  if (rejectExpectedMember(req, res, member)) return undefined;
   if (outcome === "failed") return problem(res, 500, "internal_error");
   const rows = filterRows(query, member);
   if (rows === null) return problem(res, 422, "request_invalid");

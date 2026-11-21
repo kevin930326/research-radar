@@ -1,5 +1,6 @@
 // 成員版的登入狀態（Story 3.5、ADR-0046）：路由的登入檢查、登入頁、帳號選單共用。
 import { queryOptions, type QueryClient } from "@tanstack/react-query";
+import { useCallback, useSyncExternalStore } from "react";
 
 import { datasource } from "../datasource";
 import type { Member, MemberSession } from "../datasource/types";
@@ -67,6 +68,54 @@ export function trackMemberCheck(queryClient: QueryClient, verdict: Promise<Memb
 /** 進行中的確認（沒有就是 undefined）：加入、移出送出前要等它，結果是換了人就不送（D1）。 */
 export function pendingMemberCheck(queryClient: QueryClient): Promise<MemberCheckVerdict> | undefined {
   return memberChecks.get(queryClient);
+}
+
+/**
+ * 寫入時後端說「這個分頁以為的人和現在登入的人不同」（409 member_changed，ADR-0055）之後，這個分頁整頁換成現在的人
+ * 幾次：找論文、我的文獻庫拿它當 key，加 1 就重新掛上（快取清掉之後，畫面上的查詢不會自己重讀）。
+ */
+const memberSwaps = new WeakMap<QueryClient, { count: number; listeners: Set<() => void> }>();
+
+function swapsOf(queryClient: QueryClient): { count: number; listeners: Set<() => void> } {
+  let swaps = memberSwaps.get(queryClient);
+  if (swaps === undefined) {
+    swaps = { count: 0, listeners: new Set() };
+    memberSwaps.set(queryClient, swaps);
+  }
+  return swaps;
+}
+
+/** 記一次「整頁換成現在的人」：用 useMemberSwaps 的頁面重新掛上（在 flushSync 裡呼叫就同步重畫）。 */
+export function noteMemberSwap(queryClient: QueryClient): void {
+  const swaps = swapsOf(queryClient);
+  swaps.count += 1;
+  for (const listener of swaps.listeners) listener();
+}
+
+/** 這個分頁整頁換成現在的人幾次（給頁面當 key）。 */
+export function useMemberSwaps(queryClient: QueryClient): number {
+  const subscribe = useCallback(
+    (listener: () => void) => {
+      const swaps = swapsOf(queryClient);
+      swaps.listeners.add(listener);
+      return () => {
+        swaps.listeners.delete(listener);
+      };
+    },
+    [queryClient],
+  );
+  const read = useCallback(() => swapsOf(queryClient).count, [queryClient]);
+  return useSyncExternalStore(subscribe, read, read);
+}
+
+/**
+ * 快取裡「我是誰」的成員 ID（沒有、或是沒有人時是 undefined）；換了就重畫。路由的 context 要等路由重跑完才換，
+ * 快取在問到的那一刻就換：兩個不同表示換人進行中（審查 fix2 N1）。
+ */
+export function useCachedMemberId(queryClient: QueryClient): string | undefined {
+  const subscribe = useCallback((listener: () => void) => queryClient.getQueryCache().subscribe(listener), [queryClient]);
+  const read = useCallback(() => queryClient.getQueryData(meQuery.queryKey)?.member_id, [queryClient]);
+  return useSyncExternalStore(subscribe, read, read);
 }
 
 /**

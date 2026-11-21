@@ -11,6 +11,11 @@
 // 預設登入的那一位）的文獻庫一開始是假清單裡 personal 的那幾列，測試用 state.libraryIds／libraryRemoved 讀寫；
 // 其他成員一開始是空的。復原照 ADR-0049：已經在文獻庫 → 200、不動封存；不在 → 用最新一筆封存寫回原本的加入時間
 // （回到原本的位置）；沒有封存 → 404（審查 F13）。
+// epic-3h PR 3（ADR-0055）：加入、移出、復原要帶「這個分頁以為的成員」（標頭 X-Radar-Expected-Member）。和接到請求時
+// 登入的人不同 → 409 member_changed、值不是成員 ID → 400 expected_member_invalid，都不寫。沒帶標頭的照常回應（和後端一樣），
+// 但記進 state.writesWithoutExpectedMember，fixtures.ts 在每個測試結束時要求它是空的：新增一種寫入卻沒帶標頭，測試就失敗。
+// epic-3h2 PR 1 fix1（ADR-0055）：成員專屬的讀取（論文頁、找論文清單、文獻庫清單）也一樣比對：帶的預期成員和接到請求時登入的人
+// 不同 → 409 member_changed、值不是成員 ID → 400，都不回資料；沒帶照常（和後端一樣）。
 // 其他 /api/ 路徑不處理（交給後面的 route 或預設行為）。
 import type { Page, Route } from "@playwright/test";
 
@@ -246,6 +251,19 @@ export interface ApiMockState {
   libraryChangeGate: Promise<void> | null;
   /** 收到的請求（依序）。 */
   requests: ApiRequest[];
+  /** 沒帶 X-Radar-Expected-Member 的加入、移出、復原（fixtures.ts 在測試結束時要求是空的；ADR-0055）。 */
+  writesWithoutExpectedMember: ApiRequest[];
+}
+
+/** 加入、移出、復原帶的「這個分頁以為的成員」標頭（小寫：Playwright 給的標頭名稱都是小寫）。 */
+export const EXPECTED_MEMBER_HEADER = "x-radar-expected-member";
+const MEMBER_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** 帶的預期成員和登入的人比對（ADR-0055）：不同 409、格式不對 400；沒帶或相同是 null（照常）。登入檢查之後才呼叫。 */
+function expectedMemberProblem(expected: string | undefined, asker: MemberResponse): [number, string] | null {
+  if (expected === undefined) return null;
+  if (!MEMBER_ID_PATTERN.test(expected)) return [400, "expected_member_invalid"];
+  return expected.toLowerCase() === asker.member_id ? null : [409, "member_changed"];
 }
 
 /** 這位成員的文獻庫（沒有就建一個空的）。 */
@@ -298,6 +316,7 @@ export function createApiState(): ApiMockState {
     libraryChange: "ok",
     libraryChangeGate: null,
     requests: [],
+    writesWithoutExpectedMember: [],
   };
 }
 
@@ -313,7 +332,9 @@ export function gate(): [Promise<void>, () => void] {
 const TITLES: Record<number, string> = {
   401: "Unauthorized",
   403: "Forbidden",
+  400: "Bad Request",
   404: "Not Found",
+  409: "Conflict",
   422: "Unprocessable Entity",
   500: "Internal Server Error",
 };
@@ -388,8 +409,11 @@ export async function installApiMock(page: Page, state: ApiMockState): Promise<v
       const pageSize = LIST_FIXTURES.clientConfig.paper_list_page_size;
       const page = rows === null ? null : listPage(rows, url.searchParams.get("cursor"), pageSize, LIST_FIXTURES.snapshot);
       const answer = page === null ? null : { ...page, items: page.items.map((row) => ({ ...row, in_my_library: mine.includes(row.id) })) };
+      const expected = (await request.allHeaders())[EXPECTED_MEMBER_HEADER];
       await state.listGate;
       if (asker === null || state.list === "expired") return problem(route, 401, "not_authenticated");
+      const mismatch = expectedMemberProblem(expected, asker);
+      if (mismatch !== null) return problem(route, ...mismatch);
       if (state.list === "failed") return problem(route, 500, "internal_error");
       if (answer === null) return problem(route, 422, "request_invalid");
       return json(route, answer);
@@ -402,8 +426,11 @@ export async function installApiMock(page: Page, state: ApiMockState): Promise<v
         asker === null
           ? null
           : libraryPage(state.listRows, libraryOf(state, asker.member_id).items, url.searchParams.get("cursor"), state.clientConfig.library_page_size);
+      const expected = (await request.allHeaders())[EXPECTED_MEMBER_HEADER];
       await state.libraryGate;
-      if (answer === null || state.library === "expired") return problem(route, 401, "not_authenticated");
+      if (asker === null || answer === null || state.library === "expired") return problem(route, 401, "not_authenticated");
+      const mismatch = expectedMemberProblem(expected, asker);
+      if (mismatch !== null) return problem(route, ...mismatch);
       if (state.library === "failed") return problem(route, 500, "internal_error");
       return json(route, answer);
     }
@@ -412,8 +439,13 @@ export async function installApiMock(page: Page, state: ApiMockState): Promise<v
       state.requests.push({ method, path, body });
       // 請求是誰送的，看接到時的 cookie（審查 G2）；閘門放行後才寫（看送出中）。
       const asker = state.member;
+      const expected = (await request.allHeaders())[EXPECTED_MEMBER_HEADER];
+      if (expected === undefined) state.writesWithoutExpectedMember.push({ method, path, body });
       await state.libraryChangeGate;
       if (asker === null || state.libraryChange === "expired") return problem(route, 401, "not_authenticated");
+      // 和後端一樣：登入檢查之後、寫入之前比對（ADR-0055）。
+      const mismatch = expectedMemberProblem(expected, asker);
+      if (mismatch !== null) return problem(route, ...mismatch);
       if (state.libraryChange === "failed") return problem(route, 500, "internal_error");
       const id = decodeURIComponent(libraryMatch[1]!);
       if (libraryItem(state.listRows, id) === undefined) return problem(route, 404, "not_found");
@@ -449,8 +481,11 @@ export async function installApiMock(page: Page, state: ApiMockState): Promise<v
       // 接到請求時就記下是誰、這時的文獻庫（審查 G2）。
       const asker = state.member;
       const library = asker === null ? [] : [...libraryOf(state, asker.member_id).items];
+      const expected = (await request.allHeaders())[EXPECTED_MEMBER_HEADER];
       await state.paperGate;
       if (asker === null) return problem(route, 401, "not_authenticated");
+      const mismatch = expectedMemberProblem(expected, asker);
+      if (mismatch !== null) return problem(route, ...mismatch);
       const own = state.paperByMember[asker.member_id];
       if (own !== undefined) return json(route, own);
       const mine = (page: PaperPageResponse) => ({ ...page, in_my_library: library.some((record) => record.id === page.paper.id) });

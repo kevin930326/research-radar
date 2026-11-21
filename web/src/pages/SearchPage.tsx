@@ -12,7 +12,8 @@ import { PaperRowList, SkeletonRows } from "../components/search/PaperRows";
 import { CrossIcon, NoticeIcon } from "../components/search/parts";
 import type { PaperList } from "../datasource/types";
 import type { SnapshotRef } from "../generated/model";
-import { clientConfigQuery, displayNamesQuery, filtersKey, hasHeldRows, libraryCountQuery, paperListQuery } from "../routes/paper-queries";
+import { RowsReadAs } from "../routes/library-change";
+import { clientConfigQuery, displayNamesQuery, filtersKey, hasHeldRows, libraryCountQuery, paperListKey, paperListQuery } from "../routes/paper-queries";
 import { formatCount, splitTemplate } from "./paper-format";
 import {
   START_ROWS,
@@ -50,6 +51,12 @@ interface SearchPageProps {
   onUpdate: (change: (current: SearchParams) => SearchParams) => void;
   /** 任何一個 API 回 401。 */
   onSignedOut: () => void;
+  /** 這一頁認定的成員（路由的 context）：成員專屬的讀取都帶它當預期成員（ADR-0055）。 */
+  memberId: string;
+  /** 成員專屬的讀取回 409 member_changed（另一個分頁換了人；ADR-0055）。 */
+  onMemberChanged: () => void | Promise<void>;
+  /** 換人進行中（路由還沒換成新的人）：成員專屬的資料先不讀，清單是骨架（審查 fix2 N1）。 */
+  paused?: boolean;
 }
 
 /** 「找到 {{count}} 篇」這種句子：數字換成另一種樣式（DM Mono、最亮的字色）。 */
@@ -82,7 +89,7 @@ function latestSnapshot(queryClient: ReturnType<typeof useQueryClient>): Snapsho
   return latest?.snapshot ?? null;
 }
 
-export function SearchPage({ params: addressParams, onUpdate, onSignedOut }: SearchPageProps) {
+export function SearchPage({ params: addressParams, onUpdate, onSignedOut, memberId, onMemberChanged, paused = false }: SearchPageProps) {
   const { t } = useTranslation("search");
   const { t: tc } = useTranslation("common");
   const { t: tp } = useTranslation("paper");
@@ -102,8 +109,8 @@ export function SearchPage({ params: addressParams, onUpdate, onSignedOut }: Sea
   const limit = pageSize === null ? null : start ? START_ROWS : Math.max(params.shown ?? pageSize, pageSize);
   const key = filtersKey(filters);
   const list = useQuery({
-    ...paperListQuery(queryClient, filters, limit ?? 0),
-    enabled: limit !== null && known !== null,
+    ...paperListQuery(queryClient, filters, limit ?? 0, memberId),
+    enabled: limit !== null && known !== null && !paused,
     // 「再載入」（同一組條件、多要一頁）時，新的一頁來之前先留著已經顯示的論文；換條件時不留（顯示骨架）。
     placeholderData: (previous, previousQuery) => (previousQuery?.queryKey[1] === key ? previous : undefined),
   });
@@ -120,7 +127,7 @@ export function SearchPage({ params: addressParams, onUpdate, onSignedOut }: Sea
   // 範圍是我的文獻庫、沒有條件、0 篇：再讀一次文獻庫的篇數，真的是 0 才說「你的文獻庫還沒有論文」；文獻庫有論文、
   // 但都不在找論文的範圍裡（例如被排除）時照一般的「沒有符合的論文」（F11，Kevin 2026-11-20）。
   const personalZero = !start && found !== null && found.total === 0 && params.scope === "personal" && !hasConditions(params);
-  const libraryCount = useQuery({ ...libraryCountQuery, enabled: personalZero });
+  const libraryCount = useQuery({ ...libraryCountQuery(memberId), enabled: personalZero && !paused });
   const queries = personalZero ? [config, names, list, libraryCount] : [config, names, list];
 
   // 直接打開（重新整理）網址時最多讀 MAX_SHOWN 篇（paperListQuery）：網址的 shown 比讀到的多、後面還有的時候，
@@ -132,9 +139,9 @@ export function SearchPage({ params: addressParams, onUpdate, onSignedOut }: Sea
   useEffect(() => {
     const from = alignedFrom.current;
     if (from === null || (from.key === key && from.limit === limit)) return;
-    queryClient.removeQueries({ queryKey: ["paper-list", from.key, from.limit], exact: true });
+    queryClient.removeQueries({ queryKey: paperListKey(from.key, from.limit, memberId), exact: true });
     alignedFrom.current = null;
-  }, [key, limit, queryClient]);
+  }, [key, limit, queryClient, memberId]);
   const capped =
     !start &&
     found !== null &&
@@ -160,6 +167,26 @@ export function SearchPage({ params: addressParams, onUpdate, onSignedOut }: Sea
     notified.current = true;
     onSignedOut();
   }, [signedOut, onSignedOut]);
+  // 讀取時後端說換了人（409，ADR-0055）：照「發現換人」處理（清快取、整頁換成現在的人）；這段期間清單是骨架。
+  // 每一份 409 的結果只處理一次；換人流程收尾時重讀又拿到新的一份 409（又換了人）就再處理一次（審查 fix2 N1）。
+  // 「哪一份」用查詢與這次結果的時間（dataUpdatedAt）認，不用結果物件：TanStack Query 的結構共享在內容相同時沿用
+  // 同一個物件，重讀又是 { kind: "memberChanged" } 時物件不變，會被當成處理過而停在骨架（審查 fix3 N1）。
+  const memberChanged = (
+    [
+      ["list", list],
+      ["count", libraryCount],
+    ] as const
+  )
+    .filter(([, query]) => query.data?.kind === "memberChanged")
+    .map(([name, query]) => `${name}:${query.dataUpdatedAt}`)
+    .join(" ");
+  const followed = useRef(new Set<string>());
+  useEffect(() => {
+    const fresh = memberChanged.split(" ").filter((id) => id !== "" && !followed.current.has(id));
+    if (fresh.length === 0) return;
+    for (const id of fresh) followed.current.add(id);
+    void onMemberChanged();
+  }, [memberChanged, onMemberChanged]);
 
   const state: FilterState = {
     params,
@@ -285,7 +312,8 @@ export function SearchPage({ params: addressParams, onUpdate, onSignedOut }: Sea
         {/* 手機的「清除篩選」只在篩選選單有選時出現（設計稿 .mclr2）；只有帶進來的條件時，用標籤上的 × 拿掉。 */}
         {appliedFilterCount(params) > 0 ? clearAll : null}
       </MobileFilters>
-      {body}
+      {/* 列上的加入／移出帶「這份清單是用誰的身分讀的」（ADR-0055）。 */}
+      <RowsReadAs.Provider value={list.data?.kind === "found" ? list.data.readAs : undefined}>{body}</RowsReadAs.Provider>
       <NewTabNote />
     </div>
   );

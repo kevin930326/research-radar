@@ -60,6 +60,7 @@
 | [0051](0051-backup-and-restore.md) | 備份與還原指令：`radar backup [--shared-only]`（應用程式角色、快照匯出讓筆數和傾印同一個時間點、`pg_dump`→age 公鑰→分段上傳 `backup/`，讀到結尾才確認成功、失敗不留鍵、沒設公鑰就失敗）；`radar restore <檔或->`（只還原到沒有使用者 relation 的空資料庫、版本檢查、`pg_restore`→`psql` 一個交易、commit 後比對筆數、不自動刪）；清單包在加密檔開頭；共用資料／成員資料兩份清單由 schema 體檢守著；映像加釘版本的 PostgreSQL 18 用戶端（PGDG 封存庫、驗指紋）與 Debian 的 age，約多 94 MB；論文數與統計架構測試的衝突、Procrastinate 表的歸類、age 的來源待 Kevin 決定 | 提議 | AD-4、AD-28 |
 | [0052](0052-demo-eligible-license-and-publisher.md) | 示範站可用怎麼判定：授權只看出版社自己那一版（`primary_location.license`，`public-domain` 當 CC0、看不懂當不明）；出版社用 OpenAlex 的出版社 ID 與名稱（含 lineage）比對 `config/demo_publishers.yaml`，任一個對上就排除，沒有出版社欄位＝不可用，至少要有一個出版社名稱、只有 ID 不夠；`is_demo_eligible` 入庫時算好存 `paper.demo_eligible`（不進指紋、不算變動）；view `demo_full_paper`；排除清單改了要 reparse；IEEE 的 ID 與名稱待 Kevin 用實際資料核對 | 提議 | AD-20 |
 | [0054](0054-page-max-width.md) | 整頁內容最寬 1088px、置中（導覽列、內容、頁尾含留白最寬 1280px）；先改設計稿與規格，程式另開 Story |
+| [0055](0055-expected-member-on-library-writes.md) | 文獻庫的加入、移出、復原與成員專屬的讀取（論文頁、找論文清單、文獻庫清單）帶請求標頭 `X-Radar-Expected-Member`；後端用同一個比對函式、在呼叫 services 之前和 session 的成員比對：不同 409 `member_changed`、格式不對 400 `expected_member_invalid`，都不讀不寫；沒帶照常（權限只看 session）。寫入帶的值＝畫面上那份資料是用誰的身分讀的（`readAs`），不是路由現在認定的人；找論文與我的文獻庫的 key 含成員 ID。收到 409 不重試、照「發現換人」整頁換成現在的人；e2e 替身要求每個寫入都帶標頭。#114 的切回視窗確認留著 | 提議 | AD-23 |
 | [0060](0060-license-mit.md) | 這個 repo 用 MIT 授權；BMAD、各 skill、字體、設計稿裡的 CC BY 摘要、OpenAlex 書目照各自的授權（編號跳到 0060，避開兩條線保留的 0039～0059） | 已接受 | AR-48 |
 
 「提議」表示還沒經過 Kevin 確認；PR 合併後改成「已接受」。
