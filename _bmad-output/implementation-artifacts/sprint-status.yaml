@@ -135,6 +135,9 @@
 # epic-3g 那一筆：3.17 的收尾修正、整頁寬度上限（ADR-0054）、論文列第二版（PR 112～114），不是 Story、沒有估計。
 #   2026-11-20 22:22 開工、2026-11-21 01:20 收尾、02:13（台北）PR 114 合併，約 4 小時。
 #   Kevin 2026-11-21 回報自己動手「體感小於 1 小時」，記成 0.5～1。
+# epic-3h 那一筆：示範站判定的後續、F19、論文列行高（PR 118、120、121），不是 Story、沒有估計。換人後寫入的保護沒做完，留到 epic-3h2。
+#   2026-11-21 03:15 開工、06:00 收尾（執行約 2.75 小時），之後等 Kevin 決定與補資料，21:42（台北）PR 121 合併，約 18.5 小時。
+#   Kevin 2026-11-21 回報自己動手約 1 小時。
 # 重估的倍率只用 kevin_h_low、kevin_h_high（見上面「怎麼重估」第 1 點），elapsed_h 只留著對照。
 # 這個區塊要留在 generated 上面，重跑 skill 才不會洗掉註解（2026-11-14 測過）。
 actual_hours:
@@ -147,6 +150,7 @@ actual_hours:
   - {round: epic-3e, stories: "ADR-0029 更新、3.7a", estimate_h: null, elapsed_h: 3, kevin_h_low: 1, kevin_h_high: 2, rough: true}
   - {round: epic-3f, stories: "3.14（成員版）、3.17", estimate_h: 7, elapsed_h: 7, kevin_h_low: 0.5, kevin_h_high: 1, rough: true}
   - {round: epic-3g, stories: "3.17 收尾修正、整頁寬度上限、論文列第二版（PR 112～114，不是 Story）", estimate_h: null, elapsed_h: 4, kevin_h_low: 0.5, kevin_h_high: 1, rough: true}
+  - {round: epic-3h, stories: "示範站判定的後續、F19、論文列行高（PR 118、120、121，不是 Story）", estimate_h: null, elapsed_h: 18.5, kevin_h_low: 1, kevin_h_high: 1, rough: true}
 
 generated: 11-14-2026 03:46
 last_updated: 11-17-2026 03:10
