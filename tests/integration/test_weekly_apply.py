@@ -38,7 +38,7 @@ from radar.domain.domain_config import (
     OpenAlexQuota,
 )
 from radar.domain.jobs import EMBED_PAPERS, PLAN_LLM_BATCHES, JobSpec
-from radar.domain.papers import KeywordSource, PaperOrigin
+from radar.domain.papers import KeywordSource, PaperOrigin, ParsedKeyword
 from radar.domain.parsers.openalex import parse_openalex_work
 from radar.domain.permissions import PermissionDeniedError
 from radar.domain.raw_records import JournalQuery, RawRecord, RawSource
@@ -744,14 +744,33 @@ def test_split_identifiers_row_is_skipped_and_the_rest_is_applied(
     paper_a_work["doi"] = None
     paper_b_work = _work(61, issn_l=OTHER_ISSN, title="Paper B")
     paper_b_work["doi"] = staged_work["doi"]
+    # 略過的那筆帶自己的關鍵字；A、B 各自先有不同的 OpenAlex 關鍵字。漏掉略過時，`paper_id`
+    # 是 DOI 那篇（B），B 的關鍵字會被這筆整批覆寫。
+    staged_work["keywords"] = [
+        {"id": "https://openalex.org/keywords/staged-only", "display_name": "Staged only"}
+    ]
     paper_a = _insert_paper(database, paper_a_work)
     paper_b = _insert_paper(database, paper_b_work)
+    with database.transaction() as connection:
+        for paper_id, key in ((paper_a, "paper-a-own"), (paper_b, "paper-b-own")):
+            update_paper_keywords(
+                connection,
+                paper_id,
+                KeywordSource.OPENALEX,
+                [ParsedKeyword(key=key, display_name=key.replace("-", " ").title())],
+            )
+    keywords = "SELECT * FROM paper_keyword WHERE paper_id = %s ORDER BY source, key"
+    keywords_a = _rows(weekly_db, keywords, paper_a)
+    keywords_b = _rows(weekly_db, keywords, paper_b)
+    assert len(keywords_a) == len(keywords_b) == 1
     before = _rows_of_papers(weekly_db, [paper_a, paper_b])
     run_id = _fetched_run(database, T2, misq=_misq_book(T2, [staged_work, _work(2)]), io=[[]])
 
     with capture_logs() as logs:
         result = _apply(database, run_id)
 
+    assert _rows(weekly_db, keywords, paper_a) == keywords_a
+    assert _rows(weekly_db, keywords, paper_b) == keywords_b
     assert _rows_of_papers(weekly_db, [paper_a, paper_b]) == before
     assert result == WeeklyApplyResult(
         weekly_run_id=run_id,

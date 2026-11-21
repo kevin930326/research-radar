@@ -626,7 +626,8 @@ def _hold_uncommitted(
     """另開一個執行緒寫 `paper`、寫完先不 commit，等 `release` 才結束交易。
 
     寫完時在同一個交易裡把這篇四張表的整列存進 `snapshots["rows"]`：commit 不會改這些列，
-    所以它就是這篇 commit 後的樣子（兩篇都在第三筆寫入開始之後才 commit，沒有別的時間點能存）。
+    所以它就是這篇 commit 後的樣子（呼叫的測試都在另一筆寫入開始、等著它之後才放行 commit，
+    沒有別的時間點能存）。
     """
     results: dict[str, UpsertResult] = {}
     snapshots: dict[str, dict[str, list[tuple[Any, ...]]]] = {}

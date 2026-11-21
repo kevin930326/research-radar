@@ -22,7 +22,13 @@ from structlog.testing import capture_logs
 
 from radar.adapters.fake import FakeObjectStore
 from radar.domain.domain_config import ExclusionRule, ExclusionRulesConfig
-from radar.domain.papers import KeywordSource, PaperOrigin, ParsedPaper, UpsertResult
+from radar.domain.papers import (
+    KeywordSource,
+    PaperOrigin,
+    ParsedKeyword,
+    ParsedPaper,
+    UpsertResult,
+)
 from radar.domain.parsers.openalex import parse_openalex_work
 from radar.domain.permissions import PermissionDeniedError
 from radar.domain.raw_records import RawRecord, RawSource, compress_raw
@@ -734,6 +740,25 @@ def test_split_identifiers_row_is_skipped_and_the_rest_is_applied(
     others = [_seed_paper(database, _old_parse(work, T1)).paper_id for work in works[1:]]
     for work in works:
         _seed_raw(database, store, _key(work), work_bytes(work), T1)
+    # A、B 各自先有不同的 OpenAlex 關鍵字；第 1 篇的原始資料帶的是另一組。漏掉略過時，`paper_id`
+    # 是 DOI 那篇（B），B 的關鍵字會被這筆整批覆寫。
+    source_keys = {
+        keyword.key for keyword in parse_openalex_work(work_bytes(works[0]), fetched_at=T1).keywords
+    }
+    with database.transaction() as connection:
+        for paper_id, key in ((paper_a.paper_id, "paper-a-own"), (paper_b.paper_id, "paper-b-own")):
+            update_paper_keywords(
+                connection,
+                paper_id,
+                KeywordSource.OPENALEX,
+                [ParsedKeyword(key=key, display_name=key.replace("-", " ").title())],
+            )
+    assert source_keys
+    assert source_keys.isdisjoint({"paper-a-own", "paper-b-own"})
+    keywords = "SELECT * FROM paper_keyword WHERE paper_id = %s ORDER BY source, key"
+    keywords_a = _rows(reparse_db, keywords, paper_a.paper_id)
+    keywords_b = _rows(reparse_db, keywords, paper_b.paper_id)
+    assert len(keywords_a) == len(keywords_b) == 1
     split_ids = [paper_a.paper_id, paper_b.paper_id]
     before = {
         table: [row for row in rows if row[0] in split_ids or row[1] in split_ids]
@@ -743,6 +768,8 @@ def test_split_identifiers_row_is_skipped_and_the_rest_is_applied(
     with capture_logs() as logs:
         result = _reparse(database, store)
 
+    assert _rows(reparse_db, keywords, paper_a.paper_id) == keywords_a
+    assert _rows(reparse_db, keywords, paper_b.paper_id) == keywords_b
     after = {
         table: [row for row in rows if row[0] in split_ids or row[1] in split_ids]
         for table, rows in _full_rows(reparse_db).items()
