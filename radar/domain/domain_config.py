@@ -305,7 +305,7 @@ class DomainConfig(BaseModel):
     demo_publishers: DemoPublishersConfig
 
     def scope_settings(self) -> ScopeSettings:
-        """寫入論文用的設定：追蹤範圍（`journals.yaml`）＋示範站排除的出版社。
+        """寫入論文用的設定：追蹤範圍（`journals.yaml`）＋示範站排除的出版社與期刊。
 
         正式的寫入路徑（每週更新、reparse）一律用這個，不用 `JournalsConfig.scope_settings()`
         （那個不帶排除清單，寫入的論文一律不算示範站可用）。

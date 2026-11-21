@@ -879,10 +879,12 @@ def test_journal_that_is_missing_or_not_listed_keeps_the_original_result(
     assert is_demo_eligible(license, ids, names, TEST_EXCLUSIONS) is expected
 
 
-def test_without_a_journal_list_the_journal_is_ignored() -> None:
-    # 設定檔沒有 excluded_journals：行為和加這一道之前完全一樣（期刊是什麼都不影響）。
+@pytest.mark.parametrize("journals", [{}, {"excluded_journals": []}], ids=["omitted", "empty"])
+def test_without_a_journal_list_the_journal_is_ignored(journals: dict[str, object]) -> None:
+    # 設定檔沒有 excluded_journals（省略鍵或明寫空清單 `[]`，兩種要一樣）：行為和加這一道之前
+    # 完全一樣（期刊是什麼都不影響）。
     config = DemoPublishersConfig.model_validate(
-        {"excluded": [{"id": None, "name": EXCLUDED_PUBLISHER_NAME, "note": "x"}]}
+        {"excluded": [{"id": None, "name": EXCLUDED_PUBLISHER_NAME, "note": "x"}], **journals}
     )
     exclusions = config.exclusions()
 

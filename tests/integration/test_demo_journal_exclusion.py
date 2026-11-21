@@ -5,11 +5,13 @@ PostgreSQL。
   清單、期刊是 IEEE TEM（0018-9391）」的論文：`demo_eligible` 是 false、不在 view
   `demo_full_paper`；同樣的論文換成別的期刊是 true、在 view 裡。
 - reparse 結束時的重判讀存下的 `journal_issn_l`：存下的期刊對到排除清單、原本 true 的改成 false。
-- 重判依論文 id 分頁（`batch_size=2`），跨好幾頁時每一篇該改的都改了、不該改的沒動，兩個數字正確。
+- 重判依論文 id 分頁（`batch_size=2`），跨好幾頁時每一篇該改的都改了、不該改的沒動，兩個數字正確；
+  另記下每次讀取的筆數與游標，證明真的是 2、2、2、1 依序讀、游標遞增。
 
 測試資料全部自己編（`tests/demo_works.py`），不用真的論文。每個測試一個全新、已遷移的資料庫。
 """
 
+import itertools
 import uuid
 from datetime import UTC, datetime
 from typing import Any
@@ -19,13 +21,14 @@ import pytest
 from radar.adapters.fake import FakeObjectStore
 from radar.config import load_domain_config
 from radar.domain.domain_config import ExclusionRulesConfig
-from radar.domain.papers import PaperOrigin
+from radar.domain.papers import PaperOrigin, StoredDemoFacts
 from radar.domain.parsers.openalex import parse_openalex_work
 from radar.domain.policy import PublisherExclusions
 from radar.domain.scope import ScopeSettings
 from radar.domain.viewer import SystemViewer
 from radar.repo.db import Database
-from radar.repo.papers import upsert_by_external_id
+from radar.repo.papers import list_demo_eligible_facts, upsert_by_external_id
+from radar.services import reparse as reparse_module
 from radar.services.reparse import ReparseResult, reparse_papers
 from tests.database import APP_ROLE, OWNER_ROLE, ROOT, TestDatabase, migrate
 from tests.demo_works import TEST_EXCLUSIONS, demo_work, demo_work_bytes
@@ -162,7 +165,9 @@ def test_reparse_recheck_turns_a_stored_ieee_tem_paper_false(
     assert (result.updated, result.demo_rechecked, result.demo_revoked) == (0, 2, 1)
 
 
-def test_reparse_recheck_across_several_pages(demo_db: TestDatabase, database: Database) -> None:
+def test_reparse_recheck_across_several_pages(
+    demo_db: TestDatabase, database: Database, monkeypatch: pytest.MonkeyPatch
+) -> None:
     # G2：7 篇 true（另 1 篇原本就是 false），batch_size=2 → 重判分 4 頁讀（2、2、2、1）。
     # 依論文 id 排序後第 0、1 篇（整個第一頁）與第 4 篇改成 IEEE TEM，重判要把這 3 篇改成 false。
     eligible = [_write(database, demo_work(n, issn_l=OTHER_ISSN_L), OLD_SCOPE) for n in range(1, 8)]
@@ -181,7 +186,28 @@ def test_reparse_recheck_across_several_pages(demo_db: TestDatabase, database: D
     before = _eligible_by_id(demo_db)
     assert before == {**dict.fromkeys(eligible, True), already_false: False}
 
+    # 包一層真的查詢（仍讀測試資料庫），記下每次讀取的游標、筆數與 limit，證明重判真的分頁。
+    reads: list[tuple[uuid.UUID | None, list[uuid.UUID], int]] = []
+
+    def recording_list(*args: Any, **kwargs: Any) -> list[StoredDemoFacts]:
+        page = list_demo_eligible_facts(*args, **kwargs)
+        reads.append((kwargs["after_id"], [facts.paper_id for facts in page], kwargs["limit"]))
+        return page
+
+    monkeypatch.setattr(reparse_module, "list_demo_eligible_facts", recording_list)
+
     result = _reparse(database, NEW_SCOPE, batch_size=2)
+
+    # 4 個非空頁依序 2、2、2、1，再讀一次空頁結束；每次都帶 limit=2。
+    assert [len(ids) for _, ids, _ in reads] == [2, 2, 2, 1, 0]
+    assert all(limit == 2 for _, _, limit in reads)
+    # 游標：第一次從頭讀（None），之後每次都是上一頁最後一筆的 id，而且一路遞增；7 篇各讀到一次。
+    assert reads[0][0] is None
+    for (_, previous_ids, _), (after_id, ids, _) in itertools.pairwise(reads):
+        assert after_id == previous_ids[-1]
+        assert all(paper_id > after_id for paper_id in ids)
+    read_ids = [paper_id for _, ids, _ in reads for paper_id in ids]
+    assert read_ids == ordered
 
     after = _eligible_by_id(demo_db)
     assert after == {
