@@ -32,6 +32,8 @@ export type LibraryChangeOutcome = "done" | "alreadyGone" | "failed";
  * 401 而且還是同一位：清快取，再呼叫 `onSignedOut`（回登入頁）；清的期間又換了人（例如有人登入）就不呼叫。
  * `member.expectedMemberId`：這個分頁以為的成員，交給 `source` 放進請求標頭（ADR-0055）。後端說換了人（memberChanged）而且
  * 還是同一代：呼叫 `member.onMemberChanged`（不等它做完，按鈕馬上恢復）、回 "failed"；不重試、不改快取。
+ * 例外：這筆 409 是換人流程已經做完之後才回來的舊回應（`alreadyFollowed`）時只回 "failed"，不再跑一次換人流程
+ * （不清掉已經載好的新成員的快取、畫面不多閃一次骨架；審查 fix3 G2a）。`member.routeMemberId`：回應回來當下路由認定的成員。
  */
 export async function sendLibraryChange(
   queryClient: QueryClient,
@@ -39,7 +41,11 @@ export async function sendLibraryChange(
   paperId: string,
   action: LibraryAction,
   onSignedOut: () => Promise<void> | void = () => {},
-  member: { expectedMemberId?: string; onMemberChanged?: () => Promise<void> | void } = {},
+  member: {
+    expectedMemberId?: string;
+    routeMemberId?: () => string | undefined;
+    onMemberChanged?: () => Promise<void> | void;
+  } = {},
 ): Promise<LibraryChangeOutcome> {
   const generation = memberGeneration(queryClient);
   const stillCurrent = () => memberGeneration(queryClient) === generation;
@@ -59,7 +65,7 @@ export async function sendLibraryChange(
     return "failed";
   }
   if (result.kind === "memberChanged") {
-    void member.onMemberChanged?.();
+    if (!alreadyFollowed(queryClient, member.expectedMemberId, member.routeMemberId?.())) void member.onMemberChanged?.();
     return "failed";
   }
   if (result.kind === "signedOut") {
@@ -79,6 +85,18 @@ export async function sendLibraryChange(
 
 /** 進行中的「整頁換成現在的人」（同時收到好幾個 409 時只做一次）。 */
 const following = new WeakMap<QueryClient, Promise<void>>();
+
+/**
+ * 這筆 409（請求帶的預期成員是 `expected`）是不是換人流程已經做完之後才回來的舊回應：沒有進行中的換人流程，而且快取的
+ * 「我是誰」與路由認定的成員（`routeMember`）都已經是別人（不是 `expected`）。是的話畫面已經換成新的人（或路由正在換），
+ * 不用再跑一次（審查 fix3 G2a）。三個任一個不知道（沒帶預期成員、快取沒有「我是誰」、拿不到路由的成員）都不算，照常跑。
+ * 這不會漏掉真的又換了人：畫面上那一位的下一次讀取或寫入帶的是他自己，後端不符一樣回 409，那一筆就不是舊回應。
+ */
+function alreadyFollowed(queryClient: QueryClient, expected: string | undefined, routeMember: string | undefined): boolean {
+  if (expected === undefined || routeMember === undefined || following.has(queryClient)) return false;
+  const cached = queryClient.getQueryData(meQuery.queryKey)?.member_id;
+  return cached !== undefined && cached !== expected && routeMember !== expected;
+}
 
 /**
  * 寫入時後端說換了人（409 member_changed）之後：照「發現換人」處理（和找論文切回視窗確認時一樣，PR #114）。
@@ -108,12 +126,17 @@ export function followMemberChange(
     } catch {
       member = undefined;
     }
+    // 這一輪自己清的快取，清完之後還是這一代（中間沒有別人登入、又清過一次）。
+    let stillMine = false;
     if (memberGeneration(queryClient) === generation) {
       await clearMemberQueries(queryClient);
+      // clearMemberQueries 一開始把世代號加 1（同 sendLibraryChange 的 401）。
+      stillMine = memberGeneration(queryClient) === generation + 1;
       if (member != null) queryClient.setQueryData(meQuery.queryKey, member);
     }
     if (member === null) {
-      await actions.toLogin();
+      // 比照 401（sendLibraryChange）：世代號還是這一輪的才回登入頁；問「我是誰」或清快取的期間有人登入就不回（審查 fix3 G2b）。
+      if (stillMine) await actions.toLogin();
       return;
     }
     flushSync(() => noteMemberSwap(queryClient));
@@ -165,6 +188,7 @@ export function useFollowMemberChange(): () => Promise<void> {
 export function useLibraryChange(readAs: ReadAs): (paperId: string, action: LibraryAction) => Promise<LibraryChangeOutcome> {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
+  const router = useRouter();
   const href = useLocation({ select: (location) => location.href });
   const follow = useFollowMemberChange();
   return useCallback(
@@ -175,10 +199,11 @@ export function useLibraryChange(readAs: ReadAs): (paperId: string, action: Libr
       };
       return sendLibraryChange(queryClient, librarySource(), paperId, action, toLogin, {
         expectedMemberId: readAs,
+        routeMemberId: () => (router.state.matches.at(-1)?.context as { member?: Member } | undefined)?.member?.member_id,
         onMemberChanged: follow,
       });
     },
-    [queryClient, navigate, href, readAs, follow],
+    [queryClient, navigate, router, href, readAs, follow],
   );
 }
 

@@ -2159,4 +2159,97 @@ test.describe("following a member change reads only as the new member (ADR-0055,
     expect(idsOf(state, B.member_id)).toEqual([bOnly]);
     expect(libraryOf(state, B.member_id).removed).toEqual([]);
   });
+
+  // epic-3h2 PR 1 fix3（N1 殘留）：第一輪收尾重讀又回 409 時要開始第二輪。重讀的結果和上一份一模一樣
+  // （{ kind: "memberChanged" }），TanStack Query 的結構共享會沿用同一個物件；頁面用物件認「處理過沒」就會跳過、停在骨架。
+  // 做法：第一輪的「我是誰」與重跑路由的「我是誰」都還說是甲（例如乙剛登入、那兩次回應比較早），所以頁面重新掛上後
+  // 用甲讀 → 409（這時第一輪還沒結束：重跑路由的那一次擋著）；放行後第一輪結束、收尾重讀又是 409 → 第二輪問到乙。
+
+  /** 接下來兩次「我是誰」回甲（第二次等 `hold` 放行才回）；之後照替身（目前登入的人）。回一個函式：問了幾次。 */
+  async function meSaysAThenFollows(page: Page, hold: Promise<void>): Promise<() => number> {
+    let asked = 0;
+    await page.route(/\/api\/v1\/me$/, async (route) => {
+      asked += 1;
+      if (asked === 1) return route.fulfill({ json: A });
+      if (asked === 2) {
+        await hold;
+        return route.fulfill({ json: A });
+      }
+      return route.fallback();
+    });
+    return () => asked;
+  }
+
+  test("fix3 N1 search: the read again at the end of the first round is refused again: a second round starts, the page ends as B's (not stuck on the skeleton)", async ({ page, apiMock: state }) => {
+    state.libraryIds = ALL;
+    const shared = filterListRows(ROWS, new URLSearchParams("scope=personal"), ALL)![0]!.row.id;
+    libraryOf(state, B.member_id).items = [{ id: shared, addedAt: "2026-11-01T00:00:00.000Z" }];
+    await page.setViewportSize(DESKTOP);
+    await page.goto(`${member.baseURL}/search?scope=personal`);
+    await expect(page.locator("[data-paper-row]")).toHaveCount(20);
+    const [hold, release] = gate();
+    const asked = await meSaysAThenFollows(page, hold);
+    state.member = B;
+    const after = readsFrom(page, "/api/v1/papers?");
+    const refusedAsA = () => after.filter((read) => read.expected === A.member_id && read.status === 409).length;
+    const write = page
+      .waitForResponse((response) => response.request().method() === "DELETE" && new URL(response.url()).pathname.startsWith("/api/v1/library/"))
+      .then(async (response) => ({ expected: (await response.request().allHeaders())[EXPECTED_MEMBER_HEADER], status: response.status() }));
+    await searchRow(page, shared).locator("[data-library='remove']").click();
+    expect(await write).toEqual({ expected: A.member_id, status: 409 });
+    // 第一輪：「我是誰」說甲、頁面重新掛上用甲讀 → 409；重跑路由的「我是誰」擋著，這一輪還沒結束。
+    await expect.poll(asked).toBe(2);
+    await expect.poll(refusedAsA).toBeGreaterThan(0);
+    await expect(page.locator("[data-paper-row]")).toHaveCount(0);
+    const refusedInRound = refusedAsA();
+    release();
+    // 收尾重讀又是 409 → 第二輪：問「我是誰」是乙，整頁換成乙的清單。
+    await expect(searchRow(page, shared).locator("[data-library='added']")).toBeVisible();
+    await expect(page.locator("[data-paper-row]")).toHaveCount(1);
+    await expect(page.locator("[data-state='loading']")).toHaveCount(0);
+    await twoFrames(page);
+    await page.waitForTimeout(300);
+    // 第一輪兩次（換人流程一次、重跑路由一次），第二輪兩次。
+    expect(asked()).toBe(4);
+    expect(refusedAsA()).toBeGreaterThan(refusedInRound);
+    expect(after.filter((read) => read.expected === B.member_id)).toEqual([{ expected: B.member_id, status: 200 }]);
+    expect(after.filter((read) => read.expected !== B.member_id).every((read) => read.expected === A.member_id && read.status === 409)).toBe(true);
+    expect(idsOf(state, B.member_id)).toEqual([shared]);
+    expect(libraryOf(state, B.member_id).removed).toEqual([]);
+  });
+
+  test("fix3 N1 my library: the read again at the end of the first round is refused again: a second round starts, the page ends as B's (not stuck on the skeleton)", async ({ page, apiMock: state }) => {
+    const aOnly = ROWS[0]!.row.id;
+    const bOnly = ROWS[1]!.row.id;
+    state.libraryIds = [aOnly];
+    libraryOf(state, B.member_id).items = [{ id: bOnly, addedAt: "2026-11-01T00:00:00.000Z" }];
+    await openLibrary(page);
+    await expect(rows(page)).toHaveCount(1);
+    const [hold, release] = gate();
+    const asked = await meSaysAThenFollows(page, hold);
+    state.member = B;
+    const after = readsFrom(page, "/api/v1/library");
+    const refusedAsA = () => after.filter((read) => read.expected === A.member_id && read.status === 409).length;
+    const write = page
+      .waitForResponse((response) => response.request().method() === "DELETE" && new URL(response.url()).pathname.startsWith("/api/v1/library/"))
+      .then(async (response) => ({ expected: (await response.request().allHeaders())[EXPECTED_MEMBER_HEADER], status: response.status() }));
+    await row(page, aOnly).locator("[data-library='remove']:visible").click();
+    expect(await write).toEqual({ expected: A.member_id, status: 409 });
+    await expect.poll(asked).toBe(2);
+    await expect.poll(refusedAsA).toBeGreaterThan(0);
+    await expect(rows(page)).toHaveCount(0);
+    const refusedInRound = refusedAsA();
+    release();
+    await expect(row(page, bOnly)).toBeVisible();
+    await expect(rows(page)).toHaveCount(1);
+    await expect(page.locator("[data-state='loading']")).toHaveCount(0);
+    await twoFrames(page);
+    await page.waitForTimeout(300);
+    expect(asked()).toBe(4);
+    expect(refusedAsA()).toBeGreaterThan(refusedInRound);
+    expect(after.filter((read) => read.expected === B.member_id)).toEqual([{ expected: B.member_id, status: 200 }]);
+    expect(after.filter((read) => read.expected !== B.member_id).every((read) => read.expected === A.member_id && read.status === 409)).toBe(true);
+    expect(idsOf(state, B.member_id)).toEqual([bOnly]);
+    expect(idsOf(state, A.member_id)).toEqual([aOnly]);
+  });
 });

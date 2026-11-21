@@ -120,9 +120,10 @@ export function LibraryPage({ shown, onMore, onSignedOut, memberId, onMemberChan
     onSignedOut();
   }, [signedOut, onSignedOut]);
   // 讀取時後端說換了人（409，ADR-0055）：照「發現換人」處理；這段期間清單是骨架。每一份 409 的結果只處理一次
-  // （同 SearchPage；審查 fix2 N1）。
-  const memberChanged = list.data?.kind === "memberChanged" ? list.data : undefined;
-  const followed = useRef<object | undefined>(undefined);
+  // （同 SearchPage；審查 fix2 N1）。用這次結果的時間（dataUpdatedAt）認是哪一份，不用結果物件：結構共享在內容相同時
+  // 沿用同一個物件，重讀又是 409 時會被當成處理過（審查 fix3 N1）。
+  const memberChanged = list.data?.kind === "memberChanged" ? list.dataUpdatedAt : undefined;
+  const followed = useRef<number | undefined>(undefined);
   useEffect(() => {
     if (memberChanged === undefined || followed.current === memberChanged) return;
     followed.current = memberChanged;

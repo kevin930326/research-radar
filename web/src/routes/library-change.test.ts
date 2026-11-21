@@ -803,3 +803,78 @@ describe("member-specific queries after a member change (fix2)", () => {
     expect(result).toEqual({ kind: "memberChanged" });
   });
 });
+
+// epic-3h2 PR 1 fix3（Gemini 參考審查 G2）：換人流程已經做完、畫面已是新的人之後才回來的舊 409 不再跑一次換人流程（a）；
+// 「我是誰」說沒有人時，世代號還是這一輪的才回登入頁（b）。
+describe("after the member change was followed (fix3 G2)", () => {
+  const A = { member_id: "00000000-0000-4000-8000-00000000000a", display_name: "Test Member A" };
+  const B = { member_id: "00000000-0000-4000-8000-00000000000b", display_name: "Test Member B" };
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function send(queryClient: QueryClient, routeMemberId: string | undefined, onMemberChanged: () => void) {
+    return sendLibraryChange(queryClient, source({ kind: "memberChanged" }), PAPER, "add", () => {}, {
+      expectedMemberId: A.member_id,
+      routeMemberId: () => routeMemberId,
+      onMemberChanged,
+    });
+  }
+
+  it("G2a: a 409 for A comes back after 'who am I' and the route are both B, with no round going on: 'failed', no second round", async () => {
+    const queryClient = new QueryClient();
+    queryClient.setQueryData(meQuery.queryKey, B);
+    const onMemberChanged = vi.fn();
+    expect(await send(queryClient, B.member_id, onMemberChanged)).toBe("failed");
+    expect(onMemberChanged).not.toHaveBeenCalled();
+  });
+
+  it("G2a: the page is still A's (the route or 'who am I' still says A): the 409 is followed", async () => {
+    for (const [cached, route] of [
+      [A, A],
+      [B, A],
+      [A, B],
+    ] as const) {
+      const queryClient = new QueryClient();
+      queryClient.setQueryData(meQuery.queryKey, cached);
+      const onMemberChanged = vi.fn();
+      expect(await send(queryClient, route.member_id, onMemberChanged)).toBe("failed");
+      expect(onMemberChanged).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  it("G2a: a round is going on: the 409 joins it (followed as usual)", async () => {
+    const queryClient = new QueryClient();
+    queryClient.setQueryData(meQuery.queryKey, A);
+    const [hold, release] = gate();
+    vi.spyOn(datasource.session!, "me").mockImplementation(async () => {
+      await hold;
+      return B;
+    });
+    const round = followMemberChange(queryClient, { toLogin: () => {}, reload: () => {} });
+    queryClient.setQueryData(meQuery.queryKey, B);
+    const onMemberChanged = vi.fn();
+    expect(await send(queryClient, B.member_id, onMemberChanged)).toBe("failed");
+    expect(onMemberChanged).toHaveBeenCalledTimes(1);
+    release();
+    await round;
+  });
+
+  it("G2b: 'who am I' says nobody, but someone signed in (the cache was cleared again) while this round was clearing: not sent to the login page", async () => {
+    const queryClient = new QueryClient();
+    queryClient.setQueryData(meQuery.queryKey, A);
+    vi.spyOn(datasource.session!, "me").mockResolvedValue(null);
+    // 這一輪清快取、等取消進行中的讀取時，有人登入（又清了一次，世代號再加 1）。
+    vi.spyOn(queryClient, "cancelQueries").mockImplementationOnce(async () => {
+      await clearMemberQueries(queryClient);
+      queryClient.setQueryData(meQuery.queryKey, B);
+    });
+    const toLogin = vi.fn();
+    const reload = vi.fn();
+    await followMemberChange(queryClient, { toLogin, reload });
+    expect(memberGeneration(queryClient)).toBe(2);
+    expect(toLogin).not.toHaveBeenCalled();
+    expect(reload).not.toHaveBeenCalled();
+  });
+});

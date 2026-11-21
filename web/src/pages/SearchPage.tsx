@@ -169,11 +169,22 @@ export function SearchPage({ params: addressParams, onUpdate, onSignedOut, membe
   }, [signedOut, onSignedOut]);
   // 讀取時後端說換了人（409，ADR-0055）：照「發現換人」處理（清快取、整頁換成現在的人）；這段期間清單是骨架。
   // 每一份 409 的結果只處理一次；換人流程收尾時重讀又拿到新的一份 409（又換了人）就再處理一次（審查 fix2 N1）。
-  const memberChanged = [list.data, libraryCount.data].find((data) => data?.kind === "memberChanged");
-  const followed = useRef<object | undefined>(undefined);
+  // 「哪一份」用查詢與這次結果的時間（dataUpdatedAt）認，不用結果物件：TanStack Query 的結構共享在內容相同時沿用
+  // 同一個物件，重讀又是 { kind: "memberChanged" } 時物件不變，會被當成處理過而停在骨架（審查 fix3 N1）。
+  const memberChanged = (
+    [
+      ["list", list],
+      ["count", libraryCount],
+    ] as const
+  )
+    .filter(([, query]) => query.data?.kind === "memberChanged")
+    .map(([name, query]) => `${name}:${query.dataUpdatedAt}`)
+    .join(" ");
+  const followed = useRef(new Set<string>());
   useEffect(() => {
-    if (memberChanged === undefined || followed.current === memberChanged) return;
-    followed.current = memberChanged;
+    const fresh = memberChanged.split(" ").filter((id) => id !== "" && !followed.current.has(id));
+    if (fresh.length === 0) return;
+    for (const id of fresh) followed.current.add(id);
     void onMemberChanged();
   }, [memberChanged, onMemberChanged]);
 
