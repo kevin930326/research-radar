@@ -111,10 +111,21 @@ def test_parsed_paper_is_frozen() -> None:
 
 
 def test_upsert_result_has_no_conflicts_by_default() -> None:
+    result = UpsertResult(paper_id=uuid.uuid4(), outcome=UpsertOutcome.STALE)  # noqa: F841
+
+    # 原本的 `assert result.conflicts == ()` 已拿掉：`conflicts` 欄位已刪除（ADR-0020 更新
+    # 2026-11-22），改由下一條測試驗「沒有這個欄位」。
+
+
+def test_upsert_result_has_no_conflicts_field() -> None:
+    # ADR-0020 更新 2026-11-22：`conflicts` 欄位已拿掉。
     result = UpsertResult(paper_id=uuid.uuid4(), outcome=UpsertOutcome.STALE)
 
-    # `conflicts` 欄位已拿掉（ADR-0020 更新 2026-11-22）：結果物件上不該再有這個屬性。
     assert not hasattr(result, "conflicts")
+    with pytest.raises(TypeError):
+        UpsertResult(  # type: ignore[call-arg]
+            paper_id=uuid.uuid4(), outcome=UpsertOutcome.STALE, conflicts=()
+        )
 
 
 def test_upsert_result_source_changed_defaults_false_and_is_not_compared() -> None:

@@ -153,10 +153,10 @@ def _publisher_name_key_once(value: str) -> str:
 def _journal_issn_l_key(value: str) -> str:
     """論文的期刊 ISSN-L 的比對鍵：`normalize_issn_l`；看不懂的照原字串去頭尾空白、轉大寫。
 
-    排除清單只收 `normalize_issn_l` 看得懂的值（建立時正規化成 `NNNN-NNNC`，看不懂的直接丟錯），
-    而看不懂的字串轉大寫後不會是 `NNNN-NNNC` 這種標準格式，所以永遠對不上清單：論文的 ISSN-L
-    看不懂時，期刊這一道等於沒有對上（和 None 一樣）。轉大寫只是讓這裡不丟錯，不是讓非標準寫法
-    也能被排除。
+    看不懂時這裡捕捉 `InvalidIdentifierError`，回傳備用字串，不丟錯；備用字串是原字串去頭尾空白、
+    轉大寫的結果。排除清單只收 `normalize_issn_l` 看得懂的值（建立時正規化成 `NNNN-NNNC`，看不懂的
+    直接丟錯），而備用字串不是 `NNNN-NNNC` 這種標準格式，所以永遠對不上清單：論文的 ISSN-L 看不懂
+    時，期刊這一道等於沒有對上（和 None 一樣），非標準寫法不會被排除。
     """
     try:
         return normalize_issn_l(value)

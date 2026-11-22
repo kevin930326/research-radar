@@ -115,7 +115,7 @@ Epic 3h 第一個 PR 的 Codex 審查（C2，等級「高」）：一筆來源�
    - 第 2 步掛上還沒有主人的識別碼、卻被並行的交易搶先掛到別篇的時候。為了讓這時也什麼都沒寫，第 2 步改成**先掛識別碼、再寫論文**（原本是寫完論文才掛）；鎖的順序不變（先鎖論文、再依優先序佔識別碼）。只有 DOI 與 OpenAlex ID 兩種識別碼，目標論文至少擁有其中一個，所以這一步最多認領一個，認領失敗時手上沒有掛上任何識別碼。這條路在比新舊之後（要先鎖論文、比完才認領，已經判成 STALE 的不認領），是第 3 點順序唯一的例外：STALE 時本來就什麼都不寫，結果只差在回 `stale` 而不是 `identifiers_split`。
 5. **其他情況的行為都不變**：只有一個識別碼找到、另一個沒有主人（照舊更新並掛上）；只有一個識別碼；兩個識別碼找到同一篇；都找不到（新增）；並行新增時退回保存點、重查到同一篇。
 6. **呼叫端**當作「這一筆略過」，整批不失敗，不寫關鍵字：每週更新套用的結果 `WeeklyApplyResult` 與「每週更新已套用並發佈快照」日誌多一個數字 `identifiers_split`；`reparse` 的 `ReparseResult` 與「重新解析結束」日誌多一個 `identifiers_split`（`radar reparse` 畫面印的數字不變，Kevin 2026-11-21 決定新數字只從日誌看）。reparse 結束時的示範站重判（ADR-0052 第 9 點）：被略過的兩篇算「這次沒有寫到」，照那裡的規則重判（只往 false 改）。
-7. `conflicts` 欄位與計數保留不刪。實作後，`conflicts` 唯一會有值的情況（識別碼已經屬於另一篇）都變成「識別碼分屬兩篇」，所以現在不會有值；要不要拿掉欄位由 Kevin 決定。2026-11-22 更新：Kevin 決定拿掉，`UpsertResult`、`ReparseResult`、`WeeklyApplyResult` 的 `conflicts` 欄位與日誌裡的 `conflicts` 鍵都已拿掉；`radar reparse` 畫面「識別碼衝突：」那一行改印 `identifiers_split`（行的文字與位置不變）。
+7. `conflicts` 欄位與計數保留不刪。實作後，`conflicts` 唯一會有值的情況（識別碼已經屬於另一篇）都變成「識別碼分屬兩篇」，所以現在不會有值；要不要拿掉欄位由 Kevin 決定。2026-11-22 更新：Kevin 決定拿掉，`UpsertResult`、`ReparseResult`、`WeeklyApplyResult` 的 `conflicts` 欄位與日誌裡的 `conflicts` 鍵都已拿掉；這取代第 6 點括號裡「`radar reparse` 畫面印的數字不變」的說法：從 2026-11-22 起，`radar reparse` 畫面「識別碼衝突：」那一行印 `identifiers_split`（行的文字與位置不變）。
 8. 不需要遷移。
 
 ### 理由
