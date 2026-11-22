@@ -387,7 +387,9 @@ def test_identifiers_split_paper_in_excluded_journal_is_rechecked_false(
     # 前提：用重判那份排除設定，DOI 那篇拿掉期刊就是 True、帶存下的期刊是 False；另一篇是 True。
     license_, ids, names, journal = _stored_facts(demo_db, doi_owner)
     assert (license_, journal) == ("cc-by", EXCLUDED_JOURNAL_ISSN_L)
-    assert is_demo_eligible(license_, ids, names, JOURNAL_NEW_EXCLUSIONS) is True
+    assert (
+        is_demo_eligible(license_, ids, names, JOURNAL_NEW_EXCLUSIONS, journal_issn_l=None) is True
+    )
     assert (
         is_demo_eligible(license_, ids, names, JOURNAL_NEW_EXCLUSIONS, journal_issn_l=journal)
         is False

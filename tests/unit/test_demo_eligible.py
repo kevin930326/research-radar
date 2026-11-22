@@ -49,7 +49,11 @@ def _parse(**kwargs: object) -> ParsedPaper:
 
 def _eligible(paper: ParsedPaper, excluded: PublisherExclusions | None = TEST_EXCLUSIONS) -> bool:
     return is_demo_eligible(
-        paper.primary_license, paper.publisher_ids, paper.publisher_names, excluded
+        paper.primary_license,
+        paper.publisher_ids,
+        paper.publisher_names,
+        excluded,
+        journal_issn_l=None,
     )
 
 
@@ -99,11 +103,14 @@ def test_openalex_license_mapping(value: str | None, expected: ContentLicense) -
     ],
 )
 def test_only_three_licenses_are_eligible(license: str | None, expected: bool) -> None:
-    assert is_demo_eligible(license, ("P1",), ("Open",), TEST_EXCLUSIONS) is expected
+    assert (
+        is_demo_eligible(license, ("P1",), ("Open",), TEST_EXCLUSIONS, journal_issn_l=None)
+        is expected
+    )
 
 
 def test_no_publisher_fields_is_not_eligible() -> None:
-    assert is_demo_eligible("cc-by", (), (), TEST_EXCLUSIONS) is False
+    assert is_demo_eligible("cc-by", (), (), TEST_EXCLUSIONS, journal_issn_l=None) is False
 
 
 @pytest.mark.parametrize(
@@ -124,11 +131,16 @@ def test_publisher_without_a_usable_name_is_not_eligible(
     ids: tuple[str, ...], names: tuple[str, ...]
 ) -> None:
     # ADR-0052 第 4 點：至少要有一個正規化後不是空的出版社名稱，才可能是 True。
-    assert is_demo_eligible("cc-by", ids, names, TEST_EXCLUSIONS) is False
+    assert is_demo_eligible("cc-by", ids, names, TEST_EXCLUSIONS, journal_issn_l=None) is False
 
 
 def test_one_usable_name_among_broken_ones_is_enough() -> None:
-    assert is_demo_eligible("cc-by", ("not an id!",), ("  ", "Open"), TEST_EXCLUSIONS) is True
+    assert (
+        is_demo_eligible(
+            "cc-by", ("not an id!",), ("  ", "Open"), TEST_EXCLUSIONS, journal_issn_l=None
+        )
+        is True
+    )
 
 
 # 看不見的字元（Unicode 類別 Cf、Cc）：零寬空白、BOM、軟連字號、零寬連接符、控制字元。
@@ -148,8 +160,11 @@ _INVISIBLE = ["\u200b", "\ufeff", "\u00ad", "\u200d", "\u2060", "\x00", "\x7f"]
 def test_name_of_only_invisible_characters_is_not_eligible(names: tuple[str, ...]) -> None:
     # ADR-0052 第 4、5 點：只有看不見的字元的名稱正規化後是空的，不算有名稱。
     assert all(normalize_publisher_name(name) == "" for name in names)
-    assert is_demo_eligible("cc-by", (), names, TEST_EXCLUSIONS) is False
-    assert is_demo_eligible("cc-by", ("P9000000001",), names, TEST_EXCLUSIONS) is False
+    assert is_demo_eligible("cc-by", (), names, TEST_EXCLUSIONS, journal_issn_l=None) is False
+    assert (
+        is_demo_eligible("cc-by", ("P9000000001",), names, TEST_EXCLUSIONS, journal_issn_l=None)
+        is False
+    )
 
 
 @pytest.mark.parametrize("mark", _INVISIBLE)
@@ -160,7 +175,10 @@ def test_excluded_name_with_invisible_characters_still_matches(mark: str) -> Non
         EXCLUDED_PUBLISHER_NAME.replace(" ", f" {mark}", 1),
     ):
         assert normalize_publisher_name(name) == normalize_publisher_name(EXCLUDED_PUBLISHER_NAME)
-        assert is_demo_eligible("cc-by", (), ("Open", name), TEST_EXCLUSIONS) is False
+        assert (
+            is_demo_eligible("cc-by", (), ("Open", name), TEST_EXCLUSIONS, journal_issn_l=None)
+            is False
+        )
 
 
 def test_separators_between_words_are_ignored_so_glued_words_still_match() -> None:
@@ -201,8 +219,13 @@ _NO_LETTERS_OR_DIGITS = [
 @pytest.mark.parametrize("name", _NO_LETTERS_OR_DIGITS)
 def test_name_without_letters_or_digits_is_not_eligible(name: str) -> None:
     assert normalize_publisher_name(name) == ""
-    assert is_demo_eligible("cc-by", (), (name,), TEST_EXCLUSIONS) is False
-    assert is_demo_eligible("cc-by", ("P9000000001",), (name, " "), TEST_EXCLUSIONS) is False
+    assert is_demo_eligible("cc-by", (), (name,), TEST_EXCLUSIONS, journal_issn_l=None) is False
+    assert (
+        is_demo_eligible(
+            "cc-by", ("P9000000001",), (name, " "), TEST_EXCLUSIONS, journal_issn_l=None
+        )
+        is False
+    )
 
 
 # 夾在排除名稱前後或字中間也不影響比對的字元（字母與數字以外的都拿掉）。
@@ -233,11 +256,14 @@ def test_excluded_name_with_ignored_characters_still_matches(mark: str) -> None:
         EXCLUDED_PUBLISHER_NAME.replace("E", f"E{mark}", 1),
     ):
         assert normalize_publisher_name(name) == key
-        assert is_demo_eligible("cc-by", (), ("Open", name), TEST_EXCLUSIONS) is False
+        assert (
+            is_demo_eligible("cc-by", (), ("Open", name), TEST_EXCLUSIONS, journal_issn_l=None)
+            is False
+        )
 
 
 def test_missing_exclusion_list_is_not_eligible() -> None:
-    assert is_demo_eligible("cc-by", ("P1",), ("Open",), None) is False
+    assert is_demo_eligible("cc-by", ("P1",), ("Open",), None, journal_issn_l=None) is False
 
 
 @pytest.mark.parametrize(
@@ -251,7 +277,7 @@ def test_missing_exclusion_list_is_not_eligible() -> None:
     ],
 )
 def test_any_excluded_id_or_name_excludes(ids: tuple[str, ...], names: tuple[str, ...]) -> None:
-    assert is_demo_eligible("cc-by", ids, names, TEST_EXCLUSIONS) is False
+    assert is_demo_eligible("cc-by", ids, names, TEST_EXCLUSIONS, journal_issn_l=None) is False
 
 
 # 判定為 True 時授權只可能是這幾個字面值（寫死，不拿實作的 `openalex_license` 當答案）。
@@ -304,7 +330,7 @@ def test_property_excluded_publisher_is_never_eligible(
         ids = (*ids, "P9000000002")
     else:
         names = (*names, EXCLUDED_PUBLISHER_NAME)
-    assert is_demo_eligible(license, ids, names, TEST_EXCLUSIONS) is False
+    assert is_demo_eligible(license, ids, names, TEST_EXCLUSIONS, journal_issn_l=None) is False
 
 
 # 排除清單裡的值的各種寫法：URL、小寫、大小寫與空白不同的名稱、上層出版社名稱。
@@ -362,7 +388,7 @@ def test_property_excluded_value_in_any_form_and_position_is_never_eligible(
         ids = (*ids[:id_position], excluded_id, *ids[id_position:])
     if excluded_name is not None:
         names = (*names[:name_position], excluded_name, *names[name_position:])
-    assert is_demo_eligible(license, ids, names, TEST_EXCLUSIONS) is False
+    assert is_demo_eligible(license, ids, names, TEST_EXCLUSIONS, journal_issn_l=None) is False
 
 
 @given(license=_LICENSES, ids=_IDS)
@@ -371,14 +397,14 @@ def test_property_ids_without_names_are_never_eligible(
 ) -> None:
     # 只有出版社 ID、沒有名稱：不管 ID 看不看得懂、在不在排除清單，一定是 False
     # （ADR-0052 第 4 點）。
-    assert is_demo_eligible(license, ids, (), TEST_EXCLUSIONS) is False
+    assert is_demo_eligible(license, ids, (), TEST_EXCLUSIONS, journal_issn_l=None) is False
 
 
 @given(license=_LICENSES, ids=_IDS, names=_NAMES)
 def test_property_license_outside_the_three_is_never_eligible(
     license: str | None, ids: tuple[str, ...], names: tuple[str, ...]
 ) -> None:
-    result = is_demo_eligible(license, ids, names, TEST_EXCLUSIONS)
+    result = is_demo_eligible(license, ids, names, TEST_EXCLUSIONS, journal_issn_l=None)
     if license not in _ALLOWED_LICENSE_STRINGS:
         assert result is False
 
@@ -389,14 +415,14 @@ def test_property_true_needs_allowed_license_and_publisher_not_excluded(
 ) -> None:
     # True 的必要條件：三種授權之一（寫死的字面值）、有出版社欄位、至少一個不是空白的名稱、
     # 沒有任何值在排除清單裡；而且拿掉排除清單（None）一律 False。
-    if is_demo_eligible(license, ids, names, TEST_EXCLUSIONS):
+    if is_demo_eligible(license, ids, names, TEST_EXCLUSIONS, journal_issn_l=None):
         assert license in _ALLOWED_LICENSE_STRINGS
         assert openalex_license(license) in DEMO_ELIGIBLE_LICENSES
         assert ids or names
         assert any(name.strip() for name in names)
         assert any(normalize_publisher_name(name) for name in names)
         assert not TEST_EXCLUSIONS.matches(ids, names)
-    assert is_demo_eligible(license, ids, names, None) is False
+    assert is_demo_eligible(license, ids, names, None, journal_issn_l=None) is False
 
 
 # --- 解析 ------------------------------------------------------------------------------------
@@ -533,8 +559,11 @@ def test_real_config_excludes_ieee_names() -> None:
         exclusions.names
     )
     assert normalize_publisher_name("IEEE") in exclusions.names
-    assert is_demo_eligible("cc-by", (), ("IEEE\u200b",), exclusions) is False
-    assert is_demo_eligible("cc-by", (), ("\ufeffI\u00adEEE",), exclusions) is False
+    assert is_demo_eligible("cc-by", (), ("IEEE\u200b",), exclusions, journal_issn_l=None) is False
+    assert (
+        is_demo_eligible("cc-by", (), ("\ufeffI\u00adEEE",), exclusions, journal_issn_l=None)
+        is False
+    )
     for name in (
         "IEEE\ufe0f",
         "IEEE\u3164",
@@ -547,12 +576,18 @@ def test_real_config_excludes_ieee_names() -> None:
         "IEEE\x01Computer Society",
         "IEEE\u180eComputer Society",
     ):
-        assert is_demo_eligible("cc-by", (), (name,), exclusions) is False, name
+        assert is_demo_eligible("cc-by", (), (name,), exclusions, journal_issn_l=None) is False, (
+            name
+        )
     assert config.scope_settings().demo_publishers == exclusions
     assert config.journals.scope_settings().demo_publishers is None
     assert (
         is_demo_eligible(
-            "cc-by", (), ("Institute of Electrical and Electronics Engineers",), exclusions
+            "cc-by",
+            (),
+            ("Institute of Electrical and Electronics Engineers",),
+            exclusions,
+            journal_issn_l=None,
         )
         is False
     )
@@ -645,11 +680,17 @@ def test_ieee_id_with_another_name_is_not_eligible(ids: tuple[str, ...]) -> None
     ).demo_publishers.exclusions()
 
     # 名稱是別的寫法（不在排除清單）：靠 ID 排除。
-    assert is_demo_eligible("cc-by", ids, ("Some Other Press",), exclusions) is False
+    assert (
+        is_demo_eligible("cc-by", ids, ("Some Other Press",), exclusions, journal_issn_l=None)
+        is False
+    )
     # 只有 ID、沒有名稱：名稱是必要條件，一樣不可用（ADR-0052 第 4 點）。
-    assert is_demo_eligible("cc-by", ids, (), exclusions) is False
+    assert is_demo_eligible("cc-by", ids, (), exclusions, journal_issn_l=None) is False
     # 對照：同樣的名稱、不是 IEEE 的 ID，是可用的。
-    assert is_demo_eligible("cc-by", ("P1",), ("Some Other Press",), exclusions) is True
+    assert (
+        is_demo_eligible("cc-by", ("P1",), ("Some Other Press",), exclusions, journal_issn_l=None)
+        is True
+    )
 
 
 # --- PublisherExclusions 建立時自己正規化 ---------------------------------------------------
@@ -671,7 +712,10 @@ def test_exclusions_normalize_names_and_ids_when_built() -> None:
     assert built.matches(("P42",), ()) is True
     assert built.matches(("not an id!",), ()) is True
     assert built.matches((), ("IEEE Computer Society",)) is True
-    assert is_demo_eligible("cc-by", (), ("Excluded Engineering Society",), built) is False
+    assert (
+        is_demo_eligible("cc-by", (), ("Excluded Engineering Society",), built, journal_issn_l=None)
+        is False
+    )
 
 
 def test_exclusions_reject_names_or_ids_that_normalize_to_nothing() -> None:
@@ -876,7 +920,7 @@ def test_journal_that_is_missing_or_not_listed_keeps_the_original_result(
     assert (
         is_demo_eligible(license, ids, names, JOURNAL_EXCLUSIONS, journal_issn_l=issn_l) is expected
     )
-    assert is_demo_eligible(license, ids, names, TEST_EXCLUSIONS) is expected
+    assert is_demo_eligible(license, ids, names, TEST_EXCLUSIONS, journal_issn_l=None) is expected
 
 
 @pytest.mark.parametrize("journals", [{}, {"excluded_journals": []}], ids=["omitted", "empty"])
