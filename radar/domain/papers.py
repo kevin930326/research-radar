@@ -305,6 +305,9 @@ class UpsertOutcome(StrEnum):
     STALE = "stale"  # 要寫的資料比資料庫裡的舊，什麼都沒寫
     # DOI 與 OpenAlex ID 屬於兩篇不同的既有論文：兩篇都不寫、識別碼不搬（ADR-0020 更新 2026-11-22）
     IDENTIFIERS_SPLIT = "identifiers_split"
+    # 用一個識別碼找到論文、帶來的另一種識別碼沒有主人，而那篇已經有同一種、正規化後不同值的
+    # 識別碼：什麼都不寫（ADR-0020 更新 2026-11-22 第二節）
+    SAME_SCHEME_MISMATCH = "same_scheme_mismatch"
 
 
 @dataclass(frozen=True)
@@ -318,18 +321,35 @@ class SplitIdentifiers:
 
 
 @dataclass(frozen=True)
+class SameSchemeMismatch:
+    """「同一種識別碼對不上」時的論文與兩個值（ADR-0020 更新 2026-11-22 第二節）。
+
+    `paper_id`：用另一個識別碼找到的那篇；`stored`：它已經有的同一種識別碼；`incoming`：這筆
+    資料帶來的（兩者 `scheme` 相同、`value_norm` 不同）。
+    """
+
+    paper_id: uuid.UUID
+    stored: ExternalId
+    incoming: ExternalId
+
+
+@dataclass(frozen=True)
 class UpsertResult:
     """寫入的結果。
 
     `source_changed`：更新既有論文時 `source_hash` 變了（含原本是 NULL；ADR-0028）；CREATED、
-    STALE、IDENTIFIERS_SPLIT 一律 False。不參與相等比較：兩個結果相等仍只看（論文, 結果,
-    分屬兩篇）。
+    STALE、IDENTIFIERS_SPLIT、SAME_SCHEME_MISMATCH 一律 False。不參與相等比較：兩個結果相等仍只看
+    （論文, 結果, 分屬兩篇, 同一種識別碼對不上）。
 
     `split`：只有 `IDENTIFIERS_SPLIT` 時有值，帶兩個識別碼與各自所屬的論文；這時 `paper_id` 是
     DOI 所屬的那篇（照優先序本來會寫的那篇），但這筆資料沒有寫進任何論文，呼叫端當作略過。
+
+    `mismatch`：只有 `SAME_SCHEME_MISMATCH` 時有值，帶找到的論文與同一種識別碼的兩個值；這時
+    `paper_id` 是那篇，但這筆資料什麼都沒寫，呼叫端當作略過。
     """
 
     paper_id: uuid.UUID
     outcome: UpsertOutcome
     source_changed: bool = dataclasses.field(default=False, compare=False)
     split: SplitIdentifiers | None = None
+    mismatch: SameSchemeMismatch | None = None

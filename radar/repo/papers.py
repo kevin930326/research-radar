@@ -51,6 +51,7 @@ from radar.domain.papers import (
     PaperOrigin,
     ParsedKeyword,
     ParsedPaper,
+    SameSchemeMismatch,
     SplitIdentifiers,
     StoredDemoFacts,
     StoredPaper,
@@ -712,6 +713,19 @@ def upsert_by_external_id(
        的時候（這一步在寫論文之前做，所以那時也還沒寫任何東西；已經判成 `stale` 的不會走到這裡）。
        因為只有 DOI 與 OpenAlex ID 兩種識別碼，第 2 步至少有一個識別碼屬於目標論文，最多只認領
        一個，認領失敗時手上沒有掛上任何識別碼。
+    6. 用一個識別碼找到論文 P、帶來的另一種識別碼沒有主人，而 P 已經有同一種、正規化後不同值的
+       識別碼（「同一種識別碼對不上」，ADR-0020 更新 2026-11-22 第二節）：什麼都不寫（同第 5 點），
+       回 `same_scheme_mismatch`（`mismatch` 帶 P 的 id 與同一種識別碼的兩個值），記一行警告日誌
+       （只帶 id、識別碼的種類與兩個值）。只在第 2 步鎖住 P 之後判斷一次（第 1 步與第 3 步重查
+       走到第 2 步都經過這裡），在比新舊與認領之前：要替 P 掛識別碼的交易都得先鎖 P，所以鎖到之後
+       讀到的 P 的識別碼到交易結束都不會再多；並行的另一個交易先替 P 掛上別的值、已 commit 的，
+       鎖到之後這一句也讀得到，兩個交易最多只有一個掛上。這時 P 鎖到交易結束但沒有寫。
+       「分屬兩篇」在找的時候（鎖之前）就判斷，所以鎖之前就看得到兩篇的，回 `identifiers_split`。
+       找完到鎖住 P 之間，並行的另一個交易才把這筆帶來的另一種識別碼掛到別篇 Q（並 commit）時：
+       只有 P 鎖住後已經有同一種、不同值的識別碼，這一筆才會回 `same_scheme_mismatch`（警告只帶
+       P、不帶 Q），不回 `identifiers_split`；兩篇都一樣什麼都不寫，只差在結果與日誌的分類。P 沒有
+       那一種識別碼時，這一筆會通過這個判斷，接著比新舊：比 P 舊就先回 `stale`；不比 P 舊，認領時
+       查到主人是 Q，照舊回 `identifiers_split`（第 5 點；ADR-0020 更新 2026-11-22 第二節第 3 點）。
 
     鎖的順序（ADR-0020）：先鎖論文、再佔識別碼，識別碼依優先序佔；第 3 步改走第 2 步之前先退回
     保存點，手上不留任何識別碼，才去等論文的鎖。所以每個交易只寫一篇時，不論幾個交易同時寫、
@@ -831,6 +845,45 @@ def _split_result(owners: Mapping[ExternalId, uuid.UUID]) -> UpsertResult | None
     return UpsertResult(split.doi_paper_id, UpsertOutcome.IDENTIFIERS_SPLIT, split=split)
 
 
+def _same_scheme_mismatch(
+    connection: Connection, paper_id: uuid.UUID, ids: Sequence[ExternalId]
+) -> UpsertResult | None:
+    """這篇已經有和這筆資料同一種、正規化後不同值的識別碼時，記警告並回「同一種識別碼對不上」。
+
+    要在鎖住論文之後呼叫。依優先序看這筆資料的每個識別碼：這篇有同一種識別碼、但沒有一個等於
+    帶來的值，就是對不上（找到這篇的那個識別碼一定屬於它，所以實際上只會是另一種）。這篇同一種
+    有好幾個值時，日誌與結果帶排序後的第一個。日誌只帶論文 id、識別碼的種類與兩個值。
+    """
+    rows = connection.execute(
+        text(
+            "SELECT scheme, value_norm FROM external_id WHERE paper_id = :paper_id"
+            " ORDER BY scheme, value_norm"
+        ),
+        {"paper_id": paper_id},
+    )
+    stored_by_scheme: dict[IdentifierScheme, list[str]] = {}
+    for scheme, value_norm in rows:
+        stored_by_scheme.setdefault(IdentifierScheme(scheme), []).append(value_norm)
+    for external_id in ids:
+        stored_values = stored_by_scheme.get(external_id.scheme, [])
+        if not stored_values or external_id.value_norm in stored_values:
+            continue
+        mismatch = SameSchemeMismatch(
+            paper_id=paper_id,
+            stored=ExternalId(external_id.scheme, stored_values[0]),
+            incoming=external_id,
+        )
+        log.warning(
+            "論文已經有同一種、不同值的識別碼，這一筆略過不寫",
+            paper_id=str(paper_id),
+            scheme=external_id.scheme.value,
+            stored=mismatch.stored.value_norm,
+            incoming=external_id.value_norm,
+        )
+        return UpsertResult(paper_id, UpsertOutcome.SAME_SCHEME_MISMATCH, mismatch=mismatch)
+    return None
+
+
 def _first_owner(
     ids: Sequence[ExternalId], owners: Mapping[ExternalId, uuid.UUID]
 ) -> uuid.UUID | None:
@@ -936,8 +989,8 @@ def _update_existing(
     values: Mapping[str, object],
     fetched_at: datetime,
 ) -> UpsertResult:
-    """先鎖住論文再比抓取時間；比較舊就不寫（`stale`，不掛識別碼），
-    否則先掛上還沒有主人的識別碼、再更新論文。
+    """先鎖住論文，看同一種識別碼對不對得上，再比抓取時間；對不上就不寫（`same_scheme_mismatch`），
+    比較舊就不寫（`stale`，不掛識別碼），否則先掛上還沒有主人的識別碼、再更新論文。
 
     掛識別碼時被並行的交易搶先掛到另一篇（認領失敗、主人不是這篇）：DOI 與 OpenAlex ID 分屬兩篇，
     什麼都不寫、回 `identifiers_split`（ADR-0020 更新 2026-11-22）。所以先掛識別碼、後寫論文：
@@ -956,6 +1009,16 @@ def _update_existing(
         text("SELECT openalex_fetched_at, source_hash FROM paper WHERE id = :id FOR UPDATE"),
         {"id": paper_id},
     ).one()
+    # 拿到鎖之後才讀這篇已經有的識別碼：要替這篇掛識別碼的交易都得先鎖它，所以從這裡到交易結束
+    # 不會有人再替它掛上新的；並行的另一個交易剛掛上、已 commit 的，這一句也讀得到（READ
+    # COMMITTED）。比新舊之前判斷，和「分屬兩篇」一樣（ADR-0020 更新 2026-11-22 第二節）。
+    # 等鎖期間另一種識別碼被別篇掛走時：只有 P 這時已經有同一種、不同值的識別碼，這裡才回「同一種
+    # 識別碼對不上」、不回「分屬兩篇」（兩種都不寫，只差分類）；P 沒有那一種的，會通過這裡，接著
+    # 比新舊：比 P 舊先回 STALE；不比 P 舊，認領時查到主人是別篇，照舊回「分屬兩篇」（見
+    # `upsert_by_external_id` 第 6 點）。
+    mismatch = _same_scheme_mismatch(connection, paper_id, ids)
+    if mismatch is not None:
+        return mismatch
     if stored is not None and fetched_at < stored:
         return UpsertResult(paper_id, UpsertOutcome.STALE)
     source_changed = stored_hash != values["source_hash"]

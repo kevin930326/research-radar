@@ -59,8 +59,14 @@ NO_RULES = ExclusionRulesConfig(rules=())
 # 沒有重寫到的幾種情況（ADR-0052 第 9 點「例外」）。
 NOT_REWRITTEN = ["no_raw", "missing_object", "hash_mismatch", "parse_error", "id_mismatch", "stale"]
 # 參數化逐案核對的情況：多一個「gzip 解壓失敗」（和 SHA-256 對不上同算 `hash_mismatch`），以及
-# 「識別碼分屬兩篇」（ADR-0020 更新 2026-11-22：兩篇都沒寫，算沒重寫到）。
-NOT_REWRITTEN_WITH_BAD_GZIP = [*NOT_REWRITTEN, "bad_gzip", "identifiers_split"]
+# 「識別碼分屬兩篇」（ADR-0020 更新 2026-11-22：兩篇都沒寫，算沒重寫到）、「同一種識別碼對不上」
+# （同一更新第二節：那篇沒寫，算沒重寫到）。
+NOT_REWRITTEN_WITH_BAD_GZIP = [
+    *NOT_REWRITTEN,
+    "bad_gzip",
+    "identifiers_split",
+    "same_scheme_mismatch",
+]
 # 每種情況該走到的分支：(missing_object, hash_mismatch, parse_error, id_mismatch, stale)。
 # 對照論文一定重寫到，所以這裡只反映被測的那一篇。
 EXPECTED_BRANCH = {
@@ -72,6 +78,7 @@ EXPECTED_BRANCH = {
     "id_mismatch": (0, 0, 0, 1, 0),
     "stale": (0, 0, 0, 0, 1),
     "identifiers_split": (0, 0, 0, 0, 0),
+    "same_scheme_mismatch": (0, 0, 0, 0, 0),
 }
 
 
@@ -128,6 +135,17 @@ def _seed_case(database: Database, store: FakeObjectStore, case: str, number: in
         paper_id = _write(database, doi_owner, fetched_at=T1, scope=OLD_SCOPE)
         openalex_owner = {**work, "doi": None}
         _write(database, openalex_owner, fetched_at=T1, scope=ScopeSettings(frozenset({ISSN})))
+        _seed_raw(database, store, key, content, T2)
+        return paper_id
+    if case == "same_scheme_mismatch":
+        # 這篇有原始資料的 OpenAlex ID、DOI 是別的；原始資料的 DOI 沒有主人。套用時「同一種識別碼
+        # 對不上」，這篇沒有重寫到。
+        paper_id = _write(
+            database,
+            {**work, "doi": f"https://doi.org/10.9999/own-doi.{number}"},
+            fetched_at=T1,
+            scope=OLD_SCOPE,
+        )
         _seed_raw(database, store, key, content, T2)
         return paper_id
     paper_id = _write(database, work, fetched_at=T1, scope=OLD_SCOPE)
@@ -203,6 +221,7 @@ def test_paper_not_rewritten_is_rechecked_and_turned_false(
     )
     assert branch == EXPECTED_BRANCH[case]
     assert result.identifiers_split == (1 if case == "identifiers_split" else 0)
+    assert result.same_scheme_mismatch == (1 if case == "same_scheme_mismatch" else 0)
     # 重判只算沒重寫到的那一篇；重寫到的（仍是 true）不經這條路。
     assert (result.demo_rechecked, result.demo_revoked) == (1, 1)
 

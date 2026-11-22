@@ -111,6 +111,26 @@ def test_success_prints_every_number(calls: dict[str, Any]) -> None:
     assert "source" not in reparse
 
 
+@pytest.mark.usefixtures("env")
+def test_identifier_line_prints_split_plus_same_scheme_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # 「識別碼衝突：」那一行印兩種的加總，不多印新的行（ADR-0020 更新 2026-11-22 第二節）。
+    def reparse_papers(*_args: object, **_kwargs: object) -> ReparseResult:
+        return ReparseResult(identifiers_split=2, same_scheme_mismatch=3)
+
+    monkeypatch.setattr(cli, "build_database", lambda _settings, **_kwargs: object())
+    monkeypatch.setattr(cli, "build_object_store", lambda _settings: FakeObjectStore())
+    monkeypatch.setattr(cli, "reparse_papers", reparse_papers)
+
+    result = runner.invoke(cli.app, ["reparse"])
+
+    assert result.exit_code == 0, result.output
+    lines = result.stdout.splitlines()
+    assert len(lines) == 11
+    assert lines[-1] == "識別碼衝突：5"
+
+
 @pytest.mark.usefixtures("calls")
 def test_missing_database_url_exits_1(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("RADAR_CONFIG_DIR", str(ROOT / "config"))

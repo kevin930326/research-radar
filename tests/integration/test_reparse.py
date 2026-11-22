@@ -803,6 +803,58 @@ def test_split_identifiers_row_is_skipped_and_the_rest_is_applied(
     assert (done["identifiers_split"], done["updated"]) == (1, 2)
 
 
+def test_same_scheme_mismatch_row_is_skipped_and_the_rest_is_applied(
+    reparse_db: TestDatabase, database: TrackingDatabase, store: GuardedStore
+) -> None:
+    # 一批 3 篇：第 1 篇用 OpenAlex ID 找到 P，原始資料的 DOI 沒有主人，而 P 已經有另一個 DOI
+    # （同一種識別碼對不上：略過、P 不動，ADR-0020 更新 2026-11-22 第二節），另外 2 篇照常更新。
+    works = _works(3)
+    parsed = _old_parse(works[0], T1)
+    assert parsed.doi is not None
+    paper_p = _seed_paper(database, _changed(parsed, doi="10.9999/paper-p-own-doi"))
+    others = [_seed_paper(database, _old_parse(work, T1)).paper_id for work in works[1:]]
+    for work in works:
+        _seed_raw(database, store, _key(work), work_bytes(work), T1)
+    source_keys = {
+        keyword.key for keyword in parse_openalex_work(work_bytes(works[0]), fetched_at=T1).keywords
+    }
+    with database.transaction() as connection:
+        update_paper_keywords(
+            connection,
+            paper_p.paper_id,
+            KeywordSource.OPENALEX,
+            [ParsedKeyword(key="paper-p-own", display_name="Paper P Own")],
+        )
+    assert source_keys
+    assert "paper-p-own" not in source_keys
+    keywords = "SELECT * FROM paper_keyword WHERE paper_id = %s ORDER BY source, key"
+    keywords_p = _rows(reparse_db, keywords, paper_p.paper_id)
+    assert len(keywords_p) == 1
+    before = _rows_of_papers(reparse_db, [paper_p.paper_id])
+    assert all(before[table] for table in ("paper", "external_id", "paper_keyword"))
+
+    with capture_logs() as logs:
+        result = _reparse(database, store)
+
+    assert _rows(reparse_db, keywords, paper_p.paper_id) == keywords_p
+    assert _rows_of_papers(reparse_db, [paper_p.paper_id]) == before
+    assert result == ReparseResult(
+        raw_keys=3, staged=3, updated=2, stale=0, identifiers_split=0, same_scheme_mismatch=1
+    )
+    assert _rows(
+        reparse_db, "SELECT count(*) FROM external_id WHERE value_norm = %s", parsed.doi
+    ) == [(0,)]
+    for work, paper_id in zip(works[1:], others, strict=True):
+        assert _rows(reparse_db, "SELECT referenced_works FROM paper WHERE id = %s", paper_id) == [
+            (list(parse_openalex_work(work_bytes(work), fetched_at=T1).referenced_works),)
+        ]
+    [mismatch] = [log for log in logs if log["event"].startswith("論文已經有同一種、不同值")]
+    assert (mismatch["paper_id"], mismatch["scheme"]) == (str(paper_p.paper_id), "doi")
+    assert (mismatch["stored"], mismatch["incoming"]) == ("10.9999/paper-p-own-doi", parsed.doi)
+    [done] = [log for log in logs if log["event"] == "重新解析結束"]
+    assert (done["same_scheme_mismatch"], done["identifiers_split"], done["updated"]) == (1, 0, 2)
+
+
 def test_creating_a_paper_while_applying_rolls_back(
     reparse_db: TestDatabase,
     database: TrackingDatabase,

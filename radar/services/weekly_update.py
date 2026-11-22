@@ -208,6 +208,8 @@ class WeeklyApplyResult:
       舊、什麼都沒寫的篇數。
     - `identifiers_split`：DOI 與 OpenAlex ID 屬於兩篇不同的論文、這一筆略過不寫的篇數（兩篇都
       不動，每一筆另有一行警告日誌；ADR-0020 更新 2026-11-22）。
+    - `same_scheme_mismatch`：用一個識別碼找到論文、那篇已經有同一種不同值的識別碼、這一筆略過
+      不寫的篇數（那篇不動，每一筆另有一行警告日誌；ADR-0020 更新 2026-11-22 第二節）。
     - `changed`：`updated` 裡 `source_hash` 變了的篇數（摘要、撤稿標記、書目欄位改了；只改被引用
       次數或關鍵字不算；ADR-0028）。
     - `first_snapshot_assigned`：這次指到新快照的論文篇數（含之前沒有著落的）。
@@ -226,6 +228,7 @@ class WeeklyApplyResult:
     first_snapshot_assigned: int = 0
     changed: int = 0
     identifiers_split: int = 0
+    same_scheme_mismatch: int = 0
 
 
 @dataclass(frozen=True)
@@ -500,8 +503,9 @@ def apply_weekly_update(
     2. `create_snapshot`（`building`，編號＝目前最大值＋1）。
     3. 依暫存列的 `id` 每批 `batch_size` 筆讀這一批（`batch_id`＝`weekly_run_id`）；逐筆
        `upsert_by_external_id`（`tracked`、暫存列的 `excluded_reason`），寫進論文時（CREATED、
-       UPDATED）整批覆寫 OpenAlex 的關鍵字；STALE 與「識別碼分屬兩篇」（這一筆略過、計進
-       `identifiers_split`，整批照常）不寫關鍵字。某一列丟例外時先記一筆警告「每週更新套用時這一列寫不進去」（只帶
+       UPDATED）整批覆寫 OpenAlex 的關鍵字；STALE、「識別碼分屬兩篇」與「同一種識別碼對不上」
+       （這一筆略過、分別計進 `identifiers_split`、`same_scheme_mismatch`，整批照常）不寫關鍵字。
+       某一列丟例外時先記一筆警告「每週更新套用時這一列寫不進去」（只帶
        `weekly_run_id`、`external_key` 與錯誤類別，不帶內容）再往上丟。`source_hash` 變了的
        既有論文計進 `changed`。
     4. `update_papers_first_snapshot`：追蹤範圍內、還沒有著落的論文一律指到這個快照。
@@ -613,6 +617,7 @@ def apply_weekly_update(
         first_snapshot_assigned=tally.first_snapshot_assigned,
         changed=tally.changed,
         identifiers_split=tally.identifiers_split,
+        same_scheme_mismatch=tally.same_scheme_mismatch,
     )
     if tally.staged == 0:
         # 每週整本重掃，正常不會 0 篇；0 篇多半是查詢或解析壞了。照樣發佈（行為不變），
@@ -629,6 +634,7 @@ def apply_weekly_update(
         first_snapshot_assigned=tally.first_snapshot_assigned,
         changed=tally.changed,
         identifiers_split=tally.identifiers_split,
+        same_scheme_mismatch=tally.same_scheme_mismatch,
         seconds=round(time.monotonic() - started, 1),
     )
     return result
@@ -683,6 +689,7 @@ class _ApplyTally:
     first_snapshot_assigned: int = 0
     changed: int = 0
     identifiers_split: int = 0
+    same_scheme_mismatch: int = 0
 
     def count(self, result: UpsertResult) -> None:
         """記下一筆寫入的結果。"""
@@ -691,6 +698,9 @@ class _ApplyTally:
             return
         if result.outcome is UpsertOutcome.IDENTIFIERS_SPLIT:
             self.identifiers_split += 1
+            return
+        if result.outcome is UpsertOutcome.SAME_SCHEME_MISMATCH:
+            self.same_scheme_mismatch += 1
             return
         if result.outcome is UpsertOutcome.CREATED:
             self.created += 1
