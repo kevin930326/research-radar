@@ -608,8 +608,14 @@ def _upsert_concurrently(
     database: Database,
     first_paper: ParsedPaper,
     second_paper: ParsedPaper,
+    first_rows: dict[str, dict[str, list[tuple[Any, ...]]]] | None = None,
 ) -> tuple[UpsertResult, UpsertResult]:
-    """第一個交易寫完、還沒 commit 時，第二個交易開始寫；確認第二個卡在等鎖後才讓第一個 commit。"""
+    """第一個交易寫完、還沒 commit 時，第二個交易開始寫；確認第二個卡在等鎖後才讓第一個 commit。
+
+    給了 `first_rows` 時，第一個交易寫完、放行第二個之前，在同一個交易裡把它那篇四張表的整列
+    存進 `first_rows["rows"]`（同 `_hold_uncommitted`：commit 不會改這些列，所以它就是第一個
+    commit 後、第二個寫入前的樣子）。
+    """
     first_done = threading.Event()
     release = threading.Event()
     results: dict[str, UpsertResult] = {}
@@ -625,6 +631,8 @@ def _upsert_concurrently(
                     excluded_reason=None,
                     scope=SCOPE,
                 )
+                if first_rows is not None:
+                    first_rows["rows"] = _paper_targets_in(connection, results["first"].paper_id)
                 first_done.set()
                 assert release.wait(30)
         except BaseException as exc:
@@ -683,13 +691,17 @@ def test_concurrent_inserts_sharing_only_openalex_id_end_with_one_paper(
     # 第一個 commit 後，第二個要放掉自己剛建的論文與 DOI，重查到第一個建好的那篇。那篇已經有
     # DOI 10.1/a、帶來的 10.1/b 沒有主人：「同一種識別碼對不上」，什麼都不寫（ADR-0020 更新
     # 2026-11-22 第二節；原本是更新那篇並掛上 10.1/b）。
+    first_rows: dict[str, dict[str, list[tuple[Any, ...]]]] = {}
     first, second = _upsert_concurrently(
         papers_db,
         database,
         _paper(doi="10.1/a", openalex_id="W9"),
         _paper(doi="10.1/b", openalex_id="W9"),
+        first_rows,
     )
 
+    # 四張表的整列與列數，和第一個交易寫完（commit 後、第二個寫入前）的樣子逐欄相同。
+    _assert_only_these_papers_unchanged(papers_db, {first.paper_id: first_rows["rows"]})
     assert first.outcome is UpsertOutcome.CREATED
     assert second == _mismatch_result(first.paper_id, "doi", "10.1/a", "10.1/b")
     assert second.paper_id == first.paper_id
@@ -733,16 +745,22 @@ def test_concurrent_older_write_waits_for_lock_then_is_stale(
 def test_withdrawn_insert_releases_identifiers_before_waiting_for_paper_lock(
     papers_db: TestDatabase, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """三個連線交錯，重現「撤回新增」的死結推演（ADR-0020「鎖的順序」）：
+    """三個連線交錯，原本重現「撤回新增」的死結推演（ADR-0020「鎖的順序」）；現在守的是 B、C
+    撤回或重查後都判成「同一種識別碼對不上」、A 那篇什麼都沒被寫（ADR-0020 更新 2026-11-22
+    第二節）：
 
     1. A 新增 (10.1/a, W9)，還沒 commit。
     2. B 寫 (10.1/b, W9)：找不到既有的論文 → 新增、認領到 10.1/b、在 W9 等 A。
-    3. A commit。B 認領 W9 失敗、撤回自己的新增，正要去鎖 A 那篇論文時（測試在這裡讓 B 停住）……
-    4. C 寫 (10.1/b, W9)：經 W9 找到 A 那篇、先鎖住它，再認領 10.1/b。
+    3. A commit。B 認領 W9 失敗、退回保存點撤回自己的新增，正要去鎖 A 那篇論文時（測試在這裡讓
+       B 停住）……
+    4. C 寫 (10.1/b, W9)：經 W9 找到 A 那篇、先鎖住它，讀到它已經有 10.1/a、帶來的 10.1/b 沒有
+       主人 → 回 `same_scheme_mismatch`，不認領 10.1/b、不寫，C 結束。
+    5. B 放行後鎖住 A 那篇，同樣回 `same_scheme_mismatch`、不寫。
 
-    撤回時如果還佔著 10.1/b（舊做法：在交易裡 DELETE，刪掉的列要等整個交易結束才放），C 會等 B，
-    B 放行後又等 C 的論文鎖，互等成死結。現在 B 撤回是退回保存點，10.1/b 當下就放掉：C 不必等 B
-    就能做完並 commit；B 放行後等 C 結束，再更新同一篇。
+    C 不再認領 10.1/b，所以這條已經守不住「撤回時當下放掉識別碼、不死結」（改回在交易裡 DELETE 的
+    舊做法，這條仍會通過）；那個推演改由
+    `test_withdrawn_insert_then_paper_without_doi_gets_claimed_without_deadlock` 守。A 那篇四張表的
+    整列在 A 寫完時存下，C 結束後、B 結束後各比一次。
     """
     database = Database(papers_db.app_url, connect_timeout=5, pool_size=3)
     a_written = threading.Event()
@@ -750,6 +768,7 @@ def test_withdrawn_insert_releases_identifiers_before_waiting_for_paper_lock(
     b_paused = threading.Event()
     release_b = threading.Event()
     results: dict[str, UpsertResult] = {}
+    a_rows: dict[str, dict[str, list[tuple[Any, ...]]]] = {}
     errors: list[tuple[str, BaseException]] = []
     original_update_existing = papers_module._update_existing
 
@@ -773,6 +792,9 @@ def test_withdrawn_insert_releases_identifiers_before_waiting_for_paper_lock(
                     scope=SCOPE,
                 )
                 if before_commit is not None:
+                    # A 寫完、commit 前存下 A 那篇四張表的整列（commit 不會改這些列，所以它就是
+                    # A commit 後、B 與 C 寫入前的樣子）。
+                    a_rows["rows"] = _paper_targets_in(connection, results[name].paper_id)
                     a_written.set()
                     assert before_commit.wait(30)
         except BaseException as exc:
@@ -812,6 +834,7 @@ def test_withdrawn_insert_releases_identifiers_before_waiting_for_paper_lock(
         # A 那篇已經有 DOI 10.1/a、帶來的 10.1/b 沒有主人：「同一種識別碼對不上」，C 鎖住 A 那篇
         # 後什麼都不寫（ADR-0020 更新 2026-11-22 第二節；原本是 UPDATED）。死結的推演改由
         # `test_withdrawn_insert_then_paper_without_doi_gets_claimed_without_deadlock` 守著。
+        _assert_only_these_papers_unchanged(papers_db, {results["A"].paper_id: a_rows["rows"]})
         assert results["C"] == _mismatch_result(results["A"].paper_id, "doi", "10.1/a", "10.1/b")
     finally:
         release_a.set()
@@ -822,6 +845,8 @@ def test_withdrawn_insert_releases_identifiers_before_waiting_for_paper_lock(
 
     assert errors == []
     paper_id = results["A"].paper_id
+    # B 結束後再比一次：四張表的整列與列數仍是 A 寫完時的樣子。
+    _assert_only_these_papers_unchanged(papers_db, {paper_id: a_rows["rows"]})
     assert results["A"].outcome is UpsertOutcome.CREATED
     assert results["B"] == _mismatch_result(paper_id, "doi", "10.1/a", "10.1/b")
     assert _rows(papers_db, "SELECT count(*) FROM paper") == [(1,)]
@@ -1181,6 +1206,84 @@ def test_concurrent_different_openalex_ids_for_one_paper_attach_at_most_one(
     _assert_only_these_papers_unchanged(papers_db, {paper_p.paper_id: other_rows["rows"]})
     warnings = [entry for entry in captured["logs"] if entry["log_level"] == "warning"]
     assert warnings == [_mismatch_warning(paper_p.paper_id, "openalex", "W1", "W2")]
+
+
+class _RollBackError(Exception):
+    """測試用：讓交易一丟出例外、退回。"""
+
+
+def test_concurrent_attach_after_first_rolls_back_attaches_the_second(
+    papers_db: TestDatabase,
+) -> None:
+    """先到的交易替 P 掛 W1 後退回，後到的拿到鎖後照常掛上 W2（ADR-0020 更新 2026-11-22
+    第二節第 4 點）：
+
+    1. P 只有 10.1/p（已 commit）。交易一寫 (10.1/p, W1)：鎖住 P、掛上 W1、更新 P，還沒結束。
+    2. 這筆 (10.1/p, W2)：經 10.1/p 找到 P，在 P 的鎖上等交易一。
+    3. 交易一退回：這筆拿到鎖後重讀 P 的識別碼，讀不到 W1 → 不算對不上，照常掛上 W2、更新 P。
+    """
+    database = Database(papers_db.app_url, connect_timeout=5, pool_size=3)
+    paper_p = _upsert(database, _paper(doi="10.1/p", openalex_id=None, title="P"))
+    written = threading.Event()
+    release = threading.Event()
+    first_results: dict[str, UpsertResult] = {}
+    first_errors: list[BaseException] = []
+
+    def first() -> None:
+        try:
+            with database.transaction() as connection:
+                first_results["result"] = upsert_by_external_id(
+                    connection,
+                    _paper(doi="10.1/p", openalex_id="W1", title="From first", fetched_at=T2),
+                    origin=PaperOrigin.TRACKED,
+                    excluded_reason=None,
+                    scope=SCOPE,
+                )
+                written.set()
+                assert release.wait(30)
+                raise _RollBackError
+        except _RollBackError:
+            pass
+        except BaseException as exc:
+            first_errors.append(exc)
+        finally:
+            written.set()
+
+    results: dict[str, UpsertResult] = {}
+    errors: list[BaseException] = []
+
+    def mine() -> None:
+        try:
+            results["mine"] = _upsert(
+                database,
+                _paper(
+                    doi="10.1/p", openalex_id="W2", title="Mine", fetched_at=T2 + timedelta(days=1)
+                ),
+            )
+        except BaseException as exc:
+            errors.append(exc)
+
+    first_thread = threading.Thread(target=first)
+    thread = threading.Thread(target=mine)
+    try:
+        first_thread.start()
+        assert written.wait(30)
+        thread.start()
+        _wait_until_a_backend_waits_on_a_lock(papers_db)  # 這筆在 P 的鎖上等交易一
+    finally:
+        release.set()
+        for each in (first_thread, thread):
+            each.join(30)
+
+    assert first_errors == errors == []
+    assert first_results["result"] == UpsertResult(paper_p.paper_id, UpsertOutcome.UPDATED)
+    assert results["mine"] == UpsertResult(paper_p.paper_id, UpsertOutcome.UPDATED)
+    assert sorted(_rows(papers_db, "SELECT scheme, value_norm, paper_id FROM external_id")) == [
+        ("doi", "10.1/p", paper_p.paper_id),
+        ("openalex", "W2", paper_p.paper_id),
+    ]
+    assert _paper_row(papers_db, paper_p.paper_id)["title"] == "Mine"
+    assert _rows(papers_db, "SELECT count(*) FROM paper") == [(1,)]
 
 
 def _wait_until_a_backend_waits_on_a_lock(db: TestDatabase) -> None:
