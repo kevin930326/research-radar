@@ -205,7 +205,7 @@ class WeeklyApplyResult:
       心跳），只更新了 `updated_at`；不算失敗，sweep 之後補排時接著套用。
     - `snapshot_id`、`snapshot_number`、`as_of`：這次發佈的快照。
     - `staged`：讀到的暫存列數；`created`、`updated`：新增、更新的論文篇數；`stale`：資料比論文上的
-      舊、什麼都沒寫的篇數；`conflicts`：識別碼已經屬於另一篇論文、沒有掛上去的個數。
+      舊、什麼都沒寫的篇數。
     - `identifiers_split`：DOI 與 OpenAlex ID 屬於兩篇不同的論文、這一筆略過不寫的篇數（兩篇都
       不動，每一筆另有一行警告日誌；ADR-0020 更新 2026-11-22）。
     - `changed`：`updated` 裡 `source_hash` 變了的篇數（摘要、撤稿標記、書目欄位改了；只改被引用
@@ -223,7 +223,6 @@ class WeeklyApplyResult:
     created: int = 0
     updated: int = 0
     stale: int = 0
-    conflicts: int = 0
     first_snapshot_assigned: int = 0
     changed: int = 0
     identifiers_split: int = 0
@@ -611,7 +610,6 @@ def apply_weekly_update(
         created=tally.created,
         updated=tally.updated,
         stale=tally.stale,
-        conflicts=tally.conflicts,
         first_snapshot_assigned=tally.first_snapshot_assigned,
         changed=tally.changed,
         identifiers_split=tally.identifiers_split,
@@ -628,7 +626,6 @@ def apply_weekly_update(
         created=tally.created,
         updated=tally.updated,
         stale=tally.stale,
-        conflicts=tally.conflicts,
         first_snapshot_assigned=tally.first_snapshot_assigned,
         changed=tally.changed,
         identifiers_split=tally.identifiers_split,
@@ -683,7 +680,6 @@ class _ApplyTally:
     created: int = 0
     updated: int = 0
     stale: int = 0
-    conflicts: int = 0
     first_snapshot_assigned: int = 0
     changed: int = 0
     identifiers_split: int = 0
@@ -702,7 +698,6 @@ class _ApplyTally:
             self.updated += 1
             if result.source_changed:
                 self.changed += 1
-        self.conflicts += len(result.conflicts)
 
 
 def _read_run(

@@ -319,10 +319,11 @@ class SplitIdentifiers:
 
 @dataclass(frozen=True)
 class UpsertResult:
-    """寫入的結果。`conflicts`：已經屬於另一篇論文、所以沒有掛到這篇的識別碼（不搬、不合併）。
+    """寫入的結果。
 
     `source_changed`：更新既有論文時 `source_hash` 變了（含原本是 NULL；ADR-0028）；CREATED、
-    STALE 一律 False。不參與相等比較：兩個結果相等仍只看（論文, 結果, 衝突, 分屬兩篇）。
+    STALE、IDENTIFIERS_SPLIT 一律 False。不參與相等比較：兩個結果相等仍只看（論文, 結果,
+    分屬兩篇）。
 
     `split`：只有 `IDENTIFIERS_SPLIT` 時有值，帶兩個識別碼與各自所屬的論文；這時 `paper_id` 是
     DOI 所屬的那篇（照優先序本來會寫的那篇），但這筆資料沒有寫進任何論文，呼叫端當作略過。
@@ -330,6 +331,5 @@ class UpsertResult:
 
     paper_id: uuid.UUID
     outcome: UpsertOutcome
-    conflicts: tuple[ExternalId, ...] = ()
     source_changed: bool = dataclasses.field(default=False, compare=False)
     split: SplitIdentifiers | None = None

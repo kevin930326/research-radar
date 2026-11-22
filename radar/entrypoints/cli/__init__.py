@@ -343,7 +343,7 @@ def reparse() -> None:
     typer.echo(f"放進暫存表：{result.staged}")
     typer.echo(f"更新：{result.updated}")
     typer.echo(f"資料較舊、沒寫：{result.stale}")
-    typer.echo(f"識別碼衝突：{result.conflicts}")
+    typer.echo(f"識別碼衝突：{result.identifiers_split}")
 
 
 @weekly_run_app.command("report")

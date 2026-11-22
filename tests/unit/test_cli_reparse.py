@@ -34,7 +34,7 @@ RESULT = ReparseResult(
     staged=6,
     updated=7,
     stale=8,
-    conflicts=9,
+    identifiers_split=9,
 )
 
 

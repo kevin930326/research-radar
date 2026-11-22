@@ -11,12 +11,13 @@
 import hashlib
 import re
 import uuid
-from collections.abc import Iterator
+from collections.abc import Collection, Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
+from psycopg.rows import dict_row
 from sqlalchemy import Connection, event
 from structlog.testing import capture_logs
 
@@ -261,9 +262,7 @@ def test_only_known_papers_are_fetched_and_updated(
     database.statements.clear()
     result = _reparse(database, store, batch_size=2)
 
-    assert result == ReparseResult(
-        raw_keys=5, not_in_database=2, staged=3, updated=3, stale=0, conflicts=0
-    )
+    assert result == ReparseResult(raw_keys=5, not_in_database=2, staged=3, updated=3, stale=0)
     # 只 GET 已匯入的 3 篇，而且 GET 的時候沒有開著的交易。
     assert sorted(store.gets) == sorted(
         raw_object_key("openalex", record.sha256) for record in records[:3]
@@ -710,7 +709,7 @@ def test_identifier_conflict_is_counted(
         result = _reparse(database, store)
 
     assert _full_rows(reparse_db) == before
-    assert (result.updated, result.conflicts, result.identifiers_split) == (0, 0, 1)
+    assert (result.updated, result.identifiers_split) == (0, 1)
     assert _rows(reparse_db, "SELECT count(*) FROM paper") == [(2,)]
     [split] = [log for log in logs if log["event"].startswith("DOI 與 OpenAlex ID 屬於兩篇")]
     assert (split["doi_paper_id"], split["openalex_paper_id"]) == (
@@ -727,6 +726,31 @@ def _full_rows(db: TestDatabase) -> dict[str, list[tuple[Any, ...]]]:
         table: _rows(db, f"SELECT * FROM {table} ORDER BY id")
         for table in ("paper", "external_id", "paper_abstract", "paper_keyword")
     }
+
+
+# 每張表用哪一欄判斷「屬於這篇論文」：paper 看 id，其他三張看 paper_id。
+_PAPER_ID_COLUMN = {
+    "paper": "id",
+    "external_id": "paper_id",
+    "paper_abstract": "paper_id",
+    "paper_keyword": "paper_id",
+}
+
+
+def _rows_of_papers(
+    db: TestDatabase, paper_ids: Collection[uuid.UUID]
+) -> dict[str, list[dict[str, Any]]]:
+    """論文四張表裡屬於這些論文的整列（用欄位名稱篩，逐欄比對寫入前後用）。"""
+    with db.connect(APP_ROLE) as connection:
+        cursor = connection.cursor(row_factory=dict_row)
+        return {
+            table: [
+                row
+                for row in cursor.execute(f"SELECT * FROM {table} ORDER BY id").fetchall()
+                if row[column] in paper_ids
+            ]
+            for table, column in _PAPER_ID_COLUMN.items()
+        }
 
 
 def test_split_identifiers_row_is_skipped_and_the_rest_is_applied(
@@ -760,24 +784,17 @@ def test_split_identifiers_row_is_skipped_and_the_rest_is_applied(
     keywords_b = _rows(reparse_db, keywords, paper_b.paper_id)
     assert len(keywords_a) == len(keywords_b) == 1
     split_ids = [paper_a.paper_id, paper_b.paper_id]
-    before = {
-        table: [row for row in rows if row[0] in split_ids or row[1] in split_ids]
-        for table, rows in _full_rows(reparse_db).items()
-    }
+    before = _rows_of_papers(reparse_db, split_ids)
+    assert all(before[table] for table in ("paper", "external_id", "paper_keyword"))
 
     with capture_logs() as logs:
         result = _reparse(database, store)
 
     assert _rows(reparse_db, keywords, paper_a.paper_id) == keywords_a
     assert _rows(reparse_db, keywords, paper_b.paper_id) == keywords_b
-    after = {
-        table: [row for row in rows if row[0] in split_ids or row[1] in split_ids]
-        for table, rows in _full_rows(reparse_db).items()
-    }
+    after = _rows_of_papers(reparse_db, split_ids)
     assert after == before
-    assert result == ReparseResult(
-        raw_keys=3, staged=3, updated=2, stale=0, conflicts=0, identifiers_split=1
-    )
+    assert result == ReparseResult(raw_keys=3, staged=3, updated=2, stale=0, identifiers_split=1)
     for work, paper_id in zip(works[1:], others, strict=True):
         assert _rows(reparse_db, "SELECT referenced_works FROM paper WHERE id = %s", paper_id) == [
             (list(parse_openalex_work(work_bytes(work), fetched_at=T1).referenced_works),)
