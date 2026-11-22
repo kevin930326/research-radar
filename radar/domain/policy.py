@@ -151,7 +151,13 @@ def _publisher_name_key_once(value: str) -> str:
 
 
 def _journal_issn_l_key(value: str) -> str:
-    """期刊 ISSN-L 的比對鍵：`normalize_issn_l`；看不懂的照原字串去頭尾空白、轉大寫。"""
+    """論文的期刊 ISSN-L 的比對鍵：`normalize_issn_l`；看不懂的照原字串去頭尾空白、轉大寫。
+
+    看不懂時這裡捕捉 `InvalidIdentifierError`，回傳備用字串，不丟錯；備用字串是原字串去頭尾空白、
+    轉大寫的結果。排除清單只收 `normalize_issn_l` 看得懂的值（建立時正規化成 `NNNN-NNNC`，看不懂的
+    直接丟錯），而備用字串不是 `NNNN-NNNC` 這種標準格式，所以永遠對不上清單：論文的 ISSN-L 看不懂
+    時，期刊這一道等於沒有對上（和 None 一樣），非標準寫法不會被排除。
+    """
     try:
         return normalize_issn_l(value)
     except InvalidIdentifierError:
@@ -229,7 +235,7 @@ def is_demo_eligible(
     publisher_names: Collection[str],
     excluded: PublisherExclusions | None,
     *,
-    journal_issn_l: str | None = None,
+    journal_issn_l: str | None,
 ) -> bool:
     """這篇論文能不能在示範站放完整內容。全專案只有這個函式做這個判定（ADR-0007 第 5 點）。
 

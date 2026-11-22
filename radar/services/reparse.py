@@ -92,10 +92,9 @@ class ReparseResult:
       （物件不見、內容的 SHA-256 對不上或解壓不了、解析失敗、解析出的 OpenAlex ID 和外部鍵不同）。
     - `staged`：放進暫存表的篇數。
     - `updated`：套用時寫進論文的篇數；`stale`：資料比論文上的舊、什麼都沒寫的篇數。
-    - `conflicts`：識別碼已經屬於另一篇論文、沒有掛上去的個數。
     - `identifiers_split`：DOI 與 OpenAlex ID 屬於兩篇不同的論文、這一筆略過不寫的篇數（兩篇都不動、
-      算「這次沒有寫到」，照下面的重判；ADR-0020 更新 2026-11-22）。只進「重新解析結束」日誌，
-      `radar reparse` 畫面不印。
+      算「這次沒有寫到」，照下面的重判；ADR-0020 更新 2026-11-22）。`radar reparse` 畫面的
+      「識別碼衝突：」那一行印的就是它。
     - `demo_rechecked`：套用後重判「示範站可用」的篇數（這次沒有重寫到、原本 `demo_eligible` 為
       真的論文；ADR-0052 第 9 點）；`demo_revoked`：其中從 true 改成 false 的篇數。
     """
@@ -109,7 +108,6 @@ class ReparseResult:
     staged: int = 0
     updated: int = 0
     stale: int = 0
-    conflicts: int = 0
     demo_rechecked: int = 0
     demo_revoked: int = 0
     identifiers_split: int = 0
@@ -127,7 +125,6 @@ class _Counts:
     staged: int = 0
     updated: int = 0
     stale: int = 0
-    conflicts: int = 0
     demo_rechecked: int = 0
     demo_revoked: int = 0
     identifiers_split: int = 0
@@ -252,7 +249,6 @@ def _reparse_locked(
         staged=counts.staged,
         updated=counts.updated,
         stale=counts.stale,
-        conflicts=counts.conflicts,
         demo_rechecked=counts.demo_rechecked,
         demo_revoked=counts.demo_revoked,
         identifiers_split=counts.identifiers_split,
@@ -352,7 +348,6 @@ def _apply(
                     continue
                 counts.updated += 1
                 rewritten.add(result.paper_id)
-                counts.conflicts += len(result.conflicts)
                 update_paper_keywords(
                     connection, result.paper_id, KeywordSource.OPENALEX, row.paper.keywords
                 )

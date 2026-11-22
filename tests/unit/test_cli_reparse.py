@@ -34,7 +34,7 @@ RESULT = ReparseResult(
     staged=6,
     updated=7,
     stale=8,
-    conflicts=9,
+    identifiers_split=9,
 )
 
 
@@ -98,6 +98,7 @@ def test_success_prints_every_number(calls: dict[str, Any]) -> None:
         "8",
         "9",
     ]
+    assert lines[-1] == "識別碼衝突：9"
     assert calls["build_database"] == {"pool_size": 2}
     reparse = calls["reparse"]
     assert isinstance(reparse["actor"], SystemViewer)

@@ -701,10 +701,9 @@ def upsert_by_external_id(
        認領不到（開始找的時候都沒有主人，所以只可能是並行的另一個交易剛建好同一篇；會等那個交易
        結束才知道），就退回保存點：剛新增的論文與剛認領的識別碼一起放掉，再改走第 2 步。結果和
        兩個交易依序執行時一樣。
-    4. （舊行為）識別碼已經屬於另一篇論文時不搬、不合併：放在結果的 `conflicts`，並記警告日誌。
-       判成 `stale` 時不掛任何識別碼，也不回報衝突。只有 DOI 與 OpenAlex ID 兩種識別碼時，
-       這種情況一定是第 5 點的「識別碼分屬兩篇」，所以 `conflicts` 現在不會有值（欄位保留，
-       之後另開 PR 處理）；現行流程看第 5 點。
+    4. 識別碼已經屬於另一篇論文時不搬、不合併。只有 DOI 與 OpenAlex ID 兩種識別碼，而且至少
+       一個屬於目標論文，所以這種情況一定是第 5 點的「識別碼分屬兩篇」；判成 `stale` 時不掛任何
+       識別碼。原本放這種識別碼的結果欄位 `conflicts` 已經拿掉（ADR-0020 更新 2026-11-22）。
     5. DOI 與 OpenAlex ID 屬於兩篇不同的既有論文（「識別碼分屬兩篇」，ADR-0020 更新 2026-11-22）：
        兩篇都什麼都不寫（欄位、識別碼、抓取時間、`demo_eligible`、`lab_visible`、摘要），回
        `identifiers_split`（`split` 帶兩個識別碼與各自的論文），記一行警告日誌（只帶 id 與識別碼）。
@@ -937,7 +936,7 @@ def _update_existing(
     values: Mapping[str, object],
     fetched_at: datetime,
 ) -> UpsertResult:
-    """先鎖住論文再比抓取時間；比較舊就不寫（`stale`，不掛識別碼、不回報衝突），
+    """先鎖住論文再比抓取時間；比較舊就不寫（`stale`，不掛識別碼），
     否則先掛上還沒有主人的識別碼、再更新論文。
 
     掛識別碼時被並行的交易搶先掛到另一篇（認領失敗、主人不是這篇）：DOI 與 OpenAlex ID 分屬兩篇，
@@ -1007,17 +1006,8 @@ def _update_existing(
         {**values, "id": paper_id, "source_changed": source_changed},
     )
 
-    # 識別碼屬於別篇的情況都在上面判成「分屬兩篇」了，`conflicts` 照舊算（ADR-0020 更新
-    # 2026-11-22：現在不會有值，欄位留著）。
-    conflicts: list[ExternalId] = []
-    for external_id in ids:
-        owner = current[external_id]
-        if owner != paper_id:
-            _warn_conflict(paper_id, external_id, owner)
-            conflicts.append(external_id)
-    return UpsertResult(
-        paper_id, UpsertOutcome.UPDATED, tuple(conflicts), source_changed=source_changed
-    )
+    # 識別碼屬於別篇的情況都在上面判成「分屬兩篇」了，走到這裡的識別碼都屬於這篇。
+    return UpsertResult(paper_id, UpsertOutcome.UPDATED, source_changed=source_changed)
 
 
 def _write_abstract(connection: Connection, paper_id: uuid.UUID, paper: ParsedPaper) -> None:
@@ -1199,13 +1189,3 @@ def update_papers_first_snapshot(connection: Connection, snapshot_id: uuid.UUID)
         {"snapshot_id": snapshot_id},
     )
     return rows.rowcount
-
-
-def _warn_conflict(paper_id: uuid.UUID, external_id: ExternalId, owner: uuid.UUID) -> None:
-    log.warning(
-        "識別碼已經屬於另一篇論文，沒有搬動也沒有合併",
-        paper_id=str(paper_id),
-        scheme=external_id.scheme.value,
-        value_norm=external_id.value_norm,
-        owner_paper_id=str(owner),
-    )

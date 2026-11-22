@@ -277,7 +277,6 @@ def test_split_identifiers_write_nothing_to_either_paper(
 
     assert _write_targets(papers_db) == before
     assert result == _split_result(paper_b.paper_id, "10.1/b", paper_a.paper_id, "W2")
-    assert result.conflicts == ()
     assert result.source_changed is False
     warnings = [entry for entry in logs if entry["log_level"] == "warning"]
     assert warnings == [
@@ -313,6 +312,7 @@ def test_split_identifiers_keep_doi_paper_not_demo_eligible(
         record.publisher_ids,
         record.publisher_names,
         DEMO_SCOPE.demo_publishers,
+        journal_issn_l=None,
     )
 
     with database.transaction() as connection:
@@ -461,7 +461,6 @@ def test_concurrent_inserts_end_with_one_paper(papers_db: TestDatabase, database
     assert first.outcome is UpsertOutcome.CREATED
     assert second.outcome is UpsertOutcome.UPDATED
     assert second.paper_id == first.paper_id
-    assert second.conflicts == ()
     assert _rows(papers_db, "SELECT count(*) FROM paper") == [(1,)]
     assert _rows(papers_db, "SELECT count(*) FROM external_id") == [(2,)]
     row = _paper_row(papers_db, first.paper_id)
@@ -626,8 +625,11 @@ def _hold_uncommitted(
     """另開一個執行緒寫 `paper`、寫完先不 commit，等 `release` 才結束交易。
 
     寫完時在同一個交易裡把這篇四張表的整列存進 `snapshots["rows"]`：commit 不會改這些列，
-    所以它就是這篇 commit 後的樣子（呼叫的測試都在另一筆寫入開始、等著它之後才放行 commit，
-    沒有別的時間點能存）。
+    所以它就是這篇 commit 後的樣子。呼叫的測試都等另一筆寫入開始、而且已經在等鎖之後才放行
+    commit，沒有別的時間點能存。那筆寫入等的不一定是這個交易：
+    `test_concurrent_split_found_after_withdrawn_insert_writes_nothing` 先放行交易二時，那筆寫入
+    在 10.1/a 等的是交易一，不是交易二；`test_concurrent_split_found_while_claiming_writes_nothing`
+    放行的就是那筆寫入在等的交易（W2）。
     """
     results: dict[str, UpsertResult] = {}
     snapshots: dict[str, dict[str, list[tuple[Any, ...]]]] = {}
