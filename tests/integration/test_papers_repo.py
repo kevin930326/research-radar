@@ -16,8 +16,11 @@ from structlog.testing import capture_logs
 
 from radar.domain.identifiers import ExternalId, IdentifierScheme
 from radar.domain.papers import (
+    KeywordSource,
     PaperOrigin,
+    ParsedKeyword,
     ParsedPaper,
+    SameSchemeMismatch,
     SplitIdentifiers,
     UpsertOutcome,
     UpsertResult,
@@ -369,6 +372,211 @@ def test_split_identifiers_keep_out_of_scope_paper_private(
     assert _write_targets(papers_db) == before
 
 
+# --- 同一種識別碼對不上：什麼都不寫（ADR-0020 更新 2026-11-22 第二節） --------------------------
+
+
+def _mismatch_result(paper_id: uuid.UUID, scheme: str, stored: str, incoming: str) -> UpsertResult:
+    identifier_scheme = IdentifierScheme(scheme)
+    return UpsertResult(
+        paper_id,
+        UpsertOutcome.SAME_SCHEME_MISMATCH,
+        mismatch=SameSchemeMismatch(
+            paper_id=paper_id,
+            stored=ExternalId(identifier_scheme, stored),
+            incoming=ExternalId(identifier_scheme, incoming),
+        ),
+    )
+
+
+def _mismatch_warning(paper_id: uuid.UUID, scheme: str, stored: str, incoming: str) -> object:
+    return {
+        "event": "論文已經有同一種、不同值的識別碼，這一筆略過不寫",
+        "log_level": "warning",
+        "paper_id": str(paper_id),
+        "scheme": scheme,
+        "stored": stored,
+        "incoming": incoming,
+    }
+
+
+def _existing_paper_with_everything(database: Database) -> UpsertResult:
+    """P＝(10.1/p, W2)：匯入的、追蹤範圍外（lab_visible = false），有摘要與關鍵字。"""
+    created = _upsert(
+        database,
+        _paper(
+            doi="10.1/p",
+            openalex_id="W2",
+            title="P",
+            journal_issn_l="1234-5678",
+            abstract="P abstract",
+            abstract_source="openalex",
+        ),
+        origin=PaperOrigin.IMPORT,
+    )
+    with database.transaction() as connection:
+        papers_module.update_paper_keywords(
+            connection,
+            created.paper_id,
+            KeywordSource.OPENALEX,
+            [ParsedKeyword(key="p-keyword", display_name="P keyword")],
+        )
+    return created
+
+
+def _other_work(**overrides: object) -> ParsedPaper:
+    """比 P 新、書目全部不同、授權與出版社算出來示範站可用、在追蹤範圍內的一筆資料。"""
+    fields: dict[str, object] = {
+        "title": "Other work",
+        "fetched_at": T2,
+        "publication_year": 2024,
+        "abstract": "Other abstract",
+        "abstract_source": "openalex",
+        "primary_license": "cc-by",
+        "publisher_names": ("Open Press",),
+        "journal_issn_l": TRACKED_ISSN,
+    }
+    fields.update(overrides)
+    return _paper(**fields)
+
+
+@pytest.mark.parametrize(
+    ("record", "scheme", "stored", "incoming"),
+    [
+        # 方向一：用 DOI 找到 P，帶來的 OpenAlex ID（W1）沒有主人，P 已經有 W2。
+        pytest.param({"doi": "10.1/p", "openalex_id": "W1"}, "openalex", "W2", "W1", id="by-doi"),
+        # 方向二：用 OpenAlex ID 找到 P，帶來的 DOI（10.1/q）沒有主人，P 已經有 10.1/p。
+        pytest.param(
+            {"doi": "10.1/q", "openalex_id": "W2"}, "doi", "10.1/p", "10.1/q", id="by-openalex"
+        ),
+    ],
+)
+def test_same_scheme_mismatch_writes_nothing(
+    papers_db: TestDatabase,
+    database: Database,
+    record: dict[str, object],
+    scheme: str,
+    stored: str,
+    incoming: str,
+) -> None:
+    paper_p = _existing_paper_with_everything(database)
+    before = _write_targets(papers_db)
+    assert before["paper_abstract"]
+    assert before["paper_keyword"]
+
+    with capture_logs() as logs, database.transaction() as connection:
+        result = upsert_by_external_id(
+            connection,
+            _other_work(**record),
+            origin=PaperOrigin.EXPANSION,
+            excluded_reason="some_rule",
+            scope=DEMO_SCOPE,
+        )
+
+    assert _write_targets(papers_db) == before
+    assert {table: len(rows) for table, rows in _write_targets(papers_db).items()} == {
+        "paper": 1,
+        "external_id": 2,
+        "paper_abstract": 1,
+        "paper_keyword": 1,
+    }
+    assert result == _mismatch_result(paper_p.paper_id, scheme, stored, incoming)
+    assert result.split is None
+    assert result.source_changed is False
+    warnings = [entry for entry in logs if entry["log_level"] == "warning"]
+    assert warnings == [_mismatch_warning(paper_p.paper_id, scheme, stored, incoming)]
+
+
+def test_same_scheme_mismatch_keeps_paper_not_demo_eligible(
+    papers_db: TestDatabase, database: Database
+) -> None:
+    # C-H2：P 沒有授權（demo_eligible = false）；這筆 (10.1/p, W1) 的授權與出版社算出來是 true。
+    # 以前會把這筆寫進 P、掛上 W1，P 變成示範站可用；現在 P 不動。
+    paper_p = _upsert(database, _paper(doi="10.1/p", openalex_id="W2", title="P"))
+    before = _write_targets(papers_db)
+    record = _other_work(doi="10.1/p", openalex_id="W1")
+    assert is_demo_eligible(
+        record.primary_license,
+        record.publisher_ids,
+        record.publisher_names,
+        DEMO_SCOPE.demo_publishers,
+        journal_issn_l=record.journal_issn_l,
+    )
+
+    with database.transaction() as connection:
+        result = upsert_by_external_id(
+            connection, record, origin=PaperOrigin.TRACKED, excluded_reason=None, scope=DEMO_SCOPE
+        )
+
+    assert _rows(papers_db, "SELECT demo_eligible FROM paper WHERE id = %s", paper_p.paper_id) == [
+        (False,)
+    ]
+    assert _write_targets(papers_db) == before
+    assert result == _mismatch_result(paper_p.paper_id, "openalex", "W2", "W1")
+
+
+def test_same_scheme_mismatch_wins_over_stale(papers_db: TestDatabase, database: Database) -> None:
+    # 判斷順序：和「分屬兩篇」一樣，先看同一種識別碼對不對得上，再比新舊。這筆比 P 舊，仍回
+    # 「同一種識別碼對不上」（兩種都什麼都不寫，只差在結果與警告）。
+    paper_p = _upsert(database, _paper(doi="10.1/p", openalex_id="W2", fetched_at=T2))
+    before = _write_targets(papers_db)
+
+    result = _upsert(database, _paper(doi="10.1/p", openalex_id="W1", fetched_at=T1))
+
+    assert _write_targets(papers_db) == before
+    assert result == _mismatch_result(paper_p.paper_id, "openalex", "W2", "W1")
+
+
+@pytest.mark.parametrize(
+    "record",
+    [
+        # 方向一：用 DOI 找到 P，OpenAlex ID 只是寫法不同（網址、小寫），正規化後就是 W2。
+        pytest.param(
+            {"doi": "10.1/p", "openalex_id": "https://openalex.org/w2"}, id="by-doi-openalex-url"
+        ),
+        # 方向二：用 OpenAlex ID 找到 P，DOI 只是寫法不同（大寫、網址前綴），正規化後就是 10.1/p。
+        pytest.param(
+            {"doi": "https://doi.org/10.1/P", "openalex_id": "W2"}, id="by-openalex-doi-url"
+        ),
+    ],
+)
+def test_same_identifier_written_differently_is_not_a_mismatch(
+    papers_db: TestDatabase, database: Database, record: dict[str, object]
+) -> None:
+    created = _upsert(database, _paper(doi="10.1/p", openalex_id="W2", title="Old"))
+
+    result = _upsert(database, _paper(title="New", fetched_at=T2, **record))
+
+    assert result == UpsertResult(created.paper_id, UpsertOutcome.UPDATED)
+    assert _paper_row(papers_db, created.paper_id)["title"] == "New"
+    assert sorted(_rows(papers_db, "SELECT scheme, value_norm, paper_id FROM external_id")) == [
+        ("doi", "10.1/p", created.paper_id),
+        ("openalex", "W2", created.paper_id),
+    ]
+
+
+@pytest.mark.parametrize(
+    "record",
+    [
+        pytest.param({"doi": "10.1/p", "openalex_id": None}, id="doi-only"),
+        pytest.param({"doi": None, "openalex_id": "W2"}, id="openalex-only"),
+    ],
+)
+def test_only_one_identifier_updates_paper_that_has_both(
+    papers_db: TestDatabase, database: Database, record: dict[str, object]
+) -> None:
+    # 只帶一個識別碼：沒有「另一種」可以對不上，照舊更新（行為不變）。
+    created = _upsert(database, _paper(doi="10.1/p", openalex_id="W2", title="Old"))
+
+    result = _upsert(database, _paper(title="New", fetched_at=T2, **record))
+
+    assert result == UpsertResult(created.paper_id, UpsertOutcome.UPDATED)
+    assert _paper_row(papers_db, created.paper_id)["title"] == "New"
+    assert sorted(_rows(papers_db, "SELECT scheme, value_norm, paper_id FROM external_id")) == [
+        ("doi", "10.1/p", created.paper_id),
+        ("openalex", "W2", created.paper_id),
+    ]
+
+
 def test_found_by_doi_gets_the_new_openalex_id(papers_db: TestDatabase, database: Database) -> None:
     # 只有一個識別碼找到、另一個沒有主人：照舊更新並掛上（行為不變）。
     created = _upsert(database, _paper(doi="10.1/four", openalex_id=None, title="Old"))
@@ -472,7 +680,9 @@ def test_concurrent_inserts_sharing_only_openalex_id_end_with_one_paper(
     papers_db: TestDatabase, database: Database
 ) -> None:
     # 兩個交易的 DOI 不同、OpenAlex ID 相同：第二個認領到自己的 DOI，卻在 OpenAlex ID 卡住；
-    # 第一個 commit 後，第二個要放掉自己剛建的論文與 DOI，改成更新第一個建好的那篇。
+    # 第一個 commit 後，第二個要放掉自己剛建的論文與 DOI，重查到第一個建好的那篇。那篇已經有
+    # DOI 10.1/a、帶來的 10.1/b 沒有主人：「同一種識別碼對不上」，什麼都不寫（ADR-0020 更新
+    # 2026-11-22 第二節；原本是更新那篇並掛上 10.1/b）。
     first, second = _upsert_concurrently(
         papers_db,
         database,
@@ -481,14 +691,21 @@ def test_concurrent_inserts_sharing_only_openalex_id_end_with_one_paper(
     )
 
     assert first.outcome is UpsertOutcome.CREATED
-    assert second.outcome is UpsertOutcome.UPDATED
+    assert second == _mismatch_result(first.paper_id, "doi", "10.1/a", "10.1/b")
     assert second.paper_id == first.paper_id
     assert _rows(papers_db, "SELECT count(*) FROM paper") == [(1,)]
     assert sorted(_rows(papers_db, "SELECT scheme, value_norm, paper_id FROM external_id")) == [
         ("doi", "10.1/a", first.paper_id),
-        ("doi", "10.1/b", first.paper_id),
         ("openalex", "W9", first.paper_id),
     ]
+    # 論文列停在第一個交易新增時的樣子（沒有被更新過：updated_at 仍等於 created_at）。
+    assert _rows(
+        papers_db,
+        "SELECT origin, title, openalex_fetched_at, updated_at = created_at,"
+        " source_changed_at FROM paper",
+    ) == [("tracked", "A study", T1, True, None)]
+    assert _rows(papers_db, "SELECT count(*) FROM paper_abstract") == [(0,)]
+    assert _rows(papers_db, "SELECT count(*) FROM paper_keyword") == [(0,)]
 
 
 def test_concurrent_older_write_waits_for_lock_then_is_stale(
@@ -592,7 +809,10 @@ def test_withdrawn_insert_releases_identifiers_before_waiting_for_paper_lock(
         # C 不必等 B：B 撤回時已經放掉 10.1/b。舊做法下 C 會卡在 10.1/b 等 B（到語句逾時）。
         assert not thread_c.is_alive()
         assert errors == []
-        assert results["C"] == UpsertResult(results["A"].paper_id, UpsertOutcome.UPDATED)
+        # A 那篇已經有 DOI 10.1/a、帶來的 10.1/b 沒有主人：「同一種識別碼對不上」，C 鎖住 A 那篇
+        # 後什麼都不寫（ADR-0020 更新 2026-11-22 第二節；原本是 UPDATED）。死結的推演改由
+        # `test_withdrawn_insert_then_paper_without_doi_gets_claimed_without_deadlock` 守著。
+        assert results["C"] == _mismatch_result(results["A"].paper_id, "doi", "10.1/a", "10.1/b")
     finally:
         release_a.set()
         release_b.set()
@@ -603,15 +823,15 @@ def test_withdrawn_insert_releases_identifiers_before_waiting_for_paper_lock(
     assert errors == []
     paper_id = results["A"].paper_id
     assert results["A"].outcome is UpsertOutcome.CREATED
-    assert results["B"] == UpsertResult(paper_id, UpsertOutcome.UPDATED)
+    assert results["B"] == _mismatch_result(paper_id, "doi", "10.1/a", "10.1/b")
     assert _rows(papers_db, "SELECT count(*) FROM paper") == [(1,)]
     assert sorted(_rows(papers_db, "SELECT scheme, value_norm, paper_id FROM external_id")) == [
         ("doi", "10.1/a", paper_id),
-        ("doi", "10.1/b", paper_id),
         ("openalex", "W9", paper_id),
     ]
-    # B 在 C commit 之後才寫，所以留下的是 B 的標題。
-    assert _paper_row(papers_db, paper_id)["title"] == "B"
+    # B、C 都沒寫：留下的是 A 新增時的論文列（updated_at 仍等於 created_at）。
+    assert _paper_row(papers_db, paper_id)["title"] == "A study"
+    assert _rows(papers_db, "SELECT updated_at = created_at FROM paper") == [(True,)]
 
 
 def _hold_uncommitted(
@@ -803,6 +1023,164 @@ def test_concurrent_split_found_while_claiming_writes_nothing(
     _assert_only_these_papers_unchanged(
         papers_db, {paper_b.paper_id: targets_b, paper_a: other_rows["rows"]}
     )
+
+
+def test_withdrawn_insert_then_paper_without_doi_gets_claimed_without_deadlock(
+    papers_db: TestDatabase, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """同 `test_withdrawn_insert_releases_identifiers_before_waiting_for_paper_lock` 的死結推演，
+    但 A 只有 OpenAlex ID（沒有 DOI），所以 C 鎖住 A 那篇後真的會去認領 10.1/b（不會變成
+    「同一種識別碼對不上」，ADR-0020 更新 2026-11-22 第二節）：
+
+    1. A 新增 (沒有 DOI, W9)，還沒 commit。
+    2. B 寫 (10.1/b, W9)：新增、認領到 10.1/b、在 W9 等 A。
+    3. A commit。B 撤回自己的新增，正要去鎖 A 那篇時停住。
+    4. C 寫 (10.1/b, W9)：經 W9 鎖住 A 那篇、認領 10.1/b。B 撤回時已經放掉 10.1/b，C 不必等 B。
+    5. B 放行後等 C 結束，再更新同一篇（10.1/b 已經是那篇的，值相同，不算對不上）。
+    """
+    database = Database(papers_db.app_url, connect_timeout=5, pool_size=3)
+    a_written = threading.Event()
+    release_a = threading.Event()
+    b_paused = threading.Event()
+    release_b = threading.Event()
+    results: dict[str, UpsertResult] = {}
+    errors: list[tuple[str, BaseException]] = []
+    original_update_existing = papers_module._update_existing
+
+    def pause_b_before_paper_lock(*args: Any, **kwargs: Any) -> UpsertResult:
+        if threading.current_thread().name == "B":
+            b_paused.set()
+            assert release_b.wait(30)
+        return original_update_existing(*args, **kwargs)
+
+    monkeypatch.setattr(papers_module, "_update_existing", pause_b_before_paper_lock)
+
+    def run(name: str, paper: ParsedPaper, before_commit: threading.Event | None = None) -> None:
+        try:
+            with database.transaction() as connection:
+                results[name] = upsert_by_external_id(
+                    connection,
+                    paper,
+                    origin=PaperOrigin.TRACKED,
+                    excluded_reason=None,
+                    scope=SCOPE,
+                )
+                if before_commit is not None:
+                    a_written.set()
+                    assert before_commit.wait(30)
+        except BaseException as exc:
+            errors.append((name, exc))
+        finally:
+            if name == "A":
+                a_written.set()
+            if name == "B":
+                b_paused.set()
+
+    thread_a = threading.Thread(
+        target=run, name="A", args=("A", _paper(doi=None, openalex_id="W9"), release_a)
+    )
+    thread_b = threading.Thread(
+        target=run, name="B", args=("B", _paper(doi="10.1/b", openalex_id="W9", title="B"))
+    )
+    thread_c = threading.Thread(
+        target=run, name="C", args=("C", _paper(doi="10.1/b", openalex_id="W9", title="C"))
+    )
+    threads = [thread_a, thread_b, thread_c]
+    try:
+        thread_a.start()
+        assert a_written.wait(30)
+        thread_b.start()
+        _wait_until_a_backend_waits_on_a_lock(papers_db)  # B 在 W9 等 A
+        release_a.set()
+        assert b_paused.wait(30)
+        assert errors == []
+        assert "B" not in results
+
+        thread_c.start()
+        thread_c.join(15)
+        assert not thread_c.is_alive()
+        assert errors == []
+        assert results["C"] == UpsertResult(results["A"].paper_id, UpsertOutcome.UPDATED)
+    finally:
+        release_a.set()
+        release_b.set()
+        for thread in threads:
+            if thread.ident is not None:
+                thread.join(30)
+
+    assert errors == []
+    paper_id = results["A"].paper_id
+    assert results["A"].outcome is UpsertOutcome.CREATED
+    assert results["B"] == UpsertResult(paper_id, UpsertOutcome.UPDATED)
+    assert _rows(papers_db, "SELECT count(*) FROM paper") == [(1,)]
+    assert sorted(_rows(papers_db, "SELECT scheme, value_norm, paper_id FROM external_id")) == [
+        ("doi", "10.1/b", paper_id),
+        ("openalex", "W9", paper_id),
+    ]
+    assert _paper_row(papers_db, paper_id)["title"] == "B"
+
+
+def test_concurrent_different_openalex_ids_for_one_paper_attach_at_most_one(
+    papers_db: TestDatabase,
+) -> None:
+    """兩個交易同時替同一篇 P 掛不同值的 OpenAlex ID，最多只有一個掛上：
+
+    1. P 只有 10.1/p（已 commit）。交易一寫 (10.1/p, W1)：鎖住 P、掛上 W1、更新 P，還沒 commit。
+    2. 這筆 (10.1/p, W2)：經 10.1/p 找到 P，在 P 的鎖上等交易一。
+    3. 交易一 commit：這筆拿到鎖後重讀 P 的識別碼，看到 W1 → 「同一種識別碼對不上」，什麼都不寫。
+    """
+    database = Database(papers_db.app_url, connect_timeout=5, pool_size=3)
+    paper_p = _upsert(database, _paper(doi="10.1/p", openalex_id=None, title="P"))
+    release = threading.Event()
+    written = threading.Event()
+    other, other_results, other_rows, other_errors = _hold_uncommitted(
+        database,
+        _paper(doi="10.1/p", openalex_id="W1", title="From first", fetched_at=T2),
+        written,
+        release,
+    )
+    results: dict[str, UpsertResult] = {}
+    captured: dict[str, list[Any]] = {}
+    errors: list[BaseException] = []
+
+    def mine() -> None:
+        try:
+            with capture_logs() as logs:
+                results["mine"] = _upsert(
+                    database,
+                    _paper(
+                        doi="10.1/p",
+                        openalex_id="W2",
+                        title="Mine",
+                        fetched_at=T2 + timedelta(days=1),
+                        abstract="Mine abstract",
+                        abstract_source="openalex",
+                    ),
+                )
+            captured["logs"] = logs
+        except BaseException as exc:
+            errors.append(exc)
+
+    thread = threading.Thread(target=mine)
+    try:
+        assert written.wait(30)
+        thread.start()
+        _wait_until_a_backend_waits_on_a_lock(papers_db)  # 這筆在 P 的鎖上等交易一
+    finally:
+        release.set()
+        for each in (other, thread):
+            each.join(30)
+
+    assert other_errors == errors == []
+    assert other_results["result"] == UpsertResult(paper_p.paper_id, UpsertOutcome.UPDATED)
+    assert results["mine"] == _mismatch_result(paper_p.paper_id, "openalex", "W1", "W2")
+    assert sorted(_rows(papers_db, "SELECT scheme, value_norm, paper_id FROM external_id")) == [
+        ("doi", "10.1/p", paper_p.paper_id),
+        ("openalex", "W1", paper_p.paper_id),
+    ]
+    _assert_only_these_papers_unchanged(papers_db, {paper_p.paper_id: other_rows["rows"]})
+    warnings = [entry for entry in captured["logs"] if entry["log_level"] == "warning"]
+    assert warnings == [_mismatch_warning(paper_p.paper_id, "openalex", "W1", "W2")]
 
 
 def _wait_until_a_backend_waits_on_a_lock(db: TestDatabase) -> None:

@@ -94,7 +94,9 @@ class ReparseResult:
     - `updated`：套用時寫進論文的篇數；`stale`：資料比論文上的舊、什麼都沒寫的篇數。
     - `identifiers_split`：DOI 與 OpenAlex ID 屬於兩篇不同的論文、這一筆略過不寫的篇數（兩篇都不動、
       算「這次沒有寫到」，照下面的重判；ADR-0020 更新 2026-11-22）。`radar reparse` 畫面的
-      「識別碼衝突：」那一行印的就是它。
+      「識別碼衝突：」那一行印的是它和 `same_scheme_mismatch` 的加總。
+    - `same_scheme_mismatch`：用一個識別碼找到論文、那篇已經有同一種不同值的識別碼、這一筆略過不寫
+      的篇數（那篇不動、算「這次沒有寫到」，照下面的重判；ADR-0020 更新 2026-11-22 第二節）。
     - `demo_rechecked`：套用後重判「示範站可用」的篇數（這次沒有重寫到、原本 `demo_eligible` 為
       真的論文；ADR-0052 第 9 點）；`demo_revoked`：其中從 true 改成 false 的篇數。
     """
@@ -111,6 +113,7 @@ class ReparseResult:
     demo_rechecked: int = 0
     demo_revoked: int = 0
     identifiers_split: int = 0
+    same_scheme_mismatch: int = 0
 
 
 @dataclass
@@ -128,6 +131,7 @@ class _Counts:
     demo_rechecked: int = 0
     demo_revoked: int = 0
     identifiers_split: int = 0
+    same_scheme_mismatch: int = 0
 
 
 def reparse_papers(
@@ -156,10 +160,12 @@ def reparse_papers(
        任何一步失敗就計數、記警告日誌（只帶外部鍵與原因代碼）、略過那一篇。最後短交易寫這一批的
        暫存列。
     3. 一個交易：依 `id` 分批讀這個 `batch_id` 的暫存列，逐筆 `upsert_by_external_id`（`tracked`、
-       暫存列的 `excluded_reason`），UPDATED 時整批覆寫 OpenAlex 的關鍵字（STALE 與「識別碼分屬
-       兩篇」不寫，後者計進 `identifiers_split`、整批照常）；全部寫完在同一個交易刪掉這一批的
-       暫存列。接著在**同一個交易**重判示範站可用（ADR-0052 第 9 點）：`demo_eligible` 為真、
-       而這次沒有寫到（UPDATED）的論文（沒有原始資料紀錄、各種失敗略過、STALE、識別碼分屬兩篇），
+       暫存列的 `excluded_reason`），UPDATED 時整批覆寫 OpenAlex 的關鍵字（STALE、「識別碼分屬
+       兩篇」與「同一種識別碼對不上」不寫，後兩者分別計進 `identifiers_split`、
+       `same_scheme_mismatch`，整批照常）；全部寫完在同一個交易刪掉這一批的暫存列。
+       接著在**同一個交易**重判示範站可用（ADR-0052 第 9 點）：`demo_eligible` 為真、
+       而這次沒有寫到（UPDATED）的論文（沒有原始資料紀錄、各種失敗略過、STALE、識別碼分屬兩篇、
+       同一種識別碼對不上），
        用存下的授權、出版社與期刊 ISSN-L 經 `is_demo_eligible`（同一份
        `scope.demo_publishers`）再算一次，
        算出 False 的才改成 false；只往 false 改。中途失敗整個交易退回（論文、摘要、關鍵字、
@@ -252,6 +258,7 @@ def _reparse_locked(
         demo_rechecked=counts.demo_rechecked,
         demo_revoked=counts.demo_revoked,
         identifiers_split=counts.identifiers_split,
+        same_scheme_mismatch=counts.same_scheme_mismatch,
     )
     log.info("重新解析結束", source=RawSource.OPENALEX.value, **vars(result))
     return result
@@ -345,6 +352,11 @@ def _apply(
                 if result.outcome is UpsertOutcome.IDENTIFIERS_SPLIT:
                     # 兩篇都沒寫：不算進 rewritten，交給下面的重判（ADR-0020 更新 2026-11-22）。
                     counts.identifiers_split += 1
+                    continue
+                if result.outcome is UpsertOutcome.SAME_SCHEME_MISMATCH:
+                    # 那篇沒寫：不算進 rewritten，交給下面的重判
+                    # （ADR-0020 更新 2026-11-22 第二節）。
+                    counts.same_scheme_mismatch += 1
                     continue
                 counts.updated += 1
                 rewritten.add(result.paper_id)

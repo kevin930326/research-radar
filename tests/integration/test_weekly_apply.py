@@ -792,6 +792,64 @@ def test_split_identifiers_row_is_skipped_and_the_rest_is_applied(
     assert (done["identifiers_split"], done["created"], done["updated"]) == (1, 1, 0)
 
 
+def test_same_scheme_mismatch_row_is_skipped_and_the_rest_is_applied(
+    weekly_db: TestDatabase, database: TrackingDatabase
+) -> None:
+    # 暫存的第 1 篇：DOI 屬於 P，OpenAlex ID 沒有主人，而 P 已經有另一個 OpenAlex ID（P 是別的路
+    # 寫的、追蹤範圍外，補指定快照也不會碰到它）。這一筆略過、P 不動；第 2 篇照常新增；快照照樣
+    # 發佈（ADR-0020 更新 2026-11-22 第二節）。
+    staged_work = _work(1)
+    staged_work["keywords"] = [
+        {"id": "https://openalex.org/keywords/staged-only", "display_name": "Staged only"}
+    ]
+    paper_p_work = _work(62, issn_l=OTHER_ISSN, title="Paper P")
+    paper_p_work["doi"] = staged_work["doi"]
+    paper_p = _insert_paper(database, paper_p_work)
+    with database.transaction() as connection:
+        update_paper_keywords(
+            connection,
+            paper_p,
+            KeywordSource.OPENALEX,
+            [ParsedKeyword(key="paper-p-own", display_name="Paper P Own")],
+        )
+    keywords = "SELECT * FROM paper_keyword WHERE paper_id = %s ORDER BY source, key"
+    keywords_p = _rows(weekly_db, keywords, paper_p)
+    assert len(keywords_p) == 1
+    before = _rows_of_papers(weekly_db, [paper_p])
+    run_id = _fetched_run(database, T2, misq=_misq_book(T2, [staged_work, _work(2)]), io=[[]])
+
+    with capture_logs() as logs:
+        result = _apply(database, run_id)
+
+    assert _rows(weekly_db, keywords, paper_p) == keywords_p
+    assert _rows_of_papers(weekly_db, [paper_p]) == before
+    assert result == WeeklyApplyResult(
+        weekly_run_id=run_id,
+        snapshot_id=result.snapshot_id,
+        snapshot_number=1,
+        as_of=result.as_of,
+        staged=2,
+        created=1,
+        first_snapshot_assigned=1,
+        same_scheme_mismatch=1,
+    )
+    assert _title_of(weekly_db, _key(_work(2))) == "Synthetic study 2"
+    assert _count(weekly_db, "paper") == 2
+    assert _rows(
+        weekly_db,
+        "SELECT count(*) FROM external_id WHERE scheme = 'openalex' AND value_norm = %s",
+        _key(staged_work),
+    ) == [(0,)]
+    [(_id, number, _run, status)] = _snapshots(weekly_db)
+    assert (number, status) == (1, "published")
+    [mismatch] = [log for log in logs if log["event"].startswith("論文已經有同一種、不同值")]
+    assert (mismatch["paper_id"], mismatch["scheme"]) == (str(paper_p), "openalex")
+    assert (mismatch["stored"], mismatch["incoming"]) == (_key(paper_p_work), _key(staged_work))
+    [done] = [log for log in logs if log["event"] == "每週更新已套用並發佈快照"]
+    assert (done["same_scheme_mismatch"], done["identifiers_split"]) == (1, 0)
+    assert (done["created"], done["updated"]) == (1, 0)
+
+
 # --- 還沒抓完、不存在、身分不對 ---------------------------------------------------------------
 
 
