@@ -153,6 +153,7 @@ actual_hours:
   - {round: epic-3h, stories: "示範站判定的後續、F19、論文列行高（PR 118、120、121，不是 Story）", estimate_h: null, elapsed_h: 18.5, kevin_h_low: 1, kevin_h_high: 1, rough: true}
   - {round: epic-3h2, stories: "換人後寫入的保護、示範站依期刊排除（PR 123、124，不是 Story）", estimate_h: null, elapsed_h: 3.5, kevin_h_low: 0.5, kevin_h_high: 1, rough: true}
   - {round: epic-3h3, stories: "識別碼分屬兩篇時兩篇都不寫（PR 125，不是 Story）", estimate_h: null, elapsed_h: 1.5, kevin_h_low: 0.5, kevin_h_high: 1, rough: true}
+  - {round: epic-3h4, stories: "寫入路徑的收尾、同一種識別碼對不上時略過（PR 127、128，不是 Story）", estimate_h: null, elapsed_h: 2.5, kevin_h_low: 0.5, kevin_h_high: 0.5, rough: true}
 
 generated: 11-14-2026 03:46
 last_updated: 11-17-2026 03:10
