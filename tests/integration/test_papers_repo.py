@@ -12,6 +12,7 @@ from typing import Any
 
 import psycopg
 import pytest
+from sqlalchemy import text
 from structlog.testing import capture_logs
 
 from radar.domain.identifiers import ExternalId, IdentifierScheme
@@ -1239,6 +1240,14 @@ def test_concurrent_attach_after_first_rolls_back_attaches_the_second(
                     excluded_reason=None,
                     scope=SCOPE,
                 )
+                # 用同一個連線確認 W1 已經掛在 P（還沒 commit），再放後到的進來
+                attached = connection.execute(
+                    text(
+                        "SELECT paper_id FROM external_id"
+                        " WHERE scheme = 'openalex' AND value_norm = 'W1'"
+                    )
+                ).all()
+                assert [tuple(row) for row in attached] == [(paper_p.paper_id,)]
                 written.set()
                 assert release.wait(30)
                 raise _RollBackError
@@ -1265,14 +1274,18 @@ def test_concurrent_attach_after_first_rolls_back_attaches_the_second(
 
     first_thread = threading.Thread(target=first)
     thread = threading.Thread(target=mine)
+    started: list[threading.Thread] = []
     try:
         first_thread.start()
+        started.append(first_thread)
         assert written.wait(30)
+        assert first_errors == []  # 先到者的斷言沒過時，直接在這裡看到原因
         thread.start()
+        started.append(thread)
         _wait_until_a_backend_waits_on_a_lock(papers_db)  # 這筆在 P 的鎖上等交易一
     finally:
         release.set()
-        for each in (first_thread, thread):
+        for each in started:  # 只 join 已經啟動的，免得 RuntimeError 蓋掉原本的錯誤
             each.join(30)
 
     assert first_errors == errors == []
