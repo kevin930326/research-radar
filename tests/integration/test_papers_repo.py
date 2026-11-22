@@ -15,11 +15,18 @@ import pytest
 from structlog.testing import capture_logs
 
 from radar.domain.identifiers import ExternalId, IdentifierScheme
-from radar.domain.papers import PaperOrigin, ParsedPaper, UpsertOutcome, UpsertResult
+from radar.domain.papers import (
+    PaperOrigin,
+    ParsedPaper,
+    SplitIdentifiers,
+    UpsertOutcome,
+    UpsertResult,
+)
+from radar.domain.policy import PublisherExclusions, is_demo_eligible
 from radar.domain.scope import ScopeSettings
 from radar.domain.viewer import MemberViewer, PublicViewer, SystemViewer
 from radar.repo import papers as papers_module
-from radar.repo.db import Database
+from radar.repo.db import Connection, Database
 from radar.repo.papers import get_paper, upsert_by_external_id
 from tests.database import APP_ROLE, OWNER_ROLE, TestDatabase, connect_admin, migrate
 
@@ -129,18 +136,20 @@ def test_same_fetch_time_is_written(papers_db: TestDatabase, database: Database)
 def test_identifier_owned_by_another_paper_is_reported_not_moved(
     papers_db: TestDatabase, database: Database
 ) -> None:
+    # DOI 屬於 A、OpenAlex ID 屬於 B：兩篇都不寫、識別碼不搬，回「識別碼分屬兩篇」
+    # （ADR-0020 更新 2026-11-22；原本是更新 A、把 W2 放進 conflicts）。
     paper_a = _upsert(database, _paper(doi="10.1/a", openalex_id=None, title="A"))
     paper_b = _upsert(database, _paper(doi=None, openalex_id="W2", title="B"))
+    before = _write_targets(papers_db)
 
     with capture_logs() as logs:
         result = _upsert(
             database, _paper(doi="10.1/a", openalex_id="W2", title="A2", fetched_at=T2)
         )
 
-    assert result.paper_id == paper_a.paper_id
-    assert result.outcome is UpsertOutcome.UPDATED
-    assert result.conflicts == (ExternalId(IdentifierScheme.OPENALEX, "W2"),)
-    assert _paper_row(papers_db, paper_a.paper_id)["title"] == "A2"
+    assert _write_targets(papers_db) == before
+    assert result == _split_result(paper_a.paper_id, "10.1/a", paper_b.paper_id, "W2")
+    assert _paper_row(papers_db, paper_a.paper_id)["title"] == "A"
     assert _paper_row(papers_db, paper_b.paper_id)["title"] == "B"
     assert _rows(
         papers_db,
@@ -148,7 +157,230 @@ def test_identifier_owned_by_another_paper_is_reported_not_moved(
     ) == [(paper_b.paper_id,)]
     warnings = [entry for entry in logs if entry["log_level"] == "warning"]
     assert len(warnings) == 1
-    assert warnings[0]["owner_paper_id"] == str(paper_b.paper_id)
+    assert warnings[0]["doi_paper_id"] == str(paper_a.paper_id)
+    assert warnings[0]["openalex_paper_id"] == str(paper_b.paper_id)
+
+
+# --- 識別碼分屬兩篇：兩篇都不寫（ADR-0020 更新 2026-11-22） ------------------------------------
+
+
+WRITE_TARGET_TABLES = ("paper", "external_id", "paper_abstract", "paper_keyword")
+
+
+def _write_targets(db: TestDatabase) -> dict[str, list[tuple[Any, ...]]]:
+    """論文的四張表，整列、依主鍵排序（逐欄比對寫入前後用）。"""
+    with db.connect(APP_ROLE) as connection:
+        return {
+            table: connection.execute(f"SELECT * FROM {table} ORDER BY id").fetchall()
+            for table in WRITE_TARGET_TABLES
+        }
+
+
+def _paper_target_sql(table: str) -> str:
+    column = "id" if table == "paper" else "paper_id"
+    return f"SELECT * FROM {table} WHERE {column} = %s ORDER BY id"
+
+
+def _paper_targets(db: TestDatabase, paper_id: uuid.UUID) -> dict[str, list[tuple[Any, ...]]]:
+    """一篇論文在四張表的整列（論文列、識別碼、摘要、關鍵字），依主鍵排序。"""
+    with db.connect(APP_ROLE) as connection:
+        return {
+            table: connection.execute(_paper_target_sql(table), (paper_id,)).fetchall()
+            for table in WRITE_TARGET_TABLES
+        }
+
+
+def _paper_targets_in(
+    connection: Connection, paper_id: uuid.UUID
+) -> dict[str, list[tuple[Any, ...]]]:
+    """同 `_paper_targets`，但在還沒 commit 的交易連線上讀（直接給 psycopg，值的型別相同）。"""
+    return {
+        table: [
+            tuple(row)
+            for row in connection.exec_driver_sql(_paper_target_sql(table), (paper_id,)).fetchall()
+        ]
+        for table in WRITE_TARGET_TABLES
+    }
+
+
+def _assert_only_these_papers_unchanged(
+    db: TestDatabase, snapshots: dict[uuid.UUID, dict[str, list[tuple[Any, ...]]]]
+) -> None:
+    """每篇論文四張表的整列和快照逐欄相同，而且四張表裡沒有這幾篇以外的列。"""
+    for paper_id, snapshot in snapshots.items():
+        assert _paper_targets(db, paper_id) == snapshot
+    totals = {table: len(rows) for table, rows in _write_targets(db).items()}
+    assert totals == {
+        table: sum(len(snapshot[table]) for snapshot in snapshots.values())
+        for table in WRITE_TARGET_TABLES
+    }
+
+
+def _split_result(
+    doi_paper_id: uuid.UUID, doi: str, openalex_paper_id: uuid.UUID, openalex_id: str
+) -> UpsertResult:
+    return UpsertResult(
+        doi_paper_id,
+        UpsertOutcome.IDENTIFIERS_SPLIT,
+        split=SplitIdentifiers(
+            doi=ExternalId(IdentifierScheme.DOI, doi),
+            doi_paper_id=doi_paper_id,
+            openalex_id=ExternalId(IdentifierScheme.OPENALEX, openalex_id),
+            openalex_paper_id=openalex_paper_id,
+        ),
+    )
+
+
+DEMO_SCOPE = ScopeSettings(
+    frozenset({TRACKED_ISSN}),
+    demo_publishers=PublisherExclusions(ids=frozenset(), names=frozenset({"Closed Press"})),
+)
+
+
+def test_split_identifiers_write_nothing_to_either_paper(
+    papers_db: TestDatabase, database: Database
+) -> None:
+    # B 有 DOI 10.1/b、A 有 W2；這筆資料是 (10.1/b, W2)、比兩篇都新，還帶摘要與不同的欄位。
+    paper_b = _upsert(
+        database,
+        _paper(
+            doi="10.1/b",
+            openalex_id=None,
+            title="B",
+            abstract="B abstract",
+            abstract_source="openalex",
+        ),
+        origin=PaperOrigin.IMPORT,
+    )
+    paper_a = _upsert(database, _paper(doi=None, openalex_id="W2", title="A"))
+    before = _write_targets(papers_db)
+    assert len(before["paper"]) == 2
+
+    with capture_logs() as logs, database.transaction() as connection:
+        result = upsert_by_external_id(
+            connection,
+            _paper(
+                doi="10.1/b",
+                openalex_id="W2",
+                title="Other work",
+                fetched_at=T2,
+                publication_year=2024,
+                abstract="Other abstract",
+                abstract_source="openalex",
+                primary_license="cc-by",
+                publisher_names=("Open Press",),
+            ),
+            origin=PaperOrigin.EXPANSION,
+            excluded_reason="some_rule",
+            scope=DEMO_SCOPE,
+        )
+
+    assert _write_targets(papers_db) == before
+    assert result == _split_result(paper_b.paper_id, "10.1/b", paper_a.paper_id, "W2")
+    assert result.conflicts == ()
+    assert result.source_changed is False
+    warnings = [entry for entry in logs if entry["log_level"] == "warning"]
+    assert warnings == [
+        {
+            "event": "DOI 與 OpenAlex ID 屬於兩篇不同的論文，這一筆略過不寫",
+            "log_level": "warning",
+            "doi": "10.1/b",
+            "doi_paper_id": str(paper_b.paper_id),
+            "openalex_id": "W2",
+            "openalex_paper_id": str(paper_a.paper_id),
+        }
+    ]
+
+
+def test_split_identifiers_keep_doi_paper_not_demo_eligible(
+    papers_db: TestDatabase, database: Database
+) -> None:
+    # C2：B 沒有授權（demo_eligible = false）；這筆資料的授權與出版社算出來是 true。
+    # 以前會把這筆寫進 B（DOI 優先），B 變成示範站可用；現在 B 不動。
+    paper_b = _upsert(database, _paper(doi="10.1/b", openalex_id=None, title="B"))
+    paper_a = _upsert(database, _paper(doi=None, openalex_id="W2", title="A"))
+    before = _write_targets(papers_db)
+    record = _paper(
+        doi="10.1/b",
+        openalex_id="W2",
+        title="Other work",
+        fetched_at=T2,
+        primary_license="cc-by",
+        publisher_names=("Open Press",),
+    )
+    assert is_demo_eligible(
+        record.primary_license,
+        record.publisher_ids,
+        record.publisher_names,
+        DEMO_SCOPE.demo_publishers,
+    )
+
+    with database.transaction() as connection:
+        result = upsert_by_external_id(
+            connection,
+            record,
+            origin=PaperOrigin.TRACKED,
+            excluded_reason=None,
+            scope=DEMO_SCOPE,
+        )
+
+    assert _rows(papers_db, "SELECT demo_eligible FROM paper WHERE id = %s", paper_b.paper_id) == [
+        (False,)
+    ]
+    assert _write_targets(papers_db) == before
+    assert result == _split_result(paper_b.paper_id, "10.1/b", paper_a.paper_id, "W2")
+
+
+def test_split_identifiers_win_over_stale(papers_db: TestDatabase, database: Database) -> None:
+    # 判斷順序：先看識別碼是否分屬兩篇，再比新舊。這筆資料比兩篇都舊，仍回「分屬兩篇」。
+    paper_b = _upsert(database, _paper(doi="10.1/b", openalex_id=None, fetched_at=T2))
+    paper_a = _upsert(database, _paper(doi=None, openalex_id="W2", fetched_at=T2))
+    before = _write_targets(papers_db)
+
+    result = _upsert(database, _paper(doi="10.1/b", openalex_id="W2", fetched_at=T1))
+
+    assert _write_targets(papers_db) == before
+    assert result == _split_result(paper_b.paper_id, "10.1/b", paper_a.paper_id, "W2")
+
+
+def test_split_identifiers_keep_out_of_scope_paper_private(
+    papers_db: TestDatabase, database: Database
+) -> None:
+    # A 在追蹤範圍外、匯入的（lab_visible = false），B 在範圍內。這筆 (10.1/a, W2) 是引用擴展：
+    # 以前會寫進 A（DOI 優先），A 的 lab_visible 變成 true；現在兩篇都不動。
+    paper_a = _upsert(
+        database,
+        _paper(doi="10.1/a", openalex_id=None, title="A", journal_issn_l="1234-5678"),
+        origin=PaperOrigin.IMPORT,
+    )
+    paper_b = _upsert(database, _paper(doi=None, openalex_id="W2", title="B"))
+    assert _paper_row(papers_db, paper_a.paper_id)["lab_visible"] is False
+    before = _write_targets(papers_db)
+
+    result = _upsert(
+        database,
+        _paper(doi="10.1/a", openalex_id="W2", title="Other work", fetched_at=T2),
+        origin=PaperOrigin.EXPANSION,
+    )
+
+    assert result == _split_result(paper_a.paper_id, "10.1/a", paper_b.paper_id, "W2")
+    assert result.outcome is UpsertOutcome.IDENTIFIERS_SPLIT
+    assert _paper_row(papers_db, paper_a.paper_id)["lab_visible"] is False
+    assert _write_targets(papers_db) == before
+
+
+def test_found_by_doi_gets_the_new_openalex_id(papers_db: TestDatabase, database: Database) -> None:
+    # 只有一個識別碼找到、另一個沒有主人：照舊更新並掛上（行為不變）。
+    created = _upsert(database, _paper(doi="10.1/four", openalex_id=None, title="Old"))
+
+    result = _upsert(database, _paper(doi="10.1/four", openalex_id="W4", title="New"))
+
+    assert result == UpsertResult(created.paper_id, UpsertOutcome.UPDATED)
+    assert _paper_row(papers_db, created.paper_id)["title"] == "New"
+    assert sorted(_rows(papers_db, "SELECT scheme, value_norm, paper_id FROM external_id")) == [
+        ("doi", "10.1/four", created.paper_id),
+        ("openalex", "W4", created.paper_id),
+    ]
 
 
 def test_found_by_openalex_id_gets_the_new_doi(papers_db: TestDatabase, database: Database) -> None:
@@ -381,6 +613,194 @@ def test_withdrawn_insert_releases_identifiers_before_waiting_for_paper_lock(
     ]
     # B 在 C commit 之後才寫，所以留下的是 B 的標題。
     assert _paper_row(papers_db, paper_id)["title"] == "B"
+
+
+def _hold_uncommitted(
+    database: Database, paper: ParsedPaper, written: threading.Event, release: threading.Event
+) -> tuple[
+    threading.Thread,
+    dict[str, UpsertResult],
+    dict[str, dict[str, list[tuple[Any, ...]]]],
+    list[BaseException],
+]:
+    """另開一個執行緒寫 `paper`、寫完先不 commit，等 `release` 才結束交易。
+
+    寫完時在同一個交易裡把這篇四張表的整列存進 `snapshots["rows"]`：commit 不會改這些列，
+    所以它就是這篇 commit 後的樣子（呼叫的測試都在另一筆寫入開始、等著它之後才放行 commit，
+    沒有別的時間點能存）。
+    """
+    results: dict[str, UpsertResult] = {}
+    snapshots: dict[str, dict[str, list[tuple[Any, ...]]]] = {}
+    errors: list[BaseException] = []
+
+    def run() -> None:
+        try:
+            with database.transaction() as connection:
+                result = upsert_by_external_id(
+                    connection, paper, origin=PaperOrigin.TRACKED, excluded_reason=None, scope=SCOPE
+                )
+                results["result"] = result
+                snapshots["rows"] = _paper_targets_in(connection, result.paper_id)
+                written.set()
+                assert release.wait(30)
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            written.set()
+
+    thread = threading.Thread(target=run)
+    thread.start()
+    return thread, results, snapshots, errors
+
+
+def test_concurrent_split_found_after_withdrawn_insert_writes_nothing(
+    papers_db: TestDatabase,
+) -> None:
+    """退回保存點後重查到兩篇不同論文，也走「分屬兩篇」：
+
+    1. 交易一新增 (10.1/a, 沒有 OpenAlex ID)、交易二新增 (沒有 DOI, W2)，都還沒 commit。
+    2. 這筆 (10.1/a, W2)：找的時候兩個都沒有主人 → 新增、在 10.1/a 等交易一。
+    3. 交易二先 commit，交易一再 commit：認領失敗、退回保存點，重查到 10.1/a 屬交易一那篇、
+       W2 屬交易二那篇（兩個都已 commit，所以是在重查時發現，不是之後認領時）。
+    """
+    database = Database(papers_db.app_url, connect_timeout=5, pool_size=3)
+    release_first, release_second = threading.Event(), threading.Event()
+    first_written, second_written = threading.Event(), threading.Event()
+    first, first_results, first_rows, first_errors = _hold_uncommitted(
+        database,
+        _paper(
+            doi="10.1/a",
+            openalex_id=None,
+            title="A",
+            abstract="A abstract",
+            abstract_source="openalex",
+        ),
+        first_written,
+        release_first,
+    )
+    second, second_results, second_rows, second_errors = _hold_uncommitted(
+        database,
+        _paper(
+            doi=None, openalex_id="W2", title="B", abstract="B abstract", abstract_source="openalex"
+        ),
+        second_written,
+        release_second,
+    )
+    results: dict[str, UpsertResult] = {}
+    errors: list[BaseException] = []
+
+    def mine() -> None:
+        try:
+            results["mine"] = _upsert(
+                database,
+                _paper(
+                    doi="10.1/a",
+                    openalex_id="W2",
+                    title="Mine",
+                    fetched_at=T2,
+                    abstract="Mine abstract",
+                    abstract_source="openalex",
+                ),
+            )
+        except BaseException as exc:
+            errors.append(exc)
+
+    thread = threading.Thread(target=mine)
+    try:
+        assert first_written.wait(30)
+        assert second_written.wait(30)
+        thread.start()
+        _wait_until_a_backend_waits_on_a_lock(papers_db)  # 這筆在 10.1/a 等交易一
+        release_second.set()
+        second.join(30)
+        assert not second.is_alive()
+    finally:
+        release_second.set()
+        release_first.set()
+        for each in (first, second, thread):
+            each.join(30)
+
+    assert first_errors == second_errors == errors == []
+    paper_a = first_results["result"].paper_id
+    paper_b = second_results["result"].paper_id
+    assert results["mine"] == _split_result(paper_a, "10.1/a", paper_b, "W2")
+    assert sorted(_rows(papers_db, "SELECT scheme, value_norm, paper_id FROM external_id")) == [
+        ("doi", "10.1/a", paper_a),
+        ("openalex", "W2", paper_b),
+    ]
+    assert sorted(_rows(papers_db, "SELECT title FROM paper")) == [("A",), ("B",)]
+    assert first_rows["rows"]["paper_abstract"]
+    assert second_rows["rows"]["paper_abstract"]
+    _assert_only_these_papers_unchanged(
+        papers_db, {paper_a: first_rows["rows"], paper_b: second_rows["rows"]}
+    )
+
+
+def test_concurrent_split_found_while_claiming_writes_nothing(
+    papers_db: TestDatabase,
+) -> None:
+    """更新既有論文、認領還沒有主人的識別碼時才發現它屬於別篇，也走「分屬兩篇」：
+
+    1. B 已經有 10.1/b（已 commit）；交易一新增 (沒有 DOI, W2) 還沒 commit。
+    2. 這筆 (10.1/b, W2)：經 10.1/b 找到 B、W2 還沒有主人 → 鎖住 B、在 W2 等交易一。
+    3. 交易一 commit：W2 認領失敗、屬交易一那篇 → B 什麼都不寫。
+    """
+    database = Database(papers_db.app_url, connect_timeout=5, pool_size=3)
+    paper_b = _upsert(database, _paper(doi="10.1/b", openalex_id=None, title="B"))
+    before_b = _rows(papers_db, "SELECT * FROM paper WHERE id = %s", paper_b.paper_id)
+    targets_b = _paper_targets(papers_db, paper_b.paper_id)
+    release = threading.Event()
+    written = threading.Event()
+    other, other_results, other_rows, other_errors = _hold_uncommitted(
+        database,
+        _paper(
+            doi=None, openalex_id="W2", title="A", abstract="A abstract", abstract_source="openalex"
+        ),
+        written,
+        release,
+    )
+    results: dict[str, UpsertResult] = {}
+    errors: list[BaseException] = []
+
+    def mine() -> None:
+        try:
+            results["mine"] = _upsert(
+                database,
+                _paper(
+                    doi="10.1/b",
+                    openalex_id="W2",
+                    title="Mine",
+                    fetched_at=T2,
+                    abstract="Mine abstract",
+                    abstract_source="openalex",
+                ),
+            )
+        except BaseException as exc:
+            errors.append(exc)
+
+    thread = threading.Thread(target=mine)
+    try:
+        assert written.wait(30)
+        thread.start()
+        _wait_until_a_backend_waits_on_a_lock(papers_db)  # 這筆在 W2 等交易一
+    finally:
+        release.set()
+        for each in (other, thread):
+            each.join(30)
+
+    assert other_errors == errors == []
+    paper_a = other_results["result"].paper_id
+    assert results["mine"] == _split_result(paper_b.paper_id, "10.1/b", paper_a, "W2")
+    assert _rows(papers_db, "SELECT * FROM paper WHERE id = %s", paper_b.paper_id) == before_b
+    assert sorted(_rows(papers_db, "SELECT scheme, value_norm, paper_id FROM external_id")) == [
+        ("doi", "10.1/b", paper_b.paper_id),
+        ("openalex", "W2", paper_a),
+    ]
+    assert _rows(papers_db, "SELECT title FROM paper WHERE id = %s", paper_a) == [("A",)]
+    assert other_rows["rows"]["paper_abstract"]
+    _assert_only_these_papers_unchanged(
+        papers_db, {paper_b.paper_id: targets_b, paper_a: other_rows["rows"]}
+    )
 
 
 def _wait_until_a_backend_waits_on_a_lock(db: TestDatabase) -> None:

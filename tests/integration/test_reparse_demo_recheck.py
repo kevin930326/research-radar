@@ -18,7 +18,7 @@ from radar.adapters.fake import FakeObjectStore
 from radar.domain.domain_config import ExclusionRulesConfig
 from radar.domain.papers import PaperOrigin, ParsedPaper
 from radar.domain.parsers.openalex import parse_openalex_work
-from radar.domain.policy import PublisherExclusions
+from radar.domain.policy import PublisherExclusions, is_demo_eligible
 from radar.domain.raw_records import RawRecord, RawSource, compress_raw
 from radar.domain.scope import ScopeSettings
 from radar.domain.storage_keys import RAW_CONTENT_TYPE, raw_object_key
@@ -58,8 +58,9 @@ NO_RULES = ExclusionRulesConfig(rules=())
 
 # 沒有重寫到的幾種情況（ADR-0052 第 9 點「例外」）。
 NOT_REWRITTEN = ["no_raw", "missing_object", "hash_mismatch", "parse_error", "id_mismatch", "stale"]
-# 參數化逐案核對的情況：多一個「gzip 解壓失敗」（和 SHA-256 對不上同算 `hash_mismatch`）。
-NOT_REWRITTEN_WITH_BAD_GZIP = [*NOT_REWRITTEN, "bad_gzip"]
+# 參數化逐案核對的情況：多一個「gzip 解壓失敗」（和 SHA-256 對不上同算 `hash_mismatch`），以及
+# 「識別碼分屬兩篇」（ADR-0020 更新 2026-11-22：兩篇都沒寫，算沒重寫到）。
+NOT_REWRITTEN_WITH_BAD_GZIP = [*NOT_REWRITTEN, "bad_gzip", "identifiers_split"]
 # 每種情況該走到的分支：(missing_object, hash_mismatch, parse_error, id_mismatch, stale)。
 # 對照論文一定重寫到，所以這裡只反映被測的那一篇。
 EXPECTED_BRANCH = {
@@ -70,6 +71,7 @@ EXPECTED_BRANCH = {
     "parse_error": (0, 0, 1, 0, 0),
     "id_mismatch": (0, 0, 0, 1, 0),
     "stale": (0, 0, 0, 0, 1),
+    "identifiers_split": (0, 0, 0, 0, 0),
 }
 
 
@@ -118,6 +120,15 @@ def _seed_case(database: Database, store: FakeObjectStore, case: str, number: in
         # 論文上的資料比原始資料新（例如之後單篇查詢寫的）：套用時是 STALE。
         paper_id = _write(database, work, fetched_at=T2, scope=OLD_SCOPE)
         _seed_raw(database, store, key, content, T1)
+        return paper_id
+    if case == "identifiers_split":
+        # 這篇有原始資料的 DOI、OpenAlex ID 是別的；原始資料的 OpenAlex ID 屬於另一篇（沒有 DOI、
+        # 寫入時沒帶排除清單＝false，不進重判）。套用時「識別碼分屬兩篇」，這篇沒有重寫到。
+        doi_owner = {**work, "id": f"https://openalex.org/{_key(number + 700)}"}
+        paper_id = _write(database, doi_owner, fetched_at=T1, scope=OLD_SCOPE)
+        openalex_owner = {**work, "doi": None}
+        _write(database, openalex_owner, fetched_at=T1, scope=ScopeSettings(frozenset({ISSN})))
+        _seed_raw(database, store, key, content, T2)
         return paper_id
     paper_id = _write(database, work, fetched_at=T1, scope=OLD_SCOPE)
     if case == "no_raw":
@@ -191,6 +202,7 @@ def test_paper_not_rewritten_is_rechecked_and_turned_false(
         result.stale,
     )
     assert branch == EXPECTED_BRANCH[case]
+    assert result.identifiers_split == (1 if case == "identifiers_split" else 0)
     # 重判只算沒重寫到的那一篇；重寫到的（仍是 true）不經這條路。
     assert (result.demo_rechecked, result.demo_revoked) == (1, 1)
 
@@ -323,3 +335,86 @@ def test_finish_log_carries_the_recheck_numbers(demo_db: TestDatabase, database:
 
     [finished] = [log for log in logs if log["event"] == "重新解析結束"]
     assert (finished["demo_rechecked"], finished["demo_revoked"]) == (1, 1)
+
+
+# 識別碼分屬兩篇 × 依期刊排除（epic-3h3 PR 3）：出版社那一道新舊一樣，只有期刊清單多一本。
+EXCLUDED_JOURNAL_ISSN_L = "0018-9391"
+JOURNAL_OLD_SCOPE = ScopeSettings(
+    frozenset({ISSN, EXCLUDED_JOURNAL_ISSN_L}), demo_publishers=OLD_EXCLUSIONS
+)
+JOURNAL_NEW_EXCLUSIONS = PublisherExclusions(
+    ids=OLD_EXCLUSIONS.ids,
+    names=OLD_EXCLUSIONS.names,
+    journal_issn_ls=frozenset({EXCLUDED_JOURNAL_ISSN_L}),
+)
+JOURNAL_NEW_SCOPE = ScopeSettings(
+    frozenset({ISSN, EXCLUDED_JOURNAL_ISSN_L}), demo_publishers=JOURNAL_NEW_EXCLUSIONS
+)
+
+
+def _stored_facts(db: TestDatabase, paper_id: uuid.UUID) -> tuple[Any, ...]:
+    with db.connect(APP_ROLE) as connection:
+        [row] = connection.execute(
+            "SELECT primary_license, publisher_ids, publisher_names, journal_issn_l"
+            " FROM paper WHERE id = %s",
+            (paper_id,),
+        ).fetchall()
+    return tuple(row)
+
+
+def test_identifiers_split_paper_in_excluded_journal_is_rechecked_false(
+    demo_db: TestDatabase, database: Database
+) -> None:
+    """識別碼分屬兩篇的兩方都原本 true、都沒重寫到，只經結束時的重判。
+
+    - 「DOI 那篇」：有原始資料的 DOI、OpenAlex ID 是別的；存下的期刊是排除清單裡的那本。
+    - 「OpenAlex ID 那篇」（另一篇）：原始資料的 OpenAlex ID 屬於它、沒有 DOI；存下的期刊不在清單。
+    兩篇授權（CC BY）、出版社（Example Open Press）一樣，新舊排除清單只差期刊，所以 DOI 那篇變
+    false 只能是因為存下的 journal_issn_l；OpenAlex ID 那篇維持 true。
+    """
+    store = FakeObjectStore()
+    work = demo_work(1, issn_l=ISSN)
+    doi_owner_work = {
+        **demo_work(1, issn_l=EXCLUDED_JOURNAL_ISSN_L),
+        "id": f"https://openalex.org/{_key(701)}",
+    }
+    doi_owner = _write(database, doi_owner_work, fetched_at=T1, scope=JOURNAL_OLD_SCOPE)
+    openalex_owner = _write(database, {**work, "doi": None}, fetched_at=T1, scope=JOURNAL_OLD_SCOPE)
+    _seed_raw(database, store, _key(1), demo_work_bytes(work), T2)
+    assert _eligible(demo_db, doi_owner) is True
+    assert _eligible(demo_db, openalex_owner) is True
+
+    # 前提：用重判那份排除設定，DOI 那篇拿掉期刊就是 True、帶存下的期刊是 False；另一篇是 True。
+    license_, ids, names, journal = _stored_facts(demo_db, doi_owner)
+    assert (license_, journal) == ("cc-by", EXCLUDED_JOURNAL_ISSN_L)
+    assert is_demo_eligible(license_, ids, names, JOURNAL_NEW_EXCLUSIONS) is True
+    assert (
+        is_demo_eligible(license_, ids, names, JOURNAL_NEW_EXCLUSIONS, journal_issn_l=journal)
+        is False
+    )
+    other_license, other_ids, other_names, other_journal = _stored_facts(demo_db, openalex_owner)
+    assert (other_license, other_journal) == ("cc-by", ISSN)
+    assert (
+        is_demo_eligible(
+            other_license,
+            other_ids,
+            other_names,
+            JOURNAL_NEW_EXCLUSIONS,
+            journal_issn_l=other_journal,
+        )
+        is True
+    )
+    before = {row[0]: row for row in _all_rows(demo_db)}
+
+    result = _reparse(database, store, JOURNAL_NEW_SCOPE)
+
+    assert result.identifiers_split == 1
+    assert result.updated == 0
+    assert _eligible(demo_db, doi_owner) is False
+    assert _eligible(demo_db, openalex_owner) is True
+    # 兩篇都重判、只撤銷 DOI 那篇。
+    assert (result.demo_rechecked, result.demo_revoked) == (2, 1)
+    # 兩篇都沒被重寫：除了 demo_eligible，授權、出版社、updated_at 都沒變。
+    after = {row[0]: row for row in _all_rows(demo_db)}
+    assert after[doi_owner][2:] == before[doi_owner][2:]
+    assert after[openalex_owner] == before[openalex_owner]
