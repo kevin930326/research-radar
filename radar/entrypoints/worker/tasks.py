@@ -9,6 +9,7 @@ from collections.abc import Iterator
 from contextlib import ExitStack, contextmanager
 from datetime import UTC, datetime, timedelta
 from functools import partial
+from pathlib import Path
 
 import procrastinate
 
@@ -29,6 +30,7 @@ from radar.domain.jobs import (
     EMBED_PAPERS,
     PLAN_LLM_BATCHES,
     POLL_BATCHES,
+    RUN_DEMO_EXPORT,
     RUN_WEEKLY_UPDATE,
     SUBMIT_LLM_BATCH,
     SWEEP,
@@ -48,6 +50,7 @@ from radar.entrypoints.bootstrap import (
     code_version,
 )
 from radar.ports import LlmProvider
+from radar.services.demo_export import DemoExportSetup, run_demo_export
 from radar.services.embeddings import embed_papers
 from radar.services.llm_batches import (
     LlmBatchSetup,
@@ -250,6 +253,26 @@ def register_tasks(app: procrastinate.App, parts: WorkerParts, settings: Setting
                 parts.send_heartbeat,
             )
 
+    def run_demo_export_job(demo_export_id: uuid.UUID) -> None:
+        # 示範站匯出（Story 3.7、ADR-0061）：只寫 RADAR_DEMO_EXPORT_DIR/preview/。現在只有 sweep
+        # 補排停在 queued／running 的那一筆。沒設資料夾、或開了 RADAR_DEMO_PUBLISH（正式發佈還沒
+        # 做）時 service 把那一筆記成 failed（移出起始狀態，sweep 不再補排）。執行時才讀設定檔。
+        domain_config = load_domain_config()
+        run_demo_export(
+            SystemViewer(),
+            parts.database,
+            DemoExportSetup(
+                models=load_models_config(),
+                taxonomy=load_taxonomy(),
+                context_values=load_context_values(),
+                journals=domain_config.journals,
+                publish=settings.demo_publish,
+            ),
+            demo_export_id,
+            None if settings.demo_export_dir is None else Path(settings.demo_export_dir),
+            clock=lambda: datetime.now(UTC),
+        )
+
     def load_scope() -> ScopeSettings:
         # 執行時才讀 config/journals.yaml：抓完後才改設定也照新的追蹤範圍算 in_scope。
         # 一起帶 config/demo_publishers.yaml 的排除清單，寫入時算 demo_eligible（ADR-0052）。
@@ -308,4 +331,13 @@ def register_tasks(app: procrastinate.App, parts: WorkerParts, settings: Setting
     # 查結果不做工作層的重試：下一次 cron（15 分鐘後）接著做，匯入是冪等的。
     register_job(
         app, POLL_BATCHES, poll_batches_job, max_retries=0, retry_wait=settings.job_retry_wait
+    )
+    # 示範站匯出不做工作層的重試：失敗時那一筆已經記成 failed，再跑一次要重新排一筆（自我檢查沒過
+    # 重跑也一樣）。
+    register_job(
+        app,
+        RUN_DEMO_EXPORT,
+        run_demo_export_job,
+        max_retries=0,
+        retry_wait=settings.job_retry_wait,
     )

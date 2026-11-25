@@ -3,7 +3,8 @@
 - 快照只由 `services/weekly_update.py` 的套用交易建立與發佈（架構測試守著：
   `create_snapshot`、`update_snapshot_published` 只出現在這裡與那個 service）。
 - 寫入一律用 `text()` SQL；函式收呼叫端開好的交易連線，不 commit。
-- 讀取函式第一個參數是 `viewer`，只給系統工作（`visible_to_system_only`）。
+- 讀取函式第一個參數是 `viewer`，只給系統工作（`visible_to_system_only`）；最新已發佈的快照另外給
+  示範站匯出（`PublicViewer`，`visible_snapshot_facts`）。
 """
 
 import uuid
@@ -25,9 +26,9 @@ from sqlalchemy import (
 )
 
 from radar.domain.snapshot import Snapshot, SnapshotStatus
-from radar.domain.viewer import SystemViewer
+from radar.domain.viewer import PublicViewer, SystemViewer
 from radar.repo.models import Base
-from radar.repo.visibility import visible_to_system_only
+from radar.repo.visibility import visible_snapshot_facts, visible_to_system_only
 
 # --- 表的定義（`alembic check` 拿來和資料庫比對；遷移 0007 建表） ---------------------------
 
@@ -78,13 +79,17 @@ def get_snapshot_of_weekly_run(
     return None if row is None else _snapshot(row)
 
 
-def find_latest_published_snapshot(viewer: SystemViewer, connection: Connection) -> Snapshot | None:
+def find_latest_published_snapshot(
+    viewer: SystemViewer | PublicViewer, connection: Connection
+) -> Snapshot | None:
     """目前已發佈的快照（`published` 裡 `number` 最大的一筆）；一個都還沒發佈就回 None。
 
+    示範站匯出用 `PublicViewer` 讀（Story 3.7，AD-20「只用 PublicViewer 經 repo 讀」）。
+
     Raises:
-        TypeError: `viewer` 不是 `SystemViewer`。
+        TypeError: `viewer` 不是 `SystemViewer` 或 `PublicViewer`。
     """
-    visible = visible_to_system_only(viewer)  # 不是 SystemViewer 就在碰連線之前丟錯
+    visible = visible_snapshot_facts(viewer)  # 身分不對就在碰連線之前丟錯
     row = (
         connection.execute(
             text(

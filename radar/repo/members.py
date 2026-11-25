@@ -28,7 +28,9 @@ from sqlalchemy import (
 )
 
 from radar.domain.auth import AllowedMember
+from radar.domain.viewer import SystemViewer
 from radar.repo.models import Base
+from radar.repo.visibility import visible_to_system_only
 
 # --- 表的定義（`alembic check` 拿來和資料庫比對；遷移 0019 建表） -----------------------------
 
@@ -140,3 +142,20 @@ def list_allowed_members(connection: Connection) -> list[AllowedMember]:
     成員 ID 是 UUIDv7，照 ID 排就是加入的先後；不照名稱排，免得順序跟著資料庫的定序變。
     """
     return [_member(row.tuple()) for row in connection.execute(_LIST)]
+
+
+def list_member_emails(viewer: SystemViewer, connection: Connection) -> list[str]:
+    """允許名單上的每一個 email（小寫），依成員 ID 排序。
+
+    只給示範站匯出的自我檢查用（Story 3.7、ADR-0007「寫出之前的自我檢查」第 3 項）：拿來確認匯出
+    的檔裡找不到任何成員的 email；結果不寫進任何檔或日誌。系統身分（`visible_to_system_only`）：
+    訪客看不到成員資料，用訪客身分讀會是空的、檢查等於沒做。
+
+    Raises:
+        TypeError: `viewer` 不是 `SystemViewer`。
+    """
+    visible = visible_to_system_only(viewer)  # 不是 SystemViewer 就在碰連線之前丟錯
+    rows = connection.execute(
+        text(f"SELECT a.email FROM allowed_email AS a WHERE {visible} ORDER BY a.member_id")
+    )
+    return [str(email) for email in rows.scalars()]

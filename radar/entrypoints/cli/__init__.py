@@ -124,7 +124,8 @@ from radar.entrypoints.bootstrap import (
     code_version,
 )
 from radar.entrypoints.cli.backup import backup, restore
-from radar.entrypoints.cli.export_schema import export_schema
+from radar.entrypoints.cli.demo_export import export_demo
+from radar.entrypoints.cli.export_schema import export_demo_schema, export_schema
 from radar.entrypoints.cli.members import members_app
 from radar.entrypoints.logging_config import configure_logging
 from radar.entrypoints.startup import check_ai_config
@@ -189,6 +190,9 @@ weekly_run_app = typer.Typer(help="每週更新（weekly_run）。", no_args_is_
 app.add_typer(weekly_run_app, name="weekly-run")
 app.add_typer(members_app, name="members")
 app.command("export-schema")(export_schema)
+# 示範站匯出（Story 3.7、ADR-0061）。
+app.command("export-demo-schema")(export_demo_schema)
+app.command("export-demo")(export_demo)
 # 備份與還原（Story 3.18、ADR-0051）。
 app.command("backup")(backup)
 app.command("restore")(restore)

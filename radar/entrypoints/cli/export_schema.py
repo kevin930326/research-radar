@@ -2,7 +2,9 @@
 
 文件由 api 的程式產生（`radar.entrypoints.api.openapi`）。ADR-0001 規定 api、cli、worker 三個入口
 互相不 import，所以這裡用子行程執行它、取標準輸出寫檔，不 import api（CLI 也不必載入 FastAPI）。
-`demo-openapi.json` 在 Story 3.7 加。
+`radar export-demo-schema` 輸出 `demo-openapi.json`（示範站每一種資料檔的白名單模型，Story 3.7、
+ADR-0061）：由 `radar.domain.demo_export.render_demo_openapi` 產生（domain 的純函式，直接呼叫）；
+`tests/unit/test_demo_openapi.py` 檢查 repo 裡那份和程式一致。
 """
 
 import json
@@ -14,12 +16,15 @@ from typing import Annotated
 import structlog
 import typer
 
+from radar.domain.demo_export import render_demo_openapi
 from radar.entrypoints.logging_config import configure_logging
 
 # 產生文件的模組（在 api 套件裡）。
 OPENAPI_MODULE = "radar.entrypoints.api.openapi"
 # 架構文件的專案結構：`openapi.json` 放 repo 根目錄。
 DEFAULT_OUTPUT = Path("openapi.json")
+# 示範站資料檔的 `demo-openapi.json` 也放 repo 根目錄（ADR-0010 第 4 點）。
+DEFAULT_DEMO_OUTPUT = Path("demo-openapi.json")
 # 正常幾秒內完成；卡住時不要一直等。
 TIMEOUT_SECONDS = 120
 
@@ -55,4 +60,15 @@ def export_schema(
         log.error("產生的 openapi.json 不是合法的 JSON，沒有寫檔")
         raise typer.Exit(1) from None
     output.write_bytes(result.stdout)
+    typer.echo(f"已寫入 {output}")
+
+
+def export_demo_schema(
+    output: Annotated[
+        Path,
+        typer.Option("--output", help="寫到哪個檔（預設是工作目錄的 demo-openapi.json）"),
+    ] = DEFAULT_DEMO_OUTPUT,
+) -> None:
+    """輸出示範站資料檔的 demo-openapi.json（每一種資料檔一個只能讀取的端點；不連資料庫）。"""
+    output.write_text(render_demo_openapi(), encoding="utf-8")
     typer.echo(f"已寫入 {output}")

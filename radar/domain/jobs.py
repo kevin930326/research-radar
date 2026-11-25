@@ -101,6 +101,12 @@ SUBMIT_LLM_BATCH = JobSpec("submit_llm_batch", Queue.AI, lock="llm_batches")
 # 沒有錯誤、也沒有 `needs_attention` 的批次才送 `poll-batches` 心跳。
 POLL_BATCHES = JobSpec("poll_batches", Queue.AI, schedule="poll-batches", lock="poll_batches")
 
+# 示範站匯出（Story 3.7、AD-14、AD-20、ADR-0061）：`run_demo_export(demo_export_id)` 做一次匯出
+# （只寫 `preview/`）。現在只有 sweep 會排入它（停在 `queued`／`running` 太久的那一筆）；
+# `radar export-demo` 直接在 CLI 裡做、不經佇列；每週更新後自動排入是之後的 Story。帶
+# `demo_export` 這把鎖，同時只跑一個。
+RUN_DEMO_EXPORT = JobSpec("run_demo_export", Queue.MAINTENANCE, lock="demo_export")
+
 JOBS: tuple[JobSpec, ...] = (
     SWEEP,
     WEEKLY_UPDATE,
@@ -109,6 +115,7 @@ JOBS: tuple[JobSpec, ...] = (
     PLAN_LLM_BATCHES,
     SUBMIT_LLM_BATCH,
     POLL_BATCHES,
+    RUN_DEMO_EXPORT,
 )
 
 # 排入一個工作：（工作, 參數）→ True＝新排入；False＝同一件事已經在排隊，沒有再排一筆。

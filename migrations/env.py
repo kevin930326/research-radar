@@ -15,6 +15,7 @@ import radar.repo.ai_outputs  # zh_summary、classification、research_model
 import radar.repo.api_calls  # api_call
 import radar.repo.audit  # audit_event
 import radar.repo.deleted_records  # deleted_record
+import radar.repo.demo_exports  # demo_export
 import radar.repo.embeddings  # embedding_model、embedding
 import radar.repo.ingest_staging  # ingest_staging
 import radar.repo.judgments  # judgment_event

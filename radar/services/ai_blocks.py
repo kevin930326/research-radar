@@ -15,11 +15,11 @@
 """
 
 import uuid
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from datetime import datetime
 
 from radar.domain.ai_blocks import AiBlock, AiBlockSettings, AiProduct
-from radar.domain.ai_outputs import GatewayConfig
+from radar.domain.ai_outputs import GatewayConfig, LlmTask
 from radar.domain.budget import BudgetConfig, BudgetStatus
 from radar.domain.context_values import ContextValues
 from radar.domain.pricing import ModelsConfig
@@ -42,6 +42,30 @@ def current_ai_block_settings(
     Raises:
         PromptIntegrityError: 有工作沒有登記目前的 prompt 版本。
     """
+    return _settings(models, status.allows, taxonomy, context_values)
+
+
+def demo_ai_block_settings(
+    models: ModelsConfig, taxonomy: Taxonomy, context_values: ContextValues
+) -> dict[AiProduct, AiBlockSettings]:
+    """示範站匯出（Story 3.7）用的設定：和 `current_ai_block_settings` 一樣，只差預算一律當作准。
+
+    預算是全站的帳本，要用系統身分讀；示範站匯出只用 `PublicViewer` 讀（AD-20），所以不讀帳本。
+    結果：還沒有有效值、本來會是 `deferred_budget` 的區塊，示範站上是 `pending_batch`（兩個都是
+    「還在產生」；ADR-0061 列給 Kevin）。
+
+    Raises:
+        PromptIntegrityError: 有工作沒有登記目前的 prompt 版本。
+    """
+    return _settings(models, lambda _task: True, taxonomy, context_values)
+
+
+def _settings(
+    models: ModelsConfig,
+    allows: Callable[[LlmTask], bool],
+    taxonomy: Taxonomy,
+    context_values: ContextValues,
+) -> dict[AiProduct, AiBlockSettings]:
     settings: dict[AiProduct, AiBlockSettings] = {}
     for product in AiProduct:
         task = product.llm_task
@@ -54,7 +78,7 @@ def current_ai_block_settings(
             context_values_version=(
                 context_values.version_label if product is AiProduct.RESEARCH_MODEL else None
             ),
-            budget_allows=status.allows(task),
+            budget_allows=allows(task),
         )
     return settings
 

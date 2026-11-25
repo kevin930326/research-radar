@@ -143,6 +143,13 @@ def prompt_sha256(content: bytes) -> str:
     return hashlib.sha256(content).hexdigest()
 
 
+def demo_file_sha256(content: bytes) -> str:
+    """示範站資料檔整個檔案的 SHA-256（`manifest.json` 列的雜湊，Story 3.7、ADR-0007「檔案」）。"""
+    if not isinstance(content, bytes):
+        raise TypeError("demo_file_sha256 只收 bytes（檔案原始內容）")
+    return hashlib.sha256(content).hexdigest()
+
+
 def schema_sha256(schema_json: str) -> str:
     """結構化輸出 schema 的 SHA-256。
 

@@ -62,6 +62,7 @@
 | [0054](0054-page-max-width.md) | 整頁內容最寬 1088px、置中（導覽列、內容、頁尾含留白最寬 1280px）；先改設計稿與規格，程式另開 Story |
 | [0055](0055-expected-member-on-library-writes.md) | 文獻庫的加入、移出、復原與成員專屬的讀取（論文頁、找論文清單、文獻庫清單）帶請求標頭 `X-Radar-Expected-Member`；後端用同一個比對函式、在呼叫 services 之前和 session 的成員比對：不同 409 `member_changed`、格式不對 400 `expected_member_invalid`，都不讀不寫；沒帶照常（權限只看 session）。寫入帶的值＝畫面上那份資料是用誰的身分讀的（`readAs`），不是路由現在認定的人；找論文與我的文獻庫的 key 含成員 ID。收到 409 不重試、照「發現換人」整頁換成現在的人；e2e 替身要求每個寫入都帶標頭。#114 的切回視窗確認留著 | 提議 | AD-23 |
 | [0060](0060-license-mit.md) | 這個 repo 用 MIT 授權；BMAD、各 skill、字體、設計稿裡的 CC BY 摘要、OpenAlex 書目照各自的授權（編號跳到 0060，避開兩條線保留的 0039～0059） | 已接受 | AR-48 |
+| [0061](0061-demo-export-files.md) | 示範站匯出：每次一個新目錄 `preview/<匯出編號>/`、manifest 最後換；欄式索引＋標題＋每 200 篇一個分片；每個檔一個 `extra="forbid"` 模型、組合會員站共用模型，`demo-openapi.json` 由模型產生；所有讀取在同一個唯讀交易；寫出前自我檢查沒過就不寫 | 提議 | AD-20 |
 
 「提議」表示還沒經過 Kevin 確認；PR 合併後改成「已接受」。
 

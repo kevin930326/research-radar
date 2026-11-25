@@ -82,6 +82,7 @@ SHARED_TABLES: Mapping[str, str] = {
     "api_call": "外部 API 呼叫帳本（費用與額度）",
     "batch_submission": "AI 工作的 Batch 送出紀錄",
     "batch_item": "Batch 裡的每一項",
+    "demo_export": "示範站匯出的狀態紀錄（快照與第幾次，沒有成員欄位）",
 }
 
 
