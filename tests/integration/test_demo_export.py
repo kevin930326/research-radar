@@ -20,6 +20,7 @@ from typing import Any
 import psycopg
 import pytest
 from sqlalchemy import event
+from structlog.testing import capture_logs
 
 import radar.entrypoints.worker.tasks as worker_tasks
 from radar.config import ConfigError
@@ -1611,11 +1612,12 @@ def test_same_export_id_redone_after_a_takeover_before_the_switch_succeeds(
     assert _rows(db) == [(1, "succeeded", None)]
 
 
-def test_connection_lost_before_the_switch_removes_the_written_directory(
+def test_ownership_check_raising_before_the_switch_removes_the_written_directory(
     db: TestDatabase, database: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # 第 4 輪：換 manifest 前那次確認接手代號時連線斷了（這一句丟錯）：manifest 不換、剛寫好的目錄
-    # 刪掉，那一筆記成 error。
+    # 第 4 輪（第 5 輪改名，Codex 第 4 次複查中 3）：換 manifest 前那次確認接手代號時，替身直接丟
+    # psycopg.OperationalError（只驗這個例外路徑；沒有真的斷開資料庫連線，也不驗資料庫放鎖）：
+    # manifest 不換、剛寫好的目錄刪掉，那一筆記成 error。
     snapshots = publish_snapshots(db)
     seed_papers(db, database, [PaperSpec("a", 1)], snapshots=snapshots)
     real = update_demo_export_if_owned
@@ -1633,6 +1635,145 @@ def test_connection_lost_before_the_switch_removes_the_written_directory(
     with pytest.raises(psycopg.OperationalError):
         run_demo_export(SYSTEM, database, demo_setup(), run.id, tmp_path, clock=_clock)
 
+    assert list((tmp_path / PREVIEW_DIR).iterdir()) == []
+    assert _rows(db) == [(1, "failed", "error")]
+
+
+def test_interrupt_right_after_the_manifest_rename_keeps_the_directory_and_recovers(
+    db: TestDatabase, database: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 第 5 輪（Codex 第 4 次複查新高 1、Opus 新高 1）：manifest 換名已經成功、還沒設「已發佈」就收到
+    # Ctrl-C（替身在換名之後丟 KeyboardInterrupt）：清理前重讀 manifest，已經指向這一次就不刪目錄、
+    # 不記失敗，留在 running；之後補排時補記成功、不重寫。
+    snapshots = publish_snapshots(db)
+    seed_papers(db, database, [PaperSpec("a", 1)], snapshots=snapshots)
+    real_replace = service._replace_file
+
+    def replace_then_interrupt(*args: Any) -> None:
+        real_replace(*args)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(service, "_replace_file", replace_then_interrupt)
+    run = queue_demo_export(SYSTEM, database)
+
+    with pytest.raises(KeyboardInterrupt):
+        run_demo_export(SYSTEM, database, demo_setup(), run.id, tmp_path, clock=_clock)
+
+    written = _files(tmp_path)
+    assert json.loads(written[MANIFEST_FILE])["export_id"] == "2-1"
+    assert sorted(path.name for path in (tmp_path / PREVIEW_DIR).iterdir()) == [
+        "2-1",
+        MANIFEST_FILE,
+    ]
+    assert _rows(db) == [(1, "running", None)]
+    monkeypatch.undo()
+    _make_stale(db)
+
+    result = run_demo_export(SYSTEM, database, demo_setup(), run.id, tmp_path, clock=_clock)
+
+    assert result is not None
+    assert result.export_id == "2-1"
+    assert _files(tmp_path) == written
+    assert _rows(db) == [(1, "succeeded", None)]
+
+
+def test_cleanup_leaves_a_directory_swapped_in_under_the_same_name(
+    db: TestDatabase, database: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 第 5 輪（Codex 第 4 次複查新高 2）：寫好 2-1 之後，有人把它搬走、放進同名的別的目錄，接著換
+    # manifest 前發現被接手：清理比對身分不一樣，不刪換進來的目錄（也不動搬走的那個）。
+    snapshots = publish_snapshots(db)
+    seed_papers(db, database, [PaperSpec("a", 1)], snapshots=snapshots)
+    preview = tmp_path / PREVIEW_DIR
+    moved = tmp_path / "moved-2-1"
+    real_write = service._write_export_dir
+
+    def write_then_swap(*args: Any) -> None:
+        real_write(*args)
+        (preview / "2-1").rename(moved)
+        (preview / "2-1").mkdir()
+        (preview / "2-1" / "keep.txt").write_text("someone else's", encoding="utf-8")
+
+    real_owned = update_demo_export_if_owned
+    calls: list[int] = []
+
+    def owned(connection: Any, demo_export_id: Any, token: Any) -> bool:
+        calls.append(1)
+        return False if len(calls) == 5 else bool(real_owned(connection, demo_export_id, token))
+
+    monkeypatch.setattr(service, "_write_export_dir", write_then_swap)
+    monkeypatch.setattr(service, "update_demo_export_if_owned", owned)
+    run = queue_demo_export(SYSTEM, database)
+
+    with capture_logs() as logs, pytest.raises(DemoExportTakenOverError):
+        run_demo_export(SYSTEM, database, demo_setup(), run.id, tmp_path, clock=_clock)
+
+    assert (preview / "2-1" / "keep.txt").read_text(encoding="utf-8") == "someone else's"
+    assert any(moved.iterdir())
+    events = [entry["event"] for entry in logs]
+    assert any("已經不是這次寫的" in event for event in events)
+    assert any("沒有刪掉（見前一筆警告）" in event for event in events)
+    assert _rows(db) == [(1, "running", None)]
+
+
+@pytest.mark.parametrize(
+    ("lost_at", "says"), [(1, "這次還沒寫匯出目錄"), (5, "這次寫好的匯出目錄已刪掉")]
+)
+def test_takeover_log_says_what_happened_to_the_directory(
+    db: TestDatabase,
+    database: Database,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    lost_at: int,
+    says: str,
+) -> None:
+    # 第 5 輪（Codex 中 1／#4、Opus 低 1）：被接手時的日誌照實寫匯出目錄的下場。
+    snapshots = publish_snapshots(db)
+    seed_papers(db, database, [PaperSpec("a", 1)], snapshots=snapshots)
+    real = update_demo_export_if_owned
+    calls: list[int] = []
+
+    def owned(connection: Any, demo_export_id: Any, token: Any) -> bool:
+        calls.append(1)
+        return False if len(calls) == lost_at else bool(real(connection, demo_export_id, token))
+
+    monkeypatch.setattr(service, "update_demo_export_if_owned", owned)
+    run = queue_demo_export(SYSTEM, database)
+
+    with capture_logs() as logs, pytest.raises(DemoExportTakenOverError):
+        run_demo_export(SYSTEM, database, demo_setup(), run.id, tmp_path, clock=_clock)
+
+    (taken_over,) = [entry["event"] for entry in logs if "被別的行程接手" in entry["event"]]
+    assert says in taken_over
+
+
+def test_fsync_failure_right_after_the_directory_rename_removes_the_directory(
+    db: TestDatabase, database: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 第 5 輪（Codex 第 4 次複查新中 1）：匯出目錄改名之後 fsync preview/ 失敗：manifest 不換、這次
+    # 寫好的目錄照樣刪掉（不留下讓同編號重做碰到 output_exists 的目錄），記成 error。
+    snapshots = publish_snapshots(db)
+    seed_papers(db, database, [PaperSpec("a", 1)], snapshots=snapshots)
+    renamed: list[bool] = []
+    real_rename, real_fsync = service._rename_dir, service._fsync_dir
+
+    def rename(*args: Any) -> None:
+        real_rename(*args)
+        renamed.append(True)
+
+    def fsync(descriptor: int) -> None:
+        if renamed:
+            raise OSError(errno.EIO, "disk")
+        real_fsync(descriptor)
+
+    monkeypatch.setattr(service, "_rename_dir", rename)
+    monkeypatch.setattr(service, "_fsync_dir", fsync)
+    run = queue_demo_export(SYSTEM, database)
+
+    with pytest.raises(OSError, match="disk"):
+        run_demo_export(SYSTEM, database, demo_setup(), run.id, tmp_path, clock=_clock)
+
+    assert renamed == [True]
     assert list((tmp_path / PREVIEW_DIR).iterdir()) == []
     assert _rows(db) == [(1, "failed", "error")]
 

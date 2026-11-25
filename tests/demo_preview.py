@@ -224,13 +224,16 @@ def _generate_locked() -> str:
             raise
         except BaseException:
             # 例如還原舊範例途中按了 Ctrl-C（KeyboardInterrupt 不是 OSError，不會變成
-            # BackupKeptError）：備份還在、範例位置卻是空的，就留著暫存資料夾。
+            # BackupKeptError）：備份還在、範例位置卻是空的，就留著暫存資料夾。先當成要留，確認
+            # 備份不需要了才改回：查的途中再按一次 Ctrl-C 也不會清掉備份。
+            keep_work = True
             if backup_stranded(fixtures_fd, work, TARGET.name):
-                keep_work = True
                 print(
                     f"範例資料夾沒有換成；舊範例的備份留在 {FIXTURES / work / WORK_BACKUP}",
                     file=sys.stderr,
                 )
+            else:
+                keep_work = False
             raise
         finally:
             if not keep_work:

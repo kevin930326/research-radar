@@ -214,6 +214,29 @@ def test_generation_keeps_the_backup_when_interrupted(
     assert str(work / "old") in capsys.readouterr().err
 
 
+def test_generation_keeps_the_backup_when_interrupted_again_while_checking(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 第 5 輪（Codex 第 4 次複查高 #8 剩下的）：還原途中中斷之後，查「備份是不是還需要」的時候
+    # 再按一次 Ctrl-C：暫存資料夾（舊範例的備份）照樣留著。
+    _layout(tmp_path)
+    fixtures = _patch_paths(monkeypatch, tmp_path)
+    _interrupt_after_the_backup(monkeypatch, restore=True)
+
+    def interrupted_again(*_args: Any) -> bool:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(demo_preview, "backup_stranded", interrupted_again)
+
+    with pytest.raises(KeyboardInterrupt):
+        demo_preview._generate_locked()
+
+    monkeypatch.undo()
+    (work,) = [path for path in fixtures.iterdir() if path.name != "demo-preview"]
+    assert not (fixtures / "demo-preview").exists()
+    assert (work / "old" / "manifest.json").read_text(encoding="utf-8") == "old"
+
+
 def test_generation_interrupted_after_the_old_example_is_back_cleans_up(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

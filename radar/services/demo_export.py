@@ -51,7 +51,7 @@ from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Final
+from typing import Final, Literal
 
 import structlog
 from pydantic import ValidationError
@@ -288,7 +288,8 @@ def run_demo_export(
             result = _publish(database, out, run, token, files, result, progress)
         except DemoExportTakenOverError:
             log.warning(
-                "示範站匯出被別的行程接手：manifest 沒換、狀態不改，這次寫好的匯出目錄已清掉",
+                "示範站匯出被別的行程接手：manifest 沒換、狀態不改；"
+                + _TAKEN_OVER_DIR[progress.dir],
                 export_id=run.export_id,
             )
             raise
@@ -582,18 +583,37 @@ _DEMO_OUTPUT_LOCK_POLL_SECONDS: Final = 0.05
 _DIR_FLAGS: Final = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 
 
+_TAKEN_OVER_DIR: Final = {
+    "none": "這次還沒寫匯出目錄",
+    "removed": "這次寫好的匯出目錄已刪掉",
+    "kept": "這次寫好的匯出目錄沒有刪掉（見前一筆警告）",
+}
+
+
 @dataclass
 class _Progress:
-    """這一次匯出做到哪：`switched`＝manifest 已經換成這一次（已發佈）。`run_demo_export` 建、
-    `_swap_manifest` 換名成功時設，失敗處理看它決定記不記失敗（中斷也一樣看得到）。"""
+    """這一次匯出做到哪。`run_demo_export` 建，失敗處理看它（中斷也一樣看得到）：
+
+    - `switched`：manifest 已經換成這一次（已發佈）。`_swap_manifest` 換名成功時設；換名之後、設好之前
+      就停下時，由 `_publish` 的清理重讀 manifest 補設。
+    - `replacing`：已經開始換 manifest 的名（`_swap_manifest` 換名前設）；清理只在這之後才需要重讀
+      manifest 看換了沒有。
+    - `written`：這次寫的匯出目錄的 (`st_dev`, `st_ino`)（取自改名前的暫存目錄，改名不變）。改名前
+      就設、改名確定失敗才清掉；清理只刪身分相同的目錄。
+    - `dir`：被接手時日誌怎麼寫匯出目錄（`none` 沒寫過、`removed` 刪掉了、`kept` 沒刪掉）。
+    """
 
     switched: bool = False
+    replacing: bool = False
+    written: tuple[int, int] | None = None
+    dir: Literal["none", "removed", "kept"] = "none"
 
 
 @dataclass(frozen=True)
 class _Output:
-    """打開的輸出位置：輸出資料夾與 `preview/` 的目錄 fd。之後的讀寫一律相對於這兩個 fd、每一層都
-    不跟符號連結，途中有人把 `preview` 換成符號連結也寫不到別處。`preview_path` 只用來回報位置。"""
+    """打開的輸出位置：輸出資料夾與 `preview/` 的目錄 fd。輸出資料夾本身用一般路徑打開（它和上層
+    可以是符號連結）；`preview/` 起往下的讀寫一律相對於目錄 fd、不跟符號連結，途中有人把 `preview`
+    換成符號連結也寫不到別處。`preview_path` 只用來回報位置。"""
 
     root_fd: int
     preview_fd: int
@@ -874,8 +894,9 @@ def _publish(
 ) -> DemoExportResult:
     """拿資料庫的發佈鎖、確認還是自己接手的，再拿檔案鎖：manifest 沒有指向比這次新的匯出才寫匯出
     目錄，換 manifest 前在檔案鎖裡再比一次；換好後 fsync `preview/`，同一個資料庫交易記成功。
-    寫目錄前、換 manifest 前各再確認一次接手代號與 `preview/` 還在原位；寫好目錄之後、換 manifest
-    之前停下（被接手、檢查失敗、中斷）時刪掉這次寫好的匯出目錄。manifest 換名一成功就記
+    寫目錄前、換 manifest 前各再確認一次接手代號與 `preview/` 還在原位；寫目錄（含改名後的 fsync）
+    到換 manifest 之間停下（被接手、檢查失敗、中斷）時由 `_clean_up_before_switch` 收拾：manifest
+    已經指向這一次就算已發佈、不刪；確定沒換才刪這次寫的目錄（比對身分）。manifest 換名一成功就記
     `progress.switched`（已發佈）：之後的位置檢查、fsync、記成功、commit 失敗都算已發佈待補記。
 
     Raises:
@@ -897,17 +918,14 @@ def _publish(
                 _check_not_superseded(current, run)
                 _check_owned(connection, run, token)
                 _check_in_place(out)
-                _write_export_dir(out, run.export_id, files)
                 try:
+                    _write_export_dir(out, run.export_id, files, progress)
                     _check_not_superseded(_read_manifest(out), run)
                     _check_owned(connection, run, token)
                     _check_in_place(out)
                     _swap_manifest(out, files[MANIFEST_FILE], progress)
                 except BaseException:
-                    if not progress.switched:
-                        # 還沒換 manifest（沒有讀者讀得到這個目錄）：刪掉這次剛寫好的匯出目錄，
-                        # 同一個匯出編號重做時不會碰到 output_exists（ADR-0061）。
-                        _discard_export_dir(out, run.export_id)
+                    _clean_up_before_switch(out, run, progress)
                     raise
                 # manifest 一換好就算已發佈（ADR-0061）：之後的位置檢查、fsync、記成功、
                 # commit 失敗都不能記成沒發佈過，留在 running 等補記。換完才發現 preview/
@@ -990,9 +1008,13 @@ def _fill_staging(
             os.close(descriptor)
 
 
-def _write_export_dir(out: _Output, export_id: str, files: Mapping[str, bytes]) -> None:
+def _write_export_dir(
+    out: _Output, export_id: str, files: Mapping[str, bytes], progress: _Progress
+) -> None:
     """資料檔寫進暫存目錄、改名成 `preview/<匯出編號>/`，再 fsync `preview/`（新目錄的名字先落到
-    磁碟，才換 manifest：主機突然斷電時，不會有指向缺檔的新 manifest）。
+    磁碟，才換 manifest：主機突然斷電時，不會有指向缺檔的新 manifest）。改名前把暫存目錄的身分記
+    進 `progress.written`，改名確定失敗才清掉：改名之後的任何失敗或中斷（含 fsync）都由
+    `_publish` 的清理刪掉這個目錄。
 
     Raises:
         DemoExportError: 目錄已經存在（`output_exists`）、路徑不是認得的資料檔（`output_unsafe`）。
@@ -1009,9 +1031,12 @@ def _write_export_dir(out: _Output, export_id: str, files: Mapping[str, bytes]) 
     os.mkdir(staging, 0o755, dir_fd=out.preview_fd)
     try:
         _fill_staging(out.preview_fd, staging, export_id, data_files)
+        made = os.stat(staging, dir_fd=out.preview_fd, follow_symlinks=False)
+        progress.written = (made.st_dev, made.st_ino)
         try:
             _rename_dir(out.preview_fd, staging, export_id)
         except OSError as exc:
+            progress.written = None
             if exc.errno in (errno.EEXIST, errno.ENOTEMPTY):
                 raise DemoExportError(
                     DemoExportFailure.OUTPUT_EXISTS, f"{export_id} 的目錄已經存在，不覆寫"
@@ -1023,12 +1048,79 @@ def _write_export_dir(out: _Output, export_id: str, files: Mapping[str, bytes]) 
     _fsync_dir(out.preview_fd)
 
 
-def _discard_export_dir(out: _Output, export_id: str) -> None:
-    """換 manifest 之前失敗或被接手：刪掉這次剛寫好的 `preview/<匯出編號>/`（相對於目錄 fd、不跟符號
-    連結）。還拿著檔案鎖，manifest 也沒有指向它，沒有讀者讀得到。刪不掉只記日誌（留下的目錄位置），
-    原本的例外照樣往上丟。"""
+def _manifest_points_here(out: _Output, run: DemoExportRun) -> bool | None:
+    """現在的 manifest 是不是指向這一次（只看匯出編號）；讀的時候出錯回 None（不知道）。"""
     try:
-        shutil.rmtree(export_id, dir_fd=out.preview_fd)
+        current = _read_manifest(out)
+    except Exception:
+        return None
+    return current is not None and current.export_id == run.export_id
+
+
+def _clean_up_before_switch(out: _Output, run: DemoExportRun, progress: _Progress) -> None:
+    """`_publish` 寫目錄到換 manifest 這一段停下時的清理（還拿著檔案鎖）。已經開始換 manifest 的名
+    （`replacing`）時先重讀 manifest：換名已經成功、只是還沒設 `switched` 就停下（例如換名那一下收到
+    Ctrl-C）時，manifest 已經指向這一次，補設 `switched`、不刪目錄（已發佈、待補記，ADR-0061）；讀不
+    出 manifest 時不知道讀者看不看得到，目錄留著。確定沒換時才刪這次寫的目錄（`_discard_export_dir`）。"""
+    if progress.switched:
+        return
+    points_here = _manifest_points_here(out, run) if progress.replacing else False
+    if points_here:
+        progress.switched = True
+        log.error(
+            "換 manifest 的那一下停下：manifest 已經指向這一次，匯出目錄留著，算已發佈待補記",
+            export_id=run.export_id,
+        )
+        return
+    if progress.written is None:
+        return
+    if points_here is None:
+        progress.dir = "kept"
+        log.warning(
+            "換 manifest 之前停下，但讀不出現在的 manifest，這次寫好的匯出目錄留著沒刪；"
+            "同一個匯出編號重做會碰到 output_exists",
+            export_id=run.export_id,
+        )
+        return
+    progress.dir = _discard_export_dir(out, run.export_id, progress.written)
+
+
+def _discard_export_dir(
+    out: _Output, export_id: str, written: tuple[int, int]
+) -> Literal["none", "removed", "kept"]:
+    """刪掉這次寫的 `preview/<匯出編號>/`：先相對於 `preview/` 的目錄 fd 打開它（不跟符號連結）、用
+    `st_dev`／`st_ino` 比對是不是這次寫的那一個，不是（被搬走後換成別的目錄）就不刪；是的話相對於
+    它的目錄 fd 刪掉裡面的東西，最後再刪掉這個空目錄。manifest 沒有指向它，沒有讀者讀得到。回
+    `removed`（刪掉了）、`none`（沒有這個目錄：改名沒成功就停下）或 `kept`（不是這次寫的、刪不掉，
+    記警告）；原本的例外由呼叫端照樣往上丟。"""
+    try:
+        export_fd = _open_dir(export_id, out.preview_fd)
+    except FileNotFoundError:
+        log.info("換 manifest 之前停下，沒有留下這次的匯出目錄", export_id=export_id)
+        return "none"
+    except Exception as exc:
+        log.warning(
+            "換 manifest 之前停下，這次寫好的匯出目錄打不開，沒有刪掉；"
+            "同一個匯出編號重做會碰到 output_exists",
+            export_id=export_id,
+            error_type=type(exc).__name__,
+        )
+        return "kept"
+    try:
+        opened = os.fstat(export_fd)
+        if (opened.st_dev, opened.st_ino) != written:
+            log.warning(
+                "換 manifest 之前停下，但 preview/ 底下同名的目錄已經不是這次寫的，沒有刪",
+                export_id=export_id,
+            )
+            return "kept"
+        for name in os.listdir(export_fd):
+            if stat.S_ISDIR(os.stat(name, dir_fd=export_fd, follow_symlinks=False).st_mode):
+                shutil.rmtree(name, dir_fd=export_fd)
+            else:
+                os.unlink(name, dir_fd=export_fd)
+        # 名字指向的若已不是這個目錄，rmdir 不會刪掉非空的別的目錄；空的被換進來的目錄才會被刪。
+        os.rmdir(export_id, dir_fd=out.preview_fd)
     except Exception as exc:
         log.warning(
             "換 manifest 之前停下，這次寫好的匯出目錄沒有刪掉；"
@@ -1036,8 +1128,11 @@ def _discard_export_dir(out: _Output, export_id: str) -> None:
             export_id=export_id,
             error_type=type(exc).__name__,
         )
-    else:
-        log.info("換 manifest 之前停下，已刪掉這次寫好的匯出目錄", export_id=export_id)
+        return "kept"
+    finally:
+        os.close(export_fd)
+    log.info("換 manifest 之前停下，已刪掉這次寫好的匯出目錄", export_id=export_id)
+    return "removed"
 
 
 def _check_in_place_after_switch(out: _Output, run: DemoExportRun) -> None:
@@ -1059,10 +1154,12 @@ def _check_in_place_after_switch(out: _Output, run: DemoExportRun) -> None:
 
 def _swap_manifest(out: _Output, content: bytes, progress: _Progress) -> None:
     """manifest 先寫成暫存檔（fsync），再原子地換成 `preview/manifest.json`；換名一成功就記
-    `progress.switched`（已發佈）。失敗時刪掉暫存檔。"""
+    `progress.switched`（已發佈）。換名前設 `progress.replacing`（從這裡起 manifest 可能已經換了）。
+    失敗時刪掉暫存檔。"""
     pending = f".{MANIFEST_FILE}.tmp-{uuid.uuid4().hex}"
     try:
         _write_file(out.preview_fd, pending, content)
+        progress.replacing = True
         _replace_file(out.preview_fd, pending, MANIFEST_FILE)
         progress.switched = True
     except BaseException:
