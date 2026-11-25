@@ -133,7 +133,10 @@ function byYearThenId(a: DemoPaperRow, b: DemoPaperRow): number {
     if (b.year === null) return -1;
     return b.year - a.year;
   }
-  return a.id < b.id ? 1 : a.id > b.id ? -1 : 0;
+  // 讀檔時 UUID 不分大小寫；轉小寫再比，順序才和 Postgres uuid 一樣。
+  const left = a.id.toLowerCase();
+  const right = b.id.toLowerCase();
+  return left < right ? 1 : left > right ? -1 : 0;
 }
 
 /**

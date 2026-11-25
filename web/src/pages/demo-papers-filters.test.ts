@@ -87,6 +87,13 @@ describe("demo paper list filtering", () => {
     expect(ids(filterDemoRows([...rows].reverse(), {}))).toEqual(["e", "b", "c", "a", "d"]);
   });
 
+  it("compares ids without case, like Postgres uuid order", () => {
+    // 讀檔時 UUID 不分大小寫；大寫的 id 不能因為字碼比較排到小寫前面。
+    const mixed = [row("0000000a-0000-4000-8000-000000000000"), row("0000000B-0000-4000-8000-000000000000")];
+    expect(ids(filterDemoRows(mixed, {}))).toEqual(["0000000B-0000-4000-8000-000000000000", "0000000a-0000-4000-8000-000000000000"]);
+    expect(ids(filterDemoRows([...mixed].reverse(), {}))).toEqual(["0000000B-0000-4000-8000-000000000000", "0000000a-0000-4000-8000-000000000000"]);
+  });
+
   it("ORs journals and years, ANDs topics and methods, ANDs different fields", () => {
     expect(ids(filterDemoRows(rows, { journal: "misq,io" }))).toEqual(["e", "c", "a"]);
     expect(ids(filterDemoRows(rows, { from: 2024, to: 2025 }))).toEqual(["e", "b", "c"]);

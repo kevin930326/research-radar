@@ -116,10 +116,16 @@ test.describe("demo paper list", () => {
     // 「再載入 50 篇」：接著顯示，目前顯示幾篇寫進網址；全部顯示後按鈕不見。
     await expect(page.locator("[data-shown]")).toHaveText(fill(text("search:search.results.shown"), { shown: PAGE_SIZE, total: TOTAL }));
     await expect(page.locator("[data-load-more]")).toHaveText(fill(text("search:search.results.more"), { count: PAGE_SIZE }));
+    // 再載入不再發請求（接著顯示已讀進來的資料，AD-20）。只看 fetch／XHR。
+    const later: string[] = [];
+    page.on("request", (request) => {
+      if (["fetch", "xhr"].includes(request.resourceType())) later.push(request.url());
+    });
     await page.locator("[data-load-more]").click();
     await expect(rows(page)).toHaveCount(TOTAL);
     await expect(page).toHaveURL(/[?&]shown=100(&|$)/);
     await expect(page.locator("[data-load-more]")).toHaveCount(0);
+    expect(later).toEqual([]);
     // 重新整理後還是顯示同樣多篇。
     await page.reload();
     await expect(rows(page)).toHaveCount(TOTAL);
@@ -259,7 +265,7 @@ test.describe("demo paper list", () => {
     await expectCount(page, count(methodMatch));
     await expect(page.locator("h1")).toHaveText(heading([name(NAMES.topics, topic), name(NAMES.methods, method)], count(methodMatch)));
 
-    // 年份：「近 3 年」；起訖年從網址讀（跟著今年變），篇數照範例檔算。
+    // 年份：「近 3 年」；起訖年從網址讀、再和今年核對，篇數照範例檔算。
     await chip(text("search:search.filter.year")).click();
     // 整列是 label，點在 label 上（輸入框上面蓋著選項的字；同找論文的 e2e）。
     await page.locator("label").filter({ has: page.getByRole("radio", { name: text("search:search.year.last3") }) }).click();
@@ -268,6 +274,10 @@ test.describe("demo paper list", () => {
     const address = new URL(page.url()).searchParams;
     const from = Number(address.get("from"));
     const to = Number(address.get("to"));
+    // 「近 3 年」獨立核對：到今年（台北時間）、共 3 個年份。
+    const thisYear = Number(new Intl.DateTimeFormat("en", { timeZone: "Asia/Taipei", year: "numeric" }).format(new Date()));
+    expect(to).toBe(thisYear);
+    expect(to - from).toBe(2);
     const yearMatch = (at: number) => methodMatch(at) && INDEX.year[at] !== null && from <= INDEX.year[at]! && INDEX.year[at]! <= to;
     await expectCount(page, count(yearMatch));
     const years = fill(text("demo:demo.papers.years"), { years: from === to ? String(from) : `${from}–${to}` });
