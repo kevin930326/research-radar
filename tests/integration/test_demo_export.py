@@ -5,9 +5,11 @@
 """
 
 import dataclasses
+import errno
 import hashlib
 import json
 import uuid
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +18,7 @@ import pytest
 
 from radar.domain.demo_export import (
     DEMO_LABEL_ABSTRACT_SOURCES,
+    DEMO_PAPER_LIST_PAGE_SIZE,
     MANIFEST_FILE,
     PREVIEW_DIR,
     DemoExportBusyError,
@@ -24,16 +27,21 @@ from radar.domain.demo_export import (
     dump_demo_file,
     model_for_path,
 )
+from radar.domain.judgments import ActorRole, classification_fix
 from radar.domain.papers import AbstractSource
-from radar.domain.viewer import SystemViewer
+from radar.domain.taxonomy import TaxonomyField
+from radar.domain.viewer import PublicViewer, SystemViewer
 from radar.repo.db import Database
+from radar.repo.demo_exports import update_demo_export_finished
 from radar.repo.papers import list_demo_paper_facts
 from radar.services import demo_export as service
 from radar.services.demo_export import (
     DemoExportCheckError,
     DemoExportError,
     DemoExportSetup,
+    DemoExportTakenOverError,
     NoPublishedSnapshotError,
+    fail_demo_export,
     queue_demo_export,
     run_demo_export,
 )
@@ -42,16 +50,34 @@ from tests.database import TestDatabase, migrate
 from tests.demo_export_support import (
     EXPORTED_AT,
     MISQ,
+    TEM,
     PaperSpec,
     demo_setup,
     preview_specs,
     publish_snapshots,
     seed_papers,
 )
+from tests.integration.test_effective_views import create_event
 from tests.llm_support import execute
 from tests.permissions.framework import CANARY
 
 MEMBER_EMAIL = "demo.export.member@example.org"
+# 成員版共用模型裡有、ADR-0007 白名單沒有的欄位（F1）：匯出的任何一個檔都不能有這些鍵。
+NOT_WHITELISTED_KEYS = frozenset(
+    {
+        "fix_member_count",
+        "members_disagree",
+        "reported_fields",
+        "in_scope",
+        "origin",
+        "is_retracted",
+        "zh_summary_id",
+        "research_model_id",
+        "library_page_size",
+    }
+)
+# Nature 的 ISSN-L：不在追蹤清單裡（追蹤範圍外）。
+OUT_OF_SCOPE_ISSN = "0028-0836"
 
 
 @pytest.fixture
@@ -106,14 +132,35 @@ def _rows(db: TestDatabase) -> list[tuple[Any, ...]]:
     )
 
 
+def _keys(value: object) -> Iterator[str]:
+    if isinstance(value, dict):
+        for key, item in value.items():
+            yield key
+            yield from _keys(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from _keys(item)
+
+
+def _all_text(output: Path) -> str:
+    return b"".join(_files(output).values()).decode("utf-8")
+
+
 # --- 正常的匯出 -------------------------------------------------------------------------------
 
 
 def _special_specs() -> list[PaperSpec]:
+    # 計入統計的 14 篇（固定的 13 篇加第 14 篇），加上三篇不計入統計的：被排除的非研究文章、
+    # 追蹤範圍外、還沒算進任何已發佈的快照。
     return [
-        *preview_specs(count=12),
+        *preview_specs(count=14),
         PaperSpec("excluded_not_counted", 90, excluded_reason="editors_comments"),
+        PaperSpec("out_of_scope", 91, issn_l=OUT_OF_SCOPE_ISSN),
+        PaperSpec("not_yet_published", 92, unpublished=True),
     ]
+
+
+NOT_COUNTED = ("excluded_not_counted", "out_of_scope", "not_yet_published")
 
 
 def test_export_writes_a_new_preview_directory_and_the_manifest_last(
@@ -154,16 +201,22 @@ def test_export_writes_a_new_preview_directory_and_the_manifest_last(
         assert data["snapshot"] == {"number": 2, "as_of": "2026-11-16T03:00:00Z"}, path
         assert data["export_id"] == "2-1", path
     assert manifest["exported_at"] == "2026-11-16T06:00:00Z"
-    # 12 篇計入統計（被排除的那篇不算）。有摘要：第 2、10、12 篇以外的 9 篇；本週新增：第 1、12 篇；
-    # 有完整內容（CC BY、出版社可以放、有 OpenAlex 的摘要）：第 1、4、5、6、11 篇。
+    # 14 篇計入統計（不計入統計的三篇不算）。有摘要：第 2、10、14 篇以外的 11 篇；本週新增：第 1、
+    # 14 篇；有完整內容（CC BY、出版社可以放、有 OpenAlex 的摘要）：第 1、4、5、6、11、12、13 篇。
     assert manifest["summary"] == {
-        "paper_count": 12,
-        "with_abstract_count": 9,
+        "paper_count": 14,
+        "with_abstract_count": 11,
         "new_this_week_count": 2,
-        "full_content_count": 5,
+        "full_content_count": 7,
         "first_year": 2022,
         "last_year": 2025,
     }
+    # 示範站一頁 50 篇（F18）：只在示範站的 client_config，沒有成員版文獻庫的篇數。
+    assert manifest["client_config"] == {
+        "timezone": "Asia/Taipei",
+        "paper_list_page_size": DEMO_PAPER_LIST_PAGE_SIZE,
+    }
+    assert DEMO_PAPER_LIST_PAGE_SIZE == 50
     assert _rows(db) == [(1, "succeeded", None)]
 
 
@@ -214,13 +267,41 @@ def test_each_kind_of_paper_has_only_what_it_may_show(
     title_only = named["title_only_classification"]["biblio"]["classification"]  # type: ignore[index]
     assert title_only["provenance"]["input_kind"] == "title"
 
-    # 成員修正過的主題：輸出修正後的值、標成已核對；誰修正的不在白名單裡。
+    # 成員修正過的主題、方法：輸出修正後的值、標成已核對；誰修正的、幾位成員修正過、意見是否不同都
+    # 不在白名單裡（F1，ADR-0007 第 4、6 點）。
     verified = named["human_verified_topic"]["biblio"]["classification"]["value"]  # type: ignore[index]
-    assert verified["topic"] == {
-        "keys": ["it_strategy_digital_transformation"],
-        "human_verified": True,
-        "fix_member_count": 1,
-        "members_disagree": False,
+    assert verified == {
+        "topic": {"keys": ["it_strategy_digital_transformation"], "human_verified": True},
+        "method": {"keys": ["survey_sem"], "human_verified": False},
+    }
+    method = named["human_verified_method"]["biblio"]["classification"]["value"]["method"]  # type: ignore[index]
+    assert method == {"keys": ["experiment"], "human_verified": True}
+    # 書目只有 ADR-0007 清單裡的欄位；成員版多的欄位（修正人數、回報、in_scope、origin 等）
+    # 一個都沒有。
+    assert set(full["biblio"]["biblio"]) == {
+        "id",
+        "title",
+        "authors",
+        "publication_year",
+        "journal",
+        "journal_issn_l",
+        "volume",
+        "issue",
+        "first_page",
+        "last_page",
+        "doi",
+        "doi_url",
+        "openalex_id",
+        "openalex_url",
+        "cited_by_count",
+    }
+    for path, content in _files(tmp_path).items():
+        assert NOT_WHITELISTED_KEYS.isdisjoint(_keys(json.loads(content))), path
+    assert set(full["full"]["zh_summary"]["value"]) == {
+        "research_question",
+        "method",
+        "theory",
+        "findings",
     }
 
     # 摘要來源不允許公開：沒有完整內容，也沒有分類標籤。
@@ -230,23 +311,30 @@ def test_each_kind_of_paper_has_only_what_it_may_show(
     assert other["biblio"]["classification"] is None
     assert other["biblio"]["has_abstract"] is True
 
-    # AI 沒有產生成功、還沒有產出。
+    # AI 沒有產生成功、還沒有產出（分類；完整內容層的中文重點）。
     assert named["classification_failed"]["biblio"]["classification"] == {  # type: ignore[index]
         "state": "failed",
         "value": None,
         "provenance": None,
     }
     assert named["no_ai_output_yet"]["biblio"]["classification"]["state"] == "pending_batch"  # type: ignore[index]
+    ai_failed = named["full_content_ai_failed"]["full"]  # type: ignore[index]
+    assert ai_failed["zh_summary"] == {"state": "failed", "value": None, "provenance": None}
+    assert ai_failed["research_model"]["state"] == "ready"
 
-    # 被排除、不計入統計的論文完全不在匯出裡。
-    assert named["excluded_not_counted"] is None
+    # 不計入統計的論文（被排除的非研究文章、追蹤範圍外、還沒進已發佈快照）完全不在匯出裡：分片、
+    # 索引、標題，任何一個檔都沒有它的 ID 或標題。
+    text = _all_text(tmp_path)
+    for name, number in zip(NOT_COUNTED, (90, 91, 92), strict=True):
+        assert named[name] is None, name
+        assert str(ids[name]) not in text, name
+        assert f"Fake Paper {number}:" not in text, name
 
     # 摘要原文只出現在有完整內容的論文：別的論文的摘要字串不在任何檔裡。
-    text = b"".join(_files(tmp_path).values()).decode("utf-8")
     assert "Fake abstract from another source" not in text
-    assert "Made up abstract 1" in text  # 有完整內容的第 1 篇
+    assert full["full"]["abstract"] == {"content": "Made up abstract 1", "source": "openalex"}
     for number in (3, 7, 8):  # 授權不允許、IEEE 兩篇
-        assert f"Made up abstract {number}" not in text
+        assert f'"Made up abstract {number}"' not in text
     # 中文重點只在有完整內容的論文出現（三篇只有書目的論文也有中文重點，但不輸出）。
     assert text.count("（假資料）團隊怎麼採用協作工具？") == 1
 
@@ -325,8 +413,8 @@ def test_one_export_in_progress_per_snapshot(db: TestDatabase, database: Databas
     with pytest.raises(psycopg.errors.UniqueViolation):
         execute(
             db,
-            "INSERT INTO demo_export (snapshot_id, sequence, status)"
-            " SELECT snapshot_id, 9, 'running' FROM demo_export LIMIT 1",
+            "INSERT INTO demo_export (snapshot_id, sequence, status, run_token)"
+            " SELECT snapshot_id, 9, 'running', gen_random_uuid() FROM demo_export LIMIT 1",
         )
 
 
@@ -334,53 +422,146 @@ def test_all_reads_happen_in_one_read_only_repeatable_read_transaction(
     db: TestDatabase, database: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     snapshots = publish_snapshots(db)
-    seed_papers(db, database, preview_specs(count=3), snapshots=snapshots)
-    seen: list[tuple[str, str, str, int]] = []
+    ids = seed_papers(db, database, preview_specs(count=3), snapshots=snapshots)
+    seen: list[tuple[str, str, str, int, Any, Any]] = []
 
     def spy(name: str, real: Any) -> Any:
         def wrapper(viewer: Any, connection: Any, *args: Any, **kwargs: Any) -> Any:
             isolation = connection.exec_driver_sql("SHOW transaction_isolation").scalar()
             read_only = connection.exec_driver_sql("SHOW transaction_read_only").scalar()
             pid = connection.exec_driver_sql("SELECT pg_backend_pid()").scalar()
-            seen.append((name, isolation, read_only, pid))
-            return real(viewer, connection, *args, **kwargs)
+            started = connection.exec_driver_sql("SELECT transaction_timestamp()").scalar()
+            seen.append((name, isolation, read_only, pid, started, viewer))
+            result = real(viewer, connection, *args, **kwargs)
+            if name == "find_latest_published_snapshot":
+                # 第一句讀完之後，另一條連線改一篇論文的標題並 commit：後面的讀取仍要看到原本的值。
+                execute(
+                    db,
+                    "UPDATE paper SET title = 'Fake Paper changed mid export' WHERE id = %s",
+                    ids["full_content"],
+                )
+            return result
 
         return wrapper
 
-    for name in (
+    names = (
         "find_latest_published_snapshot",
         "list_demo_paper_facts",
         "find_paper_llm_source",
         "find_ai_block",
         "list_demo_full_paper_ids",
+        "list_demo_publisher_facts",
         "list_member_emails",
-    ):
+    )
+    for name in names:
         monkeypatch.setattr(service, name, spy(name, getattr(service, name)))
 
     _export(database, tmp_path)
 
-    assert {name for name, *_ in seen} == {
-        "find_latest_published_snapshot",
-        "list_demo_paper_facts",
-        "find_paper_llm_source",
-        "find_ai_block",
-        "list_demo_full_paper_ids",
-        "list_member_emails",
-    }
-    assert {(isolation, read_only) for _, isolation, read_only, _ in seen} == {
+    assert {name for name, *_ in seen} == set(names)
+    assert {(isolation, read_only) for _, isolation, read_only, *_ in seen} == {
         ("repeatable read", "on")
     }
-    # 同一條連線（同一個交易）。
-    assert len({pid for *_, pid in seen}) == 1
+    # 同一條連線、同一個交易（交易開始的時間都一樣）。
+    assert len({pid for *_, pid, _, _ in seen}) == 1
+    assert len({started for *_, started, _ in seen}) == 1
+    # 中途 commit 的改動看不到：匯出的是原本的標題。
+    titles = json.loads(_files(tmp_path)["2-1/titles.json"])["titles"]
+    assert "Fake Paper 1: full content" in titles
+    assert "Fake Paper changed mid export" not in titles
+    # 匯出的資料只用 PublicViewer 讀；成員 email（只拿來比對）是唯一用系統身分讀的，只讀一次。
+    for name, *_, viewer in seen:
+        expected = SystemViewer if name == "list_member_emails" else PublicViewer
+        assert type(viewer) is expected, name
+    assert [name for name, *_ in seen].count("list_member_emails") == 1
+
+
+def test_stale_demo_eligible_for_an_excluded_journal_gets_no_full_content(
+    db: TestDatabase, database: Database, tmp_path: Path
+) -> None:
+    # 排除清單改了、還沒 reparse：IEEE 期刊（0018-9391）的論文資料庫裡還留著舊的 demo_eligible =
+    # true，view demo_full_paper 也算它（F2）。匯出時直接用排除清單判，不給完整內容。
+    snapshots = publish_snapshots(db)
+    ids = seed_papers(
+        db,
+        database,
+        [
+            PaperSpec(
+                "stale_ieee",
+                1,
+                issn_l=TEM,
+                publisher_id="https://openalex.org/P9000000077",
+                publisher_name="The Engineering Management Press",
+                zh_summary=True,
+            )
+        ],
+        snapshots=snapshots,
+    )
+    execute(db, "UPDATE paper SET demo_eligible = true WHERE id = %s", ids["stale_ieee"])
+    in_view = {uuid.UUID(str(row[0])) for row in execute(db, "SELECT id FROM demo_full_paper")}
+    assert ids["stale_ieee"] in in_view
+
+    _export(database, tmp_path)
+
+    [paper] = _papers(tmp_path).values()
+    assert paper["full"] is None
+    assert paper["biblio"]["has_full_content"] is False
+    assert json.loads(_files(tmp_path)["2-1/papers-index.json"])["has_full_content"] == [False]
+    text = _all_text(tmp_path)
+    assert '"Made up abstract 1"' not in text
+    assert "（假資料）" not in text
+
+
+def test_self_check_catches_an_excluded_journal_with_full_content(
+    db: TestDatabase, database: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 組檔那一段讀到的出版社與期刊欄位是空的（假裝漏了）：自我檢查第 6 項另外直接讀出版社欄位，
+    # 擋下。
+    snapshots = publish_snapshots(db)
+    ids = seed_papers(db, database, [PaperSpec("stale_ieee", 1, issn_l=TEM)], snapshots=snapshots)
+    execute(db, "UPDATE paper SET demo_eligible = true WHERE id = %s", ids["stale_ieee"])
+    _export(database, tmp_path)  # 先有一份正常的匯出（2-1）
+    before = _files(tmp_path)
+    real = list_demo_paper_facts
+
+    def blind(viewer: Any, connection: Any) -> list[DemoPaperFacts]:
+        return [
+            DemoPaperFacts(
+                **{
+                    **_fields(item),
+                    "publisher_ids": (),
+                    "publisher_names": (),
+                    "journal_issn_l": None,
+                }
+            )
+            for item in real(viewer, connection)
+        ]
+
+    monkeypatch.setattr(service, "list_demo_paper_facts", blind)
+
+    problems = _check_fails(database, tmp_path)
+
+    paper_id = ids["stale_ieee"]
+    assert f"排除清單裡的出版社或期刊的論文 {paper_id} 帶了完整內容" in problems
+    assert f"排除清單裡的出版社或期刊的論文 {paper_id} 標成有完整內容" in problems
+    _assert_unchanged(db, tmp_path, before)
 
 
 # --- 自我檢查沒過：不換 manifest、什麼都不寫、那一筆記成失敗 ------------------------------------
 
 
-def _assert_nothing_written(db: TestDatabase, output: Path) -> None:
-    assert not (output / PREVIEW_DIR / MANIFEST_FILE).exists()
-    assert not any(path.is_file() for path in output.rglob("*"))
-    assert _rows(db)[-1][1:] == ("failed", DemoExportFailure.SELF_CHECK_FAILED.value)
+def _assert_unchanged(
+    db: TestDatabase,
+    output: Path,
+    before: dict[str, bytes],
+    failure: DemoExportFailure = DemoExportFailure.SELF_CHECK_FAILED,
+) -> None:
+    """失敗的那一次（2-2）之後：既有的 manifest 位元組不變、仍指向 2-1，2-1 的檔一個不少，沒有 2-2
+    的目錄，沒有留下暫存目錄或暫存的 manifest；那一筆記成 `failure`。"""
+    assert _files(output) == before
+    assert json.loads(before[MANIFEST_FILE])["export_id"] == "2-1"
+    assert sorted(path.name for path in (output / PREVIEW_DIR).iterdir()) == ["2-1", MANIFEST_FILE]
+    assert _rows(db)[-1][1:] == ("failed", failure.value)
 
 
 def _check_fails(database: Database, output: Path, setup: DemoExportSetup | None = None) -> str:
@@ -397,19 +578,20 @@ def test_canary_in_the_output_fails_the_check(
     seed_papers(
         db, database, [PaperSpec("canary", 1, title=f"Fake Paper {CANARY}")], snapshots=snapshots
     )
+    _export(database, tmp_path)  # 沒設金絲雀：先有一份正常的匯出（2-1）
+    before = _files(tmp_path)
 
     problems = _check_fails(database, tmp_path, demo_setup(canaries=[CANARY]))
 
     assert "出現金絲雀字串" in problems
     assert CANARY not in problems
-    _assert_nothing_written(db, tmp_path)
+    _assert_unchanged(db, tmp_path, before)
 
 
 def test_member_email_in_the_output_fails_the_check(
     db: TestDatabase, database: Database, tmp_path: Path
 ) -> None:
     snapshots = publish_snapshots(db)
-    allow_member(SystemViewer(), database, email=MEMBER_EMAIL, display_name="測試成員")
     # 大小寫不同也算。
     seed_papers(
         db,
@@ -417,12 +599,15 @@ def test_member_email_in_the_output_fails_the_check(
         [PaperSpec("email", 1, title=f"Fake Paper by {MEMBER_EMAIL.upper()}")],
         snapshots=snapshots,
     )
+    _export(database, tmp_path)  # 還不是成員的 email：先有一份正常的匯出（2-1）
+    before = _files(tmp_path)
+    allow_member(SystemViewer(), database, email=MEMBER_EMAIL, display_name="測試成員")
 
     problems = _check_fails(database, tmp_path)
 
     assert "出現成員的 email" in problems
     assert MEMBER_EMAIL not in problems.casefold()
-    _assert_nothing_written(db, tmp_path)
+    _assert_unchanged(db, tmp_path, before)
 
 
 def test_full_content_outside_demo_full_paper_fails_the_check(
@@ -433,6 +618,8 @@ def test_full_content_outside_demo_full_paper_fails_the_check(
     ids = seed_papers(
         db, database, [PaperSpec("not_open", 1, license="cc-by-nc")], snapshots=snapshots
     )
+    _export(database, tmp_path)
+    before = _files(tmp_path)
     real = list_demo_paper_facts
 
     def wrong(viewer: Any, connection: Any) -> list[DemoPaperFacts]:
@@ -447,7 +634,7 @@ def test_full_content_outside_demo_full_paper_fails_the_check(
 
     assert f"不在 demo_full_paper 的論文 {ids['not_open']} 帶了完整內容" in problems
     assert f"不在 demo_full_paper 的論文 {ids['not_open']} 標成有完整內容" in problems
-    _assert_nothing_written(db, tmp_path)
+    _assert_unchanged(db, tmp_path, before)
 
 
 def _fields(facts: DemoPaperFacts) -> dict[str, Any]:
@@ -460,6 +647,8 @@ def test_field_outside_the_whitelist_fails_the_check(
     # 組檔那一段多寫了一個欄位：自我檢查用白名單模型讀回來，擋下來。
     snapshots = publish_snapshots(db)
     seed_papers(db, database, [PaperSpec("a", 1, issn_l=MISQ)], snapshots=snapshots)
+    _export(database, tmp_path)
+    before = _files(tmp_path)
     real = dump_demo_file
 
     def leaky(model: Any) -> bytes:
@@ -471,9 +660,241 @@ def test_field_outside_the_whitelist_fails_the_check(
 
     problems = _check_fails(database, tmp_path)
 
-    assert "2-1/papers-index.json：不符合白名單模型 DemoPapersIndex" in problems
+    assert "2-2/papers-index.json：不符合白名單模型 DemoPapersIndex" in problems
     assert "extra_forbidden" in problems
-    _assert_nothing_written(db, tmp_path)
+    # 多出來的鍵名不印進原因（只印 `?`）。
+    assert "member_note" not in problems
+    _assert_unchanged(db, tmp_path, before)
+
+
+def test_member_only_data_with_a_canary_never_reaches_the_files(
+    db: TestDatabase, database: Database, tmp_path: Path
+) -> None:
+    # FR-7：金絲雀放進成員專屬的地方（修正分類的理由、成員的顯示名稱、email），匯出成功、任何一個檔
+    # 都找不到它（F16）。
+    snapshots = publish_snapshots(db)
+    ids = seed_papers(db, database, [PaperSpec("fixed", 1)], snapshots=snapshots)
+    canary_email = f"{CANARY}@example.org"
+    member = allow_member(
+        SystemViewer(), database, email=canary_email, display_name=f"成員 {CANARY}"
+    ).member_id
+    event = create_event(
+        database,
+        classification_fix(
+            member_id=member,
+            actor_role=ActorRole.MEMBER,
+            paper_id=ids["fixed"],
+            field=TaxonomyField.TOPIC,
+            keys=("health_it",),
+            reason=f"修正理由 {CANARY}",
+        ),
+    )
+    assert event is not None
+
+    _export(database, tmp_path, demo_setup(canaries=[CANARY]))
+
+    text = _all_text(tmp_path).casefold()
+    assert CANARY not in text
+    assert canary_email not in text
+    [paper] = _papers(tmp_path).values()
+    assert paper["biblio"]["classification"]["value"]["topic"] == {
+        "keys": ["health_it"],
+        "human_verified": True,
+    }
+
+
+# --- 寫到一半失敗、並行、接手 ------------------------------------------------------------------
+
+
+def _first_export(db: TestDatabase, database: Database, output: Path) -> dict[str, bytes]:
+    snapshots = publish_snapshots(db)
+    seed_papers(db, database, [PaperSpec("a", 1)], snapshots=snapshots)
+    _export(database, output)
+    return _files(output)
+
+
+def _fail_on(monkeypatch: pytest.MonkeyPatch, name: str, error: BaseException) -> None:
+    def broken(*_args: Any, **_kwargs: Any) -> None:
+        raise error
+
+    monkeypatch.setattr(service, name, broken)
+
+
+@pytest.mark.parametrize("step", ["_write_file", "_rename_dir"])
+def test_failure_while_writing_the_directory_keeps_the_old_manifest(
+    db: TestDatabase,
+    database: Database,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    step: str,
+) -> None:
+    before = _first_export(db, database, tmp_path)
+    _fail_on(monkeypatch, step, OSError(errno.EIO, "disk"))
+    run = queue_demo_export(SYSTEM, database)
+
+    with pytest.raises(OSError, match="disk"):
+        run_demo_export(SYSTEM, database, demo_setup(), run.id, tmp_path, clock=_clock)
+
+    _assert_unchanged(db, tmp_path, before, DemoExportFailure.ERROR)
+
+
+def test_failure_while_replacing_the_manifest_keeps_the_old_one(
+    db: TestDatabase, database: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    before = _first_export(db, database, tmp_path)
+    _fail_on(monkeypatch, "_replace_file", OSError(errno.EIO, "disk"))
+    run = queue_demo_export(SYSTEM, database)
+
+    with pytest.raises(OSError, match="disk"):
+        run_demo_export(SYSTEM, database, demo_setup(), run.id, tmp_path, clock=_clock)
+
+    files = _files(tmp_path)
+    # 2-2 的目錄已經改名好了（留給之後清理），但 manifest 的位元組沒變、沒有留下暫存的 manifest。
+    assert files[MANIFEST_FILE] == before[MANIFEST_FILE]
+    assert {path: content for path, content in files.items() if not path.startswith("2-2/")} == (
+        before
+    )
+    assert sorted(path.name for path in (tmp_path / PREVIEW_DIR).iterdir()) == [
+        "2-1",
+        "2-2",
+        MANIFEST_FILE,
+    ]
+    assert _rows(db)[-1][1:] == ("failed", "error")
+
+
+def test_interrupted_export_is_recorded(
+    db: TestDatabase, database: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    before = _first_export(db, database, tmp_path)
+    _fail_on(monkeypatch, "_write_file", KeyboardInterrupt())
+    run = queue_demo_export(SYSTEM, database)
+
+    with pytest.raises(KeyboardInterrupt):
+        run_demo_export(SYSTEM, database, demo_setup(), run.id, tmp_path, clock=_clock)
+
+    # 中斷也移出 running（不會讓下一次 radar export-demo 被擋 6 小時）。
+    _assert_unchanged(db, tmp_path, before, DemoExportFailure.INTERRUPTED)
+
+
+def test_manifest_already_switched_is_recorded_as_succeeded_on_the_rerun(
+    db: TestDatabase, database: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 換好 manifest、記成功的那一筆交易失敗（F5）：那一筆留在 running；sweep 補排後重跑時，發現
+    # manifest 已經指向這一次、檔案都完整，就補記成功，不重寫。
+    snapshots = publish_snapshots(db)
+    seed_papers(db, database, [PaperSpec("a", 1)], snapshots=snapshots)
+    real = update_demo_export_finished
+
+    def lost_commit(connection: Any, demo_export_id: Any, **kwargs: Any) -> bool:
+        if kwargs["failure"] is None:
+            raise RuntimeError("connection lost")
+        return bool(real(connection, demo_export_id, **kwargs))
+
+    monkeypatch.setattr(service, "update_demo_export_finished", lost_commit)
+    run = queue_demo_export(SYSTEM, database)
+
+    with pytest.raises(RuntimeError):
+        run_demo_export(SYSTEM, database, demo_setup(), run.id, tmp_path, clock=_clock)
+
+    written = _files(tmp_path)
+    assert json.loads(written[MANIFEST_FILE])["export_id"] == "2-1"
+    assert _rows(db) == [(1, "running", None)]
+    monkeypatch.undo()
+    # 還沒超過 6 小時：別的行程不能接手。
+    assert run_demo_export(SYSTEM, database, demo_setup(), run.id, tmp_path, clock=_clock) is None
+    execute(db, "UPDATE demo_export SET updated_at = now() - interval '7 hours'")
+
+    result = run_demo_export(SYSTEM, database, demo_setup(), run.id, tmp_path, clock=_clock)
+
+    assert result is not None
+    assert (result.export_id, result.paper_count, result.full_content_count) == ("2-1", 1, 1)
+    assert _files(tmp_path) == written
+    assert _rows(db) == [(1, "succeeded", None)]
+
+
+def test_older_export_does_not_overwrite_a_newer_manifest(
+    db: TestDatabase, database: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 快照 2 的匯出讀完資料後，快照 3 發佈、它的匯出先寫完（F3）。快照 2 那一次在發佈鎖裡看到
+    # manifest 已經指向 3-1，不蓋回去。
+    snapshots = publish_snapshots(db)
+    seed_papers(db, database, [PaperSpec("a", 1)], snapshots=snapshots)
+    real = service._build_and_check
+    newer: list[service.DemoExportResult] = []
+    started: list[bool] = []
+
+    def slow(*args: Any, **kwargs: Any) -> Any:
+        built = real(*args, **kwargs)
+        if not started:
+            started.append(True)  # 快照 3 那一次也會經過這裡，只插一次
+            [(run,)] = execute(
+                db, "INSERT INTO weekly_run (status) VALUES ('published') RETURNING id"
+            )
+            execute(
+                db,
+                "INSERT INTO snapshot (number, weekly_run_id, status, as_of)"
+                " VALUES (3, %s, 'published', now())",
+                run,
+            )
+            newer.append(_export(database, tmp_path))
+        return built
+
+    monkeypatch.setattr(service, "_build_and_check", slow)
+    older = queue_demo_export(SYSTEM, database)
+
+    with pytest.raises(DemoExportError) as caught:
+        run_demo_export(SYSTEM, database, demo_setup(), older.id, tmp_path, clock=_clock)
+
+    assert caught.value.failure is DemoExportFailure.SUPERSEDED
+    assert newer[0].export_id == "3-1"
+    assert json.loads(_files(tmp_path)[MANIFEST_FILE])["export_id"] == "3-1"
+    assert sorted(path.name for path in (tmp_path / PREVIEW_DIR).iterdir()) == [
+        "3-1",
+        MANIFEST_FILE,
+    ]
+    assert _rows(db) == [(1, "failed", "superseded"), (1, "succeeded", None)]
+
+
+def test_export_taken_over_by_another_process_writes_nothing(
+    db: TestDatabase, database: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 組檔途中另一個行程接手了同一筆（run_token 換掉，F4）：這個行程不寫檔、不改那一筆的狀態。
+    snapshots = publish_snapshots(db)
+    seed_papers(db, database, [PaperSpec("a", 1)], snapshots=snapshots)
+    real = service._build_and_check
+
+    def taken_over(*args: Any, **kwargs: Any) -> Any:
+        built = real(*args, **kwargs)
+        execute(db, "UPDATE demo_export SET run_token = gen_random_uuid()")
+        return built
+
+    monkeypatch.setattr(service, "_build_and_check", taken_over)
+    run = queue_demo_export(SYSTEM, database)
+
+    with pytest.raises(DemoExportTakenOverError):
+        run_demo_export(SYSTEM, database, demo_setup(), run.id, tmp_path, clock=_clock)
+
+    assert _files(tmp_path) == {}
+    assert _rows(db) == [(1, "running", None)]
+
+
+def test_preview_symlink_is_refused(db: TestDatabase, database: Database, tmp_path: Path) -> None:
+    # preview 是指到別處（例如正式的 data/）的符號連結：不沿著連結寫（F7）。
+    snapshots = publish_snapshots(db)
+    seed_papers(db, database, [PaperSpec("a", 1)], snapshots=snapshots)
+    elsewhere = tmp_path / "data"
+    elsewhere.mkdir()
+    output = tmp_path / "out"
+    output.mkdir()
+    (output / PREVIEW_DIR).symlink_to(elsewhere, target_is_directory=True)
+    run = queue_demo_export(SYSTEM, database)
+
+    with pytest.raises(DemoExportError) as caught:
+        run_demo_export(SYSTEM, database, demo_setup(), run.id, output, clock=_clock)
+
+    assert caught.value.failure is DemoExportFailure.OUTPUT_UNSAFE
+    assert list(elsewhere.iterdir()) == []
+    assert _rows(db) == [(1, "failed", "output_unsafe")]
 
 
 # --- 其他失敗 ---------------------------------------------------------------------------------
@@ -502,6 +923,31 @@ def test_publish_switch_is_refused_and_nothing_is_written(
     assert _rows(db) == [(1, "failed", "publish_not_ready")]
 
 
+def test_missing_output_dir_is_recorded_and_nothing_is_written(
+    db: TestDatabase, database: Database, tmp_path: Path
+) -> None:
+    snapshots = publish_snapshots(db)
+    seed_papers(db, database, [PaperSpec("a", 1)], snapshots=snapshots)
+    run = queue_demo_export(SYSTEM, database)
+
+    with pytest.raises(DemoExportError) as caught:
+        run_demo_export(SYSTEM, database, demo_setup(), run.id, None, clock=_clock)
+
+    assert caught.value.failure is DemoExportFailure.NO_OUTPUT_DIR
+    assert list(tmp_path.iterdir()) == []
+    assert _rows(db) == [(1, "failed", "no_output_dir")]
+
+
+def test_config_error_before_the_export_is_recorded(db: TestDatabase, database: Database) -> None:
+    # worker 讀設定檔失敗（F11）：那一筆記成 failed，sweep 不再補排。
+    publish_snapshots(db)
+    run = queue_demo_export(SYSTEM, database)
+
+    assert fail_demo_export(SYSTEM, database, run.id, DemoExportFailure.CONFIG_ERROR) is True
+    assert fail_demo_export(SYSTEM, database, run.id, DemoExportFailure.CONFIG_ERROR) is False
+    assert _rows(db) == [(1, "failed", "config_error")]
+
+
 def test_existing_directory_is_not_overwritten(
     db: TestDatabase, database: Database, tmp_path: Path
 ) -> None:
@@ -516,6 +962,7 @@ def test_existing_directory_is_not_overwritten(
     assert caught.value.failure is DemoExportFailure.OUTPUT_EXISTS
     assert not (tmp_path / PREVIEW_DIR / MANIFEST_FILE).exists()
     assert list((tmp_path / PREVIEW_DIR / "2-1").iterdir()) == []
+    assert _rows(db) == [(1, "failed", "output_exists")]
 
 
 def test_finished_export_is_not_run_again(

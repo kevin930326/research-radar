@@ -146,8 +146,9 @@ class Settings(BaseModel):
     # 示範站自動發佈（ADR-0007「放置與更新」、AD-20）：預設關，關的時候匯出只寫 `preview/`。正式發佈
     # （寫 `data/`、上傳）還沒做（Epic 3 不開）：開了的話匯出直接失敗、什麼都不寫（Story 3.7）。
     demo_publish: bool = False
-    # 示範站匯出寫到哪個資料夾（底下是 `preview/`）。worker 的匯出工作用；沒設時那次匯出記成失敗。
-    # `radar export-demo` 用 `--output-dir` 指定，不看這個值。
+    # 示範站匯出寫到哪個資料夾（底下是 `preview/`）。`radar export-demo` 與 worker 的匯出工作都只看
+    # 這一個值（中斷後由 worker 補做時寫到同一個地方，ADR-0061）；沒設時 CLI 不匯出、worker 那次記成
+    # 失敗。
     demo_export_dir: str | None = Field(default=None, min_length=1)
     # Anthropic 的 API key。只有要呼叫 LLM 的指令與工作需要；缺了由 bootstrap 在組裝時回報。
     anthropic_api_key: SecretStr | None = Field(default=None, min_length=1)

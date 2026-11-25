@@ -41,7 +41,7 @@ from sqlalchemy.dialects.postgresql import ARRAY
 
 from radar.domain.ai_outputs import CurrentAbstract, PaperLlmSource
 from radar.domain.annotations import AnnotationPaperFacts, AnnotationPaperText
-from radar.domain.demo_export import DemoPaperFacts
+from radar.domain.demo_export import DemoPaperFacts, DemoPublisherFacts
 from radar.domain.identifiers import ExternalId, IdentifierScheme
 from radar.domain.llm_batches import PaperAiSource
 from radar.domain.paper_page import PaperPageFacts
@@ -1217,8 +1217,9 @@ def list_demo_eligible_facts(
 
 def list_demo_paper_facts(viewer: PublicViewer, connection: Connection) -> list[DemoPaperFacts]:
     """示範站匯出要的每一篇論文（Story 3.7、AD-20）：`viewer` 看得到的（訪客＝`counted_paper` 裡的）
-    書目、最早記上的 DOI 與 OpenAlex ID、目前的摘要的來源（不讀摘要內容）、在不在 view
-    `demo_full_paper`、是不是本週新增（`first_snapshot_id` 是最新已發佈的快照）。
+    書目、最早記上的 DOI 與 OpenAlex ID、出版社 ID 與名稱（匯出時再用排除清單判一次，不寫進檔）、
+    目前的摘要的來源（不讀摘要內容）、在不在 view `demo_full_paper`、是不是本週新增
+    （`first_snapshot_id` 是最新已發佈的快照）。
 
     一句帶可見條件的查詢。排序就是示範站資料檔的列順序：出版年新到舊（沒有年份的在最後）、同一年
     依 id 由大到小（和找論文清單一樣）。只讀，不寫。
@@ -1227,10 +1228,10 @@ def list_demo_paper_facts(viewer: PublicViewer, connection: Connection) -> list[
     rows = (
         connection.execute(
             text(
-                "SELECT paper.id, paper.origin, paper.title, paper.authors,"
+                "SELECT paper.id, paper.title, paper.authors,"
                 " paper.publication_year, paper.journal_issn_l, paper.volume, paper.issue,"
-                " paper.first_page, paper.last_page, paper.cited_by_count, paper.in_scope,"
-                " paper.is_retracted,"
+                " paper.first_page, paper.last_page, paper.cited_by_count,"
+                " paper.publisher_ids, paper.publisher_names,"
                 " (SELECT d.value_norm FROM external_id AS d"
                 "  WHERE d.paper_id = paper.id AND d.scheme = :doi"
                 "  ORDER BY d.created_at, d.id LIMIT 1) AS doi,"
@@ -1260,7 +1261,6 @@ def list_demo_paper_facts(viewer: PublicViewer, connection: Connection) -> list[
     return [
         DemoPaperFacts(
             paper_id=row["id"],
-            origin=PaperOrigin(row["origin"]),
             title=row["title"],
             authors=tuple(row["authors"]),
             publication_year=row["publication_year"],
@@ -1270,10 +1270,10 @@ def list_demo_paper_facts(viewer: PublicViewer, connection: Connection) -> list[
             first_page=row["first_page"],
             last_page=row["last_page"],
             cited_by_count=row["cited_by_count"],
-            in_scope=row["in_scope"],
-            is_retracted=row["is_retracted"],
             doi=row["doi"],
             openalex_id=row["openalex_id"],
+            publisher_ids=tuple(row["publisher_ids"]),
+            publisher_names=tuple(row["publisher_names"]),
             abstract_source=(
                 None if row["abstract_source"] is None else AbstractSource(row["abstract_source"])
             ),
@@ -1283,6 +1283,31 @@ def list_demo_paper_facts(viewer: PublicViewer, connection: Connection) -> list[
             is_new_this_week=bool(row["is_new_this_week"]),
         )
         for row in rows
+    ]
+
+
+def list_demo_publisher_facts(
+    viewer: PublicViewer, connection: Connection
+) -> list[DemoPublisherFacts]:
+    """`viewer` 看得到的每一篇論文的出版社 ID、名稱與期刊 ISSN-L（示範站匯出的自我檢查第 6 項用，
+    Story 3.7、ADR-0007）：直接讀出版社欄位，不看 `demo_eligible`。和 `list_demo_paper_facts` 另外
+    一句讀：自我檢查不拿組檔用的那份結果來檢查自己。只讀，不寫。
+    """
+    visible = visible_papers(viewer, alias="paper")
+    rows = connection.execute(
+        text(
+            "SELECT paper.id, paper.publisher_ids, paper.publisher_names, paper.journal_issn_l"
+            f" FROM paper WHERE {visible} ORDER BY paper.id"
+        )
+    )
+    return [
+        DemoPublisherFacts(
+            paper_id=paper_id,
+            publisher_ids=tuple(publisher_ids),
+            publisher_names=tuple(publisher_names),
+            journal_issn_l=journal_issn_l,
+        )
+        for paper_id, publisher_ids, publisher_names, journal_issn_l in rows
     ]
 
 

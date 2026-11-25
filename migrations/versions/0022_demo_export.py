@@ -3,7 +3,8 @@
 - 一列＝一次匯出：`snapshot_id`（外鍵到 `snapshot`）、`sequence`（這個快照的第幾次，匯出編號是
   `<快照編號>-<sequence>`，CHECK ≥ 1）、`status`（`queued`、`running`、`succeeded`、`failed`）、
   `failure_reason`（只有 `failed` 有，是原因代碼）、`created_at`、`updated_at`（NOT NULL，sweep 用
-  它判斷卡住）、`started_at`、`finished_at`（結束的一定有）。
+  它判斷卡住）、`started_at`、`finished_at`（結束的一定有）、`run_token`（接手執行的那一次的代號，
+  `running` 一定有；只有拿著它的行程能寫檔與結束那一筆，ADR-0061）。
 - （`snapshot_id`, `sequence`）UNIQUE（也當外鍵的索引）；部分唯一索引
   `uq_demo_export_snapshot_id_in_progress`：同一個快照只能有一筆 `queued` 或 `running`。
 - 只建新表，不改任何既有的表。
@@ -42,6 +43,7 @@ def upgrade() -> None:
         sa.Column("updated_at", sa.DateTime(timezone=True), server_default=_now(), nullable=False),
         sa.Column("started_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("finished_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("run_token", sa.Uuid(), nullable=True),
         sa.PrimaryKeyConstraint("id", name="pk_demo_export"),
         sa.ForeignKeyConstraint(
             ["snapshot_id"], ["snapshot.id"], name="fk_demo_export_snapshot_id_snapshot"
@@ -58,6 +60,10 @@ def upgrade() -> None:
         sa.CheckConstraint(
             "status NOT IN ('succeeded', 'failed') OR finished_at IS NOT NULL",
             name="ck_demo_export_finished_at_once_finished",
+        ),
+        sa.CheckConstraint(
+            "status <> 'running' OR run_token IS NOT NULL",
+            name="ck_demo_export_run_token_when_running",
         ),
     )
     op.create_index(

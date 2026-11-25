@@ -14,6 +14,7 @@ from pydantic import BaseModel
 
 from radar.domain.demo_export import (
     DEMO_FILE_MODELS,
+    DEMO_PAPER_LIST_PAGE_SIZE,
     MANIFEST_FILE,
     PAPERS_INDEX_FILE,
     SHARD_SIZE,
@@ -25,8 +26,6 @@ from radar.domain.paper_list import PAPER_LIST_PAGE_SIZE
 
 ROOT = Path(__file__).resolve().parents[2]
 PREVIEW = ROOT / "web" / "e2e" / "fixtures" / "demo-preview"
-# 示範站論文清單一次 50 篇（epics Story 3.14）：範例要多於一頁。
-DEMO_PAGE_SIZE = 50
 
 
 def _files() -> dict[str, bytes]:
@@ -107,7 +106,10 @@ def test_enough_papers_for_more_than_one_page() -> None:
     index = _load(f"{_export_id()}/{PAPERS_INDEX_FILE}")
     titles = _load(f"{_export_id()}/{TITLES_FILE}")["titles"]
 
-    assert len(index["id"]) > DEMO_PAGE_SIZE > PAPER_LIST_PAGE_SIZE
+    # 示範站一頁 50 篇（manifest 的 client_config 帶著，前端不另外寫一份）：範例要多於一頁。
+    assert _load(MANIFEST_FILE)["client_config"]["paper_list_page_size"] == 50
+    assert DEMO_PAPER_LIST_PAGE_SIZE == 50
+    assert len(index["id"]) > DEMO_PAPER_LIST_PAGE_SIZE > PAPER_LIST_PAGE_SIZE
     assert len(index["id"]) <= SHARD_SIZE
     assert len(titles) == len(index["id"])
     assert all(title.startswith("Fake Paper ") for title in titles)
@@ -135,10 +137,16 @@ def test_every_paper_state_is_covered() -> None:
     assert named("no ai output yet")["biblio"]["classification"]["state"] == "pending_batch"
     pending = named("full content ai pending")["full"]
     assert pending["zh_summary"]["state"] == "pending_batch"
+    # 完整內容層的 AI 沒有產生成功（中文重點 failed），研究模型照樣有。
+    ai_failed = named("full content ai failed")["full"]
+    assert ai_failed["zh_summary"]["state"] == "failed"
+    assert ai_failed["research_model"]["state"] == "ready"
     title_only = named("title only classification")["biblio"]["classification"]
     assert title_only["provenance"]["input_kind"] == "title"
     verified = named("human verified topic")["biblio"]["classification"]["value"]["topic"]
     assert verified["human_verified"] is True
+    method = named("human verified method")["biblio"]["classification"]["value"]["method"]
+    assert method == {"keys": ["experiment"], "human_verified": True}
     assert named("other source abstract")["biblio"]["classification"] is None
     assert named("ieee excluded publisher")["full"] is None
     assert named("ieee journal only")["full"] is None
@@ -159,4 +167,5 @@ def test_every_filter_has_both_sides() -> None:
     for column in ("has_abstract", "has_full_content", "is_new_this_week"):
         assert set(index[column]) == {True, False}, column
     assert {True, False} <= set(index["topics_verified"])
+    assert {True, False} <= set(index["methods_verified"])
     assert {"ready", "failed", "pending_batch", None} <= set(index["classification_state"])

@@ -2,25 +2,28 @@
 
 - **白名單**：每一種資料檔一個「多餘欄位即報錯」的模型（`DEMO_FILE_MODELS`），全部列在
   `demo-openapi.json`（`build_demo_openapi` 產生，repo 裡放一份，測試檢查兩邊一致）。論文只有兩層：
-  `DemoPaperBiblio`（全部 `counted_paper`）與 `DemoPaperFull`（只有 `demo_full_paper`）。
-  兩邊都會出現的形狀（書目、AI 區塊、來歷、快照、顯示名稱、前端設定值）直接用 `domain/contracts.py`
-  的共用模型組成，不另訂一份（ADR-0010 第 12 項）。
+  `DemoPaperBiblio`（全部 `counted_paper`）與 `DemoPaperFull`（只有示範站有完整內容的論文）。
+  書目、分類、中文重點、研究模型照 ADR-0007 第 4 點逐欄列（`DemoBiblio` 等），不整個套成員版的
+  共用模型；本身整個在清單裡的形狀（快照、來歷、顯示名稱、原文摘要、全文連結、構面與假設）才共用
+  `domain/contracts.py` 的模型（ADR-0010 第 12 項、ADR-0061）。
 - **目錄**：`preview/manifest.json` 與 `preview/<匯出編號>/…`（`RADAR_DEMO_PUBLISH` 開的時候是
   `data/`，結構相同；這個 epic 不開）。資料檔的路徑由 `data_file_path`、`shard_file_name` 決定。
-- **自我檢查**（`check_demo_files`，寫 manifest 之前）：每個檔通過它的白名單模型；不在
-  `demo_full_paper` 的論文沒有完整內容；找不到金絲雀字串與成員 email。其餘幾項（重算計數、關係與
-  問答的論文 ID、出版社欄位直接查）由之後的 Story 補（Epic 9、10、13）。
+- **自我檢查**（`check_demo_files`，寫 manifest 之前）：ADR-0007 第 1、2、3 項，與第 6 項的分片
+  與索引部分（排除清單裡的出版社或期刊的論文沒有完整內容）。第 4 項（重算計數）、第 5 項與第 6 項的
+  關係、問答、首頁部分由之後的 Story 補（ADR-0061「留到之後」）。
 - 這裡只有純函式與模型；讀資料庫、寫檔在 `services/demo_export.py`。
 """
 
 import contextlib
 import json
 import re
+import unicodedata
 import uuid
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Annotated, Any, Final, Self
+from typing import Annotated, Any, Final, Self, get_args
+from urllib.parse import unquote
 
 from pydantic import (
     BaseModel,
@@ -33,22 +36,30 @@ from pydantic import (
 )
 from pydantic.json_schema import models_json_schema
 
-from radar.domain.ai_blocks import AiBlockState
-from radar.domain.ai_outputs import InputKind
+from radar.domain.ai_blocks import (
+    AiBlock,
+    AiBlockState,
+    AiProduct,
+    ClassificationFieldValue,
+    ClassificationValue,
+    ResearchModelValue,
+    ZhSummaryValue,
+)
 from radar.domain.contracts import (
-    ClassificationBlock,
-    ClientConfig,
+    ConstructItem,
     DisplayNames,
     FullTextLinks,
+    HypothesisItem,
     PaperAbstract,
-    PaperBiblio,
     Provenance,
-    ResearchModelBlock,
     SnapshotRef,
     UtcDateTime,
-    ZhSummaryBlock,
+    doi_url,
+    openalex_url,
 )
-from radar.domain.papers import AbstractSource, PaperOrigin
+from radar.domain.papers import AbstractSource
+from radar.domain.policy import PublisherExclusions
+from radar.domain.snapshot import DATA_TIMEZONE
 
 # --- 目錄與檔名 ---------------------------------------------------------------------------------
 
@@ -75,6 +86,10 @@ _EXPORT_ID = re.compile(EXPORT_ID_PATTERN)
 # 「摘要來源允許公開」是同一個清單（遷移 0021）；整合測試檢查兩邊一致（ADR-0061）。
 DEMO_LABEL_ABSTRACT_SOURCES: Final = frozenset({AbstractSource.OPENALEX})
 
+# 示範站論文清單一頁幾篇（epics Story 3.14）：放在 manifest 的 `client_config`，前端不另外寫一份
+# （AD-21、ADR-0061）。成員版的找論文清單一頁篇數不變。
+DEMO_PAPER_LIST_PAGE_SIZE: Final = 50
+
 
 def export_id_for(snapshot_number: int, sequence: int) -> str:
     """快照編號與序號 → 匯出編號（`12-2`）。
@@ -97,6 +112,18 @@ def shard_file_name(shard: int) -> str:
     if type(shard) is not int or not 0 <= shard < _MAX_SHARDS:
         raise ValueError(f"分片編號要是 0 到 {_MAX_SHARDS - 1} 的整數")
     return f"{shard:0{_SHARD_DIGITS}d}.json"
+
+
+def export_order(export_id: str) -> tuple[int, int]:
+    """匯出編號 → （快照編號, 序號），用來比哪一次比較新（大的比較新）。
+
+    Raises:
+        ValueError: 匯出編號的格式不對。
+    """
+    if not isinstance(export_id, str) or not _EXPORT_ID.fullmatch(export_id):
+        raise ValueError("匯出編號的格式不對")
+    snapshot_number, _, sequence = export_id.partition("-")
+    return int(snapshot_number), int(sequence)
 
 
 def data_file_path(export_id: str, name: str) -> str:
@@ -125,11 +152,15 @@ class DemoExportStatus(StrEnum):
 class DemoExportFailure(StrEnum):
     """匯出失敗的原因代碼（`demo_export.failure_reason`；細節只在日誌）。"""
 
-    NO_OUTPUT_DIR = "no_output_dir"  # worker 沒有設定匯出資料夾
+    NO_OUTPUT_DIR = "no_output_dir"  # 沒有設定匯出資料夾（RADAR_DEMO_EXPORT_DIR）
+    CONFIG_ERROR = "config_error"  # worker 讀設定檔失敗（還沒開始匯出）
     PUBLISH_NOT_READY = "publish_not_ready"  # 開了 RADAR_DEMO_PUBLISH，但正式發佈還沒做
     SNAPSHOT_CHANGED = "snapshot_changed"  # 排入之後發佈了新的快照（照新的快照再排一次）
     SELF_CHECK_FAILED = "self_check_failed"  # 寫 manifest 之前的自我檢查沒過
     OUTPUT_EXISTS = "output_exists"  # 這個匯出編號的目錄已經存在（不覆寫）
+    OUTPUT_UNSAFE = "output_unsafe"  # 輸出位置是符號連結或跑出輸出資料夾（不寫）
+    SUPERSEDED = "superseded"  # manifest 已經指向比這次新的匯出（不蓋回舊的）
+    INTERRUPTED = "interrupted"  # 行程被中斷（Ctrl-C、被要求結束）
     ERROR = "error"  # 其他錯誤（類別記在日誌）
 
 
@@ -139,13 +170,15 @@ class DemoExportBusyError(Exception):
 
 @dataclass(frozen=True, slots=True)
 class DemoExportRun:
-    """`demo_export` 的一列（含它的快照編號）。"""
+    """`demo_export` 的一列（含它的快照編號）。`run_token`：接手執行的那一次的代號（`running` 才有；
+    只有拿著這個代號的行程能寫檔、能把它結束）。"""
 
     id: uuid.UUID
     snapshot_id: uuid.UUID
     snapshot_number: int
     sequence: int
     status: DemoExportStatus
+    run_token: uuid.UUID | None = None
 
     @property
     def export_id(self) -> str:
@@ -155,22 +188,29 @@ class DemoExportRun:
 # --- 匯出要讀的論文欄位（repo 讀、services 組）------------------------------------------------
 
 
+def _check_text_tuple(name: str, value: object) -> None:
+    if not isinstance(value, tuple) or not all(isinstance(item, str) for item in value):
+        raise ValueError(f"{name} 要是字串的 tuple")
+
+
 @dataclass(frozen=True, slots=True)
 class DemoPaperFacts:
     """`repo/papers.list_demo_paper_facts` 讀出的一篇論文（`PublicViewer` 看得到的，也就是
     `counted_paper` 裡的）。不含摘要內容：摘要只對 `in_demo_full_paper` 的論文另外讀。
 
     - `doi`、`openalex_id`：正規化後的值；一篇有好幾個時是最早記上的那一個。
+    - `publisher_ids`、`publisher_names`：出版社自己那一版的出版社 ID 與名稱（含上層出版社），
+      匯出時再用排除清單直接判一次（ADR-0007 第 6 項、ADR-0061）；不寫進任何檔。
     - `abstract_source`：目前的摘要的來源；沒有目前的摘要是 None。
     - `in_demo_full_paper`：在 view `demo_full_paper` 裡（示範站有完整內容）。
     - `is_new_this_week`：第一次算進的快照（`first_snapshot_id`）就是最新已發佈的快照。
 
     Raises:
-        ValueError: `authors` 不是字串的 tuple、被引用次數是負的。
+        ValueError: `authors`、`publisher_ids`、`publisher_names` 不是字串的 tuple、
+            被引用次數是負的。
     """
 
     paper_id: uuid.UUID
-    origin: PaperOrigin
     title: str
     authors: tuple[str, ...]
     publication_year: int | None
@@ -180,19 +220,18 @@ class DemoPaperFacts:
     first_page: str | None
     last_page: str | None
     cited_by_count: int | None
-    in_scope: bool
-    is_retracted: bool
     doi: str | None
     openalex_id: str | None
+    publisher_ids: tuple[str, ...]
+    publisher_names: tuple[str, ...]
     abstract_source: AbstractSource | None
     in_demo_full_paper: bool
     is_new_this_week: bool
 
     def __post_init__(self) -> None:
-        if not isinstance(self.authors, tuple) or not all(
-            isinstance(author, str) for author in self.authors
-        ):
-            raise ValueError("authors 要是字串的 tuple")
+        _check_text_tuple("authors", self.authors)
+        _check_text_tuple("publisher_ids", self.publisher_ids)
+        _check_text_tuple("publisher_names", self.publisher_names)
         if self.cited_by_count is not None and self.cited_by_count < 0:
             raise ValueError("cited_by_count 不能是負的")
 
@@ -202,27 +241,306 @@ class DemoPaperFacts:
         return self.abstract_source is None or self.abstract_source in DEMO_LABEL_ABSTRACT_SOURCES
 
 
+@dataclass(frozen=True, slots=True)
+class DemoPublisherFacts:
+    """`repo/papers.list_demo_publisher_facts` 讀出的一篇論文的出版社與期刊欄位（自我檢查第 6 項：
+    直接用出版社欄位查，不經過 `demo_eligible`，ADR-0007）。
+
+    Raises:
+        ValueError: `publisher_ids`、`publisher_names` 不是字串的 tuple。
+    """
+
+    paper_id: uuid.UUID
+    publisher_ids: tuple[str, ...]
+    publisher_names: tuple[str, ...]
+    journal_issn_l: str | None
+
+    def __post_init__(self) -> None:
+        _check_text_tuple("publisher_ids", self.publisher_ids)
+        _check_text_tuple("publisher_names", self.publisher_names)
+
+
+def excluded_publisher_paper_ids(
+    papers: Iterable[DemoPublisherFacts], exclusions: PublisherExclusions
+) -> frozenset[uuid.UUID]:
+    """出版社（ID 或名稱，含上層出版社）或期刊 ISSN-L 對上「示範站不放完整內容」清單的論文 id。
+
+    直接用 `PublisherExclusions.matches` 判（和 `is_demo_eligible` 同一份清單、同一個比對規則），
+    不看資料庫存的 `demo_eligible`：清單改了卻還沒 `radar reparse` 時，舊的 `demo_eligible` 可能
+    還是 true（ADR-0052），這一道照樣擋得住。
+    """
+    return frozenset(
+        paper.paper_id
+        for paper in papers
+        if exclusions.matches(
+            paper.publisher_ids, paper.publisher_names, journal_issn_l=paper.journal_issn_l
+        )
+    )
+
+
 # --- 白名單模型 ---------------------------------------------------------------------------------
+#
+# 每一個欄位都照 ADR-0007 第 4 點的清單逐欄列出（ADR-0061「欄位」）：不直接套成員版的共用模型，
+# 免得成員版多出來的欄位（修正人數、意見不一、回報的欄位、`in_scope`、`origin`、`is_retracted`、
+# 內部的產出 ID）跟著出去。只有本身就整個在清單裡的形狀（快照、來歷、顯示名稱、原文摘要、全文連結、
+# 構面與假設）才共用成員版的模型。
 
 _WHITELIST = ConfigDict(frozen=True, extra="forbid")
+_Text = Annotated[str, StringConstraints(min_length=1)]
+_JournalKey = Annotated[str, StringConstraints(pattern=r"^[a-z][a-z0-9_]*$", max_length=64)]
+_WITH_PROVENANCE: Final = frozenset({AiBlockState.READY, AiBlockState.EMPTY})
+
+
+def _check_demo_envelope(
+    state: AiBlockState,
+    value: object | None,
+    provenance: Provenance | None,
+    *,
+    classification: bool,
+) -> None:
+    """AI 區塊信封的不變式（和 `domain/ai_blocks.AiBlock` 相同）：只有 `ready`、`empty` 帶來歷而且
+    一定要帶；只有 `ready` 帶值而且一定要帶；分類不會是 `empty`。"""
+    if (state in _WITH_PROVENANCE) != (provenance is not None):
+        raise ValueError("只有 ready 與 empty 帶 provenance，而且一定要帶")
+    if (state is AiBlockState.READY) != (value is not None):
+        raise ValueError("只有 ready 帶 value，而且一定要帶")
+    if classification and state is AiBlockState.EMPTY:
+        raise ValueError("分類不會是 empty（至少有 unclassified）")
+
+
+def _demo_provenance(block: AiBlock) -> Provenance | None:
+    return None if block.provenance is None else Provenance.from_domain(block.provenance)
+
+
+def _checked(block: AiBlock, product: AiProduct) -> AiBlock:
+    if not isinstance(block, AiBlock) or block.product is not product:
+        raise ValueError(f"要是 {product.value} 的 AiBlock")
+    return block
+
+
+class DemoBiblio(BaseModel):
+    """論文的書目（ADR-0007 第 4 點）：論文 ID（內部 ID，和成員版的網址一致）、標題、作者、期刊、
+    年份、卷期頁碼、DOI 與 OpenAlex 連結、被引用次數。`doi_url`、`openalex_url` 由 `doi`、
+    `openalex_id` 產生，和它們一起有值或一起是 null。"""
+
+    model_config = _WHITELIST
+
+    id: uuid.UUID
+    title: _Text
+    authors: tuple[str, ...]
+    publication_year: int | None = Field(strict=True)
+    journal: _JournalKey | None
+    journal_issn_l: str | None
+    volume: str | None
+    issue: str | None
+    first_page: str | None
+    last_page: str | None
+    doi: _Text | None
+    doi_url: str | None
+    openalex_id: _Text | None
+    openalex_url: str | None
+    cited_by_count: int | None = Field(ge=0, strict=True)
+
+    @model_validator(mode="after")
+    def _check_links(self) -> Self:
+        if self.doi_url != (None if self.doi is None else doi_url(self.doi)):
+            raise ValueError("doi_url 要由 doi 產生（沒有 doi 時是 null）")
+        expected = None if self.openalex_id is None else openalex_url(self.openalex_id)
+        if self.openalex_url != expected:
+            raise ValueError("openalex_url 要由 openalex_id 產生（沒有 openalex_id 時是 null）")
+        return self
+
+
+class DemoClassificationField(BaseModel):
+    """分類的一欄（主題或方法）：代號（排序過、不重複，可能是 `unclassified`）與是否已核對
+    （人工值）。
+    誰修正的、幾位成員修正過、意見是否不同都不在白名單裡（ADR-0007 第 6 點）。"""
+
+    model_config = _WHITELIST
+
+    keys: tuple[_Text, ...]
+    human_verified: StrictBool
+
+    @classmethod
+    def from_domain(cls, value: ClassificationFieldValue) -> Self:
+        return cls(keys=value.keys, human_verified=value.human_verified)
+
+
+class DemoClassificationContent(BaseModel):
+    """有效的分類：主題與方法兩欄；沒有值的那一欄是 null。"""
+
+    model_config = _WHITELIST
+
+    topic: DemoClassificationField | None
+    method: DemoClassificationField | None
+
+
+class DemoClassificationBlock(BaseModel):
+    """分類標籤與它的 AI 標章資料（來歷含是否已核對；`input_kind` 是 `title`＝只根據標題分類）。"""
+
+    model_config = _WHITELIST
+
+    state: AiBlockState
+    value: DemoClassificationContent | None
+    provenance: Provenance | None
+
+    @model_validator(mode="after")
+    def _check(self) -> Self:
+        _check_demo_envelope(self.state, self.value, self.provenance, classification=True)
+        return self
+
+    @classmethod
+    def from_block(cls, block: AiBlock) -> Self:
+        """`repo/ai_blocks.find_ai_block` 判定的分類區塊 → 示範站的形狀（逐欄挑，不整個帶）。
+
+        Raises:
+            ValueError: 區塊不是分類。
+        """
+        block = _checked(block, AiProduct.CLASSIFICATION)
+        value = block.value
+        assert value is None or isinstance(value, ClassificationValue)
+        return cls(
+            state=block.state,
+            value=None
+            if value is None
+            else DemoClassificationContent(
+                topic=None
+                if value.topic is None
+                else DemoClassificationField.from_domain(value.topic),
+                method=None
+                if value.method is None
+                else DemoClassificationField.from_domain(value.method),
+            ),
+            provenance=_demo_provenance(block),
+        )
+
+
+class DemoZhSummaryContent(BaseModel):
+    """有效的中文重點：研究問題、方法、理論、發現（成員回報的欄位、內部 ID 不在白名單裡）。"""
+
+    model_config = _WHITELIST
+
+    research_question: str | None
+    method: str | None
+    theory: str | None
+    findings: str | None
+
+
+class DemoZhSummaryBlock(BaseModel):
+    """中文重點區塊（狀態、內容、來歷）。"""
+
+    model_config = _WHITELIST
+
+    state: AiBlockState
+    value: DemoZhSummaryContent | None
+    provenance: Provenance | None
+
+    @model_validator(mode="after")
+    def _check(self) -> Self:
+        _check_demo_envelope(self.state, self.value, self.provenance, classification=False)
+        return self
+
+    @classmethod
+    def from_block(cls, block: AiBlock) -> Self:
+        """中文重點區塊 → 示範站的形狀。
+
+        Raises:
+            ValueError: 區塊不是中文重點。
+        """
+        block = _checked(block, AiProduct.ZH_SUMMARY)
+        value = block.value
+        assert value is None or isinstance(value, ZhSummaryValue)
+        return cls(
+            state=block.state,
+            value=None
+            if value is None
+            else DemoZhSummaryContent(
+                research_question=value.research_question,
+                method=value.method,
+                theory=value.theory,
+                findings=value.findings,
+            ),
+            provenance=_demo_provenance(block),
+        )
+
+
+class DemoResearchModelContent(BaseModel):
+    """有效的研究模型：研究情境、樣本數、限制、未來研究、構面與假設（構面與假設和成員版同一個形狀；
+    研究模型本身的內部 ID 不在白名單裡）。"""
+
+    model_config = _WHITELIST
+
+    is_review_or_meta_analysis: StrictBool | None
+    country: str | None
+    industry: str | None
+    research_design: str | None
+    unit_of_analysis: str | None
+    sample_size: int | None = Field(strict=True)
+    limitations: str | None
+    future_research: str | None
+    constructs: tuple[ConstructItem, ...]
+    hypotheses: tuple[HypothesisItem, ...]
+
+
+class DemoResearchModelBlock(BaseModel):
+    """研究模型區塊（狀態、內容、來歷）。"""
+
+    model_config = _WHITELIST
+
+    state: AiBlockState
+    value: DemoResearchModelContent | None
+    provenance: Provenance | None
+
+    @model_validator(mode="after")
+    def _check(self) -> Self:
+        _check_demo_envelope(self.state, self.value, self.provenance, classification=False)
+        return self
+
+    @classmethod
+    def from_block(cls, block: AiBlock) -> Self:
+        """研究模型區塊 → 示範站的形狀。
+
+        Raises:
+            ValueError: 區塊不是研究模型。
+        """
+        block = _checked(block, AiProduct.RESEARCH_MODEL)
+        value = block.value
+        assert value is None or isinstance(value, ResearchModelValue)
+        return cls(
+            state=block.state,
+            value=None
+            if value is None
+            else DemoResearchModelContent(
+                is_review_or_meta_analysis=value.is_review_or_meta_analysis,
+                country=value.country,
+                industry=value.industry,
+                research_design=value.research_design,
+                unit_of_analysis=value.unit_of_analysis,
+                sample_size=value.sample_size,
+                limitations=value.limitations,
+                future_research=value.future_research,
+                constructs=tuple(ConstructItem.from_domain(item) for item in value.constructs),
+                hypotheses=tuple(HypothesisItem.from_domain(item) for item in value.hypotheses),
+            ),
+            provenance=_demo_provenance(block),
+        )
 
 
 class DemoPaperBiblio(BaseModel):
     """第一層：全部論文（`counted_paper`）都有（ADR-0007 第 4 點）。
 
-    - `biblio`：和成員版同一個書目模型（論文 ID、標題、作者、期刊、年份、卷期頁碼、DOI 與
-      OpenAlex 連結、被引用次數）。
-    - `links`：取得全文的連結（開放取用版本目前一律是 null，見 `FullTextLinks`）。
+    - `biblio`：書目（`DemoBiblio`）。
+    - `links`：取得全文的連結（開放取用版本目前一律是 null：成員版也還沒有來源，ADR-0061）。
     - `classification`：分類標籤與 AI 標章的資料；摘要來源不允許公開的論文是 null（AD-20）。
-    - `has_abstract`：有沒有目前的摘要；`has_full_content`：在不在 `demo_full_paper`；
+    - `has_abstract`：有沒有目前的摘要；`has_full_content`：示範站有沒有完整內容；
       `is_new_this_week`：本週新增。
     """
 
     model_config = _WHITELIST
 
-    biblio: PaperBiblio
+    biblio: DemoBiblio
     links: FullTextLinks
-    classification: ClassificationBlock | None
+    classification: DemoClassificationBlock | None
     has_abstract: StrictBool
     has_full_content: StrictBool
     is_new_this_week: StrictBool
@@ -231,19 +549,21 @@ class DemoPaperBiblio(BaseModel):
     def _check(self) -> Self:
         if self.has_full_content and not self.has_abstract:
             raise ValueError("有完整內容的論文一定有摘要")
+        if self.links.doi_url != self.biblio.doi_url:
+            raise ValueError("links.doi_url 要和書目的 doi_url 一樣")
         return self
 
 
 class DemoPaperFull(BaseModel):
-    """第二層：只有 `demo_full_paper` 的論文才有（ADR-0007 第 4 點）。原文摘要、中文重點、研究模型
+    """第二層：只有示範站有完整內容的論文才有（ADR-0007 第 4 點）。原文摘要、中文重點、研究模型
     （構面與假設），後兩者帶各自的 AI 區塊狀態與來歷。關鍵字的代號與名稱還沒輸出（ADR-0061）。"""
 
     model_config = _WHITELIST
 
     paper_id: uuid.UUID
     abstract: PaperAbstract
-    zh_summary: ZhSummaryBlock
-    research_model: ResearchModelBlock
+    zh_summary: DemoZhSummaryBlock
+    research_model: DemoResearchModelBlock
 
 
 class DemoPaper(BaseModel):
@@ -275,7 +595,6 @@ class DemoPaperShard(BaseModel):
 
 
 _Year = Annotated[int, Field(strict=True)]
-_JournalKey = Annotated[str, StringConstraints(pattern=r"^[a-z][a-z0-9_]*$", max_length=64)]
 _Key = Annotated[str, StringConstraints(min_length=1)]
 
 
@@ -359,12 +678,21 @@ class DemoTaxonomy(BaseModel):
     names: DisplayNames
 
 
+# manifest 列的資料檔路徑：`<匯出編號>/` 加上認得的檔名，或 `<匯出編號>/papers/NNN.json`（不會有
+# `..` 這種路徑段）。
+DEMO_FILE_PATH_PATTERN: Final = (
+    r"^[1-9][0-9]{0,8}-[1-9][0-9]{0,8}/"
+    r"(?:taxonomy\.json|papers-index\.json|titles\.json|papers/[0-9]{3}\.json)$"
+)
+
+
 class DemoFileEntry(BaseModel):
-    """manifest 列的一個資料檔：路徑（相對於 `preview/`）、SHA-256、位元組數。"""
+    """manifest 列的一個資料檔：路徑（相對於 `preview/`，只能是認得的資料檔）、SHA-256、
+    位元組數。"""
 
     model_config = _WHITELIST
 
-    path: Annotated[str, StringConstraints(pattern=r"^[1-9][0-9]*-[1-9][0-9]*/[a-z0-9/._-]+$")]
+    path: Annotated[str, StringConstraints(pattern=DEMO_FILE_PATH_PATTERN)]
     sha256: Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
     size: int = Field(ge=0, strict=True)
 
@@ -382,11 +710,32 @@ class DemoSummary(BaseModel):
     last_year: _Year | None
 
 
-class DemoManifest(BaseModel):
-    """`manifest.json`：現在該讀哪一次匯出（最後才寫，只有它會被覆寫）。
+class DemoClientConfig(BaseModel):
+    """示範站前端要用的設定值（AD-18、AD-21：前端不另外寫一份）。
 
-    `client_config` 和成員版 `GET /api/v1/client-config` 同一個形狀（AD-18）。
+    - `timezone`：畫面上的日期換成哪個時區（IANA 名稱）。
+    - `paper_list_page_size`：示範站論文清單一頁幾篇（Story 3.14，`DEMO_PAPER_LIST_PAGE_SIZE`）。
+
+    成員版的 `ClientConfig` 不變（示範站沒有文獻庫，不帶它的篇數）。
     """
+
+    model_config = _WHITELIST
+
+    timezone: _Text
+    paper_list_page_size: int = Field(ge=1, strict=True)
+
+
+def build_demo_client_config() -> DemoClientConfig:
+    """示範站的設定值：時區和成員版同一個（`domain/snapshot.DATA_TIMEZONE`）；清單一頁
+    `DEMO_PAPER_LIST_PAGE_SIZE` 篇。"""
+    return DemoClientConfig(
+        timezone=DATA_TIMEZONE.key, paper_list_page_size=DEMO_PAPER_LIST_PAGE_SIZE
+    )
+
+
+class DemoManifest(BaseModel):
+    """`manifest.json`：現在該讀哪一次匯出（最後才寫，只有它會被覆寫）。列的每個檔都在這次的匯出
+    目錄底下（路徑開頭是自己的 `export_id`），不重複。"""
 
     model_config = _WHITELIST
 
@@ -395,7 +744,16 @@ class DemoManifest(BaseModel):
     exported_at: UtcDateTime
     files: tuple[DemoFileEntry, ...]
     summary: DemoSummary
-    client_config: ClientConfig
+    client_config: DemoClientConfig
+
+    @model_validator(mode="after")
+    def _check(self) -> Self:
+        paths = [entry.path for entry in self.files]
+        if any(not path.startswith(f"{self.export_id}/") for path in paths):
+            raise ValueError("manifest 列的檔要在自己這次的匯出目錄底下")
+        if len(set(paths)) != len(paths):
+            raise ValueError("manifest 列的檔不能重複")
+        return self
 
 
 # 每一種資料檔對應的模型；順序也是 `demo-openapi.json` 的端點順序。
@@ -542,11 +900,6 @@ def index_columns(
     return tuple(provenances), {name: tuple(values) for name, values in columns.items()}
 
 
-def is_title_only(provenance: Provenance | None) -> bool:
-    """「只根據標題分類」：來歷的 `input_kind` 是 `title`。"""
-    return provenance is not None and provenance.input_kind is InputKind.TITLE
-
-
 # --- 自我檢查 -----------------------------------------------------------------------------------
 
 
@@ -558,14 +911,21 @@ class ForbiddenText:
     text: str
 
 
+def _fold(text: str) -> str:
+    """比對用的寫法：Unicode NFKC 正規化（全形與半形、組合字元與合成字元統一）後 casefold，再做
+    一次 NFKC（casefold 之後可能又出現可以合成的組合，Unicode 的 NFKC_Casefold 做法）。"""
+    return unicodedata.normalize("NFKC", unicodedata.normalize("NFKC", text).casefold())
+
+
 def _searchable_text(content: bytes) -> str:
-    """檔案的原始文字，加上 JSON 解開後的每一個字串（鍵與值；跳脫過的寫法在這裡已經還原），
-    全部轉成 casefold。"""
+    """檔案的原始文字，加上 JSON 解開後的每一個字串（鍵與值；跳脫過的寫法在這裡已經還原），每一段
+    再多一份百分比編碼還原後的寫法（`%40` → `@`）；全部經 `_fold`。"""
     raw = content.decode("utf-8", errors="replace")
     parts = [raw]
     with contextlib.suppress(ValueError):  # 不是合法的 JSON：只找原始文字（模型那一項會報）
         parts.extend(_strings(json.loads(content)))
-    return "\n".join(parts).casefold()
+    parts.extend([unquote(part) for part in parts])
+    return "\n".join(_fold(part) for part in parts)
 
 
 def _strings(value: object) -> Iterable[str]:
@@ -580,23 +940,67 @@ def _strings(value: object) -> Iterable[str]:
             yield from _strings(item)
 
 
+def _model_field_names(models: Iterable[type[BaseModel]]) -> frozenset[str]:
+    """這些模型（含巢狀的模型）的全部欄位名稱：失敗原因的位置只印這些已知的名稱。"""
+    names: set[str] = set()
+    seen: set[type[BaseModel]] = set()
+    pending = list(models)
+    while pending:
+        model = pending.pop()
+        if model in seen:
+            continue
+        seen.add(model)
+        for name, info in model.model_fields.items():
+            names.add(name)
+            pending.extend(_nested_models(info.annotation))
+    return frozenset(names)
+
+
+def _nested_models(annotation: object) -> list[type[BaseModel]]:
+    if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+        return [annotation]
+    return [model for arg in get_args(annotation) for model in _nested_models(arg)]
+
+
+def _safe_location(location: Sequence[object], known: frozenset[str]) -> str:
+    """驗證錯誤的位置：陣列位置與已知的欄位名稱照印，其他（多出來的鍵名等）一律印成 `?`，免得被擋下
+    的字串跟著鍵名進日誌（F12）。"""
+    parts = [
+        str(part) if isinstance(part, int) or (isinstance(part, str) and part in known) else "?"
+        for part in location
+    ]
+    return ".".join(parts) or "?"
+
+
+def _safe_error_type(value: object) -> str:
+    text = str(value)
+    return text if re.fullmatch(r"[a-z_]{1,64}", text) else "?"
+
+
 def check_demo_files(
     files: Mapping[str, bytes],
     *,
     full_paper_ids: Iterable[uuid.UUID],
     forbidden: Sequence[ForbiddenText],
+    excluded_paper_ids: Iterable[uuid.UUID] = (),
 ) -> list[str]:
-    """寫 `manifest.json` 之前的自我檢查（ADR-0007「寫出之前的自我檢查」第 1–3 項）。回傳失敗原因
-    （空的＝全部通過）；原因只寫檔名、論文 ID 與哪一種問題，不印檔案內容。
+    """寫 `manifest.json` 之前的自我檢查（ADR-0007「寫出之前的自我檢查」第 1、2、3 項與第 6 項的
+    分片與索引部分）。回傳失敗原因（空的＝全部通過）；原因只寫檔名、已知的欄位名稱與陣列位置、錯誤
+    代碼、解析得出的論文 ID，不印檔案內容、多出來的鍵名或看不懂的 ID（檔名由匯出程式自己組，照印）。
 
     1. 每個檔都是認得的資料檔，而且通過它的白名單模型（多一個欄位就失敗）。
     2. 不在 `full_paper_ids`（view `demo_full_paper`）的論文沒有完整內容：分片檔裡它的 `full` 是
-       null、`has_full_content` 是假；`papers-index.json` 的 `has_full_content` 也是假。這一項直接看
-       JSON，不經過模型（模型壞掉時照樣檢查得到）。
-    3. 每個檔的文字裡都找不到 `forbidden` 的任何一個（不分大小寫；原始文字與 JSON 解開後的每個
-       字串都找，所以跳脫過的寫法也找得到）。
+       null、`has_full_content` 是假；`papers-index.json` 的 `has_full_content` 也是假。`full` 的
+       `paper_id` 也要是這一篇自己的 ID。這一項直接看 JSON，不經過模型（模型壞掉時照樣檢查得到）。
+    3. 每個檔的文字裡都找不到 `forbidden` 的任何一個（Unicode NFKC 正規化、不分大小寫；原始文字、
+       JSON 解開後的每個字串、百分比編碼還原後的寫法都找）。
+    6. `excluded_paper_ids`（出版社或期刊在「示範站不放完整內容」清單裡的論文，直接用出版社欄位查）
+       沒有完整內容，就算它在 `full_paper_ids` 裡。
     """
     allowed = frozenset(full_paper_ids)
+    excluded = frozenset(excluded_paper_ids)
+    known = _model_field_names(model for _, model in DEMO_FILE_MODELS)
+    needles = [(item.label, _fold(item.text)) for item in forbidden if item.text]
     problems: list[str] = []
     for path in sorted(files):
         content = files[path]
@@ -609,21 +1013,21 @@ def check_demo_files(
             except ValidationError as exc:
                 errors = exc.errors(include_input=False, include_url=False, include_context=False)
                 first = errors[0] if errors else None
-                where = "?" if first is None else ".".join(str(part) for part in first["loc"])
-                kind = "?" if first is None else first["type"]
+                where = "?" if first is None else _safe_location(first["loc"], known)
+                kind = "?" if first is None else _safe_error_type(first["type"])
                 problems.append(
                     f"{path}：不符合白名單模型 {model.__name__}"
                     f"（{len(errors)} 個錯誤，第一個在 {where}：{kind}）"
                 )
-        problems.extend(_full_content_problems(path, content, allowed))
+        problems.extend(_full_content_problems(path, content, allowed, excluded))
         text = _searchable_text(content)
-        for item in forbidden:
-            if item.text and item.text.casefold() in text:
-                problems.append(f"{path}：出現{item.label}")
+        problems.extend(f"{path}：出現{label}" for label, needle in needles if needle in text)
     return problems
 
 
-def _full_content_problems(path: str, content: bytes, allowed: frozenset[uuid.UUID]) -> list[str]:
+def _full_content_problems(
+    path: str, content: bytes, allowed: frozenset[uuid.UUID], excluded: frozenset[uuid.UUID]
+) -> list[str]:
     model = model_for_path(path)
     if model not in (DemoPaperShard, DemoPapersIndex):
         return []
@@ -634,22 +1038,40 @@ def _full_content_problems(path: str, content: bytes, allowed: frozenset[uuid.UU
     problems: list[str] = []
     if model is DemoPaperShard:
         papers = data.get("papers") if isinstance(data, dict) else None
-        for item in papers if isinstance(papers, list) else []:
+        for position, item in enumerate(papers if isinstance(papers, list) else []):
             paper_id = _paper_id_of(item)
-            if paper_id in allowed:
+            who = _who(paper_id, position)
+            full = item.get("full") if isinstance(item, dict) else None
+            if isinstance(full, dict) and _as_uuid(full.get("paper_id")) != paper_id:
+                problems.append(f"{path}：{who} 的完整內容不是它自己的（paper_id 對不上）")
+            if paper_id in allowed and paper_id not in excluded:
                 continue
             biblio = item.get("biblio") if isinstance(item, dict) else None
             has_full = isinstance(biblio, dict) and biblio.get("has_full_content") is not False
             if not isinstance(item, dict) or item.get("full") is not None or has_full:
-                problems.append(f"{path}：不在 demo_full_paper 的論文 {paper_id} 帶了完整內容")
+                problems.append(f"{path}：{_reason(paper_id, excluded, who)}帶了完整內容")
     else:
         ids = data.get("id") if isinstance(data, dict) else None
         flags = data.get("has_full_content") if isinstance(data, dict) else None
         if isinstance(ids, list) and isinstance(flags, list):
-            for raw_id, flag in zip(ids, flags, strict=False):
-                if flag is not False and _as_uuid(raw_id) not in allowed:
-                    problems.append(f"{path}：不在 demo_full_paper 的論文 {raw_id} 標成有完整內容")
+            for position, (raw_id, flag) in enumerate(zip(ids, flags, strict=False)):
+                paper_id = _as_uuid(raw_id)
+                if flag is False or (paper_id in allowed and paper_id not in excluded):
+                    continue
+                who = _who(paper_id, position)
+                problems.append(f"{path}：{_reason(paper_id, excluded, who)}標成有完整內容")
     return problems
+
+
+def _who(paper_id: uuid.UUID | None, position: int) -> str:
+    """失敗原因裡指一篇論文：看得懂的 ID 照印；看不懂的只印第幾列（不印原字串）。"""
+    return f"論文 {paper_id}" if paper_id is not None else f"第 {position} 列（ID 看不懂）的論文"
+
+
+def _reason(paper_id: uuid.UUID | None, excluded: frozenset[uuid.UUID], who: str) -> str:
+    if paper_id is not None and paper_id in excluded:
+        return f"排除清單裡的出版社或期刊的{who} "
+    return f"不在 demo_full_paper 的{who} "
 
 
 def _paper_id_of(item: object) -> uuid.UUID | None:
@@ -661,7 +1083,9 @@ def _paper_id_of(item: object) -> uuid.UUID | None:
 
 
 def _as_uuid(value: object) -> uuid.UUID | None:
+    if not isinstance(value, str):
+        return None
     try:
-        return uuid.UUID(str(value))
+        return uuid.UUID(value)
     except ValueError:
         return None

@@ -74,8 +74,10 @@ class PaperSpec:
       目前的。
     - `topics`／`methods`：有效分類（AI 值）；`topics` 是 None 表示沒有分類產出。
     - `classification_failed`：目前這組鍵只有被拒收的一筆（區塊狀態 `failed`）。
-    - `human_topics`：一位假成員修正過的主題（「已核對」）。
+    - `human_topics`、`human_methods`：一位假成員修正過的主題、方法（「已核對」）。
     - `zh_summary`、`research_model`：有沒有有效的中文重點、研究模型。
+    - `zh_summary_failed`：中文重點目前這組鍵只有被拒收的一筆（完整內容層的 AI 失敗）。
+    - `unpublished`：還沒算進任何已發佈的快照（`first_snapshot_id` 是 NULL）。
     """
 
     name: str
@@ -93,7 +95,10 @@ class PaperSpec:
     methods: tuple[str, ...] = ("survey_sem",)
     classification_failed: bool = False
     human_topics: tuple[str, ...] | None = None
+    human_methods: tuple[str, ...] | None = None
     zh_summary: bool = False
+    zh_summary_failed: bool = False
+    unpublished: bool = False
     research_model: bool = False
     title: str | None = None
     extra: dict[str, Any] = field(default_factory=dict)
@@ -106,6 +111,7 @@ def demo_setup(canaries: Sequence[str] = ()) -> DemoExportSetup:
         taxonomy=load_taxonomy(CONFIG_ENV),
         context_values=load_context_values(CONFIG_ENV),
         journals=load_domain_config(CONFIG_ENV).journals,
+        exclusions=load_domain_config(CONFIG_ENV).demo_publishers.exclusions(),
         canaries=tuple(canaries),
     )
 
@@ -173,7 +179,7 @@ def seed_papers(
             )
         paper_id = result.paper_id
         ids[spec.name] = paper_id
-        first = snapshots[1] if spec.new_this_week else snapshots[0]
+        first = None if spec.unpublished else snapshots[1] if spec.new_this_week else snapshots[0]
         execute(db, "UPDATE paper SET first_snapshot_id = %s WHERE id = %s", first, paper_id)
         if spec.s2_abstract:
             execute(
@@ -189,43 +195,65 @@ def seed_papers(
         has_abstract = spec.abstract or spec.s2_abstract
         input_kind = "abstract" if has_abstract else "title"
         if spec.classification_failed:
-            key = settings[AiProduct.CLASSIFICATION]
-            run_id = insert_run(
-                db,
-                paper_id,
-                "classify",
-                input_sha256=_current_sha(database, paper_id, key),
-                prompt_version=key.prompt_version,
-                model=key.model,
-                input_kind=input_kind,
-            )
-            insert_header(
-                db, paper_id, "classify", status="rejected", run_id=run_id, input_kind=input_kind
-            )
+            _insert_rejected(db, database, paper_id, AiProduct.CLASSIFICATION, settings, input_kind)
         elif spec.topics is not None:
             insert_classification(db, paper_id, spec.topics, spec.methods, input_kind=input_kind)
-        if spec.human_topics is not None:
+        for field_name, keys in (
+            (TaxonomyField.TOPIC, spec.human_topics),
+            (TaxonomyField.METHOD, spec.human_methods),
+        ):
+            if keys is None:
+                continue
             if fixer is None:
                 fixer = allow_member(
                     SystemViewer(), database, email=FIXER_EMAIL, display_name="假成員"
                 ).member_id
-            fix(database, paper_id, TaxonomyField.TOPIC, spec.human_topics, member_id=fixer)
+            fix(database, paper_id, field_name, keys, member_id=fixer)
         if spec.zh_summary:
             insert_header(db, paper_id, "zh_summary", ZH_CONTENT, input_kind=input_kind)
+        elif spec.zh_summary_failed:
+            _insert_rejected(db, database, paper_id, AiProduct.ZH_SUMMARY, settings, input_kind)
         if spec.research_model:
             insert_research_model(db, paper_id, country="taiwan")
     return ids
 
 
-def _current_sha(database: Database, paper_id: uuid.UUID, settings: Any) -> str:
-    """這篇論文的分類現在的 `input_sha256`（和 `find_ai_block` 用同一套 domain 函式）。"""
+_TASK = {AiProduct.CLASSIFICATION: "classify", AiProduct.ZH_SUMMARY: "zh_summary"}
+
+
+def _insert_rejected(
+    db: TestDatabase,
+    database: Database,
+    paper_id: uuid.UUID,
+    product: AiProduct,
+    settings: Any,
+    input_kind: str,
+) -> None:
+    """`product` 目前這組鍵只有一筆被拒收的產出（區塊狀態 `failed`）。"""
+    key = settings[product]
+    run_id = insert_run(
+        db,
+        paper_id,
+        _TASK[product],
+        input_sha256=_current_sha(database, paper_id, key, product),
+        prompt_version=key.prompt_version,
+        model=key.model,
+        input_kind=input_kind,
+    )
+    insert_header(
+        db, paper_id, _TASK[product], status="rejected", run_id=run_id, input_kind=input_kind
+    )
+
+
+def _current_sha(database: Database, paper_id: uuid.UUID, settings: Any, product: AiProduct) -> str:
+    """這篇論文的 `product` 現在的 `input_sha256`（和 `find_ai_block` 用同一套 domain 函式）。"""
     with database.transaction() as connection:
         source = find_paper_llm_source(SystemViewer(), connection, paper_id, for_update=False)
     assert source is not None
     kind = InputKind.ABSTRACT if source.abstract is not None else InputKind.TITLE
     return input_sha256(
         build_llm_input(source, kind).blocks,
-        AiProduct.CLASSIFICATION.llm_task,
+        product.llm_task,
         taxonomy_version=settings.taxonomy_version,
         context_values_version=settings.context_values_version,
     )
@@ -253,7 +281,8 @@ _JOURNALS = (MISQ, ISR, IO)
 def preview_specs(count: int = 60) -> list[PaperSpec]:
     """給前端的範例資料：`count` 篇（預設 60，超過一頁 50 篇），涵蓋每一種狀態與篩選。
 
-    前幾篇是固定的特殊情況，其餘照順序輪流換期刊、年份、主題、方法、授權。
+    前 13 篇是固定的特殊情況（`count` 比 13 小時也全部都有），其餘照順序輪流換期刊、年份、主題、
+    方法、授權。
     """
     specs = [
         PaperSpec(
@@ -288,6 +317,8 @@ def preview_specs(count: int = 60) -> list[PaperSpec]:
         PaperSpec("other_source_abstract", 9, abstract=False, s2_abstract=True),
         PaperSpec("title_only_classification", 10, abstract=False, license=None, year=2022),
         PaperSpec("human_verified_topic", 11, human_topics=("it_strategy_digital_transformation",)),
+        PaperSpec("full_content_ai_failed", 12, zh_summary_failed=True, research_model=True),
+        PaperSpec("human_verified_method", 13, human_methods=("experiment",)),
     ]
     fixed = len(specs)
     for number in range(fixed + 1, count + 1):

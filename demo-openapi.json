@@ -8,7 +8,7 @@
     "/manifest.json": {
       "get": {
         "operationId": "getDemoManifest",
-        "summary": "`manifest.json`：現在該讀哪一次匯出（最後才寫，只有它會被覆寫）。",
+        "summary": "`manifest.json`：現在該讀哪一次匯出（最後才寫，只有它會被覆寫）。列的每個檔都在這次的匯出",
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -176,142 +176,6 @@
         "title": "AiBlockState",
         "type": "string"
       },
-      "ClassificationBlock": {
-        "additionalProperties": false,
-        "description": "分類區塊。不會是 `empty`（主題一個都不剩時是 `unclassified`）。",
-        "properties": {
-          "state": {
-            "$ref": "#/components/schemas/AiBlockState"
-          },
-          "value": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/ClassificationContent"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "provenance": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/Provenance"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          }
-        },
-        "required": [
-          "state",
-          "value",
-          "provenance"
-        ],
-        "title": "ClassificationBlock",
-        "type": "object"
-      },
-      "ClassificationContent": {
-        "additionalProperties": false,
-        "description": "有效的分類：主題與方法兩欄；沒有值的那一欄是 null（只有人工修正、沒有 AI 值時才會發生）。\n\n- `fix_member_count`：修正過這篇分類（主題或方法）的成員人數，整篇去重\n  （「有 N 位成員修正過」）。",
-        "properties": {
-          "topic": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/ClassificationField"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "method": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/ClassificationField"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "fix_member_count": {
-            "minimum": 0,
-            "title": "Fix Member Count",
-            "type": "integer"
-          }
-        },
-        "required": [
-          "topic",
-          "method",
-          "fix_member_count"
-        ],
-        "title": "ClassificationContent",
-        "type": "object"
-      },
-      "ClassificationField": {
-        "additionalProperties": false,
-        "description": "分類的一欄（主題或方法）。\n\n- `keys`：排序過、不重複的 `key`（可能是 `unclassified`）。\n- `human_verified`：這一欄是人工值（「已核對」）。\n- `fix_member_count`：修正過這一欄的成員人數。\n- `members_disagree`：兩位以上成員各自最新的修正不一樣（「意見不同」）。",
-        "properties": {
-          "keys": {
-            "items": {
-              "type": "string"
-            },
-            "title": "Keys",
-            "type": "array"
-          },
-          "human_verified": {
-            "title": "Human Verified",
-            "type": "boolean"
-          },
-          "fix_member_count": {
-            "minimum": 0,
-            "title": "Fix Member Count",
-            "type": "integer"
-          },
-          "members_disagree": {
-            "title": "Members Disagree",
-            "type": "boolean"
-          }
-        },
-        "required": [
-          "keys",
-          "human_verified",
-          "fix_member_count",
-          "members_disagree"
-        ],
-        "title": "ClassificationField",
-        "type": "object"
-      },
-      "ClientConfig": {
-        "additionalProperties": false,
-        "description": "前端要用的設定值（AD-18）。\n\n- `timezone`：畫面上的日期換成哪個時區（IANA 名稱）。\n- `library_page_size`：文獻庫清單一頁幾篇（Story 3.16）。\n- `paper_list_page_size`：找論文清單一頁幾篇（Story 3.13）。",
-        "properties": {
-          "timezone": {
-            "minLength": 1,
-            "title": "Timezone",
-            "type": "string"
-          },
-          "library_page_size": {
-            "minimum": 1,
-            "title": "Library Page Size",
-            "type": "integer"
-          },
-          "paper_list_page_size": {
-            "minimum": 1,
-            "title": "Paper List Page Size",
-            "type": "integer"
-          }
-        },
-        "required": [
-          "timezone",
-          "library_page_size",
-          "paper_list_page_size"
-        ],
-        "title": "ClientConfig",
-        "type": "object"
-      },
       "ConstructItem": {
         "additionalProperties": false,
         "description": "研究模型提到的一個構面。信效度的數字是字串（`Decimal`，不經浮點）。",
@@ -422,12 +286,305 @@
         "title": "ConstructItem",
         "type": "object"
       },
+      "DemoBiblio": {
+        "additionalProperties": false,
+        "description": "論文的書目（ADR-0007 第 4 點）：論文 ID（內部 ID，和成員版的網址一致）、標題、作者、期刊、\n年份、卷期頁碼、DOI 與 OpenAlex 連結、被引用次數。`doi_url`、`openalex_url` 由 `doi`、\n`openalex_id` 產生，和它們一起有值或一起是 null。",
+        "properties": {
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "title": {
+            "minLength": 1,
+            "title": "Title",
+            "type": "string"
+          },
+          "authors": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Authors",
+            "type": "array"
+          },
+          "publication_year": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Publication Year"
+          },
+          "journal": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "pattern": "^[a-z][a-z0-9_]*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Journal"
+          },
+          "journal_issn_l": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Journal Issn L"
+          },
+          "volume": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Volume"
+          },
+          "issue": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Issue"
+          },
+          "first_page": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "First Page"
+          },
+          "last_page": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Page"
+          },
+          "doi": {
+            "anyOf": [
+              {
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Doi"
+          },
+          "doi_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Doi Url"
+          },
+          "openalex_id": {
+            "anyOf": [
+              {
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Openalex Id"
+          },
+          "openalex_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Openalex Url"
+          },
+          "cited_by_count": {
+            "anyOf": [
+              {
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cited By Count"
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "authors",
+          "publication_year",
+          "journal",
+          "journal_issn_l",
+          "volume",
+          "issue",
+          "first_page",
+          "last_page",
+          "doi",
+          "doi_url",
+          "openalex_id",
+          "openalex_url",
+          "cited_by_count"
+        ],
+        "title": "DemoBiblio",
+        "type": "object"
+      },
+      "DemoClassificationBlock": {
+        "additionalProperties": false,
+        "description": "分類標籤與它的 AI 標章資料（來歷含是否已核對；`input_kind` 是 `title`＝只根據標題分類）。",
+        "properties": {
+          "state": {
+            "$ref": "#/components/schemas/AiBlockState"
+          },
+          "value": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DemoClassificationContent"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "provenance": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Provenance"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "state",
+          "value",
+          "provenance"
+        ],
+        "title": "DemoClassificationBlock",
+        "type": "object"
+      },
+      "DemoClassificationContent": {
+        "additionalProperties": false,
+        "description": "有效的分類：主題與方法兩欄；沒有值的那一欄是 null。",
+        "properties": {
+          "topic": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DemoClassificationField"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "method": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DemoClassificationField"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "topic",
+          "method"
+        ],
+        "title": "DemoClassificationContent",
+        "type": "object"
+      },
+      "DemoClassificationField": {
+        "additionalProperties": false,
+        "description": "分類的一欄（主題或方法）：代號（排序過、不重複，可能是 `unclassified`）與是否已核對\n（人工值）。\n誰修正的、幾位成員修正過、意見是否不同都不在白名單裡（ADR-0007 第 6 點）。",
+        "properties": {
+          "keys": {
+            "items": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "title": "Keys",
+            "type": "array"
+          },
+          "human_verified": {
+            "title": "Human Verified",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "keys",
+          "human_verified"
+        ],
+        "title": "DemoClassificationField",
+        "type": "object"
+      },
+      "DemoClientConfig": {
+        "additionalProperties": false,
+        "description": "示範站前端要用的設定值（AD-18、AD-21：前端不另外寫一份）。\n\n- `timezone`：畫面上的日期換成哪個時區（IANA 名稱）。\n- `paper_list_page_size`：示範站論文清單一頁幾篇（Story 3.14，`DEMO_PAPER_LIST_PAGE_SIZE`）。\n\n成員版的 `ClientConfig` 不變（示範站沒有文獻庫，不帶它的篇數）。",
+        "properties": {
+          "timezone": {
+            "minLength": 1,
+            "title": "Timezone",
+            "type": "string"
+          },
+          "paper_list_page_size": {
+            "minimum": 1,
+            "title": "Paper List Page Size",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "timezone",
+          "paper_list_page_size"
+        ],
+        "title": "DemoClientConfig",
+        "type": "object"
+      },
       "DemoFileEntry": {
         "additionalProperties": false,
-        "description": "manifest 列的一個資料檔：路徑（相對於 `preview/`）、SHA-256、位元組數。",
+        "description": "manifest 列的一個資料檔：路徑（相對於 `preview/`，只能是認得的資料檔）、SHA-256、\n位元組數。",
         "properties": {
           "path": {
-            "pattern": "^[1-9][0-9]*-[1-9][0-9]*/[a-z0-9/._-]+$",
+            "pattern": "^[1-9][0-9]{0,8}-[1-9][0-9]{0,8}/(?:taxonomy\\.json|papers-index\\.json|titles\\.json|papers/[0-9]{3}\\.json)$",
             "title": "Path",
             "type": "string"
           },
@@ -452,7 +609,7 @@
       },
       "DemoManifest": {
         "additionalProperties": false,
-        "description": "`manifest.json`：現在該讀哪一次匯出（最後才寫，只有它會被覆寫）。\n\n`client_config` 和成員版 `GET /api/v1/client-config` 同一個形狀（AD-18）。",
+        "description": "`manifest.json`：現在該讀哪一次匯出（最後才寫，只有它會被覆寫）。列的每個檔都在這次的匯出\n目錄底下（路徑開頭是自己的 `export_id`），不重複。",
         "properties": {
           "snapshot": {
             "$ref": "#/components/schemas/SnapshotRef"
@@ -478,7 +635,7 @@
             "$ref": "#/components/schemas/DemoSummary"
           },
           "client_config": {
-            "$ref": "#/components/schemas/ClientConfig"
+            "$ref": "#/components/schemas/DemoClientConfig"
           }
         },
         "required": [
@@ -519,10 +676,10 @@
       },
       "DemoPaperBiblio": {
         "additionalProperties": false,
-        "description": "第一層：全部論文（`counted_paper`）都有（ADR-0007 第 4 點）。\n\n- `biblio`：和成員版同一個書目模型（論文 ID、標題、作者、期刊、年份、卷期頁碼、DOI 與\n  OpenAlex 連結、被引用次數）。\n- `links`：取得全文的連結（開放取用版本目前一律是 null，見 `FullTextLinks`）。\n- `classification`：分類標籤與 AI 標章的資料；摘要來源不允許公開的論文是 null（AD-20）。\n- `has_abstract`：有沒有目前的摘要；`has_full_content`：在不在 `demo_full_paper`；\n  `is_new_this_week`：本週新增。",
+        "description": "第一層：全部論文（`counted_paper`）都有（ADR-0007 第 4 點）。\n\n- `biblio`：書目（`DemoBiblio`）。\n- `links`：取得全文的連結（開放取用版本目前一律是 null：成員版也還沒有來源，ADR-0061）。\n- `classification`：分類標籤與 AI 標章的資料；摘要來源不允許公開的論文是 null（AD-20）。\n- `has_abstract`：有沒有目前的摘要；`has_full_content`：示範站有沒有完整內容；\n  `is_new_this_week`：本週新增。",
         "properties": {
           "biblio": {
-            "$ref": "#/components/schemas/PaperBiblio"
+            "$ref": "#/components/schemas/DemoBiblio"
           },
           "links": {
             "$ref": "#/components/schemas/FullTextLinks"
@@ -530,7 +687,7 @@
           "classification": {
             "anyOf": [
               {
-                "$ref": "#/components/schemas/ClassificationBlock"
+                "$ref": "#/components/schemas/DemoClassificationBlock"
               },
               {
                 "type": "null"
@@ -563,7 +720,7 @@
       },
       "DemoPaperFull": {
         "additionalProperties": false,
-        "description": "第二層：只有 `demo_full_paper` 的論文才有（ADR-0007 第 4 點）。原文摘要、中文重點、研究模型\n（構面與假設），後兩者帶各自的 AI 區塊狀態與來歷。關鍵字的代號與名稱還沒輸出（ADR-0061）。",
+        "description": "第二層：只有示範站有完整內容的論文才有（ADR-0007 第 4 點）。原文摘要、中文重點、研究模型\n（構面與假設），後兩者帶各自的 AI 區塊狀態與來歷。關鍵字的代號與名稱還沒輸出（ADR-0061）。",
         "properties": {
           "paper_id": {
             "format": "uuid",
@@ -574,10 +731,10 @@
             "$ref": "#/components/schemas/PaperAbstract"
           },
           "zh_summary": {
-            "$ref": "#/components/schemas/ZhSummaryBlock"
+            "$ref": "#/components/schemas/DemoZhSummaryBlock"
           },
           "research_model": {
-            "$ref": "#/components/schemas/ResearchModelBlock"
+            "$ref": "#/components/schemas/DemoResearchModelBlock"
           }
         },
         "required": [
@@ -833,6 +990,164 @@
         "title": "DemoPapersIndex",
         "type": "object"
       },
+      "DemoResearchModelBlock": {
+        "additionalProperties": false,
+        "description": "研究模型區塊（狀態、內容、來歷）。",
+        "properties": {
+          "state": {
+            "$ref": "#/components/schemas/AiBlockState"
+          },
+          "value": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DemoResearchModelContent"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "provenance": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Provenance"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "state",
+          "value",
+          "provenance"
+        ],
+        "title": "DemoResearchModelBlock",
+        "type": "object"
+      },
+      "DemoResearchModelContent": {
+        "additionalProperties": false,
+        "description": "有效的研究模型：研究情境、樣本數、限制、未來研究、構面與假設（構面與假設和成員版同一個形狀；\n研究模型本身的內部 ID 不在白名單裡）。",
+        "properties": {
+          "is_review_or_meta_analysis": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Is Review Or Meta Analysis"
+          },
+          "country": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Country"
+          },
+          "industry": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Industry"
+          },
+          "research_design": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Research Design"
+          },
+          "unit_of_analysis": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Unit Of Analysis"
+          },
+          "sample_size": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sample Size"
+          },
+          "limitations": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Limitations"
+          },
+          "future_research": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Future Research"
+          },
+          "constructs": {
+            "items": {
+              "$ref": "#/components/schemas/ConstructItem"
+            },
+            "title": "Constructs",
+            "type": "array"
+          },
+          "hypotheses": {
+            "items": {
+              "$ref": "#/components/schemas/HypothesisItem"
+            },
+            "title": "Hypotheses",
+            "type": "array"
+          }
+        },
+        "required": [
+          "is_review_or_meta_analysis",
+          "country",
+          "industry",
+          "research_design",
+          "unit_of_analysis",
+          "sample_size",
+          "limitations",
+          "future_research",
+          "constructs",
+          "hypotheses"
+        ],
+        "title": "DemoResearchModelContent",
+        "type": "object"
+      },
       "DemoSummary": {
         "additionalProperties": false,
         "description": "首頁一次請求就拿到的讀數（ADR-0007「檔案」）。年份範圍沒有論文時是 null。",
@@ -942,6 +1257,100 @@
           "titles"
         ],
         "title": "DemoTitles",
+        "type": "object"
+      },
+      "DemoZhSummaryBlock": {
+        "additionalProperties": false,
+        "description": "中文重點區塊（狀態、內容、來歷）。",
+        "properties": {
+          "state": {
+            "$ref": "#/components/schemas/AiBlockState"
+          },
+          "value": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DemoZhSummaryContent"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "provenance": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Provenance"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "state",
+          "value",
+          "provenance"
+        ],
+        "title": "DemoZhSummaryBlock",
+        "type": "object"
+      },
+      "DemoZhSummaryContent": {
+        "additionalProperties": false,
+        "description": "有效的中文重點：研究問題、方法、理論、發現（成員回報的欄位、內部 ID 不在白名單裡）。",
+        "properties": {
+          "research_question": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Research Question"
+          },
+          "method": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Method"
+          },
+          "theory": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Theory"
+          },
+          "findings": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Findings"
+          }
+        },
+        "required": [
+          "research_question",
+          "method",
+          "theory",
+          "findings"
+        ],
+        "title": "DemoZhSummaryContent",
         "type": "object"
       },
       "DisplayName": {
@@ -1177,210 +1586,6 @@
         "title": "PaperAbstract",
         "type": "object"
       },
-      "PaperBiblio": {
-        "additionalProperties": false,
-        "description": "論文的書目與狀態標記需要的欄位。\n\n- `journal` 是設定檔的期刊代號（不是追蹤的期刊時是 null，這時看 `journal_issn_l`）。\n- `doi`、`openalex_id` 是正規化後的寫法；一篇有好幾個時是最早記上的那一個。\n- `doi_url`、`openalex_url` 和它們一起有值或一起是 null。",
-        "properties": {
-          "id": {
-            "format": "uuid",
-            "title": "Id",
-            "type": "string"
-          },
-          "title": {
-            "minLength": 1,
-            "title": "Title",
-            "type": "string"
-          },
-          "authors": {
-            "items": {
-              "type": "string"
-            },
-            "title": "Authors",
-            "type": "array"
-          },
-          "publication_year": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Publication Year"
-          },
-          "journal": {
-            "anyOf": [
-              {
-                "maxLength": 64,
-                "pattern": "^[a-z][a-z0-9_]*$",
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Journal"
-          },
-          "journal_issn_l": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Journal Issn L"
-          },
-          "volume": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Volume"
-          },
-          "issue": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Issue"
-          },
-          "first_page": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "First Page"
-          },
-          "last_page": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Last Page"
-          },
-          "doi": {
-            "anyOf": [
-              {
-                "minLength": 1,
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Doi"
-          },
-          "doi_url": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Doi Url"
-          },
-          "openalex_id": {
-            "anyOf": [
-              {
-                "minLength": 1,
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Openalex Id"
-          },
-          "openalex_url": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Openalex Url"
-          },
-          "cited_by_count": {
-            "anyOf": [
-              {
-                "minimum": 0,
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Cited By Count"
-          },
-          "in_scope": {
-            "title": "In Scope",
-            "type": "boolean"
-          },
-          "origin": {
-            "$ref": "#/components/schemas/PaperOrigin"
-          },
-          "is_retracted": {
-            "title": "Is Retracted",
-            "type": "boolean"
-          }
-        },
-        "required": [
-          "id",
-          "title",
-          "authors",
-          "publication_year",
-          "journal",
-          "journal_issn_l",
-          "volume",
-          "issue",
-          "first_page",
-          "last_page",
-          "doi",
-          "doi_url",
-          "openalex_id",
-          "openalex_url",
-          "cited_by_count",
-          "in_scope",
-          "origin",
-          "is_retracted"
-        ],
-        "title": "PaperBiblio",
-        "type": "object"
-      },
-      "PaperOrigin": {
-        "description": "論文怎麼進資料庫的（`paper.origin`）。只在新增時寫，之後不改。",
-        "enum": [
-          "tracked",
-          "expansion",
-          "import",
-          "manual"
-        ],
-        "title": "PaperOrigin",
-        "type": "string"
-      },
       "Provenance": {
         "additionalProperties": false,
         "description": "AI 區塊的來歷（ADR-0015）：模型、產生時間、模型看的是什麼、是否經人工核對。\n\n只有人工值時 `model` 與 `input_kind` 都是 null。",
@@ -1426,170 +1631,6 @@
         "title": "Provenance",
         "type": "object"
       },
-      "ResearchModelBlock": {
-        "additionalProperties": false,
-        "description": "研究模型區塊。",
-        "properties": {
-          "state": {
-            "$ref": "#/components/schemas/AiBlockState"
-          },
-          "value": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/ResearchModelContent"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "provenance": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/Provenance"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          }
-        },
-        "required": [
-          "state",
-          "value",
-          "provenance"
-        ],
-        "title": "ResearchModelBlock",
-        "type": "object"
-      },
-      "ResearchModelContent": {
-        "additionalProperties": false,
-        "description": "有效的研究模型：研究情境、樣本數、限制、未來研究、構面與關係。",
-        "properties": {
-          "research_model_id": {
-            "format": "uuid",
-            "title": "Research Model Id",
-            "type": "string"
-          },
-          "is_review_or_meta_analysis": {
-            "anyOf": [
-              {
-                "type": "boolean"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Is Review Or Meta Analysis"
-          },
-          "country": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Country"
-          },
-          "industry": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Industry"
-          },
-          "research_design": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Research Design"
-          },
-          "unit_of_analysis": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Unit Of Analysis"
-          },
-          "sample_size": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Sample Size"
-          },
-          "limitations": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Limitations"
-          },
-          "future_research": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Future Research"
-          },
-          "constructs": {
-            "items": {
-              "$ref": "#/components/schemas/ConstructItem"
-            },
-            "title": "Constructs",
-            "type": "array"
-          },
-          "hypotheses": {
-            "items": {
-              "$ref": "#/components/schemas/HypothesisItem"
-            },
-            "title": "Hypotheses",
-            "type": "array"
-          }
-        },
-        "required": [
-          "research_model_id",
-          "is_review_or_meta_analysis",
-          "country",
-          "industry",
-          "research_design",
-          "unit_of_analysis",
-          "sample_size",
-          "limitations",
-          "future_research",
-          "constructs",
-          "hypotheses"
-        ],
-        "title": "ResearchModelContent",
-        "type": "object"
-      },
       "SnapshotRef": {
         "additionalProperties": false,
         "description": "快照（AD-19）：編號與截止時間（發佈的時間，UTC）。截至日期由前端換成台北時間的日期。",
@@ -1612,17 +1653,6 @@
         "title": "SnapshotRef",
         "type": "object"
       },
-      "SummaryField": {
-        "description": "中文重點可以被回報的四欄（和 `zh_summary` 的欄位同名，順序固定）。",
-        "enum": [
-          "research_question",
-          "method",
-          "theory",
-          "findings"
-        ],
-        "title": "SummaryField",
-        "type": "string"
-      },
       "SupportLevel": {
         "description": "支持與否（PRD FR-3）。只有實證檢定判定支持與否；其他證據類型一律 `not_determined`。",
         "enum": [
@@ -1634,114 +1664,6 @@
         ],
         "title": "SupportLevel",
         "type": "string"
-      },
-      "ZhSummaryBlock": {
-        "additionalProperties": false,
-        "description": "中文重點區塊。只有 `ready` 帶 `value`；只有 `ready`、`empty` 帶 `provenance`。",
-        "properties": {
-          "state": {
-            "$ref": "#/components/schemas/AiBlockState"
-          },
-          "value": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/ZhSummaryContent"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "provenance": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/Provenance"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          }
-        },
-        "required": [
-          "state",
-          "value",
-          "provenance"
-        ],
-        "title": "ZhSummaryBlock",
-        "type": "object"
-      },
-      "ZhSummaryContent": {
-        "additionalProperties": false,
-        "description": "有效的中文重點。`reported_fields`：有成員回報可能有誤、還沒處理的欄位（照四欄的順序）。",
-        "properties": {
-          "zh_summary_id": {
-            "format": "uuid",
-            "title": "Zh Summary Id",
-            "type": "string"
-          },
-          "research_question": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Research Question"
-          },
-          "method": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Method"
-          },
-          "theory": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Theory"
-          },
-          "findings": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Findings"
-          },
-          "reported_fields": {
-            "items": {
-              "$ref": "#/components/schemas/SummaryField"
-            },
-            "title": "Reported Fields",
-            "type": "array"
-          }
-        },
-        "required": [
-          "zh_summary_id",
-          "research_question",
-          "method",
-          "theory",
-          "findings",
-          "reported_fields"
-        ],
-        "title": "ZhSummaryContent",
-        "type": "object"
       }
     }
   }
