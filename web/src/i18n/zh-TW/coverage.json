@@ -44,7 +44,7 @@
       "abstract": "有摘要",
       "abstractText": "這篇論文在 OpenAlex 有摘要。",
       "snapshot": "快照編號",
-      "snapshotText": "資料每整理一次就多一號。#12 是第 12 次整理出來的資料。"
+      "snapshotText": "資料每整理一次就多一號。#{{number}} 是第 {{number}} 次整理出來的資料。"
     }
   }
 }

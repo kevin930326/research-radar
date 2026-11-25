@@ -50,4 +50,24 @@ describe("coverage table (tests/golden/stats)", () => {
     expect(table.rows[0]?.cells[0]?.ratio).toBe(2 / 3);
     expect(table.ratio).toBe(2 / 3);
   });
+
+  it("refuses counts where a cell has more abstracts than papers, instead of a ratio above 1", () => {
+    const params: TrendParams = {
+      timezone: "Asia/Taipei",
+      tracking_start_year: 2025,
+      current_year_cutoff: "07-01",
+      growth_window_years: 3,
+      baseline_years: 3,
+      low_coverage_threshold: 0.5,
+    };
+    const broken: CubeRow[] = [
+      { journal: "misq", year: 2025, dim: "total", key_a: null, key_b: null, n: 3 },
+      { journal: "misq", year: 2025, dim: "with_abstract", key_a: null, key_b: null, n: 4 },
+    ];
+    expect(() => coverageTable(broken, params, ["misq"], "2025-09-01T00:00:00Z")).toThrow(RangeError);
+    // 不在表格裡的期刊也檢查（合計會算到它）。
+    expect(() => coverageTable(broken, params, ["isr"], "2025-09-01T00:00:00Z")).toThrow(RangeError);
+    const negative: CubeRow[] = [{ journal: "misq", year: 2025, dim: "total", key_a: null, key_b: null, n: -1 }];
+    expect(() => coverageTable(negative, params, ["misq"], "2025-09-01T00:00:00Z")).toThrow(RangeError);
+  });
 });

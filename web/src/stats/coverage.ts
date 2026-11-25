@@ -53,6 +53,7 @@ function ratioOf(withAbstract: number, total: number): number | null {
 /**
  * 覆蓋率表。`journals` 是表格要列的期刊代號（照設定的順序）；`asOf` 是快照的截止時間。
  * 同一個（期刊, 年份）的列加總（計數方塊不會重複，保險起見）。
+ * 計數壞掉（篇數是負的、或某一格有摘要的比總數多）時丟 RangeError，不回大於 1 的比例（畫面當成「沒有載入成功」）。
  */
 export function coverageTable(rows: readonly CubeRow[], params: TrendParams, journals: readonly string[], asOf: string): CoverageTable {
   const currentYear = yearIn(asOf, params.timezone);
@@ -73,6 +74,11 @@ export function coverageTable(rows: readonly CubeRow[], params: TrendParams, jou
       withAbstract += row.n;
     }
     counts.set(key, cell);
+  }
+  for (const [key, cell] of counts) {
+    if (cell.total < 0 || cell.withAbstract < 0 || cell.withAbstract > cell.total) {
+      throw new RangeError(`bad counts for ${key.replace("\u0000", " ")}: ${cell.withAbstract}/${cell.total}`);
+    }
   }
   return {
     years,

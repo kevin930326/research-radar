@@ -7,7 +7,8 @@
 2. 先看 `preview/manifest.json` 是不是已經指向這一次（上一次換好 manifest、卻沒記上成功就中斷）：是
    而且檔案的雜湊都對，就再 fsync 一次 `preview/`、補記成功、結束（不重寫）。已經指向比這次新的匯出
    時直接記成 `superseded`（不讀資料、不寫檔；這一次就算之前發佈過，也已經被新的一批取代）。現有的
-   manifest 讀不懂（格式不合、別的版本寫的）時拒絕（`manifest_unreadable`），不當成沒有。
+   manifest 讀不懂（格式不合、別的版本寫的）時拒絕（`manifest_unreadable`），不當成沒有；上一版
+   （沒有 `cube.json`，`PreviousDemoManifest`）寫的照樣讀得懂（ADR-0062「升版」）。
 3. **一個唯讀、REPEATABLE READ 的交易**（`Database.read_only_snapshot_transaction`）裡讀完全部的
    資料並做完自我檢查：匯出的資料只用 `PublicViewer` 經 repo 讀（最新已發佈的快照、每一篇
    `counted_paper` 的書目、出版社與分類、`demo_full_paper` 的摘要與兩個 AI 區塊），逐欄組成白名單
@@ -97,6 +98,7 @@ from radar.domain.demo_export import (
     DemoTitles,
     DemoZhSummaryBlock,
     ForbiddenText,
+    PreviousDemoManifest,
     build_demo_client_config,
     check_demo_files,
     data_file_path,
@@ -434,6 +436,7 @@ def _build_and_check(
             forbidden=forbidden,
             eligible_paper_ids=eligible_ids,
             excluded_paper_ids=excluded,
+            journal_keys=[journal.key for journal in setup.journals.journals],
         )
     if problems:
         raise DemoExportCheckError(problems)
@@ -753,8 +756,8 @@ def _read_manifest(out: _Output) -> DemoManifest | None:
 
     Raises:
         DemoExportError: manifest 是符號連結或不是一般檔案（`output_unsafe`）；讀不懂（JSON 壞掉、
-            不符合模型、別的版本寫的；`manifest_unreadable`）時拒絕，不當成沒有：不知道它指向的是
-            不是比這次新的匯出，不能蓋。
+            新版與上一版的模型都不符合；`manifest_unreadable`）時拒絕，不當成沒有：不知道它指向的
+            是不是比這次新的匯出，不能蓋。上一版（`PreviousDemoManifest`）寫的照樣讀得懂。
     """
     try:
         content = _read_at(out.preview_fd, MANIFEST_FILE)
@@ -766,6 +769,12 @@ def _read_manifest(out: _Output) -> DemoManifest | None:
         return None
     try:
         return DemoManifest.model_validate_json(content)
+    except ValidationError:
+        pass
+    try:
+        # 升版後第一次匯出：現在的 manifest 是上一版寫的（沒有 cube.json），只為了讀懂它指向哪一次
+        # （ADR-0062「升版」）；鎖、接手、換 manifest 的流程不變，寫出的一律是新版。
+        return PreviousDemoManifest.model_validate_json(content)
     except ValidationError:
         raise DemoExportError(
             DemoExportFailure.MANIFEST_UNREADABLE,

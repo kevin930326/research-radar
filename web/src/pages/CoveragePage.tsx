@@ -17,18 +17,55 @@ import { formatCount } from "./paper-format";
 //    示範站三個都是（到論文清單帶入條件）。數字是 0 時不是連結（EXPERIENCE.md「讀數」）。
 // 3. 摘要覆蓋率表：期刊 × 追蹤起始年到當年度；比例由 web/src/stats/ 算（AD-19），顯示位數由 formatPercent 決定。
 //    低於門檻（params，預設 50%）的格子是金色空心點；那一年沒有論文的格子是「—」，不是 0%，也不套金色。
-//    當年度那一欄的欄名加註「未滿一年」。指到（手機是點）一格，表格右上（手機在標題下）顯示那一格的篇數。
+//    當年度那一欄的欄名加註「未滿一年」。指到（手機是點、鍵盤是 Tab 到）一格，表格右上（手機在標題下）顯示那一格的
+//    篇數；報讀器只在點或 Tab 到時唸（指到不唸，免得滑過去一直唸）。格子可以聚焦，外框是全站的金色焦點外框（ADR-0037）。
+//    計數壞掉（有摘要比總數多）時算不出表格：整頁當成「沒有載入成功」，不讓整頁崩掉。
 //    899px 以下表格固定 866px 寬、左右捲動，第一欄（期刊）固定在左邊（Responsive & Platform）。
 // 4. Elsevier 四本的說明（設計稿的三句，寫死）。
 // 5. 名詞說明：追蹤範圍、追蹤範圍外、有摘要、快照編號。
 // 狀態：載入中是讀數與表格的骨架（沒有圖例與 Elsevier 的說明）；錯誤是全站共用的「沒有載入成功」（ListParts 的
 // ErrorBar），下面接名詞說明。「空的」不會發生（有資料才會產生快照；成員版上線前已完成第一次匯入）：
 // 沒有任何列時照樣畫表格，每一格都是「—」。
-// 說明與名詞說明裡的「14 本」「2016 年」「#12」照設計稿寫在 i18n（coverage-text.test.ts 檢查和設定一致）。
+// 說明與名詞說明裡的「14 本」「2016 年」照設計稿寫在 i18n（coverage-text.test.ts 檢查和設定一致）；名詞說明「快照編號」的
+// 例子用這一次的快照編號（設計稿寫 #12；還不知道快照時照設計稿的 12）。
 
-/** 期刊的縮寫：設定檔的代號轉大寫（設計稿的 I&M、I&O 在設定檔是 im、io；列給 Kevin）。 */
+/**
+ * 期刊的縮寫（設計稿 coverage.html 與 EXPERIENCE.md 畫面 9 的寫法；I&M、I&O 不是代號轉大寫）。
+ * coverage-text.test.ts 檢查 config/journals.yaml 的每個代號都在這裡。
+ */
+export const JOURNAL_ABBREVIATIONS: Readonly<Record<string, string>> = {
+  misq: "MISQ",
+  isr: "ISR",
+  jmis: "JMIS",
+  jais: "JAIS",
+  ejis: "EJIS",
+  isj: "ISJ",
+  jit: "JIT",
+  jsis: "JSIS",
+  dss: "DSS",
+  im: "I&M",
+  io: "I&O",
+  pmj: "PMJ",
+  tem: "TEM",
+  database: "DATABASE",
+};
+
+/** 設計稿的「快照編號」例子用的號碼（還不知道這一次的快照時）。 */
+const EXAMPLE_SNAPSHOT_NUMBER = 12;
+
+/** 期刊的縮寫：對照表裡有的照表；沒有的（測試用的假期刊）用代號轉大寫。 */
 export function journalAbbreviation(key: string): string {
-  return key.toUpperCase();
+  return JOURNAL_ABBREVIATIONS[key] ?? key.toUpperCase();
+}
+
+/** 算覆蓋率表；計數壞掉（coverageTable 丟 RangeError）時回 null，畫面當成「沒有載入成功」。 */
+function safeCoverageTable(data: CoverageData): CoverageTable | null {
+  try {
+    return coverageTable(data.rows, data.params, data.names.journals.map((journal) => journal.key), data.snapshot.as_of);
+  } catch (error) {
+    if (error instanceof RangeError) return null;
+    throw error;
+  }
 }
 
 export interface CoverageData {
@@ -68,10 +105,11 @@ export function CoveragePage({ site, state, snapshot, data, links, onRetry }: Co
   const { t } = useTranslation("coverage");
   const { t: tc } = useTranslation("common");
   const thirdLabel = site === "member" ? t("coverage.readings.thisWeek") : t("coverage.readings.fullContent");
-  const ready = state === "ready" && data !== null;
-  const table = ready ? coverageTable(data.rows, data.params, data.names.journals.map((journal) => journal.key), data.snapshot.as_of) : null;
+  const table = state === "ready" && data !== null ? safeCoverageTable(data) : null;
+  const shown = state === "ready" && table === null ? "error" : state;
+  const ready = shown === "ready" && data !== null;
   return (
-    <div data-page="coverage" data-state={state} className="text-s14 leading-normal tracking-0 text-text-primary">
+    <div data-page="coverage" data-state={shown} className="text-s14 leading-normal tracking-0 text-text-primary">
       <DataDateBar snapshot={snapshot} />
       <h1 className="mt-[14px] font-title-zh text-page-title-zh text-balance text-text-primary split:mt-[18px]">
         {t("coverage.page.title")}
@@ -79,7 +117,7 @@ export function CoveragePage({ site, state, snapshot, data, links, onRetry }: Co
       <p className="mt-[20px] max-w-reading-width text-s16 leading-190 tracking-003 text-pretty text-text-reading split:mt-[28px] split:text-s17">
         {t("coverage.intro.text")}
       </p>
-      {state === "error" ? (
+      {shown === "error" ? (
         <ErrorBar message={tc("states.loadFailed.message")} action={tc("states.loadFailed.action")} onRetry={onRetry} />
       ) : (
         <>
@@ -94,7 +132,7 @@ export function CoveragePage({ site, state, snapshot, data, links, onRetry }: Co
           {table !== null ? <Elsevier /> : null}
         </>
       )}
-      <Terms />
+      <Terms snapshotNumber={snapshot?.number ?? EXAMPLE_SNAPSHOT_NUMBER} />
     </div>
   );
 }
@@ -170,6 +208,18 @@ interface Picked {
 function CoverageGrid({ table, names, params }: { table: CoverageTable; names: DisplayNames; params: TrendParams }) {
   const { t } = useTranslation("coverage");
   const [picked, setPicked] = useState<Picked | null>(null);
+  // 報讀器唸的那一格：只在點或 Tab 到時換（指到只換畫面上的字）。
+  const [announced, setAnnounced] = useState<Picked | null>(null);
+  const choose = (next: Picked, announce: boolean) => {
+    setPicked(next);
+    if (announce) setAnnounced(next);
+  };
+  const describe = (item: Picked) =>
+    `${t("coverage.pick.cell", { journal: journalAbbreviation(item.journal), year: item.cell.year })} ${
+      item.cell.total === 0
+        ? t("coverage.legend.empty")
+        : t("coverage.pick.counts", { total: formatCount(item.cell.total), withAbstract: formatCount(item.cell.withAbstract) })
+    }`;
   const threshold = formatPercent(params.low_coverage_threshold) ?? "";
   const pick =
     picked === null ? (
@@ -195,11 +245,13 @@ function CoverageGrid({ table, names, params }: { table: CoverageTable; names: D
         </h2>
         <div
           data-coverage-pick
-          aria-live="polite"
           className="mt-[10px] min-h-[22px] font-mono text-s13 tracking-004 whitespace-nowrap text-text-tertiary split:mt-[0px] split:min-h-[0px]"
         >
           {pick}
         </div>
+        <span role="status" data-coverage-announce className="sr-only">
+          {announced === null ? "" : describe(announced)}
+        </span>
       </div>
       <div data-coverage-scroll className="mt-[20px] overflow-x-auto border-b border-hairline split:mt-[24px]">
         <table className="w-[866px] table-fixed border-collapse split:w-full split:min-w-[900px]">
@@ -258,8 +310,10 @@ function CoverageGrid({ table, names, params }: { table: CoverageTable; names: D
                         key={cell.year}
                         data-year={cell.year}
                         data-state={cell.ratio === null ? "empty" : cell.low ? "low" : "ok"}
-                        onMouseEnter={() => setPicked({ journal: row.journal, cell })}
-                        onClick={() => setPicked({ journal: row.journal, cell })}
+                        tabIndex={0}
+                        onMouseEnter={() => choose({ journal: row.journal, cell }, false)}
+                        onClick={() => choose({ journal: row.journal, cell }, true)}
+                        onFocus={() => choose({ journal: row.journal, cell }, true)}
                         className={`h-[44px] border-t border-hairline py-[10px] pl-[14px] text-left font-mono text-s13 whitespace-nowrap transition-[background-color] duration-150 split:h-[46px] split:py-[0px] split:pl-[12px] split:text-s14 ${
                           cell.ratio === null ? "text-text-tertiary" : cell.low ? "text-accent-gold" : "text-text-reading"
                         } ${on ? "bg-menu-item-hover" : ""}`}
@@ -333,7 +387,7 @@ function Elsevier() {
   );
 }
 
-function Terms() {
+function Terms({ snapshotNumber }: { snapshotNumber: number }) {
   const { t } = useTranslation("coverage");
   const items = [
     ["scope", "scopeText"],
@@ -350,7 +404,7 @@ function Terms() {
         {items.map(([term, text], at) => (
           <div key={term} className={`py-[16px] split:flex split:gap-[32px] split:py-[18px] ${at > 0 ? "border-t border-hairline" : ""}`}>
             <dt className="text-s15 tracking-002 text-text-primary split:w-[160px] split:flex-none split:leading-185">{t(`coverage.terms.${term}`)}</dt>
-            <dd className="mt-[6px] text-s14 leading-185 text-text-secondary split:mt-[0px] split:text-s15 split:tracking-002">{t(`coverage.terms.${text}`)}</dd>
+            <dd className="mt-[6px] text-s14 leading-185 text-text-secondary split:mt-[0px] split:text-s15 split:tracking-002">{t(`coverage.terms.${text}`, { number: snapshotNumber })}</dd>
           </div>
         ))}
       </dl>

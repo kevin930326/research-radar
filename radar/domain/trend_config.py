@@ -38,8 +38,8 @@ class TrendConfig(BaseModel):
     growth_window_years: int = Field(ge=1, strict=True)
     # 原始篇數的對照值取最早幾個完整年度。
     baseline_years: int = Field(ge=1, strict=True)
-    # 摘要覆蓋率低於這個比例時標成偏低（0 到 1）。
-    low_coverage_threshold: float = Field(ge=0, le=1)
+    # 摘要覆蓋率低於這個比例時標成偏低（0 到 1；整數 0、1 可以，布林與字串不收）。
+    low_coverage_threshold: float = Field(ge=0, le=1, strict=True)
 
     @field_validator("current_year_cutoff")
     @classmethod

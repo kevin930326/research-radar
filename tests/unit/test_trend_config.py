@@ -95,3 +95,40 @@ def test_missing_file_is_a_config_error(tmp_path: Path) -> None:
         load_trend_config({"RADAR_CONFIG_DIR": str(tmp_path)})
 
     assert caught.value.problems[0].startswith(f"{TREND_FILE}：找不到檔案")
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["true", "false", '"0.5"', "yes"],
+    ids=["布林 true", "布林 false", "字串的數字", "YAML 的 yes"],
+)
+def test_threshold_must_be_a_number_not_a_bool_or_string(tmp_path: Path, value: str) -> None:
+    # YAML 的 true／false 會被一般的 float 轉成 1.0／0.0，設定寫錯卻照樣啟動：這裡要擋下。
+    problems = _problems(tmp_path, GOOD.replace("0.5", value))
+
+    assert any(
+        problem.startswith(f"{TREND_FILE}：low_coverage_threshold：") for problem in problems
+    )
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"), [("0", 0.0), ("1", 1.0), ("0.0", 0.0), ("1.0", 1.0)]
+)
+def test_threshold_boundaries_are_allowed(tmp_path: Path, value: str, expected: float) -> None:
+    assert _load(tmp_path, GOOD.replace("0.5", value)).low_coverage_threshold == expected
+
+
+@pytest.mark.parametrize("value", [True, "0.5"])
+def test_params_threshold_rejects_a_bool_or_string(value: object) -> None:
+    # 回應與 cube.json 的 params 也一樣（示範站的白名單模型讀 JSON 時不把 true 當成 1）。
+    with pytest.raises(ValueError, match="low_coverage_threshold"):
+        TrendParams.model_validate(
+            {
+                "timezone": "Asia/Taipei",
+                "tracking_start_year": 2016,
+                "current_year_cutoff": "07-01",
+                "growth_window_years": 3,
+                "baseline_years": 3,
+                "low_coverage_threshold": value,
+            }
+        )

@@ -14,9 +14,11 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
+from radar.config import load_domain_config
 from radar.domain.contracts import CubeRow, SnapshotRef, TrendParams
 from radar.domain.demo_export import (
     CUBE_FILE,
+    MANIFEST_FILE,
     DemoCube,
     check_demo_files,
     data_file_path,
@@ -27,6 +29,11 @@ ROOT = Path(__file__).resolve().parents[2]
 PREVIEW = ROOT / "web" / "e2e" / "fixtures" / "demo-preview"
 CUBE = data_file_path("2-1", CUBE_FILE)
 INDEX = "2-1/papers-index.json"
+# 設定檔的期刊代號：自我檢查只印這些（其他的寫第幾格）。
+JOURNAL_KEYS = [
+    journal.key
+    for journal in load_domain_config({"RADAR_CONFIG_DIR": str(ROOT / "config")}).journals.journals
+]
 PARAMS = {
     "timezone": "Asia/Taipei",
     "tracking_start_year": 2016,
@@ -46,11 +53,22 @@ def _files() -> dict[str, bytes]:
     }
 
 
-def _cube_problems(files: dict[str, bytes]) -> list[str]:
-    # 只看計數方塊這一項：其他項（完整內容、示範站可用）的輸入給範例裡的全部論文，範例本來就通過。
+def _all_problems(files: dict[str, bytes]) -> list[str]:
+    # 其他項（完整內容、示範站可用）的輸入給範例裡的全部論文，範例本來就通過。
     ids = [uuid.UUID(paper_id) for paper_id in json.loads(_files()[INDEX])["id"]]
-    problems = check_demo_files(files, full_paper_ids=ids, forbidden=[], eligible_paper_ids=ids)
-    return [problem for problem in problems if problem.startswith(CUBE)]
+    return check_demo_files(
+        files, full_paper_ids=ids, forbidden=[], eligible_paper_ids=ids, journal_keys=JOURNAL_KEYS
+    )
+
+
+def _cube_problems(files: dict[str, bytes]) -> list[str]:
+    # 只看計數方塊這一項。
+    return [problem for problem in _all_problems(files) if problem.startswith(CUBE)]
+
+
+def _manifest_problems(files: dict[str, bytes]) -> list[str]:
+    # 只看 manifest 那兩項（列的檔、summary 的讀數）。
+    return [problem for problem in _all_problems(files) if problem.startswith(MANIFEST_FILE)]
 
 
 def _edit(files: dict[str, bytes], path: str, change: Callable[[Any], None]) -> dict[str, bytes]:
@@ -80,6 +98,10 @@ def test_the_preview_cube_matches_the_index_and_the_summary() -> None:
     assert {row["dim"] for row in rows} == {"total", "with_abstract"}
     assert cube["params"] == PARAMS
     assert cube["snapshot"] == json.loads(files[INDEX])["snapshot"]
+    # manifest 的 summary 也用索引重算過（第 9 項），範例的讀數對得上。
+    assert _manifest_problems(files) == []
+    summary = json.loads(files[MANIFEST_FILE])["summary"]
+    assert (summary["paper_count"], summary["with_abstract_count"]) == (60, 51)
 
 
 def _bump_first_total(data: dict[str, Any]) -> None:
@@ -217,3 +239,74 @@ def test_demo_cube_model_forbids_extra_fields() -> None:
 
     with pytest.raises(ValidationError):
         DemoCube.model_validate(data)
+
+
+def test_a_known_journal_is_named_in_the_problem() -> None:
+    broken = _edit(_files(), CUBE, _bump_first_total)
+    first = _rows(_files())[0]
+
+    assert any(
+        problem.startswith(f"{CUBE}：{first['journal']} {first['year']} 的計數")
+        for problem in _cube_problems(broken)
+    )
+
+
+def test_an_unknown_journal_value_is_never_echoed() -> None:
+    # 合法的 JSON、但期刊欄位是白名單不收的值（例如混進了別的文字）：重算照樣擋，訊息只寫第幾格。
+    secret = "Secret Member Note"
+
+    def plant(data: dict[str, Any]) -> None:
+        first = data["rows"][0]
+        for row in data["rows"]:
+            if (row["journal"], row["year"]) == (first["journal"], first["year"]):
+                row["journal"] = secret
+
+    problems = _all_problems(_edit(_files(), CUBE, plant))
+
+    assert any(problem.startswith(CUBE) and "（期刊不在設定檔）" in problem for problem in problems)
+    assert all(secret not in problem for problem in problems)
+
+
+@pytest.mark.parametrize("field_name", ["paper_count", "with_abstract_count", "full_content_count"])
+def test_a_wrong_summary_count_in_the_manifest_fails(field_name: str) -> None:
+    # 只改錯 manifest 的一個讀數（其他檔都不動、模型照樣通過）：用索引重算時擋下。
+    def bump(data: dict[str, Any]) -> None:
+        data["summary"][field_name] += 1
+
+    files = _files()
+    want = json.loads(files[MANIFEST_FILE])["summary"][field_name]
+
+    problems = _manifest_problems(_edit(files, MANIFEST_FILE, bump))
+
+    assert problems == [
+        f"{MANIFEST_FILE}：summary.{field_name}（{want + 1}）和 papers-index.json 重算的"
+        f"（{want}）不同"
+    ]
+
+
+def test_a_listed_file_that_is_missing_fails() -> None:
+    # manifest 照樣列著 cube.json（模型通過），實際的檔裡卻沒有：第 8 項擋下。
+    files = {path: content for path, content in _files().items() if path != CUBE}
+
+    assert _manifest_problems(files) == [f"{MANIFEST_FILE}：列了 {CUBE}，實際沒有這個檔"]
+
+
+def test_a_data_file_the_manifest_does_not_list_fails() -> None:
+    def unlist_cube(data: dict[str, Any]) -> None:
+        data["files"] = [entry for entry in data["files"] if entry["path"] != CUBE]
+
+    problems = _all_problems(_edit(_files(), MANIFEST_FILE, unlist_cube))
+
+    assert f"{CUBE}：manifest.json 沒有列" in problems
+
+
+def test_an_odd_listed_path_is_not_echoed() -> None:
+    secret = "../secret-member.json"
+
+    def odd_path(data: dict[str, Any]) -> None:
+        data["files"][0]["path"] = secret
+
+    problems = _all_problems(_edit(_files(), MANIFEST_FILE, odd_path))
+
+    assert f"{MANIFEST_FILE}：列了 第 1 個檔，實際沒有這個檔" in problems
+    assert all(secret not in problem for problem in problems)

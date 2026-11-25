@@ -3,7 +3,8 @@
 - 要登入：沒登入 401 `not_authenticated`、`no-store`，不讀計數。
 - 讀計數的身分是 session 的成員；回應是 `{rows, params, snapshot}`，只有計數（沒有比例），快照
   結尾 `Z`，沒有快照是 null；帶 `no-store`。
-- `PaperListRoutes` 沒有組計數方塊時（只測清單的測試），呼叫是 500，不會回一份假的空資料。
+- `PaperListRoutes` 沒有組計數方塊時（只測清單的測試），呼叫是 500，不會回一份假的空資料；計數
+  服務出錯時經過路由也是 500 `internal_error`，不帶例外訊息。
 資料全是測試自己編的。
 """
 
@@ -132,6 +133,33 @@ def test_routes_without_a_cube_reader_fail_loudly() -> None:
     response = _get(FakePaperList().routes())
 
     assert response.status_code == 500
+
+
+def test_a_failing_cube_reader_is_a_plain_500() -> None:
+    # 計數服務本身出錯（例如資料庫斷線）：經過真的路由，回 RFC 9457 的 500 `internal_error`，
+    # 不帶例外訊息。
+    def broken(viewer: MemberViewer) -> CubeResponse:
+        raise RuntimeError("cube-secret-detail")
+
+    routes = FakeCube().routes()
+    response = _get(
+        PaperListRoutes(
+            list_page=routes.list_page,
+            parse_filters=routes.parse_filters,
+            journal_key=routes.journal_key,
+            load_cube=broken,
+        )
+    )
+
+    assert response.status_code == 500
+    assert response.headers["content-type"] == "application/problem+json"
+    assert response.json() == {
+        "type": "about:blank",
+        "title": "Internal Server Error",
+        "status": 500,
+        "code": "internal_error",
+    }
+    assert "cube-secret-detail" not in response.text
 
 
 def test_cube_response_never_has_rows_without_a_snapshot() -> None:

@@ -839,7 +839,7 @@ class TrendParams(BaseModel):
     current_year_cutoff: MonthDay
     growth_window_years: int = Field(ge=1, strict=True)
     baseline_years: int = Field(ge=1, strict=True)
-    low_coverage_threshold: float = Field(ge=0, le=1)
+    low_coverage_threshold: float = Field(ge=0, le=1, strict=True)
 
     @field_validator("current_year_cutoff")
     @classmethod

@@ -24,7 +24,9 @@ from structlog.testing import capture_logs
 
 import radar.entrypoints.worker.tasks as worker_tasks
 from radar.config import ConfigError
+from radar.domain.cube import build_cube_rows
 from radar.domain.demo_export import (
+    CUBE_FILE,
     DEMO_LABEL_ABSTRACT_SOURCES,
     DEMO_PAPER_LIST_PAGE_SIZE,
     MANIFEST_FILE,
@@ -1795,3 +1797,57 @@ def test_waiting_too_long_for_the_output_lock_writes_nothing(
     assert caught.value.failure is DemoExportFailure.OUTPUT_BUSY
     assert list((tmp_path / PREVIEW_DIR).iterdir()) == []
     assert _rows(db) == [(1, "failed", "output_busy")]
+
+
+# --- 計數方塊（Story 3.15）：上一版的 manifest、cube.json 的自我檢查 ------------------------
+
+
+def test_export_over_a_previous_format_manifest_upgrades_it(
+    db: TestDatabase, database: Database, tmp_path: Path
+) -> None:
+    # 升版（ADR-0062）：現在的 manifest 是上一版寫的（沒有 cube.json，其他都合法、檔案都完整）。
+    # 讀得懂它指向 2-1，照常寫 2-2、換成新版的 manifest；舊的 2-1 目錄不動。
+    _first_export(db, database, tmp_path)
+    preview = tmp_path / PREVIEW_DIR
+    old_cube = f"2-1/{CUBE_FILE}"
+    (preview / old_cube).unlink()
+    manifest = json.loads((preview / MANIFEST_FILE).read_bytes())
+    manifest["files"] = [entry for entry in manifest["files"] if entry["path"] != old_cube]
+    (preview / MANIFEST_FILE).write_bytes(json.dumps(manifest).encode())
+    old_files = {
+        path: content for path, content in _files(tmp_path).items() if path != MANIFEST_FILE
+    }
+
+    result = _export(database, tmp_path)
+
+    assert result.export_id == "2-2"
+    upgraded = json.loads((preview / MANIFEST_FILE).read_bytes())
+    assert upgraded["export_id"] == "2-2"
+    assert f"2-2/{CUBE_FILE}" in {entry["path"] for entry in upgraded["files"]}
+    assert (preview / "2-2" / CUBE_FILE).is_file()
+    assert {
+        path: content for path, content in _files(tmp_path).items() if path.startswith("2-1/")
+    } == (old_files)
+    assert _rows(db)[-1] == (2, "succeeded", None)
+
+
+def test_cube_that_does_not_match_the_index_keeps_the_old_manifest(
+    db: TestDatabase, database: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # cube.json 的自我檢查沒過（計數和 papers-index.json 重算的不同）：manifest 位元組不變、
+    # 沒有 2-2 的目錄、那一筆記成 self_check_failed。
+    before = _first_export(db, database, tmp_path)
+    real = build_cube_rows
+
+    def off_by_one(*args: Any, **kwargs: Any) -> Any:
+        rows = real(*args, **kwargs)
+        first = rows[0]
+        return (first.model_copy(update={"n": first.n + 1}), *rows[1:])
+
+    monkeypatch.setattr("radar.services.demo_export.build_cube_rows", off_by_one)
+
+    problems = _check_fails(database, tmp_path)
+
+    assert "2-2/cube.json：" in problems
+    assert "和 papers-index.json 重算的不同" in problems
+    _assert_unchanged(db, tmp_path, before)

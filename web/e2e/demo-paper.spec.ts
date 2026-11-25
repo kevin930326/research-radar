@@ -275,3 +275,32 @@ test("demo citation: download RIS makes the file in the browser and the button k
   await expect(button).toHaveText(text("paper:paper.cite.downloadRis"));
   expect(requests.filter((url) => !url.startsWith("blob:"))).toEqual([]);
 });
+
+// 全站頁尾（Story 3.15）和手機版底部固定列互不遮蓋（示範站也用同一個 FullTextBar；成員版那一條在 paper.spec.ts）：
+// 捲到中間時固定列貼在視窗底部、頁尾在視窗外；捲到最底時固定列停在頁尾上面，頁尾的連結與固定列的按鈕都點得到。
+test("demo phone: the bottom bar and the site footer never cover each other", async ({ page }) => {
+  await openPaper(page, 1, { width: 390, height: 844 });
+  const bar = page.locator("[data-full-text='bar']");
+  const footer = page.locator("footer[data-site-footer]");
+  const top = (await bar.boundingBox())!;
+  expect(top.y + top.height).toBeCloseTo(844, 0);
+  expect((await footer.boundingBox())!.y).toBeGreaterThanOrEqual(844);
+
+  await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
+  await expect(footer).toBeInViewport({ ratio: 0.99 });
+  const end = (await bar.boundingBox())!;
+  const footerBox = (await footer.boundingBox())!;
+  expect(end.y + end.height, "bar bottom is above the footer top").toBeLessThanOrEqual(footerBox.y + 0.5);
+  const link = (await footer.locator("a").first().boundingBox())!;
+  const onTop = await page.evaluate(
+    ([x, y]) => document.elementFromPoint(x!, y!)?.closest("footer") !== null,
+    [link.x + link.width / 2, link.y + link.height / 2],
+  );
+  expect(onTop, "footer link is not covered").toBe(true);
+  const button = (await page.locator("[data-full-text='open-mobile']").boundingBox())!;
+  const buttonOnTop = await page.evaluate(
+    ([x, y]) => document.elementFromPoint(x!, y!)?.closest("[data-full-text='bar']") !== null,
+    [button.x + button.width / 2, button.y + button.height / 2],
+  );
+  expect(buttonOnTop, "bar button is not covered").toBe(true);
+});

@@ -46,14 +46,31 @@ Story 1.10 已經在資料庫算好計數方塊（`radar/repo/stats.py` 的 `lis
 - `TrendParams`：`timezone`、`tracking_start_year`、`current_year_cutoff`（`MM-DD`，驗證是真的日期）、
   `growth_window_years`、`baseline_years`、`low_coverage_threshold`（0 到 1）。成員版回應與示範站 `cube.json` 都帶。
 - 示範站：`cube.json` 進 `DEMO_FILE_MODELS`、`demo-openapi.json`、manifest 的必要檔；`DemoCube` 只收 `total` 與
-  `with_abstract`、每格兩種都要有、不重複、`total > 0`、`with_abstract ≤ total`。格式版本 `DEMO_FORMAT_VERSION` 從 1 改成 2
-  （舊版前端讀到新 manifest 會照版本判斷）。共用的 `CubeRow` 形狀和成員版 `openapi.json` 一樣（產生 schema 時拿掉
-  `default: null`，不改模型）。
-- 不改 #130 的鎖、接手、換 manifest 流程，只在換 manifest 之前多寫一個檔。
+  `with_abstract`、每格兩種都要有、不重複、`total > 0`、`with_abstract ≤ total`。`demo-openapi.json` 的版本
+  `DEMO_FORMAT_VERSION` 從 1 改成 2，只是標明檔案格式改了；前端不讀這個版本號（實際的保護是：前端照 manifest 找
+  `cube.json`，舊 manifest 沒有列它，涵蓋範圍頁顯示「沒有載入成功」）。共用的 `CubeRow` 形狀和成員版 `openapi.json`
+  一樣（產生 schema 時拿掉 `default: null`，不改模型）。
+- 自我檢查另外核對 manifest：列的檔和實際要寫的檔是同一批（列了卻沒有、有了卻沒列都失敗），`summary` 的篇數、
+  有摘要篇數、有完整內容篇數用 `papers-index.json` 重算。
+- 不改 #130 的鎖、接手、換 manifest 流程，只在換 manifest 之前多寫一個檔。讀「現在的 manifest」時，新版的模型
+  讀不懂就再用上一版的模型（`PreviousDemoManifest`：沒有 `cube.json`，其他相同）讀一次，只為了知道它指向哪一次、
+  能不能蓋；寫出的一律是新版。兩版都讀不懂照舊拒絕（`manifest_unreadable`）。
+
+## 升版
+
+已經有上一版匯出的環境（`preview/manifest.json` 沒有 `cube.json`），部署新版之後照這個順序：
+
+1. 先備份 `preview/manifest.json`（複製一份到別處；不要搬走，搬走讀者就讀不到）。
+2. 照平常的方式重新匯出一次：新版讀得懂上一版的 manifest，照 #130 的鎖與接手規則寫新的匯出目錄、換成新版
+   manifest；舊的匯出目錄留著不動。
+3. 確認新的 manifest 列了 `<匯出編號>/cube.json`，涵蓋範圍頁看得到數字，再刪備份。
+4. 如果匯出失敗是 `manifest_unreadable`（manifest 不是上一版、也不是新版寫的），不要自己改它：人工確認它指向
+   哪一次，再決定要不要移走重匯。
 
 ## 取捨
 
 - 計數方塊這次只放兩種列；趨勢頁要的 `topic`、`method` 等之後加進同一個端點，回應會變大，到時再看要不要篩。
-- 示範站的格式版本加 1：已經發佈的舊匯出沒有 `cube.json`，新前端讀到舊 manifest 會顯示「沒有載入成功」，要重新匯出一次。
+- 示範站的格式改了：已經發佈的舊匯出沒有 `cube.json`，新前端讀到舊 manifest 會顯示「沒有載入成功」，要照「升版」
+  重新匯出一次。讀 manifest 多認得一個上一版，下次再改格式時，上上一版的模型可以拿掉。
 - 自我檢查多一次逐格重算（索引欄式、篇數少，成本可以忽略）。
 - 規則設定值多一個設定檔；`journals.yaml` 的 `start_year` 沿用，不重複。
