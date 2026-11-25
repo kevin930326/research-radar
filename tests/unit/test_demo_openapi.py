@@ -49,7 +49,7 @@ def test_shared_shapes_are_the_same_as_the_member_api() -> None:
     member = json.loads(MEMBER_OPENAPI.read_text(encoding="utf-8"))["components"]["schemas"]
 
     shared = sorted(name for name in demo if not name.startswith("Demo"))
-    assert shared  # 書目、AI 區塊、來歷、快照、顯示名稱、前端設定值
+    assert shared  # 快照、來歷、顯示名稱、原文摘要、全文連結、構面與假設
     for name in shared:
         assert name in member, name
         assert demo[name] == member[name], name

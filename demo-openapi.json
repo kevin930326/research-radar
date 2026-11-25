@@ -609,7 +609,7 @@
       },
       "DemoManifest": {
         "additionalProperties": false,
-        "description": "`manifest.json`：現在該讀哪一次匯出（最後才寫，只有它會被覆寫）。列的每個檔都在這次的匯出\n目錄底下（路徑開頭是自己的 `export_id`），不重複。",
+        "description": "`manifest.json`：現在該讀哪一次匯出（最後才寫，只有它會被覆寫）。列的每個檔都在這次的匯出\n目錄底下（路徑開頭是自己的 `export_id`），不重複，而且是完整的一批：分類表、索引、標題與每一個\n分片（個數照 `summary.paper_count` 算）都列了。",
         "properties": {
           "snapshot": {
             "$ref": "#/components/schemas/SnapshotRef"

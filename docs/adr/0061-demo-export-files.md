@@ -1,7 +1,7 @@
 # ADR-0061：示範站匯出的檔案切法、目錄結構與白名單模型
 
 - 狀態：提議（Story 3.7，等 Kevin 確認）
-- 日期：2026-11-25（同日第 1 輪審查後修正）
+- 日期：2026-11-25（同日第 1、2 輪審查後修正）
 - 對應：Story 3.7；ADR-0007（示範站匯出與寫出前的自我檢查）、ADR-0010、ADR-0052；AD-14、AD-20、AD-21；FR-7
 - 補 ADR-0007／AD-20 沒寫到的細節。和它們字面不一樣的地方（自我檢查用系統身分讀成員 email、CLI 不經佇列、
   幾項留到之後）在「與 ADR-0007／AD-20 不一樣的地方」逐條列出，等 Kevin 確認。
@@ -41,7 +41,8 @@
 | | 做法 | 選了會怎樣 |
 |---|---|---|
 | A | 只靠部分唯一索引（同一個快照只能有一筆排隊或執行中） | 不同快照的兩次匯出可以同時跑，舊的可能把 manifest 蓋回舊的；sweep 補排時兩個行程可能同時做同一筆 |
-| B | 部分唯一索引＋接手代號＋發佈鎖＋換 manifest 前比新舊＋重跑時補記成功 | 多一欄、多一把鎖；上面幾種情況都擋得住 |
+| B | 部分唯一索引＋接手代號＋發佈鎖＋換 manifest 前比新舊＋重跑時補記成功 | 多一欄、多一把鎖；正常連線下上面幾種情況都擋得住，但資料庫連線在檢查後斷掉時，鎖跟著放掉，舊行程的檔案操作不會停 |
+| C | B ＋輸出資料夾底下的檔案鎖（`fcntl.flock`）包住寫目錄到換 manifest，鎖內換之前再比一次新舊 | 再多一個鎖檔；資料庫斷線也不會放掉檔案鎖，兩個行程的檔案操作一定一次一個 |
 
 ### 五、匯出寫到哪裡
 
@@ -57,7 +58,8 @@
 - 檔案選二 A：`manifest.json`（快照、匯出編號、匯出時間、每個檔的路徑與 sha256 與大小、`summary`、`client_config`）、
   `<匯出編號>/taxonomy.json`、`papers-index.json`、`titles.json`、`papers/NNN.json`。論文分兩層：`DemoPaperBiblio`
   （每一篇 `counted_paper`）與 `DemoPaperFull`（只有示範站有完整內容的論文才有）。manifest 列的路徑只能是
-  `<自己的匯出編號>/` 底下認得的資料檔（不會有 `..`）。
+  `<自己的匯出編號>/` 底下認得的資料檔（不會有 `..`），而且要是完整的一批：分類表、索引、標題都在，分片從 `000`
+  起連號、個數照 `summary.paper_count` 算（每 200 篇一個；0 篇沒有分片）。不齊全的 manifest 不符合模型。
 - 欄位選三 B。`demo-openapi.json` 由 `radar export-demo-schema` 從這些模型產生，repo 放一份，測試比對兩者一致。
   示範站輸出的欄位：
   - 書目：論文 ID、標題、作者、年份、期刊代號與 ISSN-L、卷期頁碼、DOI 與連結、OpenAlex ID 與連結、被引用次數。
@@ -79,17 +81,27 @@
   6. 另外直接讀出版社欄位，排除清單裡的出版社或期刊的論文沒有完整內容。
   沒過就一個檔都不寫、manifest 不換。失敗原因只印檔名、已知的欄位名稱與陣列位置、錯誤代碼、看得懂的論文 ID；
   多出來的鍵名與看不懂的 ID 不印。
-- 並行與中斷選四 B：
+- 並行與中斷選四 C（第 1 輪是 B，第 2 輪審查補檔案鎖）：
   - `demo_export` 多一欄 `run_token`：接手（`queued`，或 `running` 超過 6 小時）時換新的代號；寫檔前與記結果時
     都要拿著同一個代號，被別的行程接手後舊的那個什麼都不寫、也不改狀態。
-  - 寫檔與換 manifest 在一個短交易裡，先拿發佈鎖（CLI 與 worker 共用的 advisory lock），確認還是自己接手的、
-    現在的 manifest 沒有指向比這次新的匯出（比快照編號再比序號），才寫；比較新的就記成 `superseded`、不蓋回去。
-    記成功也在同一個交易。
-  - 資料檔逐個 fsync、目錄 fsync 後才改名；manifest 暫存檔 fsync 後才換名，換完再 fsync `preview/`。
-  - 換好 manifest 後才失敗（例如記成功的那一筆交易沒 commit 成）：那一筆留在 `running`；sweep 6 小時後補排，
-    重跑時發現 manifest 已經指向這一次、檔案雜湊都對，就補記成功、不重寫。
-  - `preview`、`manifest.json` 是符號連結，或 `preview` 實際位置不在輸出資料夾底下時拒絕（`output_unsafe`）。
-  - 行程被中斷（Ctrl-C 等）時把那一筆記成 `interrupted`，下一次 `radar export-demo` 不會被擋。
+  - 寫檔與換 manifest 在一個短交易裡，先拿資料庫的發佈鎖（CLI 與 worker 共用的 advisory lock），確認還是自己
+    接手的；再拿輸出資料夾底下的檔案鎖（`.demo-publish.lock`、`fcntl.flock`，CLI、worker、範例產生器都拿這一把；
+    資料庫斷線不會放掉它）。在檔案鎖裡看現在的 manifest 沒有指向比這次新的匯出（比快照編號再比序號）才寫目錄，
+    換 manifest 之前在檔案鎖裡再比一次；比較新的就記成 `superseded`、不蓋回去。記成功也在同一個資料庫交易。
+  - 現有的 manifest 讀不懂（JSON 壞掉、不符合模型、別的版本寫的）時拒絕（`manifest_unreadable`）、什麼都不寫：
+    不知道它指向的是不是比較新的匯出，不能當成沒有 manifest。要人工確認後移走再匯出。
+  - 資料檔逐個 fsync、各層目錄 fsync 後才改名；改名後 fsync `preview/`，才寫 manifest 暫存檔（fsync）、換名，
+    換完再 fsync `preview/`。
+  - 換好 manifest 之後的步驟失敗（換完的 fsync、記成功、commit）：讀者已經看得到新的一批，所以回報**已發佈、
+    狀態待補記**（`DemoExportPublishedUnrecordedError`；CLI 印「已發佈……不用重跑」、退出碼 1），不記失敗，
+    那一筆留在 `running`；sweep 6 小時後補排，接手時發現 manifest 已經指向這一次、檔案雜湊都對，先再 fsync 一次
+    `preview/` 才補記成功、不重寫。manifest 指向這一次、檔案卻不完整時補記不了：重跑會碰到目錄已經存在，記成
+    `output_exists`（不會一直停在 `running`）。
+  - 輸出位置的讀寫一律相對於打開的目錄 fd（`O_DIRECTORY`、`O_NOFOLLOW`、`dir_fd`），每一層都不跟符號連結：
+    `preview`、`manifest.json`、鎖檔是符號連結時拒絕（`output_unsafe`）；打開之後有人把 `preview` 換成符號連結，
+    之後的寫入仍在原本那個資料夾，不會沿著連結寫到別處。
+  - 行程被中斷（Ctrl-C 這類變成例外的中斷）時把那一筆記成 `interrupted`，下一次 `radar export-demo` 不會被擋。
+    SIGTERM 不會變成例外：被系統結束的那一筆停在 `running`，6 小時後補排。
 - 匯出位置選五 C：`radar export-demo` 與 worker 都只看 `RADAR_DEMO_EXPORT_DIR`；沒設時 CLI 不連資料庫、退出碼 1，
   worker 記成 `no_output_dir`。worker 讀設定檔失敗時那一筆記成 `config_error`（不會被 sweep 一直補排）。
 - 卡住的時間：CLI 建好列、還沒開始就中斷（停在 `queued`）的，1 小時後由 sweep 交給 worker；做到一半行程不在了
@@ -99,7 +111,11 @@
 - `radar export-demo` 在指令自己的行程裡做（不經佇列）；工作佇列也註冊了 `run_demo_export`（現在只有 sweep 排入）。
 - 示範站論文清單一頁 50 篇放在 manifest 的 `client_config`（`DemoClientConfig`：時區、`paper_list_page_size`＝50），
   前端不另外寫一份（AD-21）；成員版的 `ClientConfig` 不變。示範站沒有文獻庫，不帶它的篇數（待 Kevin 事後確認）。
-- 例外只記類別名稱：CLI 與 worker 一樣，例外訊息（可能帶主機、帳號或被擋的內容）不印、不串。
+- 例外怎麼記：
+  - 設定錯誤（`ConfigError`，讀設定檔或環境變數時）：訊息照設計只有環境變數或設定檔的名稱與原因、不含設定值。
+    CLI 印出每一條原因；worker 先把那一筆記成 `config_error`，再把 `ConfigError` 原樣往上丟（和其他工作一樣）。
+  - 進了匯出服務之後的其他例外：只記類別名稱，例外訊息（可能帶主機、帳號或被擋的內容）不印、不串（CLI 印類別名稱；
+    worker 丟只帶類別名稱的 `DemoExportJobError`）。
 
 ## 與 ADR-0007／AD-20 不一樣的地方（列給 Kevin 確認）
 
@@ -133,3 +149,6 @@
 - 舊匯出目錄不自動刪，磁碟會慢慢變多。
 - 論文 ID 是資料庫裡真的 UUID，每次匯出都一樣；示範站看得到論文 ID（和成員版的網址一致，ADR-0007 第 4 點）。
 - 寫檔時拿著資料庫的鎖與一條連線（幾秒）；同時有第二個匯出時它會等，等太久（超過連線的 `statement_timeout`）就記成失敗。
+- 檔案鎖會一直等（沒有逾時）：拿著它的行程只在寫目錄到換 manifest 那幾秒拿著，行程結束就自動放掉。輸出資料夾底下
+  多一個鎖檔 `.demo-publish.lock`（空的，不會被讀者讀到；範例產生器的那一個在 `web/e2e/fixtures/`，已列進 `.gitignore`）。
+- manifest 讀不懂時要人工處理（移走或修好），匯出不會自己蓋過去。

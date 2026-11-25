@@ -267,8 +267,9 @@ def register_tasks(app: procrastinate.App, parts: WorkerParts, settings: Setting
         # 示範站匯出（Story 3.7、ADR-0061）：只寫 RADAR_DEMO_EXPORT_DIR/preview/。現在只有 sweep
         # 補排停在 queued／running 的那一筆。沒設資料夾、或開了 RADAR_DEMO_PUBLISH（正式發佈還沒
         # 做）時 service 把那一筆記成 failed（移出起始狀態，sweep 不再補排）。執行時才讀設定檔；
-        # 讀失敗時也把那一筆記成 failed（config_error），不然 sweep 會一直補排。例外只記類別名稱
-        # （和 radar export-demo 一樣），不串原例外：訊息可能帶主機、帳號或被擋的內容。
+        # 讀失敗時也把那一筆記成 failed（config_error），不然 sweep 會一直補排；ConfigError 原樣
+        # 往上丟（和其他工作一樣；訊息照設計只有環境變數或設定檔的名稱與原因，不含設定值）。進了
+        # 匯出服務之後的例外只記類別名稱，不串原例外：訊息可能帶主機、帳號或被擋的內容。
         try:
             domain_config = load_domain_config()
             setup = DemoExportSetup(

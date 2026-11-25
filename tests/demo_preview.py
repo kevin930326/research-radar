@@ -12,7 +12,11 @@
 （UUIDv7），所以重新產生後的檔案會和原本的不一樣；結構與涵蓋的情況相同。
 
 防呆：
-- 只會換掉 `web/e2e/fixtures/demo-preview/`（固定，不收命令列參數）。
+- 只會換掉 `web/e2e/fixtures/demo-preview/`（固定，不收命令列參數）。從 repo 根目錄往下每一層都不准
+  是符號連結，上層解析後一定要等於 repo 裡的 `web/e2e/fixtures/`（不會把搬移、刪除導到 repo 外）。
+- 整段拿 `web/e2e/fixtures/` 底下的發佈檔案鎖（和匯出寫 `preview/` 時同一把，
+  `services.demo_export.demo_output_lock`）：同時跑兩次時一次一個，不會互相搬走、刪掉對方的。
+- 換的時候先把舊範例搬到暫存資料夾，新的搬不進去就把舊的搬回來（不會兩邊都沒有）。
 - `RADAR_TEST_ADMIN_DATABASE_URL` 一定要是 `127.0.0.1:55432`（測試用的資料庫）；沒設、或指到別的
   主機或埠（例如 5432 的真實資料）時拒絕執行。
 """
@@ -30,7 +34,7 @@ from radar.domain.demo_export import MANIFEST_FILE, PREVIEW_DIR, DemoManifest
 from radar.domain.fingerprints import demo_file_sha256
 from radar.domain.viewer import SystemViewer
 from radar.repo.db import Database
-from radar.services.demo_export import queue_demo_export, run_demo_export
+from radar.services.demo_export import demo_output_lock, queue_demo_export, run_demo_export
 from tests.database import ADMIN_URL_ENV, create_database, drop_database, migrate
 from tests.demo_export_support import (
     EXPORTED_AT,
@@ -42,7 +46,8 @@ from tests.demo_export_support import (
 
 ROOT = Path(__file__).resolve().parents[1]
 # 唯一會被換掉的資料夾。
-TARGET = ROOT / "web" / "e2e" / "fixtures" / "demo-preview"
+FIXTURES = ROOT / "web" / "e2e" / "fixtures"
+TARGET = FIXTURES / "demo-preview"
 # 測試用的資料庫（compose 專案 radar-ci）；本機的真實資料在 5432，不准連。
 TEST_DATABASE_HOST = "127.0.0.1"
 TEST_DATABASE_PORT = 55432
@@ -82,10 +87,47 @@ def check_complete(preview: Path) -> None:
         raise SystemExit("匯出的資料夾多了別的東西，沒有換掉範例")
 
 
+def check_target(root: Path, target: Path) -> None:
+    """`target` 從 `root` 往下每一層都不是符號連結，上層解析後就是 `root/web/e2e/fixtures`。
+
+    Raises:
+        SystemExit: 有一層是符號連結，或位置不對。
+    """
+    current = root
+    for part in target.relative_to(root).parts:
+        current = current / part
+        if current.is_symlink():
+            raise SystemExit(f"{current.relative_to(root)} 是符號連結，沒有換掉範例")
+    expected = root.resolve(strict=True) / "web" / "e2e" / "fixtures"
+    if target.parent.resolve(strict=True) != expected:
+        raise SystemExit("範例資料夾的位置不對，沒有換掉範例")
+
+
+def replace_target(fresh: Path, old: Path, target: Path) -> None:
+    """把 `fresh` 換成 `target`：舊的先搬到 `old`，新的搬不進去就把舊的搬回來。"""
+    had_old = target.exists()
+    if had_old:
+        target.rename(old)
+    try:
+        fresh.rename(target)
+    except BaseException:
+        if had_old:
+            old.rename(target)
+        raise
+
+
 def generate(admin_url: str) -> None:
     """產生範例資料，確認完整後才換掉 `TARGET`（見模組說明）。"""
     check_admin_url(admin_url)
-    work = Path(tempfile.mkdtemp(prefix=f".{TARGET.name}.work-", dir=TARGET.parent))
+    check_target(ROOT, TARGET)
+    with demo_output_lock(FIXTURES):
+        result = _generate_locked()
+    print(json.dumps({"replaced": str(TARGET.relative_to(ROOT)), "export_id": result}))
+
+
+def _generate_locked() -> str:
+    check_target(ROOT, TARGET)
+    work = Path(tempfile.mkdtemp(prefix=f".{TARGET.name}.work-", dir=FIXTURES))
     try:
         test_db = create_database(with_extensions=True)
         try:
@@ -103,13 +145,11 @@ def generate(admin_url: str) -> None:
             drop_database(test_db)
         fresh = work / "out" / PREVIEW_DIR
         check_complete(fresh)
-        old = work / "old"
-        if TARGET.exists():
-            TARGET.rename(old)
-        fresh.rename(TARGET)
+        check_target(ROOT, TARGET)
+        replace_target(fresh, work / "old", TARGET)
     finally:
         shutil.rmtree(work, ignore_errors=True)
-    print(json.dumps({"replaced": str(TARGET.relative_to(ROOT)), "export_id": result.export_id}))
+    return result.export_id
 
 
 def main() -> None:

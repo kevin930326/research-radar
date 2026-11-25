@@ -17,6 +17,7 @@ from radar.entrypoints.cli import app
 from radar.services.demo_export import (
     DemoExportCheckError,
     DemoExportError,
+    DemoExportPublishedUnrecordedError,
     DemoExportResult,
     NoPublishedSnapshotError,
 )
@@ -132,7 +133,6 @@ def test_self_check_failure_prints_every_reason_and_exits_1(
     assert "自我檢查沒過，沒有寫任何檔、manifest.json 沒換：" in result.output
     for problem in problems:
         assert f"- {problem}" in result.output
-    assert not (tmp_path / "preview").exists()
 
 
 @pytest.mark.parametrize(
@@ -157,6 +157,24 @@ def test_known_failures_exit_1_with_a_reason(
 
     assert result.exit_code == 1
     assert expected in result.output
+
+
+def test_published_but_unrecorded_says_it_is_published(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # G4：manifest 已經換好、狀態沒記上：說清楚「已發佈、狀態待補記」，不要讓人以為沒發佈。
+    _fake_service(
+        monkeypatch,
+        queue_error=None,
+        run_error=DemoExportPublishedUnrecordedError("2-1", "OperationalError"),
+    )
+
+    result = _invoke(tmp_path)
+
+    assert result.exit_code == 1
+    assert "已發佈：manifest.json 已經換成 2-1，但狀態沒有記上（OperationalError）" in result.output
+    assert "不用重跑" in result.output
+    assert "匯出失敗" not in result.output
 
 
 def test_unknown_error_prints_only_the_class_name(

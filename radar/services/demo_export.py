@@ -5,7 +5,8 @@
 1. 一個短交易接手那一筆 `demo_export`（`update_demo_export_claimed`：`queued`，或卡在 `running` 超過
    `DEMO_EXPORT_RUNNING_STUCK` 的），拿到這一次的 `run_token`；已經結束或正由別的行程在做的不做。
 2. 先看 `preview/manifest.json` 是不是已經指向這一次（上一次換好 manifest、卻沒記上成功就中斷）：是
-   而且檔案的雜湊都對，就補記成功、結束（不重寫）。
+   而且檔案的雜湊都對，就再 fsync 一次 `preview/`、補記成功、結束（不重寫）。現有的 manifest 讀不懂
+   （格式不合、別的版本寫的）時拒絕（`manifest_unreadable`），不當成沒有。
 3. **一個唯讀、REPEATABLE READ 的交易**（`Database.read_only_snapshot_transaction`）裡讀完全部的
    資料並做完自我檢查：匯出的資料只用 `PublicViewer` 經 repo 讀（最新已發佈的快照、每一篇
    `counted_paper` 的書目、出版社與分類、`demo_full_paper` 的摘要與兩個 AI 區塊），逐欄組成白名單
@@ -14,27 +15,36 @@
    欄位與成員 email（**成員 email 是唯一用系統身分讀的東西**，只拿來比對、不寫進任何檔，ADR-0061），
    `domain/demo_export.check_demo_files` 檢查全部的檔。沒過就丟 `DemoExportCheckError`，**什麼都
    不寫**。
-4. 交易結束後，在一個短交易裡拿發佈鎖（CLI 與 worker 共用）、確認這一筆仍是自己接手的、現在的
-   manifest 沒有指向比這次新的匯出，才寫檔：資料檔先寫進暫存目錄（每個檔 fsync）、整個改名成
-   `preview/<匯出編號>/`（目錄已經存在就失敗、不覆寫），再 fsync `preview/`；`preview/manifest.json`
-   最後寫（暫存檔 fsync 後換名，換的那一下是原子的，再 fsync `preview/`）；同一個交易把那一筆改成
-   `succeeded`。
-5. 任何一步失敗把那一筆改成 `failed`（記原因代碼）再往上丟；被別的行程接手了就什麼都不改。
+4. 交易結束後，在一個短交易裡拿資料庫的發佈鎖（CLI 與 worker 共用）、確認這一筆仍是自己接手的，再拿
+   輸出資料夾底下的**檔案鎖**（`fcntl.flock`；資料庫斷線也不會放掉）：現在的 manifest 沒有指向比這次
+   新的匯出，才寫檔：資料檔先寫進暫存目錄（每個檔 fsync）、整個改名成 `preview/<匯出編號>/`（目錄
+   已經存在就失敗、不覆寫），再 fsync `preview/`；換 manifest 前在檔案鎖裡再比一次新舊；
+   `preview/manifest.json` 最後寫（暫存檔 fsync 後換名，換的那一下是原子的，再 fsync `preview/`）；
+   同一個資料庫交易把那一筆改成 `succeeded`。換好 manifest 之後的步驟失敗時丟
+   `DemoExportPublishedUnrecordedError`（已發佈、狀態待補記），那一筆留在 `running`。
+5. 其他任何一步失敗把那一筆改成 `failed`（記原因代碼）再往上丟；被別的行程接手了就什麼都不改。
 
+輸出位置的讀寫一律相對於打開的目錄 fd（`O_DIRECTORY`、`O_NOFOLLOW`、`dir_fd`）：檢查之後有人把
+`preview` 換成符號連結，也寫不到別處。
 `RADAR_DEMO_PUBLISH` 預設關；這個 epic 不開：開了的話不讀資料、直接記成失敗（正式發佈還沒做）。
-這個模組只寫 `<輸出資料夾>/preview/`，沒有寫 `data/` 的路徑；`preview` 是符號連結或跑出輸出資料夾時
-拒絕。
+這個模組只寫 `<輸出資料夾>/preview/`（與輸出資料夾底下的鎖檔），沒有寫 `data/` 的路徑；`preview`
+是符號連結時拒絕。
 """
 
+import contextlib
 import errno
+import fcntl
 import os
 import re
 import shutil
+import stat
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import Final
 
 import structlog
 from pydantic import ValidationError
@@ -160,6 +170,17 @@ class DemoExportCheckError(DemoExportError):
         super().__init__(DemoExportFailure.SELF_CHECK_FAILED, f"自我檢查沒過（{len(problems)} 項）")
 
 
+class DemoExportPublishedUnrecordedError(Exception):
+    """manifest 已經換成這一次（讀者已經看得到新的一批，**已發佈**），但之後的步驟
+    （fsync `preview/`、記成功、commit）失敗：那一筆留在 `running`，之後接手（sweep 補排）時
+    補記成功、不重寫。`error_type` 是原本的錯誤類別（不串原例外：訊息可能帶主機或帳號）。"""
+
+    def __init__(self, export_id: str, error_type: str) -> None:
+        self.export_id = export_id
+        self.error_type = error_type
+        super().__init__(f"{export_id} 已發佈、狀態待補記（{error_type}）")
+
+
 class DemoExportTakenOverError(Exception):
     """這一筆已經被別的行程接手（或已經結束）：這個行程什麼都沒寫，也不改那一筆的狀態。"""
 
@@ -221,6 +242,8 @@ def run_demo_export(
         DemoExportCheckError: 自我檢查沒過（什麼都沒寫，manifest 不換）。
         DemoExportError: 其他已知的失敗（原因代碼見 `failure`）。
         DemoExportTakenOverError: 做到一半被別的行程接手（什麼都沒寫，狀態不改）。
+        DemoExportPublishedUnrecordedError: manifest 已經換成這一次，但狀態沒記上（留在 `running`，
+            之後接手時補記成功）。
         BaseException: 讀資料庫或寫檔的錯誤、中斷原樣往上丟（那一筆已記成 `failed`）。
     """
     with database.transaction() as connection:
@@ -234,28 +257,29 @@ def run_demo_export(
         )
         return None
     token = run.run_token
-    preview: Path | None = None
-    try:
-        if setup.publish:
-            raise DemoExportError(
-                DemoExportFailure.PUBLISH_NOT_READY,
-                "RADAR_DEMO_PUBLISH 開著，但正式發佈還沒做；這個 epic 只寫 preview/",
-            )
-        if output_root is None:
-            raise DemoExportError(DemoExportFailure.NO_OUTPUT_DIR, "沒有設定匯出的資料夾")
-        preview = _preview_dir(output_root)
-        recovered = _recover(database, preview, run, token)
-        if recovered is not None:
-            log.info("示範站匯出已經換好 manifest，補記成功", export_id=run.export_id)
-            return recovered
-        files, result = _build_and_check(actor, database, setup, run, clock=clock)
-        result = _publish(database, preview, run, token, files, result)
-    except DemoExportTakenOverError:
-        log.warning("示範站匯出被別的行程接手，這個行程沒有寫檔", export_id=run.export_id)
-        raise
-    except BaseException as exc:
-        _record_failure(database, preview, run, token, exc)
-        raise
+    out: _Output | None = None
+    with ExitStack() as stack:
+        try:
+            if setup.publish:
+                raise DemoExportError(
+                    DemoExportFailure.PUBLISH_NOT_READY,
+                    "RADAR_DEMO_PUBLISH 開著，但正式發佈還沒做；這個 epic 只寫 preview/",
+                )
+            if output_root is None:
+                raise DemoExportError(DemoExportFailure.NO_OUTPUT_DIR, "沒有設定匯出的資料夾")
+            out = stack.enter_context(_open_output(output_root))
+            recovered = _recover(database, out, run, token)
+            if recovered is not None:
+                log.info("示範站匯出已經換好 manifest，補記成功", export_id=run.export_id)
+                return recovered
+            files, result = _build_and_check(actor, database, setup, run, clock=clock)
+            result = _publish(database, out, run, token, files, result)
+        except DemoExportTakenOverError:
+            log.warning("示範站匯出被別的行程接手，這個行程沒有寫檔", export_id=run.export_id)
+            raise
+        except BaseException as exc:
+            _record_failure(database, out, run, token, exc)
+            raise
     log.info(
         "示範站匯出完成",
         export_id=result.export_id,
@@ -267,13 +291,14 @@ def run_demo_export(
 
 def _record_failure(
     database: Database,
-    preview: Path | None,
+    out: _Output | None,
     run: DemoExportRun,
     token: uuid.UUID,
     exc: BaseException,
 ) -> None:
-    """把那一筆記成 `failed`。manifest 已經換成這一次時不記（換好之後才失敗：留在 `running`，sweep
-    補排時 `_recover` 補記成功）；記不上（資料庫斷線等）只記日誌，原本的例外照樣往上丟。"""
+    """把那一筆記成 `failed`。manifest 已經換成這一次、檔案都完整時不記（換好之後才失敗：留在
+    `running`，sweep 補排時 `_recover` 補記成功）；manifest 指向這一次、檔案卻不完整時照樣記失敗
+    （補記不了，不要每 6 小時重排一次）。記不上（資料庫斷線等）只記日誌，原本的例外照樣往上丟。"""
     if isinstance(exc, DemoExportError):
         failure = exc.failure
     elif isinstance(exc, Exception):
@@ -281,7 +306,9 @@ def _record_failure(
     else:
         failure = DemoExportFailure.INTERRUPTED
     problems = exc.problems if isinstance(exc, DemoExportCheckError) else None
-    if preview is not None and _manifest_export_id(preview) == run.export_id:
+    if isinstance(exc, DemoExportPublishedUnrecordedError) or (
+        out is not None and _published_here(out, run)
+    ):
         log.error(
             "示範站匯出已經換好 manifest，但沒有記上成功；sweep 補排時會補記",
             export_id=run.export_id,
@@ -510,192 +537,373 @@ def _summary(papers: list[DemoPaper]) -> DemoSummary:
     )
 
 
-# --- 輸出位置、補記成功、寫檔（自我檢查通過之後）---------------------------------------------
+# --- 輸出位置、檔案鎖、補記成功、寫檔（自我檢查通過之後）---------------------------------------
+
+# 發佈用的檔案鎖（放在輸出資料夾底下）：寫匯出目錄到換 manifest 這一段，CLI、worker、範例產生器都拿
+# 這一把（`fcntl.flock`）。資料庫的發佈鎖在連線斷掉時會被放掉，這把只有行程結束才放。
+DEMO_OUTPUT_LOCK_FILE: Final = ".demo-publish.lock"
+
+_DIR_FLAGS: Final = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+
+
+@dataclass(frozen=True)
+class _Output:
+    """打開的輸出位置：輸出資料夾與 `preview/` 的目錄 fd。之後的讀寫一律相對於這兩個 fd、每一層都
+    不跟符號連結，途中有人把 `preview` 換成符號連結也寫不到別處。`preview_path` 只用來回報位置。"""
+
+    root_fd: int
+    preview_fd: int
+    preview_path: Path
 
 
 def _unsafe(message: str) -> DemoExportError:
     return DemoExportError(DemoExportFailure.OUTPUT_UNSAFE, message)
 
 
-def _preview_dir(output_root: Path) -> Path:
-    """`output_root/preview/`（沒有就建）。`preview` 是符號連結、或實際位置不在輸出資料夾底下時
-    拒絕：`RADAR_DEMO_PUBLISH` 關著時不能沿著連結寫到別的地方（例如正式的 `data/`）。"""
-    output_root.mkdir(parents=True, exist_ok=True)
-    root = output_root.resolve(strict=True)
-    preview = output_root / PREVIEW_DIR
-    if preview.is_symlink():
-        raise _unsafe("preview 是符號連結，不寫")
-    preview.mkdir(exist_ok=True)
-    if preview.is_symlink() or preview.resolve(strict=True) != root / PREVIEW_DIR:
-        raise _unsafe("preview 不在輸出資料夾底下，不寫")
-    return preview
+def _open_dir(name: str, directory_fd: int) -> int:
+    """相對於 `directory_fd` 打開一個子目錄（不跟符號連結）。"""
+    return os.open(name, _DIR_FLAGS, dir_fd=directory_fd)
 
 
-def _read_manifest(preview: Path) -> DemoManifest | None:
-    """現在的 `preview/manifest.json`；沒有、或讀不懂（不符合模型）時回 None。
+@contextmanager
+def _open_output(output_root: Path) -> Iterator[_Output]:
+    """打開 `output_root` 與它底下的 `preview/`（沒有就建）。`preview` 是符號連結或不是資料夾時
+    拒絕：`RADAR_DEMO_PUBLISH` 關著時不能沿著連結寫到別的地方（例如正式的 `data/`）。
 
     Raises:
-        DemoExportError: manifest 是符號連結（`output_unsafe`）。
+        DemoExportError: `preview` 不安全（`output_unsafe`）。
     """
-    path = preview / MANIFEST_FILE
-    if path.is_symlink():
-        raise _unsafe("manifest.json 是符號連結，不寫")
+    output_root.mkdir(parents=True, exist_ok=True)
+    root_fd = os.open(output_root, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
     try:
-        content = path.read_bytes()
+        with contextlib.suppress(FileExistsError):
+            os.mkdir(PREVIEW_DIR, 0o755, dir_fd=root_fd)
+        try:
+            preview_fd = _open_dir(PREVIEW_DIR, root_fd)
+        except OSError as exc:
+            if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+                raise _unsafe("preview 是符號連結或不是資料夾，不寫") from None
+            raise
+        try:
+            yield _Output(root_fd, preview_fd, output_root / PREVIEW_DIR)
+        finally:
+            os.close(preview_fd)
+    finally:
+        os.close(root_fd)
+
+
+@contextmanager
+def _locked(directory_fd: int) -> Iterator[None]:
+    """拿 `directory_fd` 底下的發佈檔案鎖（排他、會等）；離開時放掉。
+
+    Raises:
+        DemoExportError: 鎖檔是符號連結（`output_unsafe`）。
+    """
+    try:
+        descriptor = os.open(
+            DEMO_OUTPUT_LOCK_FILE,
+            os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC,
+            0o600,
+            dir_fd=directory_fd,
+        )
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            raise _unsafe("發佈鎖檔是符號連結，不寫") from None
+        raise
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+    finally:
+        os.close(descriptor)
+
+
+@contextmanager
+def demo_output_lock(directory: Path) -> Iterator[None]:
+    """拿 `directory` 底下的發佈檔案鎖（和匯出寫 `preview/` 時拿的是同一把）。範例產生器替換範例
+    資料夾時用（`tests/demo_preview.py`）。"""
+    directory_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        with _locked(directory_fd):
+            yield
+    finally:
+        os.close(directory_fd)
+
+
+def _read_at(directory_fd: int, path: str) -> bytes | None:
+    """相對於 `directory_fd` 讀一個檔（`a/b.json`），每一層都不跟符號連結；不存在回 None。
+
+    Raises:
+        OSError: 某一層是符號連結（`ELOOP`）、不是一般檔案（`EINVAL`）或其他讀檔錯誤。
+    """
+    *parents, name = path.split("/")
+    opened: list[int] = []
+    try:
+        current = directory_fd
+        for part in parents:
+            current = _open_dir(part, current)
+            opened.append(current)
+        descriptor = os.open(
+            name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=current
+        )
     except FileNotFoundError:
+        return None
+    finally:
+        for item in opened:
+            os.close(item)
+    with os.fdopen(descriptor, "rb") as handle:
+        if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+            raise OSError(errno.EINVAL, "不是一般檔案")
+        return handle.read()
+
+
+def _read_manifest(out: _Output) -> DemoManifest | None:
+    """現在的 `preview/manifest.json`；沒有時回 None。
+
+    Raises:
+        DemoExportError: manifest 是符號連結或不是一般檔案（`output_unsafe`）；讀不懂（JSON 壞掉、
+            不符合模型、別的版本寫的；`manifest_unreadable`）時拒絕，不當成沒有：不知道它指向的是
+            不是比這次新的匯出，不能蓋。
+    """
+    try:
+        content = _read_at(out.preview_fd, MANIFEST_FILE)
+    except OSError as exc:
+        if exc.errno in (errno.ELOOP, errno.EINVAL):
+            raise _unsafe("manifest.json 是符號連結或不是一般檔案，不寫") from None
+        raise
+    if content is None:
         return None
     try:
         return DemoManifest.model_validate_json(content)
     except ValidationError:
-        log.warning("現在的 manifest.json 讀不懂，當作沒有")
-        return None
+        raise DemoExportError(
+            DemoExportFailure.MANIFEST_UNREADABLE,
+            "現在的 manifest.json 讀不懂（格式不合或是別的版本寫的），不知道新舊、不蓋；"
+            "請人工確認後移走再匯出",
+        ) from None
 
 
-def _manifest_export_id(preview: Path) -> str | None:
-    """現在的 manifest 指向哪一次匯出；沒有、讀不懂或讀的時候出錯時回 None（只給失敗處理
-    判斷用）。"""
-    try:
-        manifest = _read_manifest(preview)
-    except Exception:
-        return None
-    return None if manifest is None else manifest.export_id
-
-
-def _files_intact(preview: Path, manifest: DemoManifest) -> bool:
-    """manifest 列的每個檔都在、不是符號連結、雜湊與大小都對。"""
+def _files_intact(out: _Output, manifest: DemoManifest) -> bool:
+    """manifest 列的每個檔都在、不是符號連結、雜湊與大小都對（列的檔齊不齊由 `DemoManifest`
+    檢查）。"""
     for entry in manifest.files:
-        path = preview / entry.path
-        if path.is_symlink() or not path.is_file():
+        try:
+            content = _read_at(out.preview_fd, entry.path)
+        except OSError:
             return False
-        content = path.read_bytes()
-        if len(content) != entry.size or demo_file_sha256(content) != entry.sha256:
+        if content is None or len(content) != entry.size:
+            return False
+        if demo_file_sha256(content) != entry.sha256:
             return False
     return True
 
 
-def _recover(
-    database: Database, preview: Path, run: DemoExportRun, token: uuid.UUID
-) -> DemoExportResult | None:
-    """manifest 已經指向這一次、檔案都完整（上一次換好 manifest、卻沒記上成功就中斷）：補記成功、回
-    這一次的結果；不是就回 None（照常匯出）。在發佈鎖裡看，免得和正在寫的行程互相看到一半。
+def _is_complete_here(out: _Output, manifest: DemoManifest | None, run: DemoExportRun) -> bool:
+    """manifest 指向這一次，而且列的檔都完整（這一次已經發佈好了）。"""
+    return (
+        manifest is not None
+        and manifest.export_id == run.export_id
+        and _files_intact(out, manifest)
+    )
+
+
+def _published_here(out: _Output, run: DemoExportRun) -> bool:
+    """失敗處理用：manifest 已經指向這一次、檔案都完整；讀的時候出錯算不是。"""
+    try:
+        return _is_complete_here(out, _read_manifest(out), run)
+    except Exception:
+        return False
+
+
+def _hold_publish(connection: DbConnection, run: DemoExportRun, token: uuid.UUID) -> None:
+    """拿資料庫的發佈鎖（CLI 與 worker 共用）、確認這一筆還是自己接手的。
 
     Raises:
-        DemoExportTakenOverError: 這一筆已經被別的行程接手。
+        DemoExportTakenOverError: 已經被別的行程接手或已經結束。
     """
-    with database.transaction() as connection:
-        Database.transaction_lock(connection, DEMO_PUBLISH_LOCK_KEY)
-        if not update_demo_export_if_owned(connection, run.id, token):
-            raise DemoExportTakenOverError(run.export_id)
-        manifest = _read_manifest(preview)
-        if manifest is None or manifest.export_id != run.export_id:
-            return None
-        if not _files_intact(preview, manifest):
-            return None
-        update_demo_export_finished(connection, run.id, run_token=token, failure=None)
+    Database.transaction_lock(connection, DEMO_PUBLISH_LOCK_KEY)
+    if not update_demo_export_if_owned(connection, run.id, token):
+        raise DemoExportTakenOverError(run.export_id)
+
+
+def _record_recovered(
+    connection: DbConnection,
+    out: _Output,
+    run: DemoExportRun,
+    token: uuid.UUID,
+    manifest: DemoManifest,
+) -> DemoExportResult:
+    """manifest 已經指向這一次、檔案都完整：先再 fsync 一次 `preview/`（上一次可能換好 manifest、
+    還沒 fsync 就中斷），才補記成功。"""
+    _fsync_dir(out.preview_fd)
+    update_demo_export_finished(connection, run.id, run_token=token, failure=None)
     return DemoExportResult(
         export_id=run.export_id,
         paper_count=manifest.summary.paper_count,
         full_content_count=manifest.summary.full_content_count,
-        manifest_path=preview / MANIFEST_FILE,
+        manifest_path=out.preview_path / MANIFEST_FILE,
     )
+
+
+def _recover(
+    database: Database, out: _Output, run: DemoExportRun, token: uuid.UUID
+) -> DemoExportResult | None:
+    """manifest 已經指向這一次、檔案都完整（上一次換好 manifest、卻沒記上成功就中斷）：補記成功、回
+    這一次的結果；不是就回 None（照常匯出）。拿著兩把發佈鎖看，免得和正在寫的行程互相看到一半。
+
+    Raises:
+        DemoExportTakenOverError: 這一筆已經被別的行程接手。
+        DemoExportError: manifest 讀不懂或不安全。
+    """
+    with database.transaction() as connection:
+        _hold_publish(connection, run, token)
+        with _locked(out.root_fd):
+            current = _read_manifest(out)
+            if current is None or not _is_complete_here(out, current, run):
+                return None
+            return _record_recovered(connection, out, run, token, current)
+
+
+def _check_not_superseded(current: DemoManifest | None, run: DemoExportRun) -> None:
+    if current is not None and export_order(current.export_id) > export_order(run.export_id):
+        raise DemoExportError(
+            DemoExportFailure.SUPERSEDED,
+            f"manifest 已經指向比 {run.export_id} 新的匯出，不蓋回舊的",
+        )
 
 
 def _publish(
     database: Database,
-    preview: Path,
+    out: _Output,
     run: DemoExportRun,
     token: uuid.UUID,
     files: dict[str, bytes],
     result: DemoExportResult,
 ) -> DemoExportResult:
-    """拿發佈鎖、確認還是自己接手的、manifest 沒有指向比這次新的匯出，才寫檔換 manifest，並在同一個
-    交易記成功（換好 manifest 後交易沒 commit 成：那一筆留在 `running`，之後由 `_recover` 補記）。
+    """拿資料庫的發佈鎖、確認還是自己接手的，再拿檔案鎖：manifest 沒有指向比這次新的匯出才寫匯出
+    目錄，換 manifest 前在檔案鎖裡再比一次；換好後 fsync `preview/`，同一個資料庫交易記成功。
 
     Raises:
         DemoExportTakenOverError: 這一筆已經被別的行程接手（什麼都沒寫）。
-        DemoExportError: manifest 已經指向比這次新的匯出（`superseded`）、目錄已經存在、輸出位置
-            不安全。
+        DemoExportError: manifest 已經指向比這次新的匯出（`superseded`）、讀不懂
+            （`manifest_unreadable`）、目錄已經存在、輸出位置不安全。
+        DemoExportPublishedUnrecordedError: manifest 已經換成這一次，之後的 fsync、記成功或 commit
+            失敗（那一筆留在 `running`，之後接手時補記）。
     """
-    with database.transaction() as connection:
-        Database.transaction_lock(connection, DEMO_PUBLISH_LOCK_KEY)
-        if not update_demo_export_if_owned(connection, run.id, token):
-            raise DemoExportTakenOverError(run.export_id)
-        current = _read_manifest(preview)
-        if current is not None and export_order(current.export_id) > export_order(run.export_id):
-            raise DemoExportError(
-                DemoExportFailure.SUPERSEDED,
-                f"manifest 已經指向比 {run.export_id} 新的匯出，不蓋回舊的",
-            )
-        manifest_path = _write(preview, run.export_id, files)
-        update_demo_export_finished(connection, run.id, run_token=token, failure=None)
+    switched = False
+    try:
+        with database.transaction() as connection:
+            _hold_publish(connection, run, token)
+            with _locked(out.root_fd):
+                current = _read_manifest(out)
+                if current is not None and _is_complete_here(out, current, run):
+                    # 別的行程（被接手前的同一筆）已經發佈好這一次：補記成功，不重寫。
+                    return _record_recovered(connection, out, run, token, current)
+                _check_not_superseded(current, run)
+                _write_export_dir(out, run.export_id, files)
+                _check_not_superseded(_read_manifest(out), run)
+                _swap_manifest(out, files[MANIFEST_FILE])
+                switched = True
+                _fsync_dir(out.preview_fd)
+            update_demo_export_finished(connection, run.id, run_token=token, failure=None)
+    except Exception as exc:
+        if switched:
+            raise DemoExportPublishedUnrecordedError(run.export_id, type(exc).__name__) from None
+        raise
     return DemoExportResult(
         export_id=result.export_id,
         paper_count=result.paper_count,
         full_content_count=result.full_content_count,
-        manifest_path=manifest_path,
+        manifest_path=out.preview_path / MANIFEST_FILE,
     )
 
 
-def _write_file(path: Path, content: bytes) -> None:
-    """寫一個新檔（已經存在就失敗）並 fsync，確定內容先落到磁碟才換名。"""
-    with path.open("xb") as handle:
-        handle.write(content)
-        handle.flush()
-        os.fsync(handle.fileno())
-
-
-def _fsync_dir(path: Path) -> None:
-    """fsync 一個目錄（讓裡面的新增、換名落到磁碟）。"""
-    descriptor = os.open(path, os.O_RDONLY)
+def _write_file(directory_fd: int, name: str, content: bytes) -> None:
+    """在 `directory_fd` 底下寫一個新檔（已經存在、或是符號連結就失敗）並 fsync，確定內容先落到磁碟
+    才換名。"""
+    descriptor = os.open(
+        name,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+        0o644,
+        dir_fd=directory_fd,
+    )
     try:
+        view = memoryview(content)
+        while view:
+            written = os.write(descriptor, view)
+            view = view[written:]
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
 
 
-def _rename_dir(source: Path, target: Path) -> None:
-    """暫存目錄改名成匯出目錄。同一個檔案系統裡改名是原子的；目標已經存在、而且不是空目錄時
-    失敗（目標是空目錄時 POSIX 會直接取代它，所以呼叫前先確認目標不存在）。"""
-    os.rename(source, target)
+def _fsync_dir(directory_fd: int) -> None:
+    """fsync 一個打開的目錄（讓裡面的新增、換名落到磁碟）。"""
+    os.fsync(directory_fd)
 
 
-def _replace_file(source: Path, target: Path) -> None:
+def _rename_dir(directory_fd: int, source: str, target: str) -> None:
+    """`directory_fd` 底下的暫存目錄改名成匯出目錄。同一個檔案系統裡改名是原子的；目標已經存在、
+    而且不是空目錄時失敗（目標是空目錄時 POSIX 會直接取代它，所以呼叫前先確認目標不存在）。"""
+    os.rename(source, target, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+
+
+def _replace_file(directory_fd: int, source: str, target: str) -> None:
     """暫存的 manifest 換成正式的（原子的換名；目標是符號連結時換掉的是連結本身，不會跟過去）。"""
-    os.replace(source, target)
+    os.replace(source, target, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
 
 
-def _write(preview: Path, export_id: str, files: dict[str, bytes]) -> Path:
-    """資料檔寫進暫存目錄、改名成 `preview/<匯出編號>/`，最後換 `preview/manifest.json`；回 manifest
-    的位置。每一步都先 fsync 再往下（主機突然斷電時，不會有指向缺檔的新 manifest）。
+def _exists(directory_fd: int, name: str) -> bool:
+    try:
+        os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return False
+    return True
+
+
+def _fill_staging(
+    preview_fd: int, staging: str, export_id: str, data_files: Mapping[str, bytes]
+) -> None:
+    """把資料檔寫進暫存目錄（每個檔 fsync），再由深到淺 fsync 各層目錄。"""
+    staging_fd = _open_dir(staging, preview_fd)
+    opened: dict[str, int] = {"": staging_fd}
+    try:
+        for path, content in data_files.items():
+            parent, _, name = path.removeprefix(f"{export_id}/").rpartition("/")
+            if parent not in opened:
+                os.mkdir(parent, 0o755, dir_fd=staging_fd)
+                opened[parent] = _open_dir(parent, staging_fd)
+            _write_file(opened[parent], name, content)
+        for parent in sorted(opened, key=lambda item: item.count("/") + bool(item), reverse=True):
+            _fsync_dir(opened[parent])
+    finally:
+        for descriptor in opened.values():
+            os.close(descriptor)
+
+
+def _write_export_dir(out: _Output, export_id: str, files: Mapping[str, bytes]) -> None:
+    """資料檔寫進暫存目錄、改名成 `preview/<匯出編號>/`，再 fsync `preview/`（新目錄的名字先落到
+    磁碟，才換 manifest：主機突然斷電時，不會有指向缺檔的新 manifest）。
 
     Raises:
         DemoExportError: 目錄已經存在（`output_exists`）、路徑不是認得的資料檔（`output_unsafe`）。
     """
-    target = preview / export_id
-    if os.path.lexists(target):
-        raise DemoExportError(
-            DemoExportFailure.OUTPUT_EXISTS, f"{export_id} 的目錄已經存在，不覆寫"
-        )
-    manifest = preview / MANIFEST_FILE
-    if manifest.is_symlink():
-        raise _unsafe("manifest.json 是符號連結，不寫")
     data_files = {path: content for path, content in files.items() if path != MANIFEST_FILE}
     for path in data_files:
         if not _DATA_FILE.fullmatch(path) or not path.startswith(f"{export_id}/"):
             raise _unsafe("資料檔的路徑不是認得的資料檔，不寫")
-    staging = preview / f".{export_id}.tmp-{uuid.uuid4().hex}"
-    staging.mkdir()
+    if _exists(out.preview_fd, export_id):
+        raise DemoExportError(
+            DemoExportFailure.OUTPUT_EXISTS, f"{export_id} 的目錄已經存在，不覆寫"
+        )
+    staging = f".{export_id}.tmp-{uuid.uuid4().hex}"
+    os.mkdir(staging, 0o755, dir_fd=out.preview_fd)
     try:
-        directories = {staging}
-        for path, content in data_files.items():
-            destination = staging / path.removeprefix(f"{export_id}/")
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            directories.add(destination.parent)
-            _write_file(destination, content)
-        for directory in sorted(directories, key=lambda item: len(item.parts), reverse=True):
-            _fsync_dir(directory)
+        _fill_staging(out.preview_fd, staging, export_id, data_files)
         try:
-            _rename_dir(staging, target)
+            _rename_dir(out.preview_fd, staging, export_id)
         except OSError as exc:
             if exc.errno in (errno.EEXIST, errno.ENOTEMPTY):
                 raise DemoExportError(
@@ -703,15 +911,18 @@ def _write(preview: Path, export_id: str, files: dict[str, bytes]) -> Path:
                 ) from None
             raise
     except BaseException:
-        shutil.rmtree(staging, ignore_errors=True)
+        shutil.rmtree(staging, ignore_errors=True, dir_fd=out.preview_fd)
         raise
-    _fsync_dir(preview)
-    pending = preview / f".{MANIFEST_FILE}.tmp-{uuid.uuid4().hex}"
+    _fsync_dir(out.preview_fd)
+
+
+def _swap_manifest(out: _Output, content: bytes) -> None:
+    """manifest 先寫成暫存檔（fsync），再原子地換成 `preview/manifest.json`；失敗時刪掉暫存檔。"""
+    pending = f".{MANIFEST_FILE}.tmp-{uuid.uuid4().hex}"
     try:
-        _write_file(pending, files[MANIFEST_FILE])
-        _replace_file(pending, manifest)
+        _write_file(out.preview_fd, pending, content)
+        _replace_file(out.preview_fd, pending, MANIFEST_FILE)
     except BaseException:
-        pending.unlink(missing_ok=True)
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(pending, dir_fd=out.preview_fd)
         raise
-    _fsync_dir(preview)
-    return manifest

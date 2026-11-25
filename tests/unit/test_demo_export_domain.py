@@ -392,6 +392,32 @@ def test_manifest_lists_only_known_files_of_its_own_export() -> None:
         DemoManifest.model_validate(twice)
 
 
+def test_manifest_must_list_a_complete_export() -> None:
+    # G7：manifest 列的檔要是完整的一批（分類表、索引、標題、每一個分片都在，分片個數照篇數算），
+    # 補記成功時才不會把不完整的一批當成發佈好了。
+    manifest = json.loads(_files()[MANIFEST_FILE])
+    entries = manifest["files"]
+    DemoManifest.model_validate(manifest)
+    assert manifest["summary"]["paper_count"] == 60
+    for missing in (
+        "2-1/taxonomy.json",
+        "2-1/papers-index.json",
+        "2-1/titles.json",
+        "2-1/papers/000.json",
+    ):
+        partial = {**manifest, "files": [entry for entry in entries if entry["path"] != missing]}
+        with pytest.raises(ValidationError, match="不齊全"):
+            DemoManifest.model_validate(partial)
+    with pytest.raises(ValidationError, match="不齊全"):
+        DemoManifest.model_validate({**manifest, "files": []})
+    extra_shard = [*entries, {**entries[0], "path": "2-1/papers/001.json"}]
+    with pytest.raises(ValidationError, match="不齊全"):
+        DemoManifest.model_validate({**manifest, "files": extra_shard})
+    more_papers = {**manifest["summary"], "paper_count": 201}
+    with pytest.raises(ValidationError, match="不齊全"):
+        DemoManifest.model_validate({**manifest, "summary": more_papers})
+
+
 def test_paths_and_ids() -> None:
     assert export_id_for(12, 2) == "12-2"
     assert export_order("12-2") == (12, 2)

@@ -9,7 +9,11 @@
 任何檔、`manifest.json` 不換，印出每一條原因、退出碼 1。`RADAR_DEMO_PUBLISH` 開著時拒絕（正式發佈
 還沒做）。
 
-輸出與日誌只有匯出編號、篇數與原因，不印連線字串或資料內容；其他錯誤只記類別名稱（和 worker 一樣）。
+manifest 已經換好、狀態卻沒記上時（`DemoExportPublishedUnrecordedError`）印「已發佈、狀態待補記」，
+退出碼 1（不用重跑，之後由 worker 接手補記）。
+
+輸出與日誌只有匯出編號、篇數與原因，不印連線字串或資料內容。設定錯誤（`ConfigError`）印出每一條
+原因（照設計只有環境變數或設定檔的名稱與原因，不含設定值）；其他錯誤只記類別名稱（和 worker 一樣）。
 """
 
 import uuid
@@ -36,6 +40,7 @@ from radar.entrypoints.logging_config import configure_logging
 from radar.services.demo_export import (
     DemoExportCheckError,
     DemoExportError,
+    DemoExportPublishedUnrecordedError,
     DemoExportSetup,
     DemoExportTakenOverError,
     NoPublishedSnapshotError,
@@ -93,6 +98,18 @@ def export_demo() -> None:
         _fail(
             "最新的快照已經有一筆排隊中或執行中的匯出，沒有再匯出一次"
             "（上一次中斷的話：排隊中 1 小時、執行中 6 小時後由 worker 接手做完）",
+            [],
+        )
+    except DemoExportPublishedUnrecordedError as exc:
+        # manifest 已經換好（讀者看得到新的一批），只是狀態沒記上：不要讓人以為沒發佈、又重跑一次。
+        log.error(
+            "示範站匯出已發佈，狀態待補記",
+            export_id=exc.export_id,
+            error_type=exc.error_type,
+        )
+        _fail(
+            f"已發佈：manifest.json 已經換成 {exc.export_id}，但狀態沒有記上（{exc.error_type}）。"
+            "不用重跑；這一筆停在執行中，6 小時後由 worker 接手補記成功",
             [],
         )
     except DemoExportTakenOverError:

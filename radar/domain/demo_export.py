@@ -160,7 +160,10 @@ class DemoExportFailure(StrEnum):
     OUTPUT_EXISTS = "output_exists"  # 這個匯出編號的目錄已經存在（不覆寫）
     OUTPUT_UNSAFE = "output_unsafe"  # 輸出位置是符號連結或跑出輸出資料夾（不寫）
     SUPERSEDED = "superseded"  # manifest 已經指向比這次新的匯出（不蓋回舊的）
-    INTERRUPTED = "interrupted"  # 行程被中斷（Ctrl-C、被要求結束）
+    MANIFEST_UNREADABLE = "manifest_unreadable"  # 現有的 manifest 讀不懂（不知道新舊，不蓋）
+    # 行程被中斷（Ctrl-C 這類變成例外的中斷）。SIGTERM 不會變成例外：被系統結束的那一筆停在
+    # running，6 小時後由 sweep 補排。
+    INTERRUPTED = "interrupted"
     ERROR = "error"  # 其他錯誤（類別記在日誌）
 
 
@@ -735,7 +738,8 @@ def build_demo_client_config() -> DemoClientConfig:
 
 class DemoManifest(BaseModel):
     """`manifest.json`：現在該讀哪一次匯出（最後才寫，只有它會被覆寫）。列的每個檔都在這次的匯出
-    目錄底下（路徑開頭是自己的 `export_id`），不重複。"""
+    目錄底下（路徑開頭是自己的 `export_id`），不重複，而且是完整的一批：分類表、索引、標題與每一個
+    分片（個數照 `summary.paper_count` 算）都列了。"""
 
     model_config = _WHITELIST
 
@@ -753,6 +757,18 @@ class DemoManifest(BaseModel):
             raise ValueError("manifest 列的檔要在自己這次的匯出目錄底下")
         if len(set(paths)) != len(paths):
             raise ValueError("manifest 列的檔不能重複")
+        # 一批完整的匯出（G7）：分類表、索引、標題都在，分片從 000 起連號、個數和篇數對得上
+        # （每 SHARD_SIZE 篇一個；0 篇沒有分片）。
+        shard_count = -(-self.summary.paper_count // SHARD_SIZE)
+        expected = {
+            data_file_path(self.export_id, name)
+            for name in (TAXONOMY_FILE, PAPERS_INDEX_FILE, TITLES_FILE)
+        } | {
+            data_file_path(self.export_id, f"{PAPERS_DIR}/{shard_file_name(shard)}")
+            for shard in range(min(shard_count, _MAX_SHARDS))
+        }
+        if set(paths) != expected:
+            raise ValueError("manifest 列的檔不齊全，或和篇數對不上")
         return self
 
 

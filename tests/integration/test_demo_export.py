@@ -6,16 +6,23 @@
 
 import dataclasses
 import errno
+import fcntl
 import hashlib
 import json
+import os
+import shutil
+import threading
 import uuid
 from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
 import psycopg
 import pytest
 
+import radar.entrypoints.worker.tasks as worker_tasks
+from radar.config import ConfigError
 from radar.domain.demo_export import (
     DEMO_LABEL_ABSTRACT_SOURCES,
     DEMO_PAPER_LIST_PAGE_SIZE,
@@ -27,26 +34,32 @@ from radar.domain.demo_export import (
     dump_demo_file,
     model_for_path,
 )
+from radar.domain.jobs import RUN_DEMO_EXPORT
 from radar.domain.judgments import ActorRole, classification_fix
 from radar.domain.papers import AbstractSource
+from radar.domain.settings import Settings
 from radar.domain.taxonomy import TaxonomyField
 from radar.domain.viewer import PublicViewer, SystemViewer
+from radar.entrypoints.bootstrap import build_worker
 from radar.repo.db import Database
 from radar.repo.demo_exports import update_demo_export_finished
 from radar.repo.papers import list_demo_paper_facts
 from radar.services import demo_export as service
 from radar.services.demo_export import (
+    DEMO_OUTPUT_LOCK_FILE,
     DemoExportCheckError,
     DemoExportError,
+    DemoExportPublishedUnrecordedError,
     DemoExportSetup,
     DemoExportTakenOverError,
     NoPublishedSnapshotError,
+    demo_output_lock,
     fail_demo_export,
     queue_demo_export,
     run_demo_export,
 )
 from radar.services.members import allow_member
-from tests.database import TestDatabase, migrate
+from tests.database import ROOT, TestDatabase, migrate
 from tests.demo_export_support import (
     EXPORTED_AT,
     MISQ,
@@ -175,8 +188,9 @@ def test_export_writes_a_new_preview_directory_and_the_manifest_last(
     manifest = json.loads(files[MANIFEST_FILE])
     assert result.export_id == manifest["export_id"] == "2-1"
     assert result.manifest_path == tmp_path / PREVIEW_DIR / MANIFEST_FILE
-    # 只寫 preview/（沒有 data/），沒有留下暫存檔；每個檔都是認得的資料檔、通過它的模型。
-    assert [path.name for path in tmp_path.iterdir()] == [PREVIEW_DIR]
+    # 只寫 preview/（沒有 data/；另外只有發佈的檔案鎖），沒有留下暫存檔；每個檔都是認得的資料檔、
+    # 通過它的模型。
+    assert sorted(path.name for path in tmp_path.iterdir()) == [DEMO_OUTPUT_LOCK_FILE, PREVIEW_DIR]
     assert sorted(files) == sorted(
         [
             MANIFEST_FILE,
@@ -334,7 +348,7 @@ def test_each_kind_of_paper_has_only_what_it_may_show(
     assert "Fake abstract from another source" not in text
     assert full["full"]["abstract"] == {"content": "Made up abstract 1", "source": "openalex"}
     for number in (3, 7, 8):  # 授權不允許、IEEE 兩篇
-        assert f'"Made up abstract {number}"' not in text
+        assert f"Made up abstract {number}" not in text
     # 中文重點只在有完整內容的論文出現（三篇只有書目的論文也有中文重點，但不輸出）。
     assert text.count("（假資料）團隊怎麼採用協作工具？") == 1
 
@@ -508,7 +522,7 @@ def test_stale_demo_eligible_for_an_excluded_journal_gets_no_full_content(
     assert paper["biblio"]["has_full_content"] is False
     assert json.loads(_files(tmp_path)["2-1/papers-index.json"])["has_full_content"] == [False]
     text = _all_text(tmp_path)
-    assert '"Made up abstract 1"' not in text
+    assert "Made up abstract 1" not in text
     assert "（假資料）" not in text
 
 
@@ -776,25 +790,39 @@ def test_interrupted_export_is_recorded(
     _assert_unchanged(db, tmp_path, before, DemoExportFailure.INTERRUPTED)
 
 
-def test_manifest_already_switched_is_recorded_as_succeeded_on_the_rerun(
-    db: TestDatabase, database: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # 換好 manifest、記成功的那一筆交易失敗（F5）：那一筆留在 running；sweep 補排後重跑時，發現
-    # manifest 已經指向這一次、檔案都完整，就補記成功，不重寫。
-    snapshots = publish_snapshots(db)
-    seed_papers(db, database, [PaperSpec("a", 1)], snapshots=snapshots)
+def _lose_the_success_update(monkeypatch: pytest.MonkeyPatch) -> None:
     real = update_demo_export_finished
 
-    def lost_commit(connection: Any, demo_export_id: Any, **kwargs: Any) -> bool:
+    def lost(connection: Any, demo_export_id: Any, **kwargs: Any) -> bool:
         if kwargs["failure"] is None:
             raise RuntimeError("connection lost")
         return bool(real(connection, demo_export_id, **kwargs))
 
-    monkeypatch.setattr(service, "update_demo_export_finished", lost_commit)
+    monkeypatch.setattr(service, "update_demo_export_finished", lost)
+
+
+def _make_stale(db: TestDatabase) -> None:
+    """執行中的那一筆假裝已經超過 6 小時（sweep 補排、別的行程可以接手）。"""
+    execute(
+        db,
+        "UPDATE demo_export SET updated_at = now() - interval '7 hours' WHERE status = 'running'",
+    )
+
+
+def test_manifest_already_switched_is_recorded_as_succeeded_on_the_rerun(
+    db: TestDatabase, database: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 換好 manifest、記成功的那一句失敗（F5）：回報「已發佈、狀態待補記」，那一筆留在 running；
+    # sweep 補排後重跑時，發現 manifest 已經指向這一次、檔案都完整，就補記成功，不重寫。
+    snapshots = publish_snapshots(db)
+    seed_papers(db, database, [PaperSpec("a", 1)], snapshots=snapshots)
+    _lose_the_success_update(monkeypatch)
     run = queue_demo_export(SYSTEM, database)
 
-    with pytest.raises(RuntimeError):
+    with pytest.raises(DemoExportPublishedUnrecordedError) as caught:
         run_demo_export(SYSTEM, database, demo_setup(), run.id, tmp_path, clock=_clock)
+
+    assert (caught.value.export_id, caught.value.error_type) == ("2-1", "RuntimeError")
 
     written = _files(tmp_path)
     assert json.loads(written[MANIFEST_FILE])["export_id"] == "2-1"
@@ -802,7 +830,7 @@ def test_manifest_already_switched_is_recorded_as_succeeded_on_the_rerun(
     monkeypatch.undo()
     # 還沒超過 6 小時：別的行程不能接手。
     assert run_demo_export(SYSTEM, database, demo_setup(), run.id, tmp_path, clock=_clock) is None
-    execute(db, "UPDATE demo_export SET updated_at = now() - interval '7 hours'")
+    _make_stale(db)
 
     result = run_demo_export(SYSTEM, database, demo_setup(), run.id, tmp_path, clock=_clock)
 
@@ -939,7 +967,7 @@ def test_missing_output_dir_is_recorded_and_nothing_is_written(
 
 
 def test_config_error_before_the_export_is_recorded(db: TestDatabase, database: Database) -> None:
-    # worker 讀設定檔失敗（F11）：那一筆記成 failed，sweep 不再補排。
+    # 還沒開始就失敗時記成 failed 的那一步（worker 入口的測試在下面）：只記一次。
     publish_snapshots(db)
     run = queue_demo_export(SYSTEM, database)
 
@@ -980,3 +1008,354 @@ def test_finished_export_is_not_run_again(
         run_demo_export(SYSTEM, database, demo_setup(), uuid.uuid4(), tmp_path, clock=_clock)
         is None
     )
+
+
+# --- 第 2 輪審查（G1～G10）------------------------------------------------------------------------
+
+
+def _lock_is_held(output: Path) -> bool:
+    """另外打開鎖檔試著拿（不等）：拿不到就是有人拿著。"""
+    descriptor = os.open(output / DEMO_OUTPUT_LOCK_FILE, os.O_RDWR)
+    try:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        return False
+    finally:
+        os.close(descriptor)
+
+
+def test_export_dir_and_manifest_are_written_while_holding_the_output_lock(
+    db: TestDatabase, database: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # G1：改名成匯出目錄、換 manifest 的時候都拿著輸出資料夾底下的檔案鎖；做完就放掉。
+    snapshots = publish_snapshots(db)
+    seed_papers(db, database, [PaperSpec("a", 1)], snapshots=snapshots)
+    held: list[tuple[str, bool]] = []
+    real_rename, real_replace = service._rename_dir, service._replace_file
+
+    def rename(*args: Any) -> None:
+        held.append(("rename", _lock_is_held(tmp_path)))
+        real_rename(*args)
+
+    def replace(*args: Any) -> None:
+        held.append(("replace", _lock_is_held(tmp_path)))
+        real_replace(*args)
+
+    monkeypatch.setattr(service, "_rename_dir", rename)
+    monkeypatch.setattr(service, "_replace_file", replace)
+
+    _export(database, tmp_path)
+
+    assert held == [("rename", True), ("replace", True)]
+    assert not _lock_is_held(tmp_path)
+
+
+def test_export_waits_for_another_holder_of_the_output_lock(
+    db: TestDatabase, database: Database, tmp_path: Path
+) -> None:
+    # G1（真的並行）：別的行程（範例產生器或另一個匯出）拿著檔案鎖時，這次匯出等它放掉才寫。
+    snapshots = publish_snapshots(db)
+    seed_papers(db, database, [PaperSpec("a", 1)], snapshots=snapshots)
+    run = queue_demo_export(SYSTEM, database)
+    outcome: list[object] = []
+
+    def export() -> None:
+        try:
+            outcome.append(
+                run_demo_export(SYSTEM, database, demo_setup(), run.id, tmp_path, clock=_clock)
+            )
+        except BaseException as exc:  # 交給主執行緒斷言
+            outcome.append(exc)
+
+    with demo_output_lock(tmp_path):
+        worker = threading.Thread(target=export)
+        worker.start()
+        worker.join(timeout=2)
+        assert worker.is_alive()
+        assert not (tmp_path / PREVIEW_DIR / MANIFEST_FILE).exists()
+        assert not (tmp_path / PREVIEW_DIR / "2-1").exists()
+    worker.join(timeout=60)
+
+    assert not worker.is_alive()
+    [result] = outcome
+    assert isinstance(result, service.DemoExportResult), result
+    assert json.loads(_files(tmp_path)[MANIFEST_FILE])["export_id"] == "2-1"
+    assert _rows(db) == [(1, "succeeded", None)]
+
+
+def test_newer_manifest_appearing_before_the_switch_is_not_overwritten(
+    db: TestDatabase, database: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # G1：資料庫鎖失效時，別的行程可能在這次寫目錄的途中換上比較新的 manifest（3-1）。換 manifest
+    # 前在檔案鎖裡再比一次，不蓋回去。
+    before = _first_export(db, database, tmp_path)
+    data = json.loads(before[MANIFEST_FILE])
+    newer = json.dumps(
+        {
+            **data,
+            "export_id": "3-1",
+            "files": [
+                {**entry, "path": entry["path"].replace("2-1/", "3-1/", 1)}
+                for entry in data["files"]
+            ],
+        }
+    ).encode()
+    real = service._write_export_dir
+
+    def then_newer(*args: Any) -> None:
+        real(*args)
+        (tmp_path / PREVIEW_DIR / MANIFEST_FILE).write_bytes(newer)
+
+    monkeypatch.setattr(service, "_write_export_dir", then_newer)
+    run = queue_demo_export(SYSTEM, database)
+
+    with pytest.raises(DemoExportError) as caught:
+        run_demo_export(SYSTEM, database, demo_setup(), run.id, tmp_path, clock=_clock)
+
+    assert caught.value.failure is DemoExportFailure.SUPERSEDED
+    assert (tmp_path / PREVIEW_DIR / MANIFEST_FILE).read_bytes() == newer
+    assert _rows(db)[-1] == (2, "failed", "superseded")
+
+
+@pytest.mark.parametrize("kind", ["broken_json", "older_format"])
+def test_unreadable_manifest_is_refused_instead_of_treated_as_missing(
+    db: TestDatabase, database: Database, tmp_path: Path, kind: str
+) -> None:
+    # G2：現有的 manifest 讀不懂（JSON 壞掉、別的版本寫的、多了欄位）時不知道它指向的是不是比較新
+    # 的匯出：拒絕、什麼都不寫，不當成沒有 manifest。
+    first = _first_export(db, database, tmp_path)
+    if kind == "broken_json":
+        content = first[MANIFEST_FILE][:-5]
+    else:
+        data = json.loads(first[MANIFEST_FILE])
+        data["client_config"]["library_page_size"] = 20
+        content = json.dumps(data).encode()
+    (tmp_path / PREVIEW_DIR / MANIFEST_FILE).write_bytes(content)
+    before = _files(tmp_path)
+    run = queue_demo_export(SYSTEM, database)
+
+    with pytest.raises(DemoExportError) as caught:
+        run_demo_export(SYSTEM, database, demo_setup(), run.id, tmp_path, clock=_clock)
+
+    assert caught.value.failure is DemoExportFailure.MANIFEST_UNREADABLE
+    assert _files(tmp_path) == before
+    assert sorted(path.name for path in (tmp_path / PREVIEW_DIR).iterdir()) == [
+        "2-1",
+        MANIFEST_FILE,
+    ]
+    assert _rows(db)[-1] == (2, "failed", "manifest_unreadable")
+
+
+def test_preview_is_fsynced_before_and_after_the_manifest_switch(
+    db: TestDatabase, database: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # G3：匯出目錄改名之後、換 manifest 之前 fsync preview/；換完再 fsync 一次。
+    snapshots = publish_snapshots(db)
+    seed_papers(db, database, [PaperSpec("a", 1)], snapshots=snapshots)
+    events: list[tuple[str, int]] = []
+    real_fsync, real_rename, real_replace = (
+        service._fsync_dir,
+        service._rename_dir,
+        service._replace_file,
+    )
+
+    def fsync(descriptor: int) -> None:
+        events.append(("fsync", os.fstat(descriptor).st_ino))
+        real_fsync(descriptor)
+
+    def rename(*args: Any) -> None:
+        events.append(("rename", 0))
+        real_rename(*args)
+
+    def replace(*args: Any) -> None:
+        events.append(("replace", 0))
+        real_replace(*args)
+
+    monkeypatch.setattr(service, "_fsync_dir", fsync)
+    monkeypatch.setattr(service, "_rename_dir", rename)
+    monkeypatch.setattr(service, "_replace_file", replace)
+
+    _export(database, tmp_path)
+
+    preview = (tmp_path / PREVIEW_DIR).stat().st_ino
+    renamed, replaced = events.index(("rename", 0)), events.index(("replace", 0))
+    assert renamed < replaced
+    assert events[renamed + 1 : replaced] == [("fsync", preview)]
+    assert events[replaced + 1 :] == [("fsync", preview)]
+
+
+def test_fsync_failure_after_the_switch_is_published_and_recovered_later(
+    db: TestDatabase, database: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # G3：換好 manifest 之後 fsync preview/ 失敗：讀者已經看得到新的一批，回報「已發佈、狀態待
+    # 補記」、不記失敗；接手時先再 fsync 一次 preview/，才補記成功。
+    _first_export(db, database, tmp_path)
+    switched: list[bool] = []
+    real_fsync, real_replace = service._fsync_dir, service._replace_file
+
+    def replace(*args: Any) -> None:
+        real_replace(*args)
+        switched.append(True)
+
+    def fsync(descriptor: int) -> None:
+        if switched:
+            raise OSError(errno.EIO, "disk")
+        real_fsync(descriptor)
+
+    monkeypatch.setattr(service, "_replace_file", replace)
+    monkeypatch.setattr(service, "_fsync_dir", fsync)
+    run = queue_demo_export(SYSTEM, database)
+
+    with pytest.raises(DemoExportPublishedUnrecordedError) as caught:
+        run_demo_export(SYSTEM, database, demo_setup(), run.id, tmp_path, clock=_clock)
+
+    assert (caught.value.export_id, caught.value.error_type) == ("2-2", "OSError")
+    written = _files(tmp_path)
+    assert json.loads(written[MANIFEST_FILE])["export_id"] == "2-2"
+    assert _rows(db)[-1] == (2, "running", None)
+    monkeypatch.undo()
+    _make_stale(db)
+    order: list[str] = []
+    real_finished = update_demo_export_finished
+
+    def spy_fsync(descriptor: int) -> None:
+        order.append("fsync")
+        real_fsync(descriptor)
+
+    def spy_finished(connection: Any, demo_export_id: Any, **kwargs: Any) -> bool:
+        order.append("succeeded" if kwargs["failure"] is None else "failed")
+        return bool(real_finished(connection, demo_export_id, **kwargs))
+
+    monkeypatch.setattr(service, "_fsync_dir", spy_fsync)
+    monkeypatch.setattr(service, "update_demo_export_finished", spy_finished)
+
+    result = run_demo_export(SYSTEM, database, demo_setup(), run.id, tmp_path, clock=_clock)
+
+    assert result is not None
+    assert result.export_id == "2-2"
+    assert order == ["fsync", "succeeded"]
+    assert _files(tmp_path) == written
+    assert _rows(db)[-1] == (2, "succeeded", None)
+
+
+def test_commit_failure_after_the_switch_is_published_and_recovered_later(
+    db: TestDatabase, database: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # G4：記成功的 UPDATE 已經執行、commit 才失敗（交易退回）：回報「已發佈、狀態待補記」，那一筆
+    # 留在 running；接手時補記成功、不重寫。
+    snapshots = publish_snapshots(db)
+    seed_papers(db, database, [PaperSpec("a", 1)], snapshots=snapshots)
+    recorded: list[bool] = []
+    real_finished = update_demo_export_finished
+    real_transaction = database.transaction
+
+    def finished(connection: Any, demo_export_id: Any, **kwargs: Any) -> bool:
+        updated = bool(real_finished(connection, demo_export_id, **kwargs))
+        if kwargs["failure"] is None:
+            recorded.append(updated)
+        return updated
+
+    @contextmanager
+    def commit_fails() -> Iterator[Any]:
+        with real_transaction() as connection:
+            yield connection
+            if recorded:
+                # 在交易裡丟錯：真的交易退回，記成功的 UPDATE 沒有生效（和 commit 失敗一樣）。
+                raise psycopg.OperationalError("commit failed")
+
+    monkeypatch.setattr(service, "update_demo_export_finished", finished)
+    monkeypatch.setattr(database, "transaction", commit_fails)
+    run = queue_demo_export(SYSTEM, database)
+
+    with pytest.raises(DemoExportPublishedUnrecordedError) as caught:
+        run_demo_export(SYSTEM, database, demo_setup(), run.id, tmp_path, clock=_clock)
+
+    assert recorded == [True]
+    assert (caught.value.export_id, caught.value.error_type) == ("2-1", "OperationalError")
+    written = _files(tmp_path)
+    assert json.loads(written[MANIFEST_FILE])["export_id"] == "2-1"
+    assert _rows(db) == [(1, "running", None)]
+    monkeypatch.undo()
+    _make_stale(db)
+
+    result = run_demo_export(SYSTEM, database, demo_setup(), run.id, tmp_path, clock=_clock)
+
+    assert result is not None
+    assert result.export_id == "2-1"
+    assert _files(tmp_path) == written
+    assert _rows(db) == [(1, "succeeded", None)]
+
+
+def test_preview_swapped_for_a_symlink_mid_export_is_not_followed(
+    db: TestDatabase, database: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # G5：檢查過 preview/ 之後，有人把它換成指到別處（例如正式的 data/）的符號連結：之後的寫入都
+    # 相對於一開始打開的目錄，寫進原本那個資料夾，不沿著連結寫。
+    snapshots = publish_snapshots(db)
+    seed_papers(db, database, [PaperSpec("a", 1)], snapshots=snapshots)
+    elsewhere = tmp_path / "data"
+    elsewhere.mkdir()
+    output = tmp_path / "out"
+    real = service._build_and_check
+
+    def swap(*args: Any, **kwargs: Any) -> Any:
+        built = real(*args, **kwargs)
+        (output / PREVIEW_DIR).rename(output / "moved")
+        (output / PREVIEW_DIR).symlink_to(elsewhere, target_is_directory=True)
+        return built
+
+    monkeypatch.setattr(service, "_build_and_check", swap)
+
+    _export(database, output)
+
+    assert list(elsewhere.iterdir()) == []
+    assert sorted(path.name for path in (output / "moved").iterdir()) == ["2-1", MANIFEST_FILE]
+
+
+def test_manifest_listing_this_export_with_missing_files_is_recorded_as_failed(
+    db: TestDatabase, database: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # G10（L1）：manifest 已經指向這一次、資料檔卻少了一個：補記不了；重跑時目錄已經存在，記成
+    # failed（不要一直停在 running、每 6 小時重排一次）。
+    snapshots = publish_snapshots(db)
+    seed_papers(db, database, [PaperSpec("a", 1)], snapshots=snapshots)
+    _lose_the_success_update(monkeypatch)
+    run = queue_demo_export(SYSTEM, database)
+    with pytest.raises(DemoExportPublishedUnrecordedError):
+        run_demo_export(SYSTEM, database, demo_setup(), run.id, tmp_path, clock=_clock)
+    monkeypatch.undo()
+    (tmp_path / PREVIEW_DIR / "2-1" / "titles.json").unlink()
+    _make_stale(db)
+
+    with pytest.raises(DemoExportError) as caught:
+        run_demo_export(SYSTEM, database, demo_setup(), run.id, tmp_path, clock=_clock)
+
+    assert caught.value.failure is DemoExportFailure.OUTPUT_EXISTS
+    assert _rows(db) == [(1, "failed", "output_exists")]
+
+
+def test_config_error_in_the_worker_job_is_recorded(
+    db: TestDatabase, database: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # G8：走 worker 登記的工作（register_tasks 裡的 run_demo_export_job）：設定檔壞掉時那一筆記成
+    # failed（config_error，sweep 不再補排），ConfigError 原樣往上丟，什麼都不寫。
+    publish_snapshots(db)
+    run = queue_demo_export(SYSTEM, database)
+    config_dir = tmp_path / "config"
+    shutil.copytree(ROOT / "config", config_dir)
+    (config_dir / "models.yaml").write_text("models: [\n", encoding="utf-8")
+    monkeypatch.setenv("RADAR_CONFIG_DIR", str(config_dir))
+    output = tmp_path / "out"
+    settings = Settings.model_validate({"database_url": db.app_url, "demo_export_dir": str(output)})
+    parts = build_worker(settings, queue_pool_size=1, app_pool_size=1, heartbeat_urls={})
+    worker_tasks.register_tasks(parts.job_app.app, parts, settings)
+    task = parts.job_app.app.tasks[RUN_DEMO_EXPORT.name].func
+
+    with pytest.raises(ConfigError):
+        task(demo_export_id=run.id)
+
+    assert _rows(db) == [(1, "failed", "config_error")]
+    assert not output.exists()
