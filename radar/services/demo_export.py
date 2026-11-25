@@ -24,9 +24,11 @@
    新的匯出，才寫檔：資料檔先寫進暫存目錄（每個檔 fsync）、整個改名成 `preview/<匯出編號>/`（目錄
    已經存在就失敗、不覆寫），再 fsync `preview/`；換 manifest 前在檔案鎖裡再比一次新舊；
    `preview/manifest.json` 最後寫（暫存檔 fsync 後換名，換的那一下是原子的，再 fsync `preview/`）；
-   同一個資料庫交易把那一筆改成 `succeeded`。換好 manifest 之後的步驟失敗時丟
-   `DemoExportPublishedUnrecordedError`（已發佈、狀態待補記），那一筆留在 `running`。
-5. 其他任何一步失敗把那一筆改成 `failed`（記原因代碼）再往上丟；被別的行程接手了就什麼都不改。
+   同一個資料庫交易把那一筆改成 `succeeded`。**manifest 換名一成功就算已發佈**：之後的步驟（位置
+   檢查、fsync、記成功、commit）失敗時丟 `DemoExportPublishedUnrecordedError`（已發佈、狀態待
+   補記），中斷原樣往上丟，那一筆都留在 `running`、不記失敗。寫好匯出目錄之後、換 manifest 之前
+   停下（被接手、檢查失敗、中斷）時，刪掉這次寫好的匯出目錄（manifest 沒指向它，沒有讀者讀得到）。
+5. 其他任何一步失敗把那一筆改成 `failed`（記原因代碼）再往上丟；被別的行程接手了就不改狀態。
 
 輸出位置的讀寫一律相對於打開的目錄 fd（`O_DIRECTORY`、`O_NOFOLLOW`、`dir_fd`）：檢查之後有人把
 `preview` 換成符號連結，也寫不到別處。
@@ -94,6 +96,8 @@ from radar.domain.demo_export import (
     build_demo_client_config,
     check_demo_files,
     data_file_path,
+    demo_eligible_for,
+    demo_eligible_paper_ids,
     dump_demo_file,
     excluded_publisher_paper_ids,
     export_order,
@@ -246,10 +250,11 @@ def run_demo_export(
     Raises:
         DemoExportCheckError: 自我檢查沒過（什麼都沒寫，manifest 不換）。
         DemoExportError: 其他已知的失敗（原因代碼見 `failure`）。
-        DemoExportTakenOverError: 做到一半被別的行程接手（狀態不改；拿到檔案鎖後才發現時，已經寫好的
-            匯出目錄留著，manifest 不換）。
+        DemoExportTakenOverError: 做到一半被別的行程接手（狀態不改、manifest 不換；已經寫好的匯出
+            目錄刪掉，刪不掉時日誌另外寫）。
         DemoExportPublishedUnrecordedError: manifest 已經換成這一次，但狀態沒記上（留在 `running`，
-            之後接手時補記成功）。
+            之後接手時補記成功）。換好 manifest 之後的中斷（`KeyboardInterrupt` 等）原樣往上丟，
+            一樣不記失敗。
         BaseException: 讀資料庫或寫檔的錯誤、中斷原樣往上丟（那一筆已記成 `failed`）。
     """
     with database.transaction() as connection:
@@ -264,6 +269,7 @@ def run_demo_export(
         return None
     token = run.run_token
     out: _Output | None = None
+    progress = _Progress()
     with ExitStack() as stack:
         try:
             if setup.publish:
@@ -279,12 +285,15 @@ def run_demo_export(
                 log.info("示範站匯出已經換好 manifest，補記成功", export_id=run.export_id)
                 return recovered
             files, result = _build_and_check(actor, database, setup, run, clock=clock)
-            result = _publish(database, out, run, token, files, result)
+            result = _publish(database, out, run, token, files, result, progress)
         except DemoExportTakenOverError:
-            log.warning("示範站匯出被別的行程接手，這個行程沒有寫檔", export_id=run.export_id)
+            log.warning(
+                "示範站匯出被別的行程接手：manifest 沒換、狀態不改，這次寫好的匯出目錄已清掉",
+                export_id=run.export_id,
+            )
             raise
         except BaseException as exc:
-            _record_failure(database, out, run, token, exc)
+            _record_failure(database, out, run, token, exc, published=progress.switched)
             raise
     log.info(
         "示範站匯出完成",
@@ -301,10 +310,14 @@ def _record_failure(
     run: DemoExportRun,
     token: uuid.UUID,
     exc: BaseException,
+    *,
+    published: bool = False,
 ) -> None:
-    """把那一筆記成 `failed`。manifest 已經換成這一次、檔案都完整時不記（換好之後才失敗：留在
-    `running`，sweep 補排時 `_recover` 補記成功）；manifest 指向這一次、檔案卻不完整時照樣記失敗
-    （補記不了，不要每 6 小時重排一次）。記不上（資料庫斷線等）只記日誌，原本的例外照樣往上丟。"""
+    """把那一筆記成 `failed`。`published`（這個行程已經換好 manifest）時一律不記：manifest 一換好
+    就算已發佈，之後的檢查失敗或中斷都留在 `running`，sweep 補排時 `_recover` 補記（ADR-0061）。
+    沒換過但 manifest 已經指向這一次、檔案都完整時也不記（被接手前的同一筆換好的）；manifest 指向
+    這一次、檔案卻不完整時照樣記失敗（補記不了，不要每 6 小時重排一次）。記不上（資料庫斷線等）
+    只記日誌，原本的例外照樣往上丟。"""
     if isinstance(exc, DemoExportError):
         failure = exc.failure
     elif isinstance(exc, Exception):
@@ -312,8 +325,10 @@ def _record_failure(
     else:
         failure = DemoExportFailure.INTERRUPTED
     problems = exc.problems if isinstance(exc, DemoExportCheckError) else None
-    if isinstance(exc, DemoExportPublishedUnrecordedError) or (
-        out is not None and _published_here(out, run)
+    if (
+        published
+        or isinstance(exc, DemoExportPublishedUnrecordedError)
+        or (out is not None and _published_here(out, run))
     ):
         log.error(
             "示範站匯出已經換好 manifest，但沒有記上成功；sweep 補排時會補記",
@@ -391,13 +406,17 @@ def _build_and_check(
         files[MANIFEST_FILE] = dump_demo_file(manifest)
         # 自我檢查另外讀（同一個交易），不拿組檔用的那份結果檢查自己。
         full_ids = list_demo_full_paper_ids(viewer, connection)
-        excluded = excluded_publisher_paper_ids(
-            list_demo_publisher_facts(viewer, connection), setup.exclusions
-        )
+        publisher_facts = list_demo_publisher_facts(viewer, connection)
+        excluded = excluded_publisher_paper_ids(publisher_facts, setup.exclusions)
+        eligible_ids = demo_eligible_paper_ids(publisher_facts, setup.exclusions)
         forbidden = [ForbiddenText("金絲雀字串", canary) for canary in setup.canaries]
         forbidden += _member_email_checks(actor, connection)
         problems = check_demo_files(
-            files, full_paper_ids=full_ids, forbidden=forbidden, excluded_paper_ids=excluded
+            files,
+            full_paper_ids=full_ids,
+            forbidden=forbidden,
+            eligible_paper_ids=eligible_ids,
+            excluded_paper_ids=excluded,
         )
     if problems:
         raise DemoExportCheckError(problems)
@@ -445,13 +464,18 @@ def _paper(
         classification = DemoClassificationBlock.from_block(
             _block(viewer, connection, facts, AiProduct.CLASSIFICATION, settings)
         )
-    # 完整內容：在 view `demo_full_paper` 裡，而且出版社與期刊這時直接對排除清單也沒有對上（不只信
-    # 資料庫存的 `demo_eligible`，ADR-0007 第 6 項、ADR-0052）。
-    excluded = setup.exclusions.matches(
-        facts.publisher_ids, facts.publisher_names, journal_issn_l=facts.journal_issn_l
+    # 示範站可用：資料庫存的 `demo_eligible`（view `demo_full_paper` 用的同一欄），而且出版社與期刊
+    # 這時直接對排除清單也沒有對上（不只信存的值，ADR-0007 第 6 項、ADR-0052）。完整內容只給在
+    # view 裡、而且這一次判定也可以的論文，所以有完整內容的一定 demo_eligible。
+    eligible = demo_eligible_for(
+        facts.demo_eligible,
+        facts.publisher_ids,
+        facts.publisher_names,
+        facts.journal_issn_l,
+        setup.exclusions,
     )
     full: DemoPaperFull | None = None
-    if facts.in_demo_full_paper and not excluded:
+    if facts.in_demo_full_paper and eligible:
         source = find_paper_llm_source(viewer, connection, facts.paper_id, for_update=False)
         if source is None or source.abstract is None:
             # 同一個 REPEATABLE READ 交易裡不會發生：view 說有目前的摘要，這裡就讀得到。
@@ -473,6 +497,7 @@ def _paper(
             classification=classification,
             has_abstract=facts.abstract_source is not None,
             has_full_content=full is not None,
+            demo_eligible=eligible,
             is_new_this_week=facts.is_new_this_week,
         ),
         full=full,
@@ -555,6 +580,14 @@ DEMO_OUTPUT_LOCK_TIMEOUT_SECONDS: Final = 300.0
 _DEMO_OUTPUT_LOCK_POLL_SECONDS: Final = 0.05
 
 _DIR_FLAGS: Final = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+
+
+@dataclass
+class _Progress:
+    """這一次匯出做到哪：`switched`＝manifest 已經換成這一次（已發佈）。`run_demo_export` 建、
+    `_swap_manifest` 換名成功時設，失敗處理看它決定記不記失敗（中斷也一樣看得到）。"""
+
+    switched: bool = False
 
 
 @dataclass(frozen=True)
@@ -837,21 +870,22 @@ def _publish(
     token: uuid.UUID,
     files: dict[str, bytes],
     result: DemoExportResult,
+    progress: _Progress,
 ) -> DemoExportResult:
     """拿資料庫的發佈鎖、確認還是自己接手的，再拿檔案鎖：manifest 沒有指向比這次新的匯出才寫匯出
     目錄，換 manifest 前在檔案鎖裡再比一次；換好後 fsync `preview/`，同一個資料庫交易記成功。
-    寫目錄前、換 manifest 前各再確認一次接手代號與 `preview/` 還在原位；換完再確認一次
-    `preview/` 還在原位，才算已發佈。
+    寫目錄前、換 manifest 前各再確認一次接手代號與 `preview/` 還在原位；寫好目錄之後、換 manifest
+    之前停下（被接手、檢查失敗、中斷）時刪掉這次寫好的匯出目錄。manifest 換名一成功就記
+    `progress.switched`（已發佈）：之後的位置檢查、fsync、記成功、commit 失敗都算已發佈待補記。
 
     Raises:
-        DemoExportTakenOverError: 這一筆已經被別的行程接手（manifest 不換）。
+        DemoExportTakenOverError: 這一筆已經被別的行程接手（manifest 不換、寫好的匯出目錄刪掉）。
         DemoExportError: manifest 已經指向比這次新的匯出（`superseded`）、讀不懂
             （`manifest_unreadable`）、目錄已經存在、輸出位置不安全或途中被搬走（`output_unsafe`）、
             等檔案鎖太久（`output_busy`）。
-        DemoExportPublishedUnrecordedError: manifest 已經換成這一次，之後的 fsync、記成功或 commit
-            失敗（那一筆留在 `running`，之後接手時補記）。
+        DemoExportPublishedUnrecordedError: manifest 已經換成這一次，之後的位置檢查、fsync、記成功
+            或 commit 失敗（那一筆留在 `running`，之後接手時補記）。
     """
-    switched = False
     try:
         with database.transaction() as connection:
             _hold_publish(connection, run, token)
@@ -864,18 +898,25 @@ def _publish(
                 _check_owned(connection, run, token)
                 _check_in_place(out)
                 _write_export_dir(out, run.export_id, files)
-                _check_not_superseded(_read_manifest(out), run)
-                _check_owned(connection, run, token)
-                _check_in_place(out)
-                _swap_manifest(out, files[MANIFEST_FILE])
-                # 換完確認 preview/ 還在原位才算已發佈：換的途中被搬走時，新的 manifest 在讀者看不到
-                # 的地方，記失敗（不回報成功、也不說已發佈）。
-                _check_in_place(out)
-                switched = True
+                try:
+                    _check_not_superseded(_read_manifest(out), run)
+                    _check_owned(connection, run, token)
+                    _check_in_place(out)
+                    _swap_manifest(out, files[MANIFEST_FILE], progress)
+                except BaseException:
+                    if not progress.switched:
+                        # 還沒換 manifest（沒有讀者讀得到這個目錄）：刪掉這次剛寫好的匯出目錄，
+                        # 同一個匯出編號重做時不會碰到 output_exists（ADR-0061）。
+                        _discard_export_dir(out, run.export_id)
+                    raise
+                # manifest 一換好就算已發佈（ADR-0061）：之後的位置檢查、fsync、記成功、
+                # commit 失敗都不能記成沒發佈過，留在 running 等補記。換完才發現 preview/
+                # 被搬走時日誌另外寫。
+                _check_in_place_after_switch(out, run)
                 _fsync_dir(out.preview_fd)
             update_demo_export_finished(connection, run.id, run_token=token, failure=None)
     except Exception as exc:
-        if switched:
+        if progress.switched:
             raise DemoExportPublishedUnrecordedError(run.export_id, type(exc).__name__) from None
         raise
     return DemoExportResult(
@@ -982,12 +1023,48 @@ def _write_export_dir(out: _Output, export_id: str, files: Mapping[str, bytes]) 
     _fsync_dir(out.preview_fd)
 
 
-def _swap_manifest(out: _Output, content: bytes) -> None:
-    """manifest 先寫成暫存檔（fsync），再原子地換成 `preview/manifest.json`；失敗時刪掉暫存檔。"""
+def _discard_export_dir(out: _Output, export_id: str) -> None:
+    """換 manifest 之前失敗或被接手：刪掉這次剛寫好的 `preview/<匯出編號>/`（相對於目錄 fd、不跟符號
+    連結）。還拿著檔案鎖，manifest 也沒有指向它，沒有讀者讀得到。刪不掉只記日誌（留下的目錄位置），
+    原本的例外照樣往上丟。"""
+    try:
+        shutil.rmtree(export_id, dir_fd=out.preview_fd)
+    except Exception as exc:
+        log.warning(
+            "換 manifest 之前停下，這次寫好的匯出目錄沒有刪掉；"
+            "同一個匯出編號重做會碰到 output_exists",
+            export_id=export_id,
+            error_type=type(exc).__name__,
+        )
+    else:
+        log.info("換 manifest 之前停下，已刪掉這次寫好的匯出目錄", export_id=export_id)
+
+
+def _check_in_place_after_switch(out: _Output, run: DemoExportRun) -> None:
+    """換好 manifest 之後確認 `preview/` 還在原位。不在原位時丟錯（那一筆留在 `running`、算已發佈待
+    補記，不記成功也不記失敗），日誌寫明新的 manifest 寫進了被搬走的那個資料夾。
+
+    Raises:
+        DemoExportError: `preview/` 被搬走或換掉（`output_unsafe`）。
+    """
+    try:
+        _check_in_place(out)
+    except DemoExportError:
+        log.error(
+            "換 manifest 的途中 preview/ 被搬走或換掉：新的 manifest 寫進了被搬走的那個資料夾",
+            export_id=run.export_id,
+        )
+        raise
+
+
+def _swap_manifest(out: _Output, content: bytes, progress: _Progress) -> None:
+    """manifest 先寫成暫存檔（fsync），再原子地換成 `preview/manifest.json`；換名一成功就記
+    `progress.switched`（已發佈）。失敗時刪掉暫存檔。"""
     pending = f".{MANIFEST_FILE}.tmp-{uuid.uuid4().hex}"
     try:
         _write_file(out.preview_fd, pending, content)
         _replace_file(out.preview_fd, pending, MANIFEST_FILE)
+        progress.switched = True
     except BaseException:
         with contextlib.suppress(FileNotFoundError):
             os.unlink(pending, dir_fd=out.preview_fd)

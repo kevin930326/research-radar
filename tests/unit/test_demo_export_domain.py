@@ -17,6 +17,7 @@ from radar.domain.demo_export import (
     DemoFileEntry,
     DemoManifest,
     DemoPaper,
+    DemoPaperBiblio,
     DemoPaperShard,
     DemoPapersIndex,
     DemoPublisherFacts,
@@ -24,6 +25,8 @@ from radar.domain.demo_export import (
     ForbiddenText,
     check_demo_files,
     data_file_path,
+    demo_eligible_for,
+    demo_eligible_paper_ids,
     excluded_publisher_paper_ids,
     export_id_for,
     export_order,
@@ -60,6 +63,16 @@ FULL_CONTENT_NUMBERS = frozenset(
 )
 
 
+# 範例裡 `demo_eligible` 是 true 的論文（授權允許轉載、出版社與期刊不在排除清單）：固定的 13 篇裡
+# 授權 CC BY、出版社可以放的 9 篇（第 2 篇沒有摘要、第 9 篇摘要來源不允許公開），加上第 14 篇起
+# 「授權是 CC BY」的（i＝n − 14，i % 3 ≠ 0）。寫死，不從範例自己算。
+ELIGIBLE_NUMBERS = frozenset(
+    {1, 2, 4, 5, 6, 9, 11, 12, 13}
+    | {15, 16, 18, 19, 21, 22, 24, 25, 27, 28, 30, 31, 33, 34, 36, 37, 39, 40, 42, 43, 45, 46}
+    | {48, 49, 51, 52, 54, 55, 57, 58, 60}
+)
+
+
 def _ids_by_number(files: dict[str, bytes]) -> dict[int, uuid.UUID]:
     """標題的編號 → 論文 ID（`titles.json` 與 `papers-index.json` 的列順序相同）。"""
     titles = json.loads(files["2-1/titles.json"])["titles"]
@@ -73,6 +86,11 @@ def _ids_by_number(files: dict[str, bytes]) -> dict[int, uuid.UUID]:
 def _full_ids(files: dict[str, bytes]) -> set[uuid.UUID]:
     by_number = _ids_by_number(files)
     return {by_number[number] for number in FULL_CONTENT_NUMBERS}
+
+
+def _eligible_ids(files: dict[str, bytes]) -> set[uuid.UUID]:
+    by_number = _ids_by_number(files)
+    return {by_number[number] for number in ELIGIBLE_NUMBERS}
 
 
 def _forbidden() -> list[ForbiddenText]:
@@ -96,7 +114,15 @@ def test_the_preview_example_passes_every_check() -> None:
 
     # 範例標成有完整內容的，正好是照測試資料算出來的那幾篇。
     assert flagged == _full_ids(files)
-    assert check_demo_files(files, full_paper_ids=_full_ids(files), forbidden=_forbidden()) == []
+    assert (
+        check_demo_files(
+            files,
+            full_paper_ids=_full_ids(files),
+            eligible_paper_ids=_eligible_ids(files),
+            forbidden=_forbidden(),
+        )
+        == []
+    )
 
 
 # --- 四種失敗各一條（AC：多餘欄位、不該有完整內容的論文帶了完整內容、金絲雀字串、成員 email）---
@@ -109,7 +135,12 @@ def test_a_field_outside_the_whitelist_fails() -> None:
         data["papers"][0]["biblio"]["biblio"]["member_email_hint"] = "x"
 
     broken = _edit(files, SHARD, add_field)
-    problems = check_demo_files(broken, full_paper_ids=_full_ids(files), forbidden=[])
+    problems = check_demo_files(
+        broken,
+        full_paper_ids=_full_ids(files),
+        eligible_paper_ids=_eligible_ids(files),
+        forbidden=[],
+    )
 
     assert len(problems) == 1
     assert problems[0].startswith(f"{SHARD}：不符合白名單模型 DemoPaperShard")
@@ -124,7 +155,12 @@ def test_full_content_for_a_paper_outside_demo_full_paper_fails() -> None:
     victim_id = uuid.UUID(victim["biblio"]["biblio"]["id"])
 
     # 檔案本身沒變、形狀也對，但這篇不在 view `demo_full_paper` 裡（例如被改成 IEEE）。
-    problems = check_demo_files(files, full_paper_ids=full_ids - {victim_id}, forbidden=[])
+    problems = check_demo_files(
+        files,
+        full_paper_ids=full_ids - {victim_id},
+        eligible_paper_ids=_eligible_ids(files),
+        forbidden=[],
+    )
 
     assert problems == [
         f"{INDEX}：不在 demo_full_paper 的論文 {victim_id} 標成有完整內容",
@@ -145,7 +181,10 @@ def test_full_content_check_does_not_rely_on_the_model() -> None:
         data["unexpected"] = True
 
     problems = check_demo_files(
-        _edit(files, SHARD, break_model), full_paper_ids=full_ids - {target_id}, forbidden=[]
+        _edit(files, SHARD, break_model),
+        full_paper_ids=full_ids - {target_id},
+        eligible_paper_ids=_eligible_ids(files),
+        forbidden=[],
     )
 
     assert f"{SHARD}：不在 demo_full_paper 的論文 {target_id} 帶了完整內容" in problems
@@ -160,6 +199,7 @@ def test_canary_anywhere_fails() -> None:
     problems = check_demo_files(
         _edit(files, "2-1/titles.json", plant),
         full_paper_ids=_full_ids(files),
+        eligible_paper_ids=_eligible_ids(files),
         forbidden=_forbidden(),
     )
 
@@ -180,6 +220,7 @@ def test_member_email_anywhere_fails(written: str) -> None:
     problems = check_demo_files(
         {**files, MANIFEST_FILE: planted.encode("utf-8")},
         full_paper_ids=_full_ids(files),
+        eligible_paper_ids=_eligible_ids(files),
         forbidden=_forbidden(),
     )
 
@@ -206,6 +247,7 @@ def test_member_email_in_other_unicode_forms_fails(written: str) -> None:
     problems = check_demo_files(
         _edit(files, "2-1/titles.json", plant),
         full_paper_ids=_full_ids(files),
+        eligible_paper_ids=_eligible_ids(files),
         forbidden=_forbidden(),
     )
 
@@ -224,6 +266,7 @@ def test_canary_with_combining_characters_fails() -> None:
     problems = check_demo_files(
         _edit(files, "2-1/titles.json", plant),
         full_paper_ids=_full_ids(files),
+        eligible_paper_ids=_eligible_ids(files),
         forbidden=[ForbiddenText("金絲雀字串", composed)],
     )
 
@@ -243,7 +286,12 @@ def test_problems_never_echo_unknown_keys_or_unreadable_ids() -> None:
         data["has_full_content"][0] = True
 
     broken = _edit(_edit(files, SHARD, as_key), INDEX, as_id)
-    problems = check_demo_files(broken, full_paper_ids=_full_ids(files), forbidden=_forbidden())
+    problems = check_demo_files(
+        broken,
+        full_paper_ids=_full_ids(files),
+        eligible_paper_ids=_eligible_ids(files),
+        forbidden=_forbidden(),
+    )
 
     assert f"{SHARD}：出現成員的 email" in problems
     assert any(
@@ -262,13 +310,116 @@ def test_excluded_publisher_paper_with_full_content_fails() -> None:
     victim = _ids_by_number(files)[1]
 
     problems = check_demo_files(
-        files, full_paper_ids=full_ids, forbidden=[], excluded_paper_ids={victim}
+        files,
+        full_paper_ids=full_ids,
+        eligible_paper_ids=_eligible_ids(files),
+        forbidden=[],
+        excluded_paper_ids={victim},
     )
 
     assert problems == [
         f"{INDEX}：排除清單裡的出版社或期刊的論文 {victim} 標成有完整內容",
         f"{SHARD}：排除清單裡的出版社或期刊的論文 {victim} 帶了完整內容",
+        f"{SHARD}：排除清單裡的出版社或期刊的論文 {victim} 標成 demo_eligible",
     ]
+
+
+def _shard_papers(files: dict[str, bytes]) -> list[dict[str, Any]]:
+    return [
+        paper
+        for path, content in files.items()
+        if "/papers/" in path
+        for paper in json.loads(content)["papers"]
+    ]
+
+
+def test_the_preview_example_flags_demo_eligible_as_the_test_data_says() -> None:
+    # 第 4 輪（Kevin 2026-11-25 選 A）：範例標成 demo_eligible 的正好是照測試資料算出來的那幾篇，
+    # 而且兩種「沒有摘要」都有（3.9 的論文頁用它分「沒有摘要」與「只有書目」）。
+    files = _files()
+    by_id = {uuid.UUID(paper["biblio"]["biblio"]["id"]): paper for paper in _shard_papers(files)}
+    numbers = _ids_by_number(files)
+    flagged = {paper_id for paper_id, paper in by_id.items() if paper["biblio"]["demo_eligible"]}
+
+    assert flagged == _eligible_ids(files)
+    eligible_without = by_id[numbers[2]]["biblio"]
+    assert (eligible_without["demo_eligible"], eligible_without["has_abstract"]) == (True, False)
+    not_eligible_without = by_id[numbers[10]]["biblio"]
+    assert (not_eligible_without["demo_eligible"], not_eligible_without["has_abstract"]) == (
+        False,
+        False,
+    )
+    # 有完整內容的一定 demo_eligible。
+    assert _full_ids(files) <= flagged
+
+
+def test_demo_eligible_for_a_paper_the_license_does_not_allow_fails() -> None:
+    # 自我檢查第 7 項：授權不允許轉載（另外算的判定是不可以）的論文標成 demo_eligible。
+    files = _files()
+    victim = _ids_by_number(files)[3]
+
+    def flip(data: dict[str, Any]) -> None:
+        for paper in data["papers"]:
+            if paper["biblio"]["biblio"]["id"] == str(victim):
+                paper["biblio"]["demo_eligible"] = True
+
+    problems = check_demo_files(
+        _edit(files, SHARD, flip),
+        full_paper_ids=_full_ids(files),
+        eligible_paper_ids=_eligible_ids(files),
+        forbidden=[],
+    )
+
+    assert problems == [f"{SHARD}：授權不允許轉載的論文 {victim} 標成 demo_eligible"]
+
+
+def test_demo_eligible_check_does_not_rely_on_the_model() -> None:
+    # 模型壞掉（不是布林）時第 7 項照樣報；不在另外算的名單裡的也報。
+    files = _files()
+    numbers = _ids_by_number(files)
+
+    def broken(data: dict[str, Any]) -> None:
+        for paper in data["papers"]:
+            if paper["biblio"]["biblio"]["id"] == str(numbers[3]):
+                paper["biblio"]["demo_eligible"] = "yes"
+
+    problems = check_demo_files(
+        _edit(files, SHARD, broken),
+        full_paper_ids=_full_ids(files),
+        eligible_paper_ids=_eligible_ids(files) - {numbers[2]},
+        forbidden=[],
+    )
+
+    assert f"{SHARD}：論文 {numbers[3]} 的 demo_eligible 不是布林" in problems
+    assert f"{SHARD}：授權不允許轉載的論文 {numbers[2]} 標成 demo_eligible" in problems
+    assert any(
+        problem.startswith(f"{SHARD}：不符合白名單模型 DemoPaperShard") for problem in problems
+    )
+
+
+def test_demo_eligible_ids_use_the_stored_value_and_the_exclusion_list() -> None:
+    exclusions = PublisherExclusions(
+        ids=frozenset({"P4310319808"}),
+        names=frozenset({"Institute of Electrical and Electronics Engineers"}),
+        journal_issn_ls=frozenset({"0018-9391"}),
+    )
+    papers = [
+        # 存的是 true、出版社可以放。
+        DemoPublisherFacts(uuid.UUID(int=1), ("P9000000001",), ("Example Open Press",), None, True),
+        # 存的是 false（授權不允許）。
+        DemoPublisherFacts(
+            uuid.UUID(int=2), ("P9000000001",), ("Example Open Press",), None, False
+        ),
+        # 存的是舊的 true，但期刊這時在排除清單裡。
+        DemoPublisherFacts(uuid.UUID(int=3), ("P9000000077",), ("Press",), "0018-9391", True),
+        # 存的是舊的 true，但出版社 ID 這時在排除清單裡。
+        DemoPublisherFacts(uuid.UUID(int=4), ("https://openalex.org/P4310319808",), (), None, True),
+    ]
+
+    assert demo_eligible_paper_ids(papers, exclusions) == {uuid.UUID(int=1)}
+    assert demo_eligible_for(True, (), ("Example Open Press",), None, exclusions) is True
+    assert demo_eligible_for(False, (), ("Example Open Press",), None, exclusions) is False
+    assert demo_eligible_for(True, (), (), "0018-9391", exclusions) is False
 
 
 def test_excluded_publisher_ids_use_the_exclusion_list_directly() -> None:
@@ -317,7 +468,10 @@ def test_full_content_must_belong_to_its_own_paper() -> None:
                 paper["full"]["paper_id"] = str(by_number[3])
 
     problems = check_demo_files(
-        _edit(files, SHARD, swap), full_paper_ids=_full_ids(files), forbidden=[]
+        _edit(files, SHARD, swap),
+        full_paper_ids=_full_ids(files),
+        eligible_paper_ids=_eligible_ids(files),
+        forbidden=[],
     )
 
     assert f"{SHARD}：論文 {by_number[1]} 的完整內容不是它自己的（paper_id 對不上）" in problems
@@ -329,7 +483,12 @@ def test_full_content_must_belong_to_its_own_paper() -> None:
 def test_unknown_file_fails() -> None:
     files = {**_files(), "2-1/members.json": b"{}"}
 
-    problems = check_demo_files(files, full_paper_ids=_full_ids(files), forbidden=[])
+    problems = check_demo_files(
+        files,
+        full_paper_ids=_full_ids(files),
+        eligible_paper_ids=_eligible_ids(files),
+        forbidden=[],
+    )
 
     assert problems == ["2-1/members.json：不是認得的資料檔"]
 
@@ -347,6 +506,20 @@ def test_paper_full_layer_only_with_full_content() -> None:
     flipped = {**with_full, "biblio": {**with_full["biblio"], "has_full_content": False}}
     with pytest.raises(ValidationError, match="只有 has_full_content 的論文有 full"):
         DemoPaper.model_validate(flipped)
+
+
+def test_full_content_requires_demo_eligible() -> None:
+    # 第 4 輪：有完整內容的論文一定 demo_eligible（模型檢查）。
+    papers = json.loads(_files()[SHARD])["papers"]
+    with_full = next(paper for paper in papers if paper["full"] is not None)
+    flipped = {**with_full["biblio"], "demo_eligible": False}
+
+    with pytest.raises(ValidationError, match="有完整內容的論文一定是 demo_eligible"):
+        DemoPaperBiblio.model_validate(flipped)
+    # 少了這一欄也不行（白名單模型每一欄都要有）。
+    missing = {key: value for key, value in with_full["biblio"].items() if key != "demo_eligible"}
+    with pytest.raises(ValidationError, match="demo_eligible"):
+        DemoPaperBiblio.model_validate(missing)
 
 
 def test_index_columns_must_line_up() -> None:

@@ -1238,7 +1238,7 @@ def list_demo_paper_facts(viewer: PublicViewer, connection: Connection) -> list[
                 " (SELECT o.value_norm FROM external_id AS o"
                 "  WHERE o.paper_id = paper.id AND o.scheme = :openalex"
                 "  ORDER BY o.created_at, o.id LIMIT 1) AS openalex_id,"
-                " a.source AS abstract_source,"
+                " a.source AS abstract_source, paper.demo_eligible,"
                 " EXISTS (SELECT 1 FROM demo_full_paper AS f WHERE f.id = paper.id)"
                 " AS in_demo_full_paper,"
                 " paper.first_snapshot_id IS NOT DISTINCT FROM"
@@ -1277,6 +1277,7 @@ def list_demo_paper_facts(viewer: PublicViewer, connection: Connection) -> list[
             abstract_source=(
                 None if row["abstract_source"] is None else AbstractSource(row["abstract_source"])
             ),
+            demo_eligible=row["demo_eligible"],
             in_demo_full_paper=row["in_demo_full_paper"],
             # 還沒有任何已發佈的快照時 `first_snapshot_id` 也一定是 NULL（`counted_paper` 只收已發佈
             # 快照的論文），訪客看不到任何一篇，不會走到這裡。
@@ -1290,14 +1291,15 @@ def list_demo_publisher_facts(
     viewer: PublicViewer, connection: Connection
 ) -> list[DemoPublisherFacts]:
     """`viewer` 看得到的每一篇論文的出版社 ID、名稱與期刊 ISSN-L（示範站匯出的自我檢查第 6 項用，
-    Story 3.7、ADR-0007）：直接讀出版社欄位，不看 `demo_eligible`。和 `list_demo_paper_facts` 另外
-    一句讀：自我檢查不拿組檔用的那份結果來檢查自己。只讀，不寫。
+    Story 3.7、ADR-0007：排除清單直接用出版社欄位查），以及資料庫存的 `demo_eligible`（第 7 項：核對
+    匯出的 `demo_eligible`）。和 `list_demo_paper_facts` 另外一句讀：自我檢查不拿組檔用的那份結果來
+    檢查自己。只讀，不寫。
     """
     visible = visible_papers(viewer, alias="paper")
     rows = connection.execute(
         text(
-            "SELECT paper.id, paper.publisher_ids, paper.publisher_names, paper.journal_issn_l"
-            f" FROM paper WHERE {visible} ORDER BY paper.id"
+            "SELECT paper.id, paper.publisher_ids, paper.publisher_names, paper.journal_issn_l,"
+            f" paper.demo_eligible FROM paper WHERE {visible} ORDER BY paper.id"
         )
     )
     return [
@@ -1306,8 +1308,9 @@ def list_demo_publisher_facts(
             publisher_ids=tuple(publisher_ids),
             publisher_names=tuple(publisher_names),
             journal_issn_l=journal_issn_l,
+            demo_eligible=demo_eligible,
         )
-        for paper_id, publisher_ids, publisher_names, journal_issn_l in rows
+        for paper_id, publisher_ids, publisher_names, journal_issn_l, demo_eligible in rows
     ]
 
 

@@ -276,6 +276,27 @@ def test_each_kind_of_paper_has_only_what_it_may_show(
         assert paper["biblio"]["has_full_content"] is False, name
         assert paper["biblio"]["classification"]["state"] == "ready", name
     assert named["ieee_journal_only"]["biblio"]["biblio"]["journal"] == "tem"  # type: ignore[index]
+    # 第 4 輪：demo_eligible（授權允許轉載）。授權允許但沒有摘要的是 true；授權不允許、IEEE 兩篇、
+    # 沒有授權的是 false；有完整內容的都是 true；摘要來源不允許公開但授權允許的是 true。
+    eligible = {name: paper["biblio"]["demo_eligible"] for name, paper in named.items() if paper}
+    assert eligible == {
+        "full_content": True,
+        "eligible_without_abstract": True,
+        "biblio_only_not_open": False,
+        "classification_failed": True,
+        "no_ai_output_yet": True,
+        "full_content_ai_pending": True,
+        "ieee_excluded_publisher": False,
+        "ieee_journal_only": False,
+        "other_source_abstract": True,
+        "title_only_classification": False,
+        "human_verified_topic": True,
+        "human_verified_method": True,
+        "full_content_ai_failed": True,
+        "paper_14": False,
+    }
+    no_abstract = named["title_only_classification"]["biblio"]  # type: ignore[index]
+    assert (no_abstract["demo_eligible"], no_abstract["has_abstract"]) == (False, False)
     assert named["eligible_without_abstract"]["biblio"]["has_abstract"] is False  # type: ignore[index]
     title_only = named["title_only_classification"]["biblio"]["classification"]  # type: ignore[index]
     assert title_only["provenance"]["input_kind"] == "title"
@@ -519,6 +540,8 @@ def test_stale_demo_eligible_for_an_excluded_journal_gets_no_full_content(
     [paper] = _papers(tmp_path).values()
     assert paper["full"] is None
     assert paper["biblio"]["has_full_content"] is False
+    # 第 4 輪：demo_eligible 是排除清單擋完之後的結果，和不給完整內容一致。
+    assert paper["biblio"]["demo_eligible"] is False
     assert json.loads(_files(tmp_path)["2-1/papers-index.json"])["has_full_content"] == [False]
     text = _all_text(tmp_path)
     assert "Made up abstract 1" not in text
@@ -557,6 +580,7 @@ def test_self_check_catches_an_excluded_journal_with_full_content(
     paper_id = ids["stale_ieee"]
     assert f"排除清單裡的出版社或期刊的論文 {paper_id} 帶了完整內容" in problems
     assert f"排除清單裡的出版社或期刊的論文 {paper_id} 標成有完整內容" in problems
+    assert f"排除清單裡的出版社或期刊的論文 {paper_id} 標成 demo_eligible" in problems
     _assert_unchanged(db, tmp_path, before)
 
 
@@ -637,7 +661,7 @@ def test_full_content_outside_demo_full_paper_fails_the_check(
 
     def wrong(viewer: Any, connection: Any) -> list[DemoPaperFacts]:
         return [
-            DemoPaperFacts(**{**_fields(item), "in_demo_full_paper": True})
+            DemoPaperFacts(**{**_fields(item), "in_demo_full_paper": True, "demo_eligible": True})
             for item in real(viewer, connection)
         ]
 
@@ -647,6 +671,8 @@ def test_full_content_outside_demo_full_paper_fails_the_check(
 
     assert f"不在 demo_full_paper 的論文 {ids['not_open']} 帶了完整內容" in problems
     assert f"不在 demo_full_paper 的論文 {ids['not_open']} 標成有完整內容" in problems
+    # 第 4 輪：自我檢查第 7 項另外讀資料庫存的 demo_eligible，也擋下。
+    assert f"授權不允許轉載的論文 {ids['not_open']} 標成 demo_eligible" in problems
     _assert_unchanged(db, tmp_path, before)
 
 
@@ -761,18 +787,9 @@ def test_failure_while_replacing_the_manifest_keeps_the_old_one(
     with pytest.raises(OSError, match="disk"):
         run_demo_export(SYSTEM, database, demo_setup(), run.id, tmp_path, clock=_clock)
 
-    files = _files(tmp_path)
-    # 2-2 的目錄已經改名好了（留給之後清理），但 manifest 的位元組沒變、沒有留下暫存的 manifest。
-    assert files[MANIFEST_FILE] == before[MANIFEST_FILE]
-    assert {path: content for path, content in files.items() if not path.startswith("2-2/")} == (
-        before
-    )
-    assert sorted(path.name for path in (tmp_path / PREVIEW_DIR).iterdir()) == [
-        "2-1",
-        "2-2",
-        MANIFEST_FILE,
-    ]
-    assert _rows(db)[-1][1:] == ("failed", "error")
+    # 第 4 輪：manifest 沒換成，這次寫好的 2-2 目錄也刪掉（不留孤兒目錄）；manifest 的位元組沒變、
+    # 沒有留下暫存的 manifest。
+    _assert_unchanged(db, tmp_path, before, DemoExportFailure.ERROR)
 
 
 def test_interrupted_export_is_recorded(
@@ -1129,6 +1146,11 @@ def test_newer_manifest_written_after_the_directory_is_checked_again_before_the_
 
     assert caught.value.failure is DemoExportFailure.SUPERSEDED
     assert (tmp_path / PREVIEW_DIR / MANIFEST_FILE).read_bytes() == newer
+    # 第 4 輪：換 manifest 前停下，這次寫好的 2-2 目錄刪掉。
+    assert sorted(path.name for path in (tmp_path / PREVIEW_DIR).iterdir()) == [
+        "2-1",
+        MANIFEST_FILE,
+    ]
     assert _rows(db)[-1] == (2, "failed", "superseded")
 
 
@@ -1388,9 +1410,10 @@ def test_config_error_in_the_worker_job_is_recorded(
     ("lost_at", "written"),
     [
         # 接手代號的確認：_recover 的拿鎖前（1）與拿到檔案鎖後（2）、_publish 的拿鎖前（3）、
-        # 拿到檔案鎖後寫目錄前（4）、換 manifest 前（5）。
+        # 拿到檔案鎖後寫目錄前（4）、換 manifest 前（5）。第 4 輪：換 manifest 前發現時，
+        # 這次寫好的 2-1 目錄刪掉（原本留著）。
         (4, []),
-        (5, ["2-1"]),
+        (5, []),
     ],
 )
 def test_takeover_noticed_after_getting_the_output_lock_does_not_switch_the_manifest(
@@ -1402,7 +1425,8 @@ def test_takeover_noticed_after_getting_the_output_lock_does_not_switch_the_mani
     written: list[str],
 ) -> None:
     # H2：等檔案鎖的期間被別的行程接手（這裡用替身讓第 lost_at 次確認接手代號回「不是自己的」）：
-    # 拿到檔案鎖之後再確認一次，寫目錄前發現就什麼都不寫，換 manifest 前發現就不換；狀態不改。
+    # 拿到檔案鎖之後再確認一次，寫目錄前發現就什麼都不寫，換 manifest 前發現就不換、刪掉剛寫好的
+    # 目錄；狀態不改。
     snapshots = publish_snapshots(db)
     seed_papers(db, database, [PaperSpec("a", 1)], snapshots=snapshots)
     real = update_demo_export_if_owned
@@ -1469,8 +1493,9 @@ def test_published_export_superseded_before_it_was_recorded_is_recorded_as_super
 def test_preview_moved_while_the_manifest_is_switched_is_not_reported_as_success(
     db: TestDatabase, database: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # H4：換 manifest 的那一下 preview/ 被搬走：新的 manifest 寫在讀者看不到的地方。換完確認打開的
-    # 目錄已經不是 <輸出資料夾>/preview，記成 output_unsafe，不回報成功、也不說已發佈。
+    # H4、第 4 輪（Codex 第 3 次複查新高 1）：換 manifest 的那一下 preview/ 被搬走。manifest 一換好
+    # 就算已發佈：換完的位置檢查失敗不回報成功，也不記成失敗（留在 running、已發佈待補記）；搬回來
+    # 之後補排時補記成功。
     snapshots = publish_snapshots(db)
     seed_papers(db, database, [PaperSpec("a", 1)], snapshots=snapshots)
     output = tmp_path / "out"
@@ -1483,12 +1508,133 @@ def test_preview_moved_while_the_manifest_is_switched_is_not_reported_as_success
     monkeypatch.setattr(service, "_replace_file", replace_then_move)
     run = queue_demo_export(SYSTEM, database)
 
-    with pytest.raises(DemoExportError) as caught:
+    with pytest.raises(DemoExportPublishedUnrecordedError) as caught:
         run_demo_export(SYSTEM, database, demo_setup(), run.id, output, clock=_clock)
 
-    assert caught.value.failure is DemoExportFailure.OUTPUT_UNSAFE
+    assert (caught.value.export_id, caught.value.error_type) == ("2-1", "DemoExportError")
     assert not (output / PREVIEW_DIR).exists()
-    assert _rows(db) == [(1, "failed", "output_unsafe")]
+    moved = json.loads((output / "moved" / MANIFEST_FILE).read_bytes())
+    assert moved["export_id"] == "2-1"
+    assert _rows(db) == [(1, "running", None)]
+    monkeypatch.undo()
+    (output / "moved").rename(output / PREVIEW_DIR)
+    _make_stale(db)
+
+    result = run_demo_export(SYSTEM, database, demo_setup(), run.id, output, clock=_clock)
+
+    assert result is not None
+    assert result.export_id == "2-1"
+    assert _rows(db) == [(1, "succeeded", None)]
+
+
+@pytest.mark.parametrize(
+    "error", [PermissionError(errno.EACCES, "denied"), KeyboardInterrupt()], ids=type
+)
+def test_failure_right_after_the_switch_is_never_recorded_as_unpublished(
+    db: TestDatabase,
+    database: Database,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    error: BaseException,
+) -> None:
+    # 第 4 輪（Codex 第 3 次複查新高 1）：manifest 換好之後，位置檢查一直讀不到路徑（權限錯誤；
+    # 失敗處理再查一次也讀不到）或收到中斷：已發佈，不記成 failed，留在 running；之後補排時補記
+    # 成功、不重寫。
+    snapshots = publish_snapshots(db)
+    seed_papers(db, database, [PaperSpec("a", 1)], snapshots=snapshots)
+    switched: list[bool] = []
+    real_replace, real_check = service._replace_file, service._check_in_place
+
+    def replace(*args: Any) -> None:
+        real_replace(*args)
+        switched.append(True)
+
+    def check(out: Any) -> None:
+        if switched:
+            raise error
+        real_check(out)
+
+    monkeypatch.setattr(service, "_replace_file", replace)
+    monkeypatch.setattr(service, "_check_in_place", check)
+    run = queue_demo_export(SYSTEM, database)
+
+    expected = (
+        DemoExportPublishedUnrecordedError if isinstance(error, Exception) else KeyboardInterrupt
+    )
+    with pytest.raises(expected):
+        run_demo_export(SYSTEM, database, demo_setup(), run.id, tmp_path, clock=_clock)
+
+    written = _files(tmp_path)
+    assert json.loads(written[MANIFEST_FILE])["export_id"] == "2-1"
+    assert _rows(db) == [(1, "running", None)]
+    monkeypatch.undo()
+    _make_stale(db)
+
+    result = run_demo_export(SYSTEM, database, demo_setup(), run.id, tmp_path, clock=_clock)
+
+    assert result is not None
+    assert result.export_id == "2-1"
+    assert _files(tmp_path) == written
+    assert _rows(db) == [(1, "succeeded", None)]
+
+
+def test_same_export_id_redone_after_a_takeover_before_the_switch_succeeds(
+    db: TestDatabase, database: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 第 4 輪（Opus 第 3 輪確認的中）：寫好匯出目錄之後、換 manifest 之前發現被接手，刪掉剛寫好的
+    # 目錄；之後接手的行程用同一個匯出編號重做，不會碰到 output_exists。
+    snapshots = publish_snapshots(db)
+    seed_papers(db, database, [PaperSpec("a", 1)], snapshots=snapshots)
+    real = update_demo_export_if_owned
+    calls: list[int] = []
+
+    def owned(connection: Any, demo_export_id: Any, token: Any) -> bool:
+        calls.append(1)
+        return False if len(calls) == 5 else bool(real(connection, demo_export_id, token))
+
+    monkeypatch.setattr(service, "update_demo_export_if_owned", owned)
+    run = queue_demo_export(SYSTEM, database)
+    with pytest.raises(DemoExportTakenOverError):
+        run_demo_export(SYSTEM, database, demo_setup(), run.id, tmp_path, clock=_clock)
+    monkeypatch.undo()
+    assert list((tmp_path / PREVIEW_DIR).iterdir()) == []
+    _make_stale(db)
+
+    result = run_demo_export(SYSTEM, database, demo_setup(), run.id, tmp_path, clock=_clock)
+
+    assert result is not None
+    assert result.export_id == "2-1"
+    assert sorted(path.name for path in (tmp_path / PREVIEW_DIR).iterdir()) == [
+        "2-1",
+        MANIFEST_FILE,
+    ]
+    assert _rows(db) == [(1, "succeeded", None)]
+
+
+def test_connection_lost_before_the_switch_removes_the_written_directory(
+    db: TestDatabase, database: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 第 4 輪：換 manifest 前那次確認接手代號時連線斷了（這一句丟錯）：manifest 不換、剛寫好的目錄
+    # 刪掉，那一筆記成 error。
+    snapshots = publish_snapshots(db)
+    seed_papers(db, database, [PaperSpec("a", 1)], snapshots=snapshots)
+    real = update_demo_export_if_owned
+    calls: list[int] = []
+
+    def owned(connection: Any, demo_export_id: Any, token: Any) -> bool:
+        calls.append(1)
+        if len(calls) == 5:
+            raise psycopg.OperationalError("connection lost")
+        return bool(real(connection, demo_export_id, token))
+
+    monkeypatch.setattr(service, "update_demo_export_if_owned", owned)
+    run = queue_demo_export(SYSTEM, database)
+
+    with pytest.raises(psycopg.OperationalError):
+        run_demo_export(SYSTEM, database, demo_setup(), run.id, tmp_path, clock=_clock)
+
+    assert list((tmp_path / PREVIEW_DIR).iterdir()) == []
+    assert _rows(db) == [(1, "failed", "error")]
 
 
 def test_waiting_too_long_for_the_output_lock_writes_nothing(
