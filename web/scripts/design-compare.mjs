@@ -207,7 +207,8 @@ function differs(key, ref, impl) {
 }
 
 async function open(browser, target, clicks, size, waitUntil = "networkidle") {
-  const page = await browser.newPage({ viewport: size });
+  // 剪貼簿寫入的權限：「複製 APA 引用」按了要真的放進剪貼簿才會換成「已複製」（Story 3.10 用 --click-url 量那個狀態）。
+  const page = await browser.newPage({ viewport: size, permissions: ["clipboard-read", "clipboard-write"] });
   // 等到網路安靜下來：延遲載入的路由、要等資料的畫面才不會只量到一半。
   await page.goto(target, { waitUntil });
   for (const text of clicks) {

@@ -358,3 +358,15 @@ describe("demo paper page", () => {
     expect(hidden.html).not.toContain(t("paper:paper.noAbstract.message"));
   });
 });
+
+describe("citation export on the demo paper page (Story 3.10)", () => {
+  // 設計稿 paper-demo.html：四種版本都有「引用」三顆（和成員版同一份實作，AR-24）。
+  it.each([1, 2, 3, 12])("Fake Paper %i has the three citation buttons in the rail and the mobile block", async (number) => {
+    const { html } = await render(number);
+    for (const key of ["paper:paper.cite.heading", "paper:paper.cite.copyApa", "paper:paper.cite.downloadRis", "paper:paper.cite.downloadBibtex"]) {
+      expect(html.split(`>${t(key)}<`).length - 1, key).toBe(2);
+    }
+    expect(html).toContain('data-cite="rail"');
+    expect(html).toContain('data-cite="mobile"');
+  });
+});

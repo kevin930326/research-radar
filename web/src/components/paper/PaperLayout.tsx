@@ -2,6 +2,8 @@ import type { ReactNode } from "react";
 
 import { NewTabNote } from "../ExternalArrow";
 import { AbstractSection, NoAbstractSection } from "./AbstractSection";
+import { citationSource } from "./citation";
+import { CiteBlock } from "./CiteBlock";
 import { FullTextBar, FullTextMobile, FullTextRail } from "./FullText";
 import { PaperBiblio, classificationHasTags } from "./PaperBiblio";
 import { ResearchModelSection } from "./ResearchModelSection";
@@ -17,6 +19,7 @@ import { externalUrl } from "../../pages/paper-format";
 // 「取得全文」在書目與分類下方，「開啟全文」在底部固定列。
 // 順序：書目（分類接最後一行）→ 中文重點 → 研究模型 → 原文摘要；沒有摘要時中文重點與原文摘要合成一塊，放在研究模型前面。
 // 三個 AI 區塊各自照自己的狀態顯示（同一頁可以各是不同狀態）。
+// 「引用」（Story 3.10）在「取得全文」與成員版的「我的文獻庫」後面；手機版在書目下方那一塊的最後。兩站一樣。
 // 示範站沒有完整內容的論文（`limited`）：書目與分類之後只有一段說明（或什麼都沒有），沒有中文重點、研究模型、原文摘要；
 // 說明在手機版放在「取得全文」上面（設計稿 paper-demo.html「只有書目」的手機版）。
 // 頁面最外層把字級、行高、字距設成設計稿 .pp 的樣子（14px、瀏覽器預設行高、沒有字距、主要文字色），
@@ -92,6 +95,7 @@ export function PaperLayout({ page, names, onRetryNames, member, limited }: Pape
   const first = firstUnverifiedBadge(page, names !== null);
   const links = paperLinks(page);
   const fullTextMobile = <FullTextMobile links={links} />;
+  const citation = citationSource(page, names);
   return (
     <article
       data-page="paper"
@@ -110,6 +114,7 @@ export function PaperLayout({ page, names, onRetryNames, member, limited }: Pape
             <div className="split:hidden">
               {fullTextMobile}
               {member?.mobile}
+              <CiteBlock source={citation} mobile />
             </div>
             {page.abstract === null ? <NoAbstractSection doiUrl={links.doi_url} /> : null}
             <ZhSummarySection block={page.zh_summary} firstBadge={first === "zh_summary"} />
@@ -119,7 +124,10 @@ export function PaperLayout({ page, names, onRetryNames, member, limited }: Pape
         ) : (
           <>
             {limited.notice}
-            <div className="split:hidden">{fullTextMobile}</div>
+            <div className="split:hidden">
+              {fullTextMobile}
+              <CiteBlock source={citation} mobile />
+            </div>
           </>
         )}
         <FullTextBar links={links} extra={member?.bar} />
@@ -128,6 +136,7 @@ export function PaperLayout({ page, names, onRetryNames, member, limited }: Pape
       <aside className="sticky top-8 mt-8 hidden box-content w-rail-width shrink-0 self-start border-l border-hairline pl-8 split:block">
         <FullTextRail links={links} />
         {member?.rail}
+        <CiteBlock source={citation} />
       </aside>
       <NewTabNote />
     </article>

@@ -1,7 +1,10 @@
 // 論文頁（Story 3.8）：整頁層級的狀態（載入中、錯誤、找不到或沒有權限、登入過期）、AI 文字的淨化、
 // 「開啟全文」、兩欄與手機版的版面，以及 1440／1000／500 三種寬度的整頁截圖。
 // 區塊層級的狀態（State Patterns 每一列）在 src/pages/PaperPage.test.tsx。資料是 fixtures/papers.json 的假論文。
+import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+
+import type { Page } from "@playwright/test";
 
 import { MEMBERS, gate, paperId, paperPage } from "./api-mock.ts";
 import { TEXT } from "./expected.ts";
@@ -332,3 +335,137 @@ for (const label of ["normal", "no-abstract", "zh-failed", "all-failed"]) {
     });
   }
 }
+
+// ---- 引用匯出（Story 3.10）----
+// 剪貼簿換成記錄放進去的字（各瀏覽器的剪貼簿權限不同；這裡要看的是放進去的字與按鈕的樣子）。
+// 預期值是照 tests/golden/exports/README.md 的規則、對假資料「normal」「no-doi」手寫的。
+
+const COPY_APA = TEXT["paper:paper.cite.copyApa"]!;
+const COPIED = TEXT["paper:paper.cite.copied"]!;
+const NORMAL_APA =
+  "Example, A., Sample, J., & Placeholder, R. (2023). Rating Inconsistency and Reader Trust on Review Platforms. Journal of Example Studies, 12(3), 101–124. https://doi.org/10.5555/rr.1";
+const NO_DOI_APA =
+  "Example, A., Sample, J., & Placeholder, R. (2023). Rating Inconsistency and Reader Trust on Review Platforms. Journal of Example Studies, 12(3), 101–124.";
+const NORMAL_RIS = [
+  "TY  - JOUR",
+  "AU  - Example, Avery",
+  "AU  - Sample, Jordan",
+  "AU  - Placeholder, Riley",
+  "TI  - Rating Inconsistency and Reader Trust on Review Platforms",
+  "T2  - Journal of Example Studies",
+  "PY  - 2023",
+  "VL  - 12",
+  "IS  - 3",
+  "SP  - 101",
+  "EP  - 124",
+  "DO  - 10.5555/rr.1",
+  "ER  - ",
+];
+const NO_DOI_BIBTEX = [
+  "@article{example2023rating,",
+  "  author = {Example, Avery and Sample, Jordan and Placeholder, Riley},",
+  "  title = {Rating Inconsistency and Reader Trust on Review Platforms},",
+  "  journal = {Journal of Example Studies},",
+  "  year = {2023},",
+  "  volume = {12},",
+  "  number = {3},",
+  "  pages = {101--124}",
+  "}",
+];
+
+async function recordClipboard(page: Page, fail = false): Promise<() => Promise<string[]>> {
+  await page.addInitScript((shouldFail) => {
+    const written: string[] = [];
+    (window as unknown as { __clipboard: string[] }).__clipboard = written;
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: {
+        writeText: (text: string) => {
+          if (shouldFail) return Promise.reject(new DOMException("denied", "NotAllowedError"));
+          written.push(text);
+          return Promise.resolve();
+        },
+      },
+    });
+  }, fail);
+  return () => page.evaluate(() => (window as unknown as { __clipboard: string[] }).__clipboard);
+}
+
+for (const [label, viewport, where] of [
+  ["desktop rail", { width: 1280, height: 900 }, "rail"],
+  ["mobile block", { width: 500, height: 900 }, "mobile"],
+] as const) {
+  test(`citation ${label}: copy puts the APA reference and link on the clipboard, shows copied for 2 seconds`, async ({ page }) => {
+    const clipboard = await recordClipboard(page);
+    const requests: string[] = [];
+    await page.setViewportSize(viewport);
+    await page.goto(url("normal"));
+    await expect(page.locator("h1")).toHaveText(paperPage("normal").paper.title);
+    page.on("request", (request) => requests.push(new URL(request.url()).pathname));
+    const button = page.locator(`[data-cite='${where}'] [data-cite='apa']`);
+    await expect(button).toHaveText(COPY_APA);
+    const gold = await button.evaluate((element) => getComputedStyle(element).color);
+    // 不用浮動通知：按之前與按之後，頁面上的通知區（status、alert）數量一樣。
+    const notices = page.locator("[role='status'], [role='alert'], [aria-live='assertive']");
+    const noticesBefore = await notices.count();
+    await button.click();
+    // 原地換成「已複製」、暖白色（text-primary #EFEAE0）、不能按（aria-disabled），不用浮動通知。
+    await expect(button).toHaveText(COPIED);
+    await expect(button).toHaveAttribute("aria-disabled", "true");
+    expect(await button.evaluate((element) => getComputedStyle(element).color)).toBe("rgb(239, 234, 224)");
+    expect(gold).toBe("rgb(227, 180, 102)");
+    expect(await clipboard()).toEqual([NORMAL_APA]);
+    // 「已複製」時再按不會再複製一次（aria-disabled 時 Playwright 會等到能按才點，所以用 force 直接點）。
+    await button.click({ force: true });
+    await expect(button).toHaveText(COPIED);
+    expect(await clipboard()).toEqual([NORMAL_APA]);
+    expect(await notices.count()).toBe(noticesBefore);
+    // 2 秒後換回來（給 1 秒的餘裕；不到 1.5 秒時還是「已複製」）。
+    await page.waitForTimeout(1500);
+    await expect(button).toHaveText(COPIED);
+    await expect(button).toHaveText(COPY_APA, { timeout: 1500 });
+    await expect(button).not.toHaveAttribute("aria-disabled");
+    // 不呼叫後端。
+    expect(requests.filter((path) => path.startsWith("/api/"))).toEqual([]);
+  });
+}
+
+test("citation: download RIS makes the file in the browser and the button keeps its text", async ({ page }) => {
+  const requests: string[] = [];
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await page.goto(url("normal"));
+  await expect(page.locator("h1")).toHaveText(paperPage("normal").paper.title);
+  page.on("request", (request) => requests.push(request.url()));
+  const button = page.locator("[data-cite='rail'] [data-cite='ris']");
+  const [download] = await Promise.all([page.waitForEvent("download"), button.click()]);
+  expect(download.suggestedFilename()).toBe("example2023rating.ris");
+  expect(readFileSync((await download.path())!, "utf-8")).toBe(`${NORMAL_RIS.join("\r\n")}\r\n`);
+  await expect(button).toHaveText(TEXT["paper:paper.cite.downloadRis"]!);
+  expect(requests.filter((request) => request.includes("/api/"))).toEqual([]);
+});
+
+test("citation, State Patterns 8 no DOI: the export still works and has no DOI field", async ({ page }) => {
+  const clipboard = await recordClipboard(page);
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await page.goto(url("no-doi"));
+  await expect(page.locator("h1")).toHaveText(paperPage("no-doi").paper.title);
+  await page.locator("[data-cite='rail'] [data-cite='apa']").click();
+  expect(await clipboard()).toEqual([NO_DOI_APA]);
+  const button = page.locator("[data-cite='rail'] [data-cite='bibtex']");
+  const [download] = await Promise.all([page.waitForEvent("download"), button.click()]);
+  expect(download.suggestedFilename()).toBe("example2023rating.bib");
+  expect(readFileSync((await download.path())!, "utf-8")).toBe(`${NO_DOI_BIBTEX.join("\n")}\n`);
+  await expect(button).toHaveText(TEXT["paper:paper.cite.downloadBibtex"]!);
+});
+
+test("citation: when the clipboard refuses, nothing is shown and the text stays", async ({ page }) => {
+  const clipboard = await recordClipboard(page, true);
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await page.goto(url("normal"));
+  const button = page.locator("[data-cite='rail'] [data-cite='apa']");
+  await button.click();
+  await page.waitForTimeout(300);
+  await expect(button).toHaveText(COPY_APA);
+  await expect(button).not.toHaveAttribute("aria-disabled");
+  expect(await clipboard()).toEqual([]);
+});

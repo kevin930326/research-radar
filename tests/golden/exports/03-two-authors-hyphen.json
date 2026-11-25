@@ -1,0 +1,38 @@
+{
+  "note": "兩位作者（最後一位前面也要逗號＋&）、名字有連字號、有中間名、沒有期、只有起始頁",
+  "input": {
+    "title": "Fake Paper Three about Two Authors",
+    "authors": ["Jean-Paul Fakename", "Mary Ann Lee-Test"],
+    "year": 2023,
+    "journal": "Fake Systems Review",
+    "volume": "12",
+    "issue": null,
+    "first_page": "e101",
+    "last_page": null,
+    "doi": "10.1234/fake.0003"
+  },
+  "apa": "Fakename, J.-P., & Lee-Test, M. A. (2023). Fake Paper Three about Two Authors. Fake Systems Review, 12, e101. https://doi.org/10.1234/fake.0003",
+  "ris": [
+    "TY  - JOUR",
+    "AU  - Fakename, Jean-Paul",
+    "AU  - Lee-Test, Mary Ann",
+    "TI  - Fake Paper Three about Two Authors",
+    "T2  - Fake Systems Review",
+    "PY  - 2023",
+    "VL  - 12",
+    "SP  - e101",
+    "DO  - 10.1234/fake.0003",
+    "ER  - "
+  ],
+  "bibtex": [
+    "@article{fakename2023fake,",
+    "  author = {Fakename, Jean-Paul and Lee-Test, Mary Ann},",
+    "  title = {Fake Paper Three about Two Authors},",
+    "  journal = {Fake Systems Review},",
+    "  year = {2023},",
+    "  volume = {12},",
+    "  pages = {e101},",
+    "  doi = {10.1234/fake.0003}",
+    "}"
+  ]
+}

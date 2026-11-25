@@ -1,0 +1,38 @@
+{
+  "note": "沒有 DOI（State Patterns「8. 論文頁」：引用匯出照常，少 DOI 欄位）",
+  "input": {
+    "title": "Fake Paper Two Without a DOI",
+    "authors": ["Dana Example"],
+    "year": 2024,
+    "journal": "Fake Journal of Management",
+    "volume": "7",
+    "issue": "1",
+    "first_page": "1",
+    "last_page": "20",
+    "doi": null
+  },
+  "apa": "Example, D. (2024). Fake Paper Two Without a DOI. Fake Journal of Management, 7(1), 1–20.",
+  "ris": [
+    "TY  - JOUR",
+    "AU  - Example, Dana",
+    "TI  - Fake Paper Two Without a DOI",
+    "T2  - Fake Journal of Management",
+    "PY  - 2024",
+    "VL  - 7",
+    "IS  - 1",
+    "SP  - 1",
+    "EP  - 20",
+    "ER  - "
+  ],
+  "bibtex": [
+    "@article{example2024fake,",
+    "  author = {Example, Dana},",
+    "  title = {Fake Paper Two Without a DOI},",
+    "  journal = {Fake Journal of Management},",
+    "  year = {2024},",
+    "  volume = {7},",
+    "  number = {1},",
+    "  pages = {1--20}",
+    "}"
+  ]
+}

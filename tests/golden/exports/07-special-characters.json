@@ -1,0 +1,41 @@
+{
+  "note": "標題有大括號、反斜線、引號、&、%、底線、非 ASCII；作者名字有變音符號；期刊名有 &；DOI 有底線",
+  "input": {
+    "title": "Fake {Braces} \\ \"Quotes\" & 50% of_users: Café 資訊",
+    "authors": ["José Müller", "Zoë Ångström"],
+    "year": 2021,
+    "journal": "Fake Journal of R&D",
+    "volume": "5",
+    "issue": "2",
+    "first_page": "10",
+    "last_page": "19",
+    "doi": "10.1234/fake_0007"
+  },
+  "apa": "Müller, J., & Ångström, Z. (2021). Fake {Braces} \\ \"Quotes\" & 50% of_users: Café 資訊. Fake Journal of R&D, 5(2), 10–19. https://doi.org/10.1234/fake_0007",
+  "ris": [
+    "TY  - JOUR",
+    "AU  - Müller, José",
+    "AU  - Ångström, Zoë",
+    "TI  - Fake {Braces} \\ \"Quotes\" & 50% of_users: Café 資訊",
+    "T2  - Fake Journal of R&D",
+    "PY  - 2021",
+    "VL  - 5",
+    "IS  - 2",
+    "SP  - 10",
+    "EP  - 19",
+    "DO  - 10.1234/fake_0007",
+    "ER  - "
+  ],
+  "bibtex": [
+    "@article{muller2021fake,",
+    "  author = {Müller, José and Ångström, Zoë},",
+    "  title = {Fake \\textbraceleft{}Braces\\textbraceright{} \\textbackslash{} \"Quotes\" \\& 50\\% of\\_users: Café 資訊},",
+    "  journal = {Fake Journal of R\\&D},",
+    "  year = {2021},",
+    "  volume = {5},",
+    "  number = {2},",
+    "  pages = {10--19},",
+    "  doi = {10.1234/fake_0007}",
+    "}"
+  ]
+}

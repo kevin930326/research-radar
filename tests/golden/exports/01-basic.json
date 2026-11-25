@@ -1,0 +1,42 @@
+{
+  "note": "三位作者、有 DOI、卷期頁碼齊全",
+  "input": {
+    "title": "Fake Paper One: Testing Citation Export",
+    "authors": ["Alice Fakeauthor", "Bob C. Testwriter", "Carol Sample"],
+    "year": 2025,
+    "journal": "Journal of Fake Information Systems",
+    "volume": "42",
+    "issue": "3",
+    "first_page": "894",
+    "last_page": "925",
+    "doi": "10.1234/fake.0001"
+  },
+  "apa": "Fakeauthor, A., Testwriter, B. C., & Sample, C. (2025). Fake Paper One: Testing Citation Export. Journal of Fake Information Systems, 42(3), 894–925. https://doi.org/10.1234/fake.0001",
+  "ris": [
+    "TY  - JOUR",
+    "AU  - Fakeauthor, Alice",
+    "AU  - Testwriter, Bob C.",
+    "AU  - Sample, Carol",
+    "TI  - Fake Paper One: Testing Citation Export",
+    "T2  - Journal of Fake Information Systems",
+    "PY  - 2025",
+    "VL  - 42",
+    "IS  - 3",
+    "SP  - 894",
+    "EP  - 925",
+    "DO  - 10.1234/fake.0001",
+    "ER  - "
+  ],
+  "bibtex": [
+    "@article{fakeauthor2025fake,",
+    "  author = {Fakeauthor, Alice and Testwriter, Bob C. and Sample, Carol},",
+    "  title = {Fake Paper One: Testing Citation Export},",
+    "  journal = {Journal of Fake Information Systems},",
+    "  year = {2025},",
+    "  volume = {42},",
+    "  number = {3},",
+    "  pages = {894--925},",
+    "  doi = {10.1234/fake.0001}",
+    "}"
+  ]
+}

@@ -150,7 +150,7 @@ describe("paper page: three AI blocks with content", () => {
       .split(/<[^>]+>/)
       .map((segment) => segment.replace(/\s+/g, ""))
       .filter((segment) => segment !== "");
-    expect(LATER_STORIES.length).toBeGreaterThan(10);
+    expect(LATER_STORIES.length).toBeGreaterThan(9);
     for (const text of LATER_STORIES) {
       expect(segments).not.toContain(text);
     }
@@ -648,5 +648,41 @@ describe("my library on the paper page", () => {
     const html = renderWith(fixture("normal"), undefined);
     expect(html).not.toContain("data-library");
     expect(html).not.toContain(TEXT["paper:paper.library.add"]);
+  });
+});
+
+describe("citation export on the paper page (Story 3.10)", () => {
+  const CITE = ["paper:paper.cite.heading", "paper:paper.cite.copyApa", "paper:paper.cite.downloadRis", "paper:paper.cite.downloadBibtex"];
+
+  it("the rail and the mobile block both have the three citation buttons, in the design's order", () => {
+    const html = render(fixture("normal"));
+    for (const key of CITE) expect(count(html, `>${TEXT[key]!}<`), key).toBe(2);
+    expect(html).toContain('data-cite="rail"');
+    expect(html).toContain('data-cite="mobile"');
+    // 「已複製」是按了之後才出現。
+    expect(html).not.toContain(`>${TEXT["paper:paper.cite.copied"]!}<`);
+    // 輔助欄：取得全文 → 我的文獻庫 → 引用（設計稿 paper.html）。
+    const withLibrary = renderToStaticMarkup(
+      <RouterContextProvider router={router}>
+        <PaperPage
+          page={fixture("normal")}
+          names={NAMES}
+          library={{ inLibrary: false, busy: false, focusToken: 0, onAdd: () => {}, onRemove: () => {} }}
+        />
+      </RouterContextProvider>,
+    );
+    const aside = withLibrary.slice(withLibrary.indexOf("<aside"));
+    expect(aside.indexOf('data-full-text="rail"')).toBeGreaterThanOrEqual(0);
+    expect(aside.indexOf('data-full-text="rail"')).toBeLessThan(aside.indexOf('data-library="rail"'));
+    expect(aside.indexOf('data-library="rail"')).toBeLessThan(aside.indexOf('data-cite="rail"'));
+    // 三個都是按鈕，按鈕內沒有連結（不換頁、不呼叫後端）。
+    for (const name of ["apa", "ris", "bibtex"]) {
+      expect(count(html, `<button type="button" data-cite="${name}"`), name).toBe(2);
+    }
+  });
+
+  it("State Patterns 8, no DOI: citation export is still there", () => {
+    const html = render(fixture("no-doi"));
+    for (const key of CITE) expect(count(html, `>${TEXT[key]!}<`), key).toBe(2);
   });
 });

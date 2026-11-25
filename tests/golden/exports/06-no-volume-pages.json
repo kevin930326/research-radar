@@ -1,0 +1,34 @@
+{
+  "note": "沒有卷期頁碼（APA：缺的部分省略）",
+  "input": {
+    "title": "Fake Paper Six in Press",
+    "authors": ["Frank Nobody", "Grace Zero"],
+    "year": 2026,
+    "journal": "Fake Advances",
+    "volume": null,
+    "issue": null,
+    "first_page": null,
+    "last_page": null,
+    "doi": "10.1234/fake.0006"
+  },
+  "apa": "Nobody, F., & Zero, G. (2026). Fake Paper Six in Press. Fake Advances. https://doi.org/10.1234/fake.0006",
+  "ris": [
+    "TY  - JOUR",
+    "AU  - Nobody, Frank",
+    "AU  - Zero, Grace",
+    "TI  - Fake Paper Six in Press",
+    "T2  - Fake Advances",
+    "PY  - 2026",
+    "DO  - 10.1234/fake.0006",
+    "ER  - "
+  ],
+  "bibtex": [
+    "@article{nobody2026fake,",
+    "  author = {Nobody, Frank and Zero, Grace},",
+    "  title = {Fake Paper Six in Press},",
+    "  journal = {Fake Advances},",
+    "  year = {2026},",
+    "  doi = {10.1234/fake.0006}",
+    "}"
+  ]
+}
