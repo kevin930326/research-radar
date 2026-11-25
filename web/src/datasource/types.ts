@@ -3,6 +3,7 @@
 import type {
   AiBlockState,
   ClientConfig,
+  CubeResponse,
   DisplayNames,
   LibraryItemResponse,
   LibraryPageResponse,
@@ -83,6 +84,15 @@ export type { ClientConfig };
 /** 讀設定值的結果（Story 3.14）：401 回 `signedOut`（回登入頁），其他錯誤丟出例外。 */
 export type ClientConfigResult = { kind: "found"; config: ClientConfig } | { kind: "signedOut" };
 
+/**
+ * 計數方塊（Story 3.15、AD-19）：每本期刊每一年的 `total` 與 `with_abstract` 篇數、規則的設定值、快照。
+ * 成員版是 `GET /api/v1/cube`，示範站是 `preview/<匯出編號>/cube.json`，形狀相同。比例由 `web/src/stats/` 算。
+ */
+export type Cube = CubeResponse;
+
+/** 讀計數方塊的結果：401 回 `signedOut`（回登入頁），其他錯誤丟出例外。 */
+export type CubeResult = { kind: "found"; cube: Cube } | { kind: "signedOut" };
+
 /** 找論文的篩選條件（`GET /api/v1/papers` 的參數，不含 cursor：cursor 由資料來源層自己接）。 */
 export type PaperListFilters = Omit<ListPapersParams, "cursor">;
 
@@ -118,6 +128,8 @@ export interface PaperSource {
    * 總篇數與快照用最後一次回應的。每一頁都帶 `expectedMemberId`（給了的話；ADR-0055）。
    */
   list(filters: PaperListFilters, limit: number, previous?: PaperList | null, expectedMemberId?: string): Promise<PaperListResult>;
+  /** 計數方塊（資料涵蓋範圍，Story 3.15）；401 回 `signedOut`，其他沒有成功時丟出例外。 */
+  cube(): Promise<CubeResult>;
 }
 
 /**
@@ -206,6 +218,14 @@ export interface DemoManifest {
   pageSize: number;
   /** manifest 列出的檔（相對於 `preview/` 的路徑）。 */
   files: readonly string[];
+  /** manifest 的 `summary` 裡資料涵蓋範圍要用的讀數（Story 3.15）：篇數、有摘要、有完整內容。 */
+  summary: { paperCount: number; withAbstractCount: number; fullContentCount: number };
+}
+
+/** 示範站資料涵蓋範圍要用的資料（Story 3.15）：`cube.json` 與 `taxonomy.json`（期刊的顯示名稱）。 */
+export interface DemoCoverage {
+  cube: Cube;
+  names: DisplayNames;
 }
 
 export interface DemoPaperIndex {
@@ -250,6 +270,8 @@ export interface DemoPaperSource {
    * 索引裡沒有這一篇回 null（找不到這一頁）；分片讀不到、形狀不對、和 manifest 不是同一次匯出就丟出例外。
    */
   paper(manifest: DemoManifest, index: DemoPaperIndex, paperId: string): Promise<DemoPaper | null>;
+  /** 讀 manifest 指到的計數方塊與分類表（Story 3.15）；讀不到、形狀不對、和 manifest 不是同一次匯出就丟出例外。 */
+  coverage(manifest: DemoManifest): Promise<DemoCoverage>;
 }
 
 export interface DataSource {

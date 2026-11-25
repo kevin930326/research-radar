@@ -28,6 +28,7 @@ from pydantic import (
     PlainSerializer,
     StrictBool,
     StringConstraints,
+    field_validator,
     model_validator,
 )
 
@@ -43,6 +44,7 @@ from radar.domain.paper_rows import PAPER_ROW_AUTHOR_LIMIT, PaperRowFacts
 from radar.domain.papers import AbstractSource, PaperOrigin
 from radar.domain.snapshot import DATA_TIMEZONE, Snapshot, SnapshotStatus
 from radar.domain.taxonomy import Taxonomy, TaxonomyField
+from radar.domain.trend_config import MonthDay, TrendConfig, check_month_day
 
 
 class CubeDim(StrEnum):
@@ -812,3 +814,70 @@ def build_client_config() -> ClientConfig:
         library_page_size=LIBRARY_PAGE_SIZE,
         paper_list_page_size=PAPER_LIST_PAGE_SIZE,
     )
+
+
+# --- 計數方塊（Story 3.15、AD-19、ADR-0011、ADR-0062）-------------------------------------------
+
+
+class TrendParams(BaseModel):
+    """趨勢與覆蓋率的規則用到的設定值（ADR-0011 的 `params`）：成員版的計數方塊回應、示範站的
+    `cube.json`、`tests/golden/stats/` 的資料檔都用這一個形狀。前端的 `web/src/stats/` 只用傳進來
+    的值，不寫死。
+
+    - `timezone`：資料截止日用的時區（IANA 名稱）。
+    - `tracking_start_year`：追蹤起始年（`journals.yaml` 的 `start_year`）。
+    - `current_year_cutoff`：當年度納入「成長最快」的分界日（`MM-DD`，含當天）。
+    - `growth_window_years`：成長最快每組幾年。
+    - `baseline_years`：原始篇數的對照值取最早幾個完整年度。
+    - `low_coverage_threshold`：摘要覆蓋率低於這個比例就標成偏低（0 到 1）。
+    """
+
+    model_config = _FROZEN
+
+    timezone: _Text
+    tracking_start_year: int = Field(ge=1900, le=9999, strict=True)
+    current_year_cutoff: MonthDay
+    growth_window_years: int = Field(ge=1, strict=True)
+    baseline_years: int = Field(ge=1, strict=True)
+    low_coverage_threshold: float = Field(ge=0, le=1)
+
+    @field_validator("current_year_cutoff")
+    @classmethod
+    def _real_date(cls, value: str) -> str:
+        return check_month_day(value)
+
+
+def build_trend_params(trend: TrendConfig, journals: JournalsConfig) -> TrendParams:
+    """設定值 → `params`：`trend.yaml` 的四個值、`journals.yaml` 的追蹤起始年、資料截止日的時區
+    （`domain/snapshot.DATA_TIMEZONE`）。由 services 與 api 的組裝呼叫，`repo` 不碰（AD-1）。"""
+    return TrendParams(
+        timezone=DATA_TIMEZONE.key,
+        tracking_start_year=journals.start_year,
+        current_year_cutoff=trend.current_year_cutoff,
+        growth_window_years=trend.growth_window_years,
+        baseline_years=trend.baseline_years,
+        low_coverage_threshold=trend.low_coverage_threshold,
+    )
+
+
+class CubeResponse(BaseModel):
+    """成員版的計數方塊（`GET /api/v1/cube`）：只有計數，不給比例（AD-19）。
+
+    - `rows`：Story 1.10 定義的 `total` 與 `with_abstract` 兩種列（期刊照設定的順序、年份遞增）；
+      主題、方法等其他種類等用到的 Story 再加（ADR-0062）。
+    - `params`：規則用到的設定值。
+    - `snapshot`：目前已發佈的快照；一個都還沒發佈時是 null，這時 `rows` 是空的（算數的論文只算
+      已發佈快照的，AD-5）。
+    """
+
+    model_config = _FROZEN
+
+    rows: tuple[CubeRow, ...]
+    params: TrendParams
+    snapshot: SnapshotRef | None
+
+    @model_validator(mode="after")
+    def _rows_need_snapshot(self) -> Self:
+        if self.snapshot is None and self.rows:
+            raise ValueError("還沒有已發佈的快照時不會有計數")
+        return self

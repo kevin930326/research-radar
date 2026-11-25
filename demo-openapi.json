@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Research Radar 示範站資料檔",
-    "version": "1"
+    "version": "2"
   },
   "paths": {
     "/manifest.json": {
@@ -92,6 +92,35 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/DemoTitles"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "export_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[1-9][0-9]{0,8}-[1-9][0-9]{0,8}$"
+            }
+          }
+        ]
+      }
+    },
+    "/{export_id}/cube.json": {
+      "get": {
+        "operationId": "getDemoCube",
+        "summary": "`cube.json`：計數方塊（Story 3.15、AD-19、ADR-0062），和成員版 `CubeResponse` 同一個形狀，",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DemoCube"
                 }
               }
             }
@@ -284,6 +313,75 @@
           "ave"
         ],
         "title": "ConstructItem",
+        "type": "object"
+      },
+      "CubeDim": {
+        "description": "計數方塊的一列是哪一種計數（AD-19、ADR-0011「計數方塊」）。剛好這六種。",
+        "enum": [
+          "total",
+          "with_abstract",
+          "pending_classification",
+          "topic",
+          "topic_pair",
+          "method"
+        ],
+        "title": "CubeDim",
+        "type": "string"
+      },
+      "CubeRow": {
+        "additionalProperties": false,
+        "description": "計數方塊的一列（一格）：（`journal`, `year`, `dim`, `key_a`, `key_b`, `n`）。\n\n- `journal` 是設定檔的期刊代號（不是 ISSN-L）。\n- 主題、方法用設定檔的代號，未分類是 `unclassified`；`topic_pair` 把字母順序在前的放\n  `key_a`（ADR-0011）。\n- 只給計數，不給比例：比例由前端的 `web/src/stats/` 用這些格子算。",
+        "properties": {
+          "journal": {
+            "maxLength": 64,
+            "pattern": "^[a-z][a-z0-9_]*$",
+            "title": "Journal",
+            "type": "string"
+          },
+          "year": {
+            "title": "Year",
+            "type": "integer"
+          },
+          "dim": {
+            "$ref": "#/components/schemas/CubeDim"
+          },
+          "key_a": {
+            "anyOf": [
+              {
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Key A"
+          },
+          "key_b": {
+            "anyOf": [
+              {
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Key B"
+          },
+          "n": {
+            "minimum": 0,
+            "title": "N",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "journal",
+          "year",
+          "dim",
+          "n"
+        ],
+        "title": "CubeRow",
         "type": "object"
       },
       "DemoBiblio": {
@@ -579,12 +677,44 @@
         "title": "DemoClientConfig",
         "type": "object"
       },
+      "DemoCube": {
+        "additionalProperties": false,
+        "description": "`cube.json`：計數方塊（Story 3.15、AD-19、ADR-0062），和成員版 `CubeResponse` 同一個形狀，\n多 `export_id`。只有計數、不給比例；比例由前端的 `web/src/stats/` 算。\n\n- `rows`：每個有論文的（期刊, 年份）剛好一列 `total`（大於 0）與一列 `with_abstract`（不超過\n  `total`），沒有其他種類的列，不重複。\n- `params`：規則用到的設定值（`TrendParams`）。",
+        "properties": {
+          "snapshot": {
+            "$ref": "#/components/schemas/SnapshotRef"
+          },
+          "export_id": {
+            "pattern": "^[1-9][0-9]{0,8}-[1-9][0-9]{0,8}$",
+            "title": "Export Id",
+            "type": "string"
+          },
+          "params": {
+            "$ref": "#/components/schemas/TrendParams"
+          },
+          "rows": {
+            "items": {
+              "$ref": "#/components/schemas/CubeRow"
+            },
+            "title": "Rows",
+            "type": "array"
+          }
+        },
+        "required": [
+          "snapshot",
+          "export_id",
+          "params",
+          "rows"
+        ],
+        "title": "DemoCube",
+        "type": "object"
+      },
       "DemoFileEntry": {
         "additionalProperties": false,
         "description": "manifest 列的一個資料檔：路徑（相對於 `preview/`，只能是認得的資料檔）、SHA-256、\n位元組數。",
         "properties": {
           "path": {
-            "pattern": "^[1-9][0-9]{0,8}-[1-9][0-9]{0,8}/(?:taxonomy\\.json|papers-index\\.json|titles\\.json|papers/[0-9]{3}\\.json)$",
+            "pattern": "^[1-9][0-9]{0,8}-[1-9][0-9]{0,8}/(?:taxonomy\\.json|papers-index\\.json|titles\\.json|cube\\.json|papers/[0-9]{3}\\.json)$",
             "title": "Path",
             "type": "string"
           },
@@ -609,7 +739,7 @@
       },
       "DemoManifest": {
         "additionalProperties": false,
-        "description": "`manifest.json`：現在該讀哪一次匯出（最後才寫，只有它會被覆寫）。列的每個檔都在這次的匯出\n目錄底下（路徑開頭是自己的 `export_id`），不重複，而且是完整的一批：分類表、索引、標題與每一個\n分片（個數照 `summary.paper_count` 算）都列了。",
+        "description": "`manifest.json`：現在該讀哪一次匯出（最後才寫，只有它會被覆寫）。列的每個檔都在這次的匯出\n目錄底下（路徑開頭是自己的 `export_id`），不重複，而且是完整的一批：分類表、索引、標題、計數\n方塊與每一個分片（個數照 `summary.paper_count` 算）都列了。",
         "properties": {
           "snapshot": {
             "$ref": "#/components/schemas/SnapshotRef"
@@ -1669,6 +1799,54 @@
         ],
         "title": "SupportLevel",
         "type": "string"
+      },
+      "TrendParams": {
+        "additionalProperties": false,
+        "description": "趨勢與覆蓋率的規則用到的設定值（ADR-0011 的 `params`）：成員版的計數方塊回應、示範站的\n`cube.json`、`tests/golden/stats/` 的資料檔都用這一個形狀。前端的 `web/src/stats/` 只用傳進來\n的值，不寫死。\n\n- `timezone`：資料截止日用的時區（IANA 名稱）。\n- `tracking_start_year`：追蹤起始年（`journals.yaml` 的 `start_year`）。\n- `current_year_cutoff`：當年度納入「成長最快」的分界日（`MM-DD`，含當天）。\n- `growth_window_years`：成長最快每組幾年。\n- `baseline_years`：原始篇數的對照值取最早幾個完整年度。\n- `low_coverage_threshold`：摘要覆蓋率低於這個比例就標成偏低（0 到 1）。",
+        "properties": {
+          "timezone": {
+            "minLength": 1,
+            "title": "Timezone",
+            "type": "string"
+          },
+          "tracking_start_year": {
+            "maximum": 9999,
+            "minimum": 1900,
+            "title": "Tracking Start Year",
+            "type": "integer"
+          },
+          "current_year_cutoff": {
+            "pattern": "^(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])$",
+            "title": "Current Year Cutoff",
+            "type": "string"
+          },
+          "growth_window_years": {
+            "minimum": 1,
+            "title": "Growth Window Years",
+            "type": "integer"
+          },
+          "baseline_years": {
+            "minimum": 1,
+            "title": "Baseline Years",
+            "type": "integer"
+          },
+          "low_coverage_threshold": {
+            "maximum": 1,
+            "minimum": 0,
+            "title": "Low Coverage Threshold",
+            "type": "number"
+          }
+        },
+        "required": [
+          "timezone",
+          "tracking_start_year",
+          "current_year_cutoff",
+          "growth_window_years",
+          "baseline_years",
+          "low_coverage_threshold"
+        ],
+        "title": "TrendParams",
+        "type": "object"
       }
     }
   }

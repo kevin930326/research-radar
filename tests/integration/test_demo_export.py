@@ -197,6 +197,7 @@ def test_export_writes_a_new_preview_directory_and_the_manifest_last(
             "2-1/taxonomy.json",
             "2-1/papers-index.json",
             "2-1/titles.json",
+            "2-1/cube.json",
             "2-1/papers/000.json",
         ]
     )

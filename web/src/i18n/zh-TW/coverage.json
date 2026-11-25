@@ -1,0 +1,50 @@
+{
+  "coverage": {
+    "page": {
+      "title": "資料涵蓋範圍"
+    },
+    "intro": {
+      "text": "追蹤 14 本資管期刊、2016 年至今的論文。資料來自 OpenAlex，每週更新一次。"
+    },
+    "readings": {
+      "total": "收錄",
+      "withAbstract": "有摘要",
+      "thisWeek": "本週新增",
+      "fullContent": "有完整內容",
+      "unit": "篇"
+    },
+    "table": {
+      "title": "摘要覆蓋率",
+      "pickPointer": "指到一格看篇數",
+      "pickTouch": "點一格看篇數",
+      "journal": "期刊",
+      "partialYear": "未滿一年"
+    },
+    "pick": {
+      "cell": "{{journal}} · {{year}}",
+      "counts": "{{total}} 篇裡 {{withAbstract}} 篇有摘要"
+    },
+    "legend": {
+      "full": "{{percent}} 以上",
+      "low": "未滿 {{percent}}，資料可能不全",
+      "empty": "這一年沒有論文"
+    },
+    "elsevier": {
+      "list": "JSIS、DSS、I&M、I&O",
+      "journals": "{{journals}} 這四本由 Elsevier 出版，在 OpenAlex 上大多沒有摘要。",
+      "effect": "沒有摘要的論文只根據標題分類，也沒有研究模型，所以趨勢裡這四本的分類比較不準，關係排行表也數不到它們。",
+      "note": "這幾本期刊的論文可能有人研究，只是我們讀不到摘要。"
+    },
+    "terms": {
+      "title": "名詞說明",
+      "scope": "追蹤範圍",
+      "scopeText": "14 本期刊、2016 年至今的論文。",
+      "outside": "追蹤範圍外",
+      "outsideText": "不在 14 本追蹤期刊或 2016 年以前，不計入趨勢與關係排行表。",
+      "abstract": "有摘要",
+      "abstractText": "這篇論文在 OpenAlex 有摘要。",
+      "snapshot": "快照編號",
+      "snapshotText": "資料每整理一次就多一號。#12 是第 12 次整理出來的資料。"
+    }
+  }
+}

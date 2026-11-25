@@ -1,0 +1,2465 @@
+{
+ "_note": "成員版資料涵蓋範圍的假計數方塊（Story 3.15；e2e 與 scripts/mock-api.mjs 用）：14 本期刊 2016–2026，Elsevier 四本的有摘要比例偏低，io 2026 沒有論文。數字是編的。快照和 paper-list.json 相同。",
+ "rows": [
+  {
+   "journal": "misq",
+   "year": 2016,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 53
+  },
+  {
+   "journal": "misq",
+   "year": 2016,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 52
+  },
+  {
+   "journal": "misq",
+   "year": 2017,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 31
+  },
+  {
+   "journal": "misq",
+   "year": 2017,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 29
+  },
+  {
+   "journal": "misq",
+   "year": 2018,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 34
+  },
+  {
+   "journal": "misq",
+   "year": 2018,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 31
+  },
+  {
+   "journal": "misq",
+   "year": 2019,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 37
+  },
+  {
+   "journal": "misq",
+   "year": 2019,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 33
+  },
+  {
+   "journal": "misq",
+   "year": 2020,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 40
+  },
+  {
+   "journal": "misq",
+   "year": 2020,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 40
+  },
+  {
+   "journal": "misq",
+   "year": 2021,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 43
+  },
+  {
+   "journal": "misq",
+   "year": 2021,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 42
+  },
+  {
+   "journal": "misq",
+   "year": 2022,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 46
+  },
+  {
+   "journal": "misq",
+   "year": 2022,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 44
+  },
+  {
+   "journal": "misq",
+   "year": 2023,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 49
+  },
+  {
+   "journal": "misq",
+   "year": 2023,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 46
+  },
+  {
+   "journal": "misq",
+   "year": 2024,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 52
+  },
+  {
+   "journal": "misq",
+   "year": 2024,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 48
+  },
+  {
+   "journal": "misq",
+   "year": 2025,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 30
+  },
+  {
+   "journal": "misq",
+   "year": 2025,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 30
+  },
+  {
+   "journal": "misq",
+   "year": 2026,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 20
+  },
+  {
+   "journal": "misq",
+   "year": 2026,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 19
+  },
+  {
+   "journal": "isr",
+   "year": 2016,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 35
+  },
+  {
+   "journal": "isr",
+   "year": 2016,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 33
+  },
+  {
+   "journal": "isr",
+   "year": 2017,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 38
+  },
+  {
+   "journal": "isr",
+   "year": 2017,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 35
+  },
+  {
+   "journal": "isr",
+   "year": 2018,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 41
+  },
+  {
+   "journal": "isr",
+   "year": 2018,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 37
+  },
+  {
+   "journal": "isr",
+   "year": 2019,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 44
+  },
+  {
+   "journal": "isr",
+   "year": 2019,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 44
+  },
+  {
+   "journal": "isr",
+   "year": 2020,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 47
+  },
+  {
+   "journal": "isr",
+   "year": 2020,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 46
+  },
+  {
+   "journal": "isr",
+   "year": 2021,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 50
+  },
+  {
+   "journal": "isr",
+   "year": 2021,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 48
+  },
+  {
+   "journal": "isr",
+   "year": 2022,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 53
+  },
+  {
+   "journal": "isr",
+   "year": 2022,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 50
+  },
+  {
+   "journal": "isr",
+   "year": 2023,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 31
+  },
+  {
+   "journal": "isr",
+   "year": 2023,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 27
+  },
+  {
+   "journal": "isr",
+   "year": 2024,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 34
+  },
+  {
+   "journal": "isr",
+   "year": 2024,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 34
+  },
+  {
+   "journal": "isr",
+   "year": 2025,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 37
+  },
+  {
+   "journal": "isr",
+   "year": 2025,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 36
+  },
+  {
+   "journal": "isr",
+   "year": 2026,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 25
+  },
+  {
+   "journal": "isr",
+   "year": 2026,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 23
+  },
+  {
+   "journal": "jmis",
+   "year": 2016,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 42
+  },
+  {
+   "journal": "jmis",
+   "year": 2016,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 39
+  },
+  {
+   "journal": "jmis",
+   "year": 2017,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 45
+  },
+  {
+   "journal": "jmis",
+   "year": 2017,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 41
+  },
+  {
+   "journal": "jmis",
+   "year": 2018,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 48
+  },
+  {
+   "journal": "jmis",
+   "year": 2018,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 48
+  },
+  {
+   "journal": "jmis",
+   "year": 2019,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 51
+  },
+  {
+   "journal": "jmis",
+   "year": 2019,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 50
+  },
+  {
+   "journal": "jmis",
+   "year": 2020,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 54
+  },
+  {
+   "journal": "jmis",
+   "year": 2020,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 52
+  },
+  {
+   "journal": "jmis",
+   "year": 2021,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 32
+  },
+  {
+   "journal": "jmis",
+   "year": 2021,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 29
+  },
+  {
+   "journal": "jmis",
+   "year": 2022,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 35
+  },
+  {
+   "journal": "jmis",
+   "year": 2022,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 31
+  },
+  {
+   "journal": "jmis",
+   "year": 2023,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 38
+  },
+  {
+   "journal": "jmis",
+   "year": 2023,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 38
+  },
+  {
+   "journal": "jmis",
+   "year": 2024,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 41
+  },
+  {
+   "journal": "jmis",
+   "year": 2024,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 40
+  },
+  {
+   "journal": "jmis",
+   "year": 2025,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 44
+  },
+  {
+   "journal": "jmis",
+   "year": 2025,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 42
+  },
+  {
+   "journal": "jmis",
+   "year": 2026,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 30
+  },
+  {
+   "journal": "jmis",
+   "year": 2026,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 27
+  },
+  {
+   "journal": "jais",
+   "year": 2016,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 49
+  },
+  {
+   "journal": "jais",
+   "year": 2016,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 45
+  },
+  {
+   "journal": "jais",
+   "year": 2017,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 52
+  },
+  {
+   "journal": "jais",
+   "year": 2017,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 52
+  },
+  {
+   "journal": "jais",
+   "year": 2018,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 30
+  },
+  {
+   "journal": "jais",
+   "year": 2018,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 29
+  },
+  {
+   "journal": "jais",
+   "year": 2019,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 33
+  },
+  {
+   "journal": "jais",
+   "year": 2019,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 31
+  },
+  {
+   "journal": "jais",
+   "year": 2020,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 36
+  },
+  {
+   "journal": "jais",
+   "year": 2020,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 33
+  },
+  {
+   "journal": "jais",
+   "year": 2021,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 39
+  },
+  {
+   "journal": "jais",
+   "year": 2021,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 35
+  },
+  {
+   "journal": "jais",
+   "year": 2022,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 42
+  },
+  {
+   "journal": "jais",
+   "year": 2022,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 42
+  },
+  {
+   "journal": "jais",
+   "year": 2023,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 45
+  },
+  {
+   "journal": "jais",
+   "year": 2023,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 44
+  },
+  {
+   "journal": "jais",
+   "year": 2024,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 48
+  },
+  {
+   "journal": "jais",
+   "year": 2024,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 46
+  },
+  {
+   "journal": "jais",
+   "year": 2025,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 51
+  },
+  {
+   "journal": "jais",
+   "year": 2025,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 48
+  },
+  {
+   "journal": "jais",
+   "year": 2026,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 20
+  },
+  {
+   "journal": "jais",
+   "year": 2026,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 16
+  },
+  {
+   "journal": "ejis",
+   "year": 2016,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 31
+  },
+  {
+   "journal": "ejis",
+   "year": 2016,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 31
+  },
+  {
+   "journal": "ejis",
+   "year": 2017,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 34
+  },
+  {
+   "journal": "ejis",
+   "year": 2017,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 33
+  },
+  {
+   "journal": "ejis",
+   "year": 2018,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 37
+  },
+  {
+   "journal": "ejis",
+   "year": 2018,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 35
+  },
+  {
+   "journal": "ejis",
+   "year": 2019,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 40
+  },
+  {
+   "journal": "ejis",
+   "year": 2019,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 37
+  },
+  {
+   "journal": "ejis",
+   "year": 2020,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 43
+  },
+  {
+   "journal": "ejis",
+   "year": 2020,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 39
+  },
+  {
+   "journal": "ejis",
+   "year": 2021,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 46
+  },
+  {
+   "journal": "ejis",
+   "year": 2021,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 46
+  },
+  {
+   "journal": "ejis",
+   "year": 2022,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 49
+  },
+  {
+   "journal": "ejis",
+   "year": 2022,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 48
+  },
+  {
+   "journal": "ejis",
+   "year": 2023,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 52
+  },
+  {
+   "journal": "ejis",
+   "year": 2023,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 50
+  },
+  {
+   "journal": "ejis",
+   "year": 2024,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 30
+  },
+  {
+   "journal": "ejis",
+   "year": 2024,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 27
+  },
+  {
+   "journal": "ejis",
+   "year": 2025,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 33
+  },
+  {
+   "journal": "ejis",
+   "year": 2025,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 29
+  },
+  {
+   "journal": "ejis",
+   "year": 2026,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 25
+  },
+  {
+   "journal": "ejis",
+   "year": 2026,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 25
+  },
+  {
+   "journal": "isj",
+   "year": 2016,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 38
+  },
+  {
+   "journal": "isj",
+   "year": 2016,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 37
+  },
+  {
+   "journal": "isj",
+   "year": 2017,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 41
+  },
+  {
+   "journal": "isj",
+   "year": 2017,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 39
+  },
+  {
+   "journal": "isj",
+   "year": 2018,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 44
+  },
+  {
+   "journal": "isj",
+   "year": 2018,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 41
+  },
+  {
+   "journal": "isj",
+   "year": 2019,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 47
+  },
+  {
+   "journal": "isj",
+   "year": 2019,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 43
+  },
+  {
+   "journal": "isj",
+   "year": 2020,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 50
+  },
+  {
+   "journal": "isj",
+   "year": 2020,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 50
+  },
+  {
+   "journal": "isj",
+   "year": 2021,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 53
+  },
+  {
+   "journal": "isj",
+   "year": 2021,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 52
+  },
+  {
+   "journal": "isj",
+   "year": 2022,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 31
+  },
+  {
+   "journal": "isj",
+   "year": 2022,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 29
+  },
+  {
+   "journal": "isj",
+   "year": 2023,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 34
+  },
+  {
+   "journal": "isj",
+   "year": 2023,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 31
+  },
+  {
+   "journal": "isj",
+   "year": 2024,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 37
+  },
+  {
+   "journal": "isj",
+   "year": 2024,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 33
+  },
+  {
+   "journal": "isj",
+   "year": 2025,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 40
+  },
+  {
+   "journal": "isj",
+   "year": 2025,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 40
+  },
+  {
+   "journal": "isj",
+   "year": 2026,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 30
+  },
+  {
+   "journal": "isj",
+   "year": 2026,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 29
+  },
+  {
+   "journal": "jit",
+   "year": 2016,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 45
+  },
+  {
+   "journal": "jit",
+   "year": 2016,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 43
+  },
+  {
+   "journal": "jit",
+   "year": 2017,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 48
+  },
+  {
+   "journal": "jit",
+   "year": 2017,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 45
+  },
+  {
+   "journal": "jit",
+   "year": 2018,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 51
+  },
+  {
+   "journal": "jit",
+   "year": 2018,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 47
+  },
+  {
+   "journal": "jit",
+   "year": 2019,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 54
+  },
+  {
+   "journal": "jit",
+   "year": 2019,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 54
+  },
+  {
+   "journal": "jit",
+   "year": 2020,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 32
+  },
+  {
+   "journal": "jit",
+   "year": 2020,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 31
+  },
+  {
+   "journal": "jit",
+   "year": 2021,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 35
+  },
+  {
+   "journal": "jit",
+   "year": 2021,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 33
+  },
+  {
+   "journal": "jit",
+   "year": 2022,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 38
+  },
+  {
+   "journal": "jit",
+   "year": 2022,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 35
+  },
+  {
+   "journal": "jit",
+   "year": 2023,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 41
+  },
+  {
+   "journal": "jit",
+   "year": 2023,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 37
+  },
+  {
+   "journal": "jit",
+   "year": 2024,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 44
+  },
+  {
+   "journal": "jit",
+   "year": 2024,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 44
+  },
+  {
+   "journal": "jit",
+   "year": 2025,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 47
+  },
+  {
+   "journal": "jit",
+   "year": 2025,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 46
+  },
+  {
+   "journal": "jit",
+   "year": 2026,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 20
+  },
+  {
+   "journal": "jit",
+   "year": 2026,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 18
+  },
+  {
+   "journal": "jsis",
+   "year": 2016,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 52
+  },
+  {
+   "journal": "jsis",
+   "year": 2016,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 11
+  },
+  {
+   "journal": "jsis",
+   "year": 2017,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 30
+  },
+  {
+   "journal": "jsis",
+   "year": 2017,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 7
+  },
+  {
+   "journal": "jsis",
+   "year": 2018,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 33
+  },
+  {
+   "journal": "jsis",
+   "year": 2018,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 8
+  },
+  {
+   "journal": "jsis",
+   "year": 2019,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 36
+  },
+  {
+   "journal": "jsis",
+   "year": 2019,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 9
+  },
+  {
+   "journal": "jsis",
+   "year": 2020,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 39
+  },
+  {
+   "journal": "jsis",
+   "year": 2020,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 10
+  },
+  {
+   "journal": "jsis",
+   "year": 2021,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 42
+  },
+  {
+   "journal": "jsis",
+   "year": 2021,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 11
+  },
+  {
+   "journal": "jsis",
+   "year": 2022,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 45
+  },
+  {
+   "journal": "jsis",
+   "year": 2022,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 13
+  },
+  {
+   "journal": "jsis",
+   "year": 2023,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 48
+  },
+  {
+   "journal": "jsis",
+   "year": 2023,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 14
+  },
+  {
+   "journal": "jsis",
+   "year": 2024,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 51
+  },
+  {
+   "journal": "jsis",
+   "year": 2024,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 15
+  },
+  {
+   "journal": "jsis",
+   "year": 2025,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 54
+  },
+  {
+   "journal": "jsis",
+   "year": 2025,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 17
+  },
+  {
+   "journal": "jsis",
+   "year": 2026,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 25
+  },
+  {
+   "journal": "jsis",
+   "year": 2026,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 8
+  },
+  {
+   "journal": "dss",
+   "year": 2016,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 34
+  },
+  {
+   "journal": "dss",
+   "year": 2016,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 8
+  },
+  {
+   "journal": "dss",
+   "year": 2017,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 37
+  },
+  {
+   "journal": "dss",
+   "year": 2017,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 9
+  },
+  {
+   "journal": "dss",
+   "year": 2018,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 40
+  },
+  {
+   "journal": "dss",
+   "year": 2018,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 10
+  },
+  {
+   "journal": "dss",
+   "year": 2019,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 43
+  },
+  {
+   "journal": "dss",
+   "year": 2019,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 11
+  },
+  {
+   "journal": "dss",
+   "year": 2020,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 46
+  },
+  {
+   "journal": "dss",
+   "year": 2020,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 12
+  },
+  {
+   "journal": "dss",
+   "year": 2021,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 49
+  },
+  {
+   "journal": "dss",
+   "year": 2021,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 14
+  },
+  {
+   "journal": "dss",
+   "year": 2022,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 52
+  },
+  {
+   "journal": "dss",
+   "year": 2022,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 15
+  },
+  {
+   "journal": "dss",
+   "year": 2023,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 30
+  },
+  {
+   "journal": "dss",
+   "year": 2023,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 9
+  },
+  {
+   "journal": "dss",
+   "year": 2024,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 33
+  },
+  {
+   "journal": "dss",
+   "year": 2024,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 10
+  },
+  {
+   "journal": "dss",
+   "year": 2025,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 36
+  },
+  {
+   "journal": "dss",
+   "year": 2025,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 11
+  },
+  {
+   "journal": "dss",
+   "year": 2026,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 30
+  },
+  {
+   "journal": "dss",
+   "year": 2026,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 10
+  },
+  {
+   "journal": "im",
+   "year": 2016,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 41
+  },
+  {
+   "journal": "im",
+   "year": 2016,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 10
+  },
+  {
+   "journal": "im",
+   "year": 2017,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 44
+  },
+  {
+   "journal": "im",
+   "year": 2017,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 11
+  },
+  {
+   "journal": "im",
+   "year": 2018,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 47
+  },
+  {
+   "journal": "im",
+   "year": 2018,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 12
+  },
+  {
+   "journal": "im",
+   "year": 2019,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 50
+  },
+  {
+   "journal": "im",
+   "year": 2019,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 14
+  },
+  {
+   "journal": "im",
+   "year": 2020,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 53
+  },
+  {
+   "journal": "im",
+   "year": 2020,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 15
+  },
+  {
+   "journal": "im",
+   "year": 2021,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 31
+  },
+  {
+   "journal": "im",
+   "year": 2021,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 9
+  },
+  {
+   "journal": "im",
+   "year": 2022,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 34
+  },
+  {
+   "journal": "im",
+   "year": 2022,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 10
+  },
+  {
+   "journal": "im",
+   "year": 2023,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 37
+  },
+  {
+   "journal": "im",
+   "year": 2023,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 11
+  },
+  {
+   "journal": "im",
+   "year": 2024,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 40
+  },
+  {
+   "journal": "im",
+   "year": 2024,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 13
+  },
+  {
+   "journal": "im",
+   "year": 2025,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 43
+  },
+  {
+   "journal": "im",
+   "year": 2025,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 14
+  },
+  {
+   "journal": "im",
+   "year": 2026,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 20
+  },
+  {
+   "journal": "im",
+   "year": 2026,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 7
+  },
+  {
+   "journal": "io",
+   "year": 2016,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 48
+  },
+  {
+   "journal": "io",
+   "year": 2016,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 12
+  },
+  {
+   "journal": "io",
+   "year": 2017,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 51
+  },
+  {
+   "journal": "io",
+   "year": 2017,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 13
+  },
+  {
+   "journal": "io",
+   "year": 2018,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 54
+  },
+  {
+   "journal": "io",
+   "year": 2018,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 15
+  },
+  {
+   "journal": "io",
+   "year": 2019,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 32
+  },
+  {
+   "journal": "io",
+   "year": 2019,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 9
+  },
+  {
+   "journal": "io",
+   "year": 2020,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 35
+  },
+  {
+   "journal": "io",
+   "year": 2020,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 10
+  },
+  {
+   "journal": "io",
+   "year": 2021,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 38
+  },
+  {
+   "journal": "io",
+   "year": 2021,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 11
+  },
+  {
+   "journal": "io",
+   "year": 2022,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 41
+  },
+  {
+   "journal": "io",
+   "year": 2022,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 13
+  },
+  {
+   "journal": "io",
+   "year": 2023,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 44
+  },
+  {
+   "journal": "io",
+   "year": 2023,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 14
+  },
+  {
+   "journal": "io",
+   "year": 2024,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 47
+  },
+  {
+   "journal": "io",
+   "year": 2024,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 15
+  },
+  {
+   "journal": "io",
+   "year": 2025,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 50
+  },
+  {
+   "journal": "io",
+   "year": 2025,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 17
+  },
+  {
+   "journal": "pmj",
+   "year": 2016,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 30
+  },
+  {
+   "journal": "pmj",
+   "year": 2016,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 28
+  },
+  {
+   "journal": "pmj",
+   "year": 2017,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 33
+  },
+  {
+   "journal": "pmj",
+   "year": 2017,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 30
+  },
+  {
+   "journal": "pmj",
+   "year": 2018,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 36
+  },
+  {
+   "journal": "pmj",
+   "year": 2018,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 32
+  },
+  {
+   "journal": "pmj",
+   "year": 2019,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 39
+  },
+  {
+   "journal": "pmj",
+   "year": 2019,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 39
+  },
+  {
+   "journal": "pmj",
+   "year": 2020,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 42
+  },
+  {
+   "journal": "pmj",
+   "year": 2020,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 41
+  },
+  {
+   "journal": "pmj",
+   "year": 2021,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 45
+  },
+  {
+   "journal": "pmj",
+   "year": 2021,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 43
+  },
+  {
+   "journal": "pmj",
+   "year": 2022,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 48
+  },
+  {
+   "journal": "pmj",
+   "year": 2022,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 45
+  },
+  {
+   "journal": "pmj",
+   "year": 2023,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 51
+  },
+  {
+   "journal": "pmj",
+   "year": 2023,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 47
+  },
+  {
+   "journal": "pmj",
+   "year": 2024,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 54
+  },
+  {
+   "journal": "pmj",
+   "year": 2024,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 54
+  },
+  {
+   "journal": "pmj",
+   "year": 2025,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 32
+  },
+  {
+   "journal": "pmj",
+   "year": 2025,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 31
+  },
+  {
+   "journal": "pmj",
+   "year": 2026,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 30
+  },
+  {
+   "journal": "pmj",
+   "year": 2026,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 28
+  },
+  {
+   "journal": "tem",
+   "year": 2016,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 37
+  },
+  {
+   "journal": "tem",
+   "year": 2016,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 34
+  },
+  {
+   "journal": "tem",
+   "year": 2017,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 40
+  },
+  {
+   "journal": "tem",
+   "year": 2017,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 36
+  },
+  {
+   "journal": "tem",
+   "year": 2018,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 43
+  },
+  {
+   "journal": "tem",
+   "year": 2018,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 43
+  },
+  {
+   "journal": "tem",
+   "year": 2019,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 46
+  },
+  {
+   "journal": "tem",
+   "year": 2019,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 45
+  },
+  {
+   "journal": "tem",
+   "year": 2020,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 49
+  },
+  {
+   "journal": "tem",
+   "year": 2020,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 47
+  },
+  {
+   "journal": "tem",
+   "year": 2021,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 52
+  },
+  {
+   "journal": "tem",
+   "year": 2021,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 49
+  },
+  {
+   "journal": "tem",
+   "year": 2022,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 30
+  },
+  {
+   "journal": "tem",
+   "year": 2022,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 26
+  },
+  {
+   "journal": "tem",
+   "year": 2023,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 33
+  },
+  {
+   "journal": "tem",
+   "year": 2023,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 33
+  },
+  {
+   "journal": "tem",
+   "year": 2024,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 36
+  },
+  {
+   "journal": "tem",
+   "year": 2024,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 35
+  },
+  {
+   "journal": "tem",
+   "year": 2025,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 39
+  },
+  {
+   "journal": "tem",
+   "year": 2025,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 37
+  },
+  {
+   "journal": "tem",
+   "year": 2026,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 20
+  },
+  {
+   "journal": "tem",
+   "year": 2026,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 17
+  },
+  {
+   "journal": "database",
+   "year": 2016,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 44
+  },
+  {
+   "journal": "database",
+   "year": 2016,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 40
+  },
+  {
+   "journal": "database",
+   "year": 2017,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 47
+  },
+  {
+   "journal": "database",
+   "year": 2017,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 47
+  },
+  {
+   "journal": "database",
+   "year": 2018,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 50
+  },
+  {
+   "journal": "database",
+   "year": 2018,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 49
+  },
+  {
+   "journal": "database",
+   "year": 2019,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 53
+  },
+  {
+   "journal": "database",
+   "year": 2019,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 51
+  },
+  {
+   "journal": "database",
+   "year": 2020,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 31
+  },
+  {
+   "journal": "database",
+   "year": 2020,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 28
+  },
+  {
+   "journal": "database",
+   "year": 2021,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 34
+  },
+  {
+   "journal": "database",
+   "year": 2021,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 30
+  },
+  {
+   "journal": "database",
+   "year": 2022,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 37
+  },
+  {
+   "journal": "database",
+   "year": 2022,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 37
+  },
+  {
+   "journal": "database",
+   "year": 2023,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 40
+  },
+  {
+   "journal": "database",
+   "year": 2023,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 39
+  },
+  {
+   "journal": "database",
+   "year": 2024,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 43
+  },
+  {
+   "journal": "database",
+   "year": 2024,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 41
+  },
+  {
+   "journal": "database",
+   "year": 2025,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 46
+  },
+  {
+   "journal": "database",
+   "year": 2025,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 43
+  },
+  {
+   "journal": "database",
+   "year": 2026,
+   "dim": "total",
+   "key_a": null,
+   "key_b": null,
+   "n": 25
+  },
+  {
+   "journal": "database",
+   "year": 2026,
+   "dim": "with_abstract",
+   "key_a": null,
+   "key_b": null,
+   "n": 21
+  }
+ ],
+ "params": {
+  "timezone": "Asia/Taipei",
+  "tracking_start_year": 2016,
+  "current_year_cutoff": "07-01",
+  "growth_window_years": 3,
+  "baseline_years": 3,
+  "low_coverage_threshold": 0.5
+ },
+ "snapshot": {
+  "number": 12,
+  "as_of": "2026-11-11T17:30:00Z"
+ }
+}

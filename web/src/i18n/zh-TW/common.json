@@ -31,5 +31,17 @@
     "external": {
       "newTab": "（開新分頁）"
     }
+  },
+  "footer": {
+    "source": {
+      "text": "資料來源　OpenAlex 開放書目資料"
+    },
+    "links": {
+      "coverage": "資料涵蓋範圍",
+      "notice": "使用須知"
+    },
+    "update": {
+      "frequency": "每週更新一次"
+    }
   }
 }

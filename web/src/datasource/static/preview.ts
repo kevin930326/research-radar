@@ -8,6 +8,7 @@ import type {
   ClassificationBlock,
   ClassificationField,
   ConstructItem,
+  CubeRow,
   DisplayName,
   DisplayNames,
   HypothesisItem,
@@ -16,10 +17,11 @@ import type {
   Provenance,
   ResearchModelBlock,
   SnapshotRef,
+  TrendParams,
   ZhSummaryBlock,
 } from "../../generated/model";
 import { AbstractSource, AiBlockState, EvidenceType, InputKind, SupportLevel } from "../../generated/model";
-import type { DemoManifest, DemoPaper, DemoPaperIndex, DemoPaperKind, DemoPaperRow } from "../types";
+import type { DemoCoverage, DemoManifest, DemoPaper, DemoPaperIndex, DemoPaperKind, DemoPaperRow } from "../types";
 
 /** 匯出放在網站的哪個位置（manifest 的檔案路徑相對於它；ADR-0061 一 A）。 */
 export const PREVIEW_BASE = "/preview/";
@@ -146,7 +148,77 @@ export async function loadDemoManifest(fetchImpl: typeof fetch = fetch): Promise
   const files = array(manifest.files, "manifest.json", "files").map((entry, index) =>
     string(object(entry, "manifest.json", `files[${index}]`).path, "manifest.json", `files[${index}].path`),
   );
-  return { snapshot: manifestSnapshot, exportId, pageSize, files };
+  const summaryRaw = object(manifest.summary, "manifest.json", "summary");
+  const summary = {
+    paperCount: integer(summaryRaw.paper_count, "manifest.json", "summary.paper_count", 0),
+    withAbstractCount: integer(summaryRaw.with_abstract_count, "manifest.json", "summary.with_abstract_count", 0),
+    fullContentCount: integer(summaryRaw.full_content_count, "manifest.json", "summary.full_content_count", 0),
+  };
+  return { snapshot: manifestSnapshot, exportId, pageSize, files, summary };
+}
+
+const CUBE_DIMS: readonly string[] = ["total", "with_abstract", "pending_classification", "topic", "topic_pair", "method"];
+const MONTH_DAY = /^(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])$/;
+
+function trendParams(value: unknown, file: string): TrendParams {
+  const raw = object(value, file, "params");
+  const threshold = raw.low_coverage_threshold;
+  if (typeof threshold !== "number" || !Number.isFinite(threshold) || threshold < 0 || threshold > 1) {
+    throw new PreviewFileError(file, "params.low_coverage_threshold");
+  }
+  return {
+    timezone: string(raw.timezone, file, "params.timezone"),
+    tracking_start_year: integer(raw.tracking_start_year, file, "params.tracking_start_year", 1900),
+    current_year_cutoff: string(raw.current_year_cutoff, file, "params.current_year_cutoff", MONTH_DAY),
+    growth_window_years: integer(raw.growth_window_years, file, "params.growth_window_years", 1),
+    baseline_years: integer(raw.baseline_years, file, "params.baseline_years", 1),
+    low_coverage_threshold: threshold,
+  };
+}
+
+function cubeRow(value: unknown, file: string, at: number): CubeRow {
+  const field = `rows[${at}]`;
+  const raw = object(value, file, field);
+  const dim = raw.dim;
+  if (typeof dim !== "string" || !CUBE_DIMS.includes(dim)) throw new PreviewFileError(file, `${field}.dim`);
+  const key = (name: "key_a" | "key_b") => nullable(raw[name], (item) => string(item, file, `${field}.${name}`));
+  return {
+    journal: string(raw.journal, file, `${field}.journal`, JOURNAL_KEY),
+    year: integer(raw.year, file, `${field}.year`, 1),
+    dim: dim as CubeRow["dim"],
+    key_a: key("key_a"),
+    key_b: key("key_b"),
+    n: integer(raw.n, file, `${field}.n`, 0),
+  };
+}
+
+/**
+ * 讀 manifest 指到的計數方塊 `cube.json` 與分類表 `taxonomy.json`（資料涵蓋範圍，Story 3.15），檢查過才回傳：
+ * 兩個檔都要列在 manifest 裡、快照與匯出編號和 manifest 相同。`fetchImpl` 給單元測試換成讀範例檔。
+ */
+export async function loadDemoCoverage(manifest: DemoManifest, fetchImpl: typeof fetch = fetch): Promise<DemoCoverage> {
+  const listed = new Set(manifest.files);
+  const path = (name: string) => {
+    const file = `${manifest.exportId}/${name}`;
+    if (!listed.has(file)) throw new PreviewFileError("manifest.json", `files: ${name}`);
+    return file;
+  };
+  const expected = { snapshot: manifest.snapshot, exportId: manifest.exportId };
+  const cubeFile = path("cube.json");
+  const taxonomyFile = path("taxonomy.json");
+  const [cubeRaw, taxonomyRaw] = await Promise.all([readJson(cubeFile, fetchImpl), readJson(taxonomyFile, fetchImpl)]);
+  const cube = object(cubeRaw, cubeFile, "(root)");
+  sameExport(cube, cubeFile, expected);
+  const taxonomy = object(taxonomyRaw, taxonomyFile, "(root)");
+  sameExport(taxonomy, taxonomyFile, expected);
+  return {
+    cube: {
+      rows: array(cube.rows, cubeFile, "rows").map((row, at) => cubeRow(row, cubeFile, at)),
+      params: trendParams(cube.params, cubeFile),
+      snapshot: manifest.snapshot,
+    },
+    names: displayNames(taxonomy.names, taxonomyFile),
+  };
 }
 
 /**

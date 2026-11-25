@@ -16,9 +16,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from radar.config import load_context_values, load_domain_config, load_taxonomy
+from radar.config import load_context_values, load_domain_config, load_taxonomy, load_trend_config
 from radar.domain.ai_blocks import AiProduct
 from radar.domain.ai_outputs import InputKind, build_llm_input
+from radar.domain.contracts import build_trend_params
 from radar.domain.fingerprints import input_sha256
 from radar.domain.papers import PaperOrigin
 from radar.domain.parsers.openalex import parse_openalex_work
@@ -112,6 +113,9 @@ def demo_setup(canaries: Sequence[str] = ()) -> DemoExportSetup:
         context_values=load_context_values(CONFIG_ENV),
         journals=load_domain_config(CONFIG_ENV).journals,
         exclusions=load_domain_config(CONFIG_ENV).demo_publishers.exclusions(),
+        params=build_trend_params(
+            load_trend_config(CONFIG_ENV), load_domain_config(CONFIG_ENV).journals
+        ),
         canaries=tuple(canaries),
     )
 

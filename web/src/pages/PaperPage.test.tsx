@@ -130,8 +130,8 @@ describe("paper page: three AI blocks with content", () => {
     }
     expect(topics[0]).toContain('href="/search?topic=platforms"');
     expect(topics[1]).toContain('href="/search?topic=trust"');
-    // 整頁的連結只有站外的 EXTERNAL_LINKS 個、這兩個主題與一個方法（下一條）。
-    expect(count(html, "<a ")).toBe(EXTERNAL_LINKS + 2 + 1);
+    // 整頁的連結只有站外的 EXTERNAL_LINKS 個、這兩個主題與一個方法（下一條），加上資料日期列的日期（Story 3.15 連到資料涵蓋範圍）。
+    expect(count(html, "<a ")).toBe(EXTERNAL_LINKS + 2 + 1 + 1);
   });
 
   it("method tags link to search with the method condition in the same tab", () => {
@@ -150,7 +150,7 @@ describe("paper page: three AI blocks with content", () => {
       .split(/<[^>]+>/)
       .map((segment) => segment.replace(/\s+/g, ""))
       .filter((segment) => segment !== "");
-    expect(LATER_STORIES.length).toBeGreaterThan(9);
+    expect(LATER_STORIES.length).toBeGreaterThan(8);
     for (const text of LATER_STORIES) {
       expect(segments).not.toContain(text);
     }

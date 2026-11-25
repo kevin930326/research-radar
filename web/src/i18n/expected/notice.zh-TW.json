@@ -14,7 +14,8 @@
     "12. 找論文第 4 點、13. 我的文獻庫第 3、4、6 點（2026-11-20 改過的版本：已加入＋移出、選取列「已選 N 篇」＋「開啟全文」＋「取消」；「Kevin 的決定」第 86～91 項）",
     "7. 論文清單（示範站版：標題、標題裡的字、兩個「只看…的」、每列的完整內容標示；State Patterns「7. 論文清單」）與示範站導覽列（範圍標示、論文）。其中 demo:demo.papers.separator（「、」，標題裡一個欄位選了好幾個值時的接法）是 Story 3.14 自訂的寫法、沒有出處（列給 Kevin）：放在 strings 只是因為 i18n 每一條都要在這份清單裡，單一個標點的逐字檢查沒有作用",
     "8. 論文頁（示範站版：「示範站只有書目」的說明與兩個連結；State Patterns「8. 論文頁」示範站只寫「沒有產生成功」；Story 3.9）",
-    "8. 論文頁（輔助欄「引用」：複製 APA 引用、已複製、下載 RIS、下載 BibTeX；Story 3.10）"
+    "8. 論文頁（輔助欄「引用」：複製 APA 引用、已複製、下載 RIS、下載 BibTeX；Story 3.10）",
+    "9. 資料涵蓋範圍（標題、說明、三個讀數、摘要覆蓋率表與圖例、Elsevier 的說明、名詞說明；State Patterns「9. 資料涵蓋範圍」）與全站頁尾（資料來源、資料涵蓋範圍、使用須知、更新頻率；Story 3.15）。說明、表格的提示與指到一格的字、圖例、Elsevier 的前兩句與名詞說明的解釋只在設計稿（docs/ux/reference/screens/coverage.html），放 otherSources；說明與名詞說明裡的「14 本」「2016 年」「#12」照設計稿寫死（coverage-text.test.ts 檢查和 config/journals.yaml 一致），圖例的門檻由 params 帶入（佔位符）"
   ],
   "strings": {
     "notice:notice.page.title": "使用須知",
@@ -187,7 +188,26 @@
     "paper:paper.cite.copyApa": "複製 APA 引用",
     "paper:paper.cite.copied": "已複製",
     "paper:paper.cite.downloadRis": "下載 RIS",
-    "paper:paper.cite.downloadBibtex": "下載 BibTeX"
+    "paper:paper.cite.downloadBibtex": "下載 BibTeX",
+    "coverage:coverage.page.title": "資料涵蓋範圍",
+    "coverage:coverage.readings.total": "收錄",
+    "coverage:coverage.readings.withAbstract": "有摘要",
+    "coverage:coverage.readings.thisWeek": "本週新增",
+    "coverage:coverage.readings.fullContent": "有完整內容",
+    "coverage:coverage.readings.unit": "篇",
+    "coverage:coverage.table.title": "摘要覆蓋率",
+    "coverage:coverage.table.journal": "期刊",
+    "coverage:coverage.table.partialYear": "未滿一年",
+    "coverage:coverage.legend.empty": "這一年沒有論文",
+    "coverage:coverage.elsevier.list": "JSIS、DSS、I&M、I&O",
+    "coverage:coverage.terms.title": "名詞說明",
+    "coverage:coverage.terms.scope": "追蹤範圍",
+    "coverage:coverage.terms.outside": "追蹤範圍外",
+    "coverage:coverage.terms.abstract": "有摘要",
+    "coverage:coverage.terms.snapshot": "快照編號",
+    "common:footer.links.coverage": "資料涵蓋範圍",
+    "common:footer.links.notice": "使用須知",
+    "common:footer.update.frequency": "每週更新一次"
   },
   "absent": [
     "問答的資料怎麼處理",
@@ -332,6 +352,66 @@
     "demo:demo.filter.clearTitle": {
       "text": "清除文字",
       "source": "docs/ux/reference/screens/papers-demo.html"
+    },
+    "coverage:coverage.intro.text": {
+      "text": "追蹤 14 本資管期刊、2016 年至今的論文。資料來自 OpenAlex，每週更新一次。",
+      "source": "docs/ux/reference/screens/coverage.html"
+    },
+    "coverage:coverage.table.pickPointer": {
+      "text": "指到一格看篇數",
+      "source": "docs/ux/reference/screens/coverage.html"
+    },
+    "coverage:coverage.table.pickTouch": {
+      "text": "點一格看篇數",
+      "source": "docs/ux/reference/screens/coverage.html"
+    },
+    "coverage:coverage.pick.cell": {
+      "text": "{{journal}} · {{year}}",
+      "source": "docs/ux/reference/screens/coverage.html"
+    },
+    "coverage:coverage.pick.counts": {
+      "text": "{{total}} 篇裡 {{withAbstract}} 篇有摘要",
+      "source": "docs/ux/reference/screens/coverage.html"
+    },
+    "coverage:coverage.legend.full": {
+      "text": "{{percent}} 以上",
+      "source": "docs/ux/reference/screens/coverage.html"
+    },
+    "coverage:coverage.legend.low": {
+      "text": "未滿 {{percent}}，資料可能不全",
+      "source": "docs/ux/reference/screens/coverage.html"
+    },
+    "coverage:coverage.elsevier.journals": {
+      "text": "{{journals}} 這四本由 Elsevier 出版，在 OpenAlex 上大多沒有摘要。",
+      "source": "docs/ux/reference/screens/coverage.html"
+    },
+    "coverage:coverage.elsevier.effect": {
+      "text": "沒有摘要的論文只根據標題分類，也沒有研究模型，所以趨勢裡這四本的分類比較不準，關係排行表也數不到它們。",
+      "source": "docs/ux/reference/screens/coverage.html"
+    },
+    "coverage:coverage.elsevier.note": {
+      "text": "這幾本期刊的論文可能有人研究，只是我們讀不到摘要。",
+      "source": "docs/ux/reference/screens/coverage.html"
+    },
+    "coverage:coverage.terms.scopeText": {
+      "text": "14 本期刊、2016 年至今的論文。",
+      "source": "docs/ux/reference/screens/coverage.html"
+    },
+    "coverage:coverage.terms.abstractText": {
+      "text": "這篇論文在 OpenAlex 有摘要。",
+      "source": "docs/ux/reference/screens/coverage.html"
+    },
+    "coverage:coverage.terms.snapshotText": {
+      "text": "資料每整理一次就多一號。#12 是第 12 次整理出來的資料。",
+      "source": "docs/ux/reference/screens/coverage.html"
+    },
+    "common:footer.source.text": {
+      "text": "資料來源　OpenAlex 開放書目資料",
+      "source": "docs/ux/reference/screens/coverage.html"
+    },
+    "coverage:coverage.terms.outsideText": {
+      "text": "不在 14 本追蹤期刊或 2016 年以前，不計入趨勢與關係排行表。",
+      "source": "docs/ux/reference/screens/coverage.html"
     }
   }
 }

@@ -10,18 +10,22 @@
   `scope`）由框架擋下，一樣是 422 `request_invalid`。
 - 這裡只做形狀轉換（論文列用 `domain/contracts.PaperRow`），條件的驗證在
   `domain/paper_list.parse_paper_list_filters`，看不看得到在 repo 的查詢裡。
-- 處理函式的名稱就是 operationId（`list_papers`，全站唯一）。一定要在 `mount_web` 之前裝。
+- `GET /api/v1/cube`：計數方塊（Story 3.15、ADR-0062）：`total` 與 `with_abstract` 的計數、
+  `params`、`snapshot`，只有計數、不給比例（AD-19）。要登入（沒登入 401），帶 `no-store`；內容是
+  實驗室看得到的算數論文的篇數，每位成員看到的一樣，所以不比對 `X-Radar-Expected-Member`。和論文
+  清單裝在一起：計數方塊的每一格都要能用論文清單查出相同篇數（AD-19「點得回去」）。
+- 處理函式的名稱就是 operationId（`list_papers`、`cube`，全站唯一）。一定要在 `mount_web` 之前裝。
 """
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import partial
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, FastAPI, Query, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
 
-from radar.domain.contracts import PaperRow, SnapshotRef
+from radar.domain.contracts import CubeResponse, PaperRow, SnapshotRef, TrendParams
 from radar.domain.domain_config import JournalsConfig
 from radar.domain.errors import ErrorCode
 from radar.domain.paper_list import (
@@ -40,13 +44,19 @@ from radar.entrypoints.api.auth import (
     API_V1_PREFIX,
     NO_STORE,
     AuthRoutes,
+    current_member,
     member_as_expected,
     origin_dependency,
 )
 from radar.entrypoints.api.problems import ApiProblemError
 from radar.entrypoints.api.web import web_mounted
 from radar.entrypoints.bootstrap import Database
+from radar.services import cube as cube_service
 from radar.services import paper_list as paper_list_service
+
+
+def _cube_not_configured(_viewer: MemberViewer) -> CubeResponse:
+    raise RuntimeError("計數方塊的讀取函式沒有組進路由")
 
 
 @dataclass(frozen=True)
@@ -56,17 +66,24 @@ class PaperListRoutes:
     `list_page`：成員在這些條件下、從這個位置之後的一頁。
     `parse_filters`：API 收到的條件 → 驗證過的條件；不合法丟 `InvalidPaperListQueryError`。
     `journal_key`：ISSN-L → 設定檔的期刊代號（不是追蹤的期刊回 None）。
+    `load_cube`：成員看得到的計數方塊（Story 3.15）。沒給時呼叫會丟 `RuntimeError`（只測清單的
+    測試不用組它；正式組裝一律由 `build_paper_list_routes` 給）。
     """
 
     list_page: Callable[[MemberViewer, PaperListFilters, PaperListCursor | None], PaperListPage]
     parse_filters: Callable[[PaperListQuery], PaperListFilters]
     journal_key: Callable[[str | None], str | None]
+    load_cube: Callable[[MemberViewer], CubeResponse] = field(default=_cube_not_configured)
 
 
 def build_paper_list_routes(
-    database: Database, journals: JournalsConfig, taxonomy: Taxonomy
+    database: Database, journals: JournalsConfig, taxonomy: Taxonomy, params: TrendParams
 ) -> PaperListRoutes:
-    """用資料庫、追蹤的期刊（代號 ↔ ISSN-L、追蹤起始年）與分類表（主題、方法代碼）組好路由。"""
+    """用資料庫、追蹤的期刊（代號 ↔ ISSN-L、追蹤起始年）、分類表（主題、方法代碼）與計數方塊的
+    `params`（`contracts.build_trend_params` 從設定組好）組好路由。"""
+
+    def load_cube(viewer: MemberViewer) -> CubeResponse:
+        return cube_service.get_cube(viewer, database, journals=journals, params=params)
 
     def list_page(
         viewer: MemberViewer, filters: PaperListFilters, after: PaperListCursor | None
@@ -77,6 +94,7 @@ def build_paper_list_routes(
         list_page=list_page,
         parse_filters=partial(parse_paper_list_filters, journals=journals, taxonomy=taxonomy),
         journal_key=partial(journal_key_for, journals),
+        load_cube=load_cube,
     )
 
 
@@ -157,5 +175,15 @@ def install_paper_list_routes(
         page = routes.list_page(member.viewer, filters, after)
         response.headers.update(NO_STORE)
         return paper_list_response(page, routes.journal_key)
+
+    @router.get("/cube")
+    def cube(request: Request, response: Response) -> CubeResponse:
+        """計數方塊：每本追蹤期刊每一年算數的論文篇數（`total`）與其中有摘要的篇數
+        （`with_abstract`），加上規則用到的設定值（`params`）與目前已發佈的快照（還沒有是 null）。
+        只有計數，比例由前端算。沒登入 401。"""
+        member = current_member(request, auth_routes)
+        found = routes.load_cube(member.viewer)
+        response.headers.update(NO_STORE)
+        return found
 
     app.include_router(router)

@@ -135,6 +135,7 @@ def test_openapi_lists_the_current_endpoints() -> None:
         Endpoint("DELETE", "/api/v1/library/{paper_id}"),
         Endpoint("POST", "/api/v1/library/{paper_id}/restore"),
         Endpoint("GET", "/api/v1/papers"),
+        Endpoint("GET", "/api/v1/cube"),
     }
 
 

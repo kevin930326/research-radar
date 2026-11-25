@@ -1,6 +1,9 @@
 // 整頁外框（ADR-0054）：導覽列、內容兩塊寬度 100%、最寬 1280px（含左右留白各 96px，內容 1088px）、左右置中。
 // 視窗 1920 時兩塊都是 x 320、寬 1280，內容從 416 開始、寬 1088；視窗 1280 時和改之前一樣（x 0、內容從 96 開始）。
-// 預期值都是寫死的；1440 與 1280 以下各斷點另由 layout.spec.ts 量使用須知。頁尾還沒做（Story 3.15）。
+// 預期值都是寫死的；1440 與 1280 以下各斷點另由 layout.spec.ts 量使用須知。
+// 全站頁尾（Story 3.15）也在同一個外框裡：寬度、左右留白和導覽列、內容一樣，在 main 正下方、整頁最底下；
+// 高度 900px 以上 97px（上框線 1＋上內距 22＋連結可點範圍 44＋下內距 30），899px 以下 101px
+//（上框線 1＋上內距 10＋連結 44＋列距 4＋一行 16＋下內距 26）。
 import type { Page } from "@playwright/test";
 
 import { expect, test } from "./fixtures.ts";
@@ -90,4 +93,29 @@ for (const [widthText, expected] of Object.entries(FRAMES)) {
     expect(rect.width, "login column width").toBeCloseTo(360, 0);
     expect(rect.x, "login column x").toBeCloseTo((width - 360) / 2, 0);
   });
+}
+
+/** 頁尾的高度（寫死；算法見檔頭）。 */
+const FOOTER_HEIGHT: Record<number, number> = { 1920: 97, 1280: 97, 390: 101 };
+const FOOTER_FRAMES: Record<number, Frame> = { ...FRAMES, 390: { x: 0, width: 390, contentX: 20, contentWidth: 350 } };
+
+for (const [widthText, expected] of Object.entries(FOOTER_FRAMES)) {
+  const width = Number(widthText);
+  for (const [site, path] of [
+    ...[...WITH_NAV, "/coverage"].map((entry) => [member, entry] as const),
+    [demo, "/papers"] as const,
+    [demo, "/coverage"] as const,
+  ]) {
+    test(`page frame at ${width}px: site footer of ${site.name} ${path}`, async ({ page }) => {
+      await page.setViewportSize({ width, height: 900 });
+      await page.goto(`${site.baseURL}${path}`);
+      await expect(page.locator("main h1")).toBeVisible();
+      const footer = await box(page, "footer[data-site-footer]");
+      expectFrame(footer, expected, "footer");
+      expect(footer.height, "footer height").toBeCloseTo(FOOTER_HEIGHT[width]!, 0);
+      // 和 main 一樣寬、在 main 正下方。
+      const main = await box(page, "main");
+      expect(footer.y, "footer top").toBeCloseTo(main.y + main.height, 0);
+    });
+  }
 }

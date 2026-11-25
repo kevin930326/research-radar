@@ -62,11 +62,14 @@ from radar.domain.contracts import (
     FullTextLinks,
     PaperAbstract,
     SnapshotRef,
+    TrendParams,
     build_display_names,
     doi_url,
     openalex_url,
 )
+from radar.domain.cube import build_cube_rows
 from radar.domain.demo_export import (
+    CUBE_FILE,
     DEMO_FILE_PATH_PATTERN,
     MANIFEST_FILE,
     PAPERS_DIR,
@@ -77,6 +80,7 @@ from radar.domain.demo_export import (
     TITLES_FILE,
     DemoBiblio,
     DemoClassificationBlock,
+    DemoCube,
     DemoExportFailure,
     DemoExportRun,
     DemoFileEntry,
@@ -129,6 +133,7 @@ from radar.repo.papers import (
     list_demo_publisher_facts,
 )
 from radar.repo.snapshots import find_latest_published_snapshot
+from radar.repo.stats import list_cube_counts
 from radar.services.ai_blocks import demo_ai_block_settings
 
 log = structlog.get_logger(__name__)
@@ -141,13 +146,15 @@ class DemoExportSetup:
     """匯出要的設定（入口讀好設定檔組成；services 不讀設定）：模型（判定 AI 區塊「目前這組鍵」）、
     分類表、情境值清單、追蹤的期刊（ISSN-L → 期刊代號、顯示名稱）、示範站不放完整內容的出版社與
     期刊（`config/demo_publishers.yaml`）、自我檢查要找的金絲雀字串（測試環境放；正式環境是空的）、
-    `RADAR_DEMO_PUBLISH`（預設關）。"""
+    `RADAR_DEMO_PUBLISH`（預設關）。`params` 是 `cube.json` 的規則設定值
+    （`contracts.build_trend_params` 組好，Story 3.15）。"""
 
     models: ModelsConfig
     taxonomy: Taxonomy
     context_values: ContextValues
     journals: JournalsConfig
     exclusions: PublisherExclusions
+    params: TrendParams
     canaries: tuple[str, ...] = ()
     publish: bool = False
 
@@ -393,6 +400,15 @@ def _build_and_check(
             # 舊的 demo_eligible 還是 true、但出版社或期刊在排除清單裡（清單改了還沒 reparse）。
             log.warning("示範站可用的舊判定和排除清單不一致，這幾篇不給完整內容", count=stale)
         files = _data_files(setup, ref, export_id, papers)
+        # 計數方塊（Story 3.15）：同一個交易、同一個訪客身分經 repo 數（AD-5、AD-19），和成員版的
+        # 計數方塊同一個查詢；自我檢查再用 papers-index.json 重算每一格。
+        cube = DemoCube(
+            snapshot=ref,
+            export_id=export_id,
+            params=setup.params,
+            rows=build_cube_rows(list_cube_counts(viewer, connection), setup.journals),
+        )
+        files[data_file_path(export_id, CUBE_FILE)] = dump_demo_file(cube)
         manifest = DemoManifest(
             snapshot=ref,
             export_id=export_id,
@@ -594,8 +610,8 @@ _TAKEN_OVER_DIR: Final = {
 class _Progress:
     """這一次匯出做到哪。`run_demo_export` 建，失敗處理看它（中斷也一樣看得到）：
 
-    - `switched`：manifest 已經換成這一次（已發佈）。`_swap_manifest` 換名成功時設；換名之後、設好之前
-      就停下時，由 `_publish` 的清理重讀 manifest 補設。
+    - `switched`：manifest 已經換成這一次（已發佈）。`_swap_manifest` 換名成功時設；換名之後、設好
+      之前就停下時，由 `_publish` 的清理重讀 manifest 補設。
     - `replacing`：已經開始換 manifest 的名（`_swap_manifest` 換名前設）；清理只在這之後才需要重讀
       manifest 看換了沒有。
     - `written`：這次寫的匯出目錄的 (`st_dev`, `st_ino`)（取自改名前的暫存目錄，改名不變）。改名前
@@ -1061,7 +1077,8 @@ def _clean_up_before_switch(out: _Output, run: DemoExportRun, progress: _Progres
     """`_publish` 寫目錄到換 manifest 這一段停下時的清理（還拿著檔案鎖）。已經開始換 manifest 的名
     （`replacing`）時先重讀 manifest：換名已經成功、只是還沒設 `switched` 就停下（例如換名那一下收到
     Ctrl-C）時，manifest 已經指向這一次，補設 `switched`、不刪目錄（已發佈、待補記，ADR-0061）；讀不
-    出 manifest 時不知道讀者看不看得到，目錄留著。確定沒換時才刪這次寫的目錄（`_discard_export_dir`）。"""
+    出 manifest 時不知道讀者看不看得到，目錄留著。確定沒換時才刪這次寫的目錄
+    （`_discard_export_dir`）。"""
     if progress.switched:
         return
     points_here = _manifest_points_here(out, run) if progress.replacing else False

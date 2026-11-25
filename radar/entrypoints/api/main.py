@@ -20,8 +20,9 @@ from radar.config import (
     load_models_config,
     load_settings,
     load_taxonomy,
+    load_trend_config,
 )
-from radar.domain.contracts import build_client_config, build_display_names
+from radar.domain.contracts import build_client_config, build_display_names, build_trend_params
 from radar.entrypoints.api.app import create_app
 from radar.entrypoints.api.auth import AuthRoutes, build_auth_routes, install_auth_routes
 from radar.entrypoints.api.library import (
@@ -98,6 +99,8 @@ def main() -> int:
         # 登入設定的組合不合法（正式環境開假登入、假登入與 Google 登入同時開、試用環境缺 Access
         # 設定等）也不啟動（ADR-0046）。
         auth_settings = load_auth_settings()
+        # 計數方塊的 params（Story 3.15、ADR-0062）：分界日、每組幾年、低覆蓋率門檻等。
+        trend_config = load_trend_config()
     except ConfigError as exc:
         log.error("設定錯誤，無法啟動", service="api", problems=exc.problems)
         return 1
@@ -126,7 +129,12 @@ def main() -> int:
             _utc_now,
         ),
         library_routes=build_library_routes(probes.database, paper_setup.journals),
-        paper_list_routes=build_paper_list_routes(probes.database, paper_setup.journals, taxonomy),
+        paper_list_routes=build_paper_list_routes(
+            probes.database,
+            paper_setup.journals,
+            taxonomy,
+            build_trend_params(trend_config, paper_setup.journals),
+        ),
     )
     # 頁面殼另外掛、不經 create_app 的 web_dist 參數：關機的整合測試會把 create_app 換成只收
     # readiness_check 的版本、再加自己的路由；分開掛，那些路由才排在「其餘路徑」之前。

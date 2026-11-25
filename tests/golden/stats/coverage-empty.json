@@ -1,0 +1,76 @@
+{
+  "description": "沒有任何列：每一格都算不出來（「—」），全部的比例也是 null（不是 0%）",
+  "params": {
+    "timezone": "Asia/Taipei",
+    "tracking_start_year": 2023,
+    "current_year_cutoff": "07-01",
+    "growth_window_years": 3,
+    "baseline_years": 3,
+    "low_coverage_threshold": 0.6
+  },
+  "journals": [
+    "misq",
+    "isr"
+  ],
+  "rows": [],
+  "cases": [
+    {
+      "name": "沒有論文",
+      "as_of": "2024-03-01T00:00:00Z",
+      "expected": {
+        "years": [
+          2023,
+          2024
+        ],
+        "currentYear": 2024,
+        "rows": [
+          {
+            "journal": "misq",
+            "cells": [
+              {
+                "year": 2023,
+                "total": 0,
+                "withAbstract": 0,
+                "ratio": null,
+                "reason": "empty_year",
+                "low": false
+              },
+              {
+                "year": 2024,
+                "total": 0,
+                "withAbstract": 0,
+                "ratio": null,
+                "reason": "empty_year",
+                "low": false
+              }
+            ]
+          },
+          {
+            "journal": "isr",
+            "cells": [
+              {
+                "year": 2023,
+                "total": 0,
+                "withAbstract": 0,
+                "ratio": null,
+                "reason": "empty_year",
+                "low": false
+              },
+              {
+                "year": 2024,
+                "total": 0,
+                "withAbstract": 0,
+                "ratio": null,
+                "reason": "empty_year",
+                "low": false
+              }
+            ]
+          }
+        ],
+        "total": 0,
+        "withAbstract": 0,
+        "ratio": null
+      }
+    }
+  ]
+}

@@ -1,0 +1,265 @@
+// 資料涵蓋範圍（Story 3.15；EXPERIENCE.md 畫面 9、State Patterns「9. 資料涵蓋範圍」）：成員版讀 /api/v1/cube
+// （api-mock.ts，假資料 fixtures/cube.json），示範站讀範例匯出的 cube.json（fixtures/demo-preview）。
+// 正常、載入中（表格的骨架）、錯誤（全站共用的「沒有載入成功」，重新整理後恢復）、沒有依據（那一年沒有論文的格子是
+// 「—」，不是 0%）；「空的」不會發生（State Patterns「9.」），沒有測試。入口：資料日期列、使用須知第 4 段、頁尾。
+// 預期的篇數與比例寫死（數字是假資料編的，算法見每一行旁邊）；設計稿表格裡的數字是編的，不拿來當答案。
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+
+import type { Page, Route } from "@playwright/test";
+
+import { gate } from "./api-mock.ts";
+import { TEXT } from "./expected.ts";
+import { expect, test } from "./fixtures.ts";
+import { SITES } from "./pages.ts";
+
+const member = SITES[0]!;
+const demo = SITES[1]!;
+const SCREENSHOT_DIR = fileURLToPath(new URL("./screenshots/", import.meta.url));
+const DESKTOP = { width: 1280, height: 900 };
+const PHONE = { width: 390, height: 844 };
+
+function text(key: string): string {
+  const value = TEXT[key];
+  if (value === undefined) throw new Error(`no expected text ${key}`);
+  return value;
+}
+
+function fill(template: string, values: Record<string, string | number>): string {
+  return template.replace(/\{\{(\w+)\}\}/g, (_, name: string) => String(values[name]));
+}
+
+interface CubeFile {
+  rows: { journal: string; year: number; dim: string; n: number }[];
+}
+const DEMO_FIXTURE = fileURLToPath(new URL("./fixtures/demo-preview/", import.meta.url));
+const DEMO_EXPORT = (JSON.parse(readFileSync(`${DEMO_FIXTURE}manifest.json`, "utf-8")) as { export_id: string }).export_id;
+const DEMO_CUBE = JSON.parse(readFileSync(`${DEMO_FIXTURE}${DEMO_EXPORT}/cube.json`, "utf-8")) as CubeFile;
+
+const readings = (page: Page) => page.locator("[data-reading] [data-reading-number]");
+const cell = (page: Page, journal: string, year: number) => page.locator(`tr[data-journal='${journal}'] td[data-year='${year}']`);
+
+async function open(page: Page, base: string, viewport = DESKTOP): Promise<void> {
+  await page.setViewportSize(viewport);
+  await page.goto(`${base}/coverage`);
+}
+
+async function expectTerms(page: Page): Promise<void> {
+  await expect(page.locator("[data-coverage-terms] dt")).toHaveText(
+    ["scope", "outside", "abstract", "snapshot"].map((key) => text(`coverage:coverage.terms.${key}`)),
+  );
+}
+
+test.describe("member coverage page", () => {
+  test("shows the intro, three readings, the table, the Elsevier note and the terms", async ({ page }) => {
+    await open(page, member.baseURL);
+    await expect(page.locator("main h1")).toHaveText(text("coverage:coverage.page.title"));
+    await expect(page.locator("[data-page='coverage']")).toHaveAttribute("data-state", "ready");
+    await expect(page.locator("[data-reading] dt")).toHaveText([
+      text("coverage:coverage.readings.total"),
+      text("coverage:coverage.readings.withAbstract"),
+      text("coverage:coverage.readings.thisWeek"),
+    ]);
+    // fixtures/cube.json：total 合計 6,175、with_abstract 合計 4,685（4685/6175 = 75.87%）；本週新增是 paper-list.json
+    // 裡 this_week 的篇數。
+    const thisWeek = (JSON.parse(readFileSync(fileURLToPath(new URL("./fixtures/paper-list.json", import.meta.url)), "utf-8")) as {
+      rows: { this_week: boolean }[];
+    }).rows.filter((entry) => entry.this_week).length;
+    await expect(readings(page)).toHaveText(["6,175", "4,685", String(thisWeek)]);
+    await expect(page.locator("[data-reading-percent]")).toHaveText("76%");
+    // 成員版只有本週新增是連結（設計稿）：到找論文並帶入「本週新增」。
+    await expect(page.locator("[data-reading] a")).toHaveCount(1);
+    await expect(page.locator("[data-reading='third'] a")).toHaveAttribute("href", "/search?this_week=true");
+    // 年份欄：追蹤起始年 2016 到快照那一年 2026（11 欄），最後一欄加註「未滿一年」。
+    await expect(page.locator("thead th[scope='col']")).toHaveCount(12);
+    await expect(page.locator("[data-partial-year]")).toHaveCount(1);
+    await expect(page.locator("thead th").last()).toHaveText(`${text("coverage:coverage.table.partialYear")}2026`);
+    await expect(page.locator("[data-coverage-elsevier]")).toBeVisible();
+    await expectTerms(page);
+  });
+
+  test("no grounds: a year without papers is a dash, not 0%, and never gold", async ({ page }) => {
+    await open(page, member.baseURL);
+    // fixtures/cube.json 沒有 io 2026 的列。
+    await expect(cell(page, "io", 2026)).toHaveText("—");
+    await expect(cell(page, "io", 2026)).toHaveAttribute("data-state", "empty");
+    // 有論文的格子：misq 2024 是 48/52（92.3% → 92%）；Elsevier 的 dss 2016 是 8/34（23.5% → 24%，未滿 50% 金色）。
+    await expect(cell(page, "misq", 2024)).toHaveText("92%");
+    await expect(cell(page, "misq", 2024)).toHaveAttribute("data-state", "ok");
+    await expect(cell(page, "dss", 2016)).toHaveText("24%");
+    await expect(cell(page, "dss", 2016)).toHaveAttribute("data-state", "low");
+    // 指到一格，右上顯示篇數；指到空格顯示「這一年沒有論文」。
+    await cell(page, "misq", 2024).hover();
+    await expect(page.locator("[data-coverage-pick]")).toHaveText(
+      `${fill(text("coverage:coverage.pick.cell"), { journal: "MISQ", year: 2024 })}${fill(text("coverage:coverage.pick.counts"), { total: 52, withAbstract: 48 })}`,
+    );
+    await cell(page, "io", 2026).hover();
+    await expect(page.locator("[data-coverage-pick]")).toContainText(text("coverage:coverage.legend.empty"));
+  });
+
+  test("loading shows the skeleton of the readings and the table", async ({ page, apiMock }) => {
+    const [wait, release] = gate();
+    apiMock.cubeGate = wait;
+    await open(page, member.baseURL);
+    await expect(page.locator("[data-page='coverage']")).toHaveAttribute("data-state", "loading");
+    await expect(page.locator("[data-coverage-skeleton]")).toBeVisible();
+    await expect(readings(page)).toHaveCount(0);
+    await expect(page.locator("[data-coverage-legend]")).toHaveCount(0);
+    await expect(page.locator("[data-coverage-elsevier]")).toHaveCount(0);
+    await expectTerms(page);
+    release();
+    await expect(page.locator("[data-page='coverage']")).toHaveAttribute("data-state", "ready");
+    await expect(page.locator("[data-coverage-skeleton]")).toHaveCount(0);
+  });
+
+  test("an error shows load failed; trying again recovers", async ({ page, apiMock }) => {
+    apiMock.cube = "failed";
+    await open(page, member.baseURL);
+    const error = page.locator("[role='alert'][data-state='error']");
+    await expect(error).toContainText(text("common:states.loadFailed.message"));
+    await expect(page.locator("table")).toHaveCount(0);
+    await expect(page.locator("[data-readings]")).toHaveCount(0);
+    await expectTerms(page);
+    apiMock.cube = "ok";
+    await error.getByRole("button", { name: text("common:states.loadFailed.action") }).click();
+    await expect(page.locator("[data-page='coverage']")).toHaveAttribute("data-state", "ready");
+    await expect(readings(page).first()).toHaveText("6,175");
+  });
+
+  test("no published snapshot yet (cannot happen) is shown as load failed", async ({ page, apiMock }) => {
+    apiMock.cubeBody = { ...apiMock.cubeBody, rows: [], snapshot: null };
+    await open(page, member.baseURL);
+    await expect(page.locator("[data-page='coverage']")).toHaveAttribute("data-state", "error");
+    await expect(page.locator("table")).toHaveCount(0);
+  });
+
+  test("an expired session goes to the login page", async ({ page, apiMock }) => {
+    apiMock.cube = "expired";
+    await open(page, member.baseURL);
+    await expect(page).toHaveURL(/\/login/);
+  });
+
+  test("entry points: the data date on another page, and paragraph 4 of the notice", async ({ page }) => {
+    await page.setViewportSize(DESKTOP);
+    await page.goto(`${member.baseURL}/search`);
+    await page.locator("[data-data-date-link]").click();
+    await expect(page).toHaveURL(`${member.baseURL}/coverage`);
+    // 在這一頁自己，日期不是連結。
+    await expect(page.locator("[data-data-date]")).toBeVisible();
+    await expect(page.locator("[data-data-date-link]")).toHaveCount(0);
+
+    await page.goto(`${member.baseURL}/notice`);
+    await page.locator("[data-coverage-link]").click();
+    await expect(page).toHaveURL(`${member.baseURL}/coverage`);
+    await expect(page.locator("main h1")).toHaveText(text("coverage:coverage.page.title"));
+  });
+
+  test("phone: the table scrolls sideways at 866px with the journal column fixed; the page does not", async ({ page }) => {
+    await open(page, member.baseURL, PHONE);
+    await expect(page.locator("table")).toBeVisible();
+    expect((await page.locator("table").boundingBox())!.width).toBeCloseTo(866, 0);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(PHONE.width);
+    const scroller = page.locator("[data-coverage-scroll]");
+    const before = (await page.locator("tr[data-journal='misq'] th").boundingBox())!.x;
+    await scroller.evaluate((element) => element.scrollBy(300, 0));
+    expect((await page.locator("tr[data-journal='misq'] th").boundingBox())!.x).toBeCloseTo(before, 0);
+    // 手機是點一格。
+    await cell(page, "misq", 2024).click();
+    await expect(page.locator("[data-coverage-pick]")).toContainText(fill(text("coverage:coverage.pick.cell"), { journal: "MISQ", year: 2024 }));
+  });
+});
+
+test.describe("demo coverage page", () => {
+  test("shows the three readings from the export, all linked to the paper list", async ({ page }) => {
+    await open(page, demo.baseURL);
+    await expect(page.locator("[data-page='coverage']")).toHaveAttribute("data-state", "ready");
+    await expect(page.locator("[data-reading] dt")).toHaveText([
+      text("coverage:coverage.readings.total"),
+      text("coverage:coverage.readings.withAbstract"),
+      text("coverage:coverage.readings.fullContent"),
+    ]);
+    // 範例匯出（manifest.json 的 summary）：60 篇、51 篇有摘要（85%）、34 篇有完整內容。
+    await expect(readings(page)).toHaveText(["60", "51", "34"]);
+    await expect(page.locator("[data-reading-percent]")).toHaveText("85%");
+    await expect(page.locator("[data-reading] a")).toHaveCount(3);
+    const hrefs = await page.locator("[data-reading] a").evaluateAll((links) => links.map((link) => link.getAttribute("href")));
+    expect(hrefs).toEqual(["/papers", "/papers?abstract=true", "/papers?full=true"]);
+    await page.locator("[data-reading='third'] a").click();
+    await expect(page).toHaveURL(`${demo.baseURL}/papers?full=true`);
+  });
+
+  test("no grounds: journals and years without papers are dashes", async ({ page }) => {
+    await open(page, demo.baseURL);
+    const has = new Set(DEMO_CUBE.rows.map((row) => `${row.journal} ${row.year}`));
+    // 範例只有 io、isr、misq、tem 有論文：jmis 每一年都是空格；2016 年每一本都是空格。
+    expect(has.has("jmis 2024")).toBe(false);
+    await expect(page.locator("tr[data-journal='jmis'] td")).toHaveText(Array.from({ length: 11 }, () => "—"));
+    await expect(page.locator("td[data-year='2016'][data-state='empty']")).toHaveCount(14);
+    await expect(page.locator("td[data-state='ok'], td[data-state='low']")).toHaveCount(has.size);
+    await expect(page.locator("[data-partial-year]")).toHaveCount(1);
+  });
+
+  test("loading shows the skeleton until cube.json arrives", async ({ page }) => {
+    const [wait, release] = gate();
+    await page.route("**/preview/*/cube.json", async (route: Route) => {
+      await wait;
+      await route.continue();
+    });
+    await open(page, demo.baseURL);
+    await expect(page.locator("[data-page='coverage']")).toHaveAttribute("data-state", "loading");
+    await expect(page.locator("[data-coverage-skeleton]")).toBeVisible();
+    // 日期列照常（manifest 已經讀到）。
+    await expect(page.locator("[data-data-date]")).toBeVisible();
+    release();
+    await expect(page.locator("[data-page='coverage']")).toHaveAttribute("data-state", "ready");
+  });
+
+  test("an error shows load failed; trying again recovers", async ({ page }) => {
+    let fail = true;
+    await page.route("**/preview/*/cube.json", async (route: Route) => {
+      if (fail) await route.fulfill({ status: 500, body: "" });
+      else await route.continue();
+    });
+    await open(page, demo.baseURL);
+    const error = page.locator("[role='alert'][data-state='error']");
+    await expect(error).toContainText(text("common:states.loadFailed.message"));
+    await expectTerms(page);
+    fail = false;
+    await error.getByRole("button", { name: text("common:states.loadFailed.action") }).click();
+    await expect(readings(page)).toHaveText(["60", "51", "34"]);
+  });
+
+  test("a cube.json of another export is a load failure", async ({ page }) => {
+    await page.route("**/preview/*/cube.json", async (route: Route) => {
+      const response = await route.fetch();
+      const body = (await response.json()) as Record<string, unknown>;
+      await route.fulfill({ response, json: { ...body, export_id: "9-9" } });
+    });
+    await open(page, demo.baseURL);
+    await expect(page.locator("[role='alert'][data-state='error']")).toContainText(text("common:states.loadFailed.message"));
+  });
+
+  test("entry point: the data date on the paper list", async ({ page }) => {
+    await page.setViewportSize(DESKTOP);
+    await page.goto(`${demo.baseURL}/papers`);
+    await page.locator("[data-data-date-link]").click();
+    await expect(page).toHaveURL(`${demo.baseURL}/coverage`);
+    await expect(page.locator("main h1")).toHaveText(text("coverage:coverage.page.title"));
+  });
+});
+
+for (const [site, base] of [
+  ["member", member.baseURL],
+  ["demo", demo.baseURL],
+] as const) {
+  for (const width of [1440, 1000, 500]) {
+    test(`${site} coverage screenshot at ${width}px`, async ({ page, browserName }) => {
+      test.skip(browserName !== "chromium", "screenshots are taken in chromium only");
+      await open(page, base, { width, height: 900 });
+      await expect(page.locator("table")).toBeVisible();
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+      await page.evaluate(() => document.fonts.ready);
+      await page.screenshot({ path: `${SCREENSHOT_DIR}coverage-${site}-${width}.png`, fullPage: true });
+    });
+  }
+}

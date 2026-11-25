@@ -21,7 +21,7 @@ from fastapi import FastAPI
 
 from radar.domain.auth import AuthenticatedMember, FakeLoginRequest, MemberSummary, NewSession
 from radar.domain.auth_settings import FakeLoginMode
-from radar.domain.contracts import DisplayNames, build_client_config
+from radar.domain.contracts import CubeResponse, DisplayNames, build_client_config
 from radar.domain.library import LibraryCursor, LibraryEntry, LibraryPage
 from radar.domain.paper_list import PaperListCursor, PaperListFilters, PaperListPage, PaperListQuery
 from radar.domain.paper_page import PaperPage
@@ -84,6 +84,10 @@ def _parse_paper_list(_query: PaperListQuery) -> PaperListFilters:
     _not_for_requests()
 
 
+def _load_cube(_viewer: MemberViewer) -> CubeResponse:
+    _not_for_requests()
+
+
 def build_schema_app() -> FastAPI:
     """組一個只用來產生文件的 app：路由和正式的一樣，而且假登入的路由也在。"""
     app = create_app(readiness_check=_not_ready)
@@ -111,7 +115,10 @@ def build_schema_app() -> FastAPI:
             journal_key=_journal_key,
         ),
         paper_list_routes=PaperListRoutes(
-            list_page=_list_papers, parse_filters=_parse_paper_list, journal_key=_journal_key
+            list_page=_list_papers,
+            parse_filters=_parse_paper_list,
+            journal_key=_journal_key,
+            load_cube=_load_cube,
         ),
     )
     return app

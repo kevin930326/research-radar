@@ -9,7 +9,8 @@
 - **目錄**：`preview/manifest.json` 與 `preview/<匯出編號>/…`（`RADAR_DEMO_PUBLISH` 開的時候是
   `data/`，結構相同；這個 epic 不開）。資料檔的路徑由 `data_file_path`、`shard_file_name` 決定。
 - **自我檢查**（`check_demo_files`，寫 manifest 之前）：ADR-0007 第 1、2、3 項，與第 6 項的分片
-  與索引部分（排除清單裡的出版社或期刊的論文沒有完整內容）。第 4 項（重算計數）、第 5 項與第 6 項的
+  與索引部分（排除清單裡的出版社或期刊的論文沒有完整內容）；第 4 項的計數方塊部分（`cube.json`
+  每一格用 `papers-index.json` 重算，Story 3.15）。第 4 項的趨勢、關係部分、第 5 項與第 6 項的
   關係、問答、首頁部分由之後的 Story 補（ADR-0061「留到之後」）。
 - 這裡只有純函式與模型；讀資料庫、寫檔在 `services/demo_export.py`。
 """
@@ -34,7 +35,8 @@ from pydantic import (
     ValidationError,
     model_validator,
 )
-from pydantic.json_schema import models_json_schema
+from pydantic.json_schema import GenerateJsonSchema, JsonSchemaValue, models_json_schema
+from pydantic_core import core_schema
 
 from radar.domain.ai_blocks import (
     AiBlock,
@@ -47,12 +49,15 @@ from radar.domain.ai_blocks import (
 )
 from radar.domain.contracts import (
     ConstructItem,
+    CubeDim,
+    CubeRow,
     DisplayNames,
     FullTextLinks,
     HypothesisItem,
     PaperAbstract,
     Provenance,
     SnapshotRef,
+    TrendParams,
     UtcDateTime,
     doi_url,
     openalex_url,
@@ -69,6 +74,8 @@ MANIFEST_FILE: Final = "manifest.json"
 TAXONOMY_FILE: Final = "taxonomy.json"
 PAPERS_INDEX_FILE: Final = "papers-index.json"
 TITLES_FILE: Final = "titles.json"
+# 計數方塊（Story 3.15、ADR-0062）：和成員版 `GET /api/v1/cube` 同一個形狀，多 `export_id`。
+CUBE_FILE: Final = "cube.json"
 PAPERS_DIR: Final = "papers"
 # 論文詳情每 200 篇一個分片檔（ADR-0007「檔案」）：第 i 列在第 ⌊i÷200⌋ 個分片。
 SHARD_SIZE: Final = 200
@@ -729,11 +736,51 @@ class DemoTaxonomy(BaseModel):
     names: DisplayNames
 
 
+# 示範站的計數方塊只有這兩種列（Story 1.10 的定義；ADR-0062）。
+_DEMO_CUBE_DIMS: Final = (CubeDim.TOTAL, CubeDim.WITH_ABSTRACT)
+
+
+class DemoCube(BaseModel):
+    """`cube.json`：計數方塊（Story 3.15、AD-19、ADR-0062），和成員版 `CubeResponse` 同一個形狀，
+    多 `export_id`。只有計數、不給比例；比例由前端的 `web/src/stats/` 算。
+
+    - `rows`：每個有論文的（期刊, 年份）剛好一列 `total`（大於 0）與一列 `with_abstract`（不超過
+      `total`），沒有其他種類的列，不重複。
+    - `params`：規則用到的設定值（`TrendParams`）。
+    """
+
+    model_config = _WHITELIST
+
+    snapshot: SnapshotRef
+    export_id: ExportId
+    params: TrendParams
+    rows: tuple[CubeRow, ...]
+
+    @model_validator(mode="after")
+    def _check(self) -> Self:
+        counts: dict[tuple[str, int], dict[CubeDim, int]] = {}
+        for row in self.rows:
+            if row.dim not in _DEMO_CUBE_DIMS:
+                raise ValueError("cube.json 只有 total 與 with_abstract 兩種列")
+            cell = counts.setdefault((row.journal, row.year), {})
+            if row.dim in cell:
+                raise ValueError("同一個期刊、年份的同一種列不能重複")
+            cell[row.dim] = row.n
+        for cell in counts.values():
+            if set(cell) != set(_DEMO_CUBE_DIMS):
+                raise ValueError("每個期刊、年份都要有 total 與 with_abstract")
+            if cell[CubeDim.TOTAL] == 0:
+                raise ValueError("沒有論文的期刊、年份不列")
+            if cell[CubeDim.WITH_ABSTRACT] > cell[CubeDim.TOTAL]:
+                raise ValueError("with_abstract 不能比 total 多")
+        return self
+
+
 # manifest 列的資料檔路徑：`<匯出編號>/` 加上認得的檔名，或 `<匯出編號>/papers/NNN.json`（不會有
 # `..` 這種路徑段）。
 DEMO_FILE_PATH_PATTERN: Final = (
     r"^[1-9][0-9]{0,8}-[1-9][0-9]{0,8}/"
-    r"(?:taxonomy\.json|papers-index\.json|titles\.json|papers/[0-9]{3}\.json)$"
+    r"(?:taxonomy\.json|papers-index\.json|titles\.json|cube\.json|papers/[0-9]{3}\.json)$"
 )
 
 
@@ -786,8 +833,8 @@ def build_demo_client_config() -> DemoClientConfig:
 
 class DemoManifest(BaseModel):
     """`manifest.json`：現在該讀哪一次匯出（最後才寫，只有它會被覆寫）。列的每個檔都在這次的匯出
-    目錄底下（路徑開頭是自己的 `export_id`），不重複，而且是完整的一批：分類表、索引、標題與每一個
-    分片（個數照 `summary.paper_count` 算）都列了。"""
+    目錄底下（路徑開頭是自己的 `export_id`），不重複，而且是完整的一批：分類表、索引、標題、計數
+    方塊與每一個分片（個數照 `summary.paper_count` 算）都列了。"""
 
     model_config = _WHITELIST
 
@@ -805,12 +852,12 @@ class DemoManifest(BaseModel):
             raise ValueError("manifest 列的檔要在自己這次的匯出目錄底下")
         if len(set(paths)) != len(paths):
             raise ValueError("manifest 列的檔不能重複")
-        # 一批完整的匯出（G7）：分類表、索引、標題都在，分片從 000 起連號、個數和篇數對得上
-        # （每 SHARD_SIZE 篇一個；0 篇沒有分片）。
+        # 一批完整的匯出（G7）：分類表、索引、標題、計數方塊都在，分片從 000 起連號、個數和篇數
+        # 對得上（每 SHARD_SIZE 篇一個；0 篇沒有分片）。
         shard_count = -(-self.summary.paper_count // SHARD_SIZE)
         expected = {
             data_file_path(self.export_id, name)
-            for name in (TAXONOMY_FILE, PAPERS_INDEX_FILE, TITLES_FILE)
+            for name in (TAXONOMY_FILE, PAPERS_INDEX_FILE, TITLES_FILE, CUBE_FILE)
         } | {
             data_file_path(self.export_id, f"{PAPERS_DIR}/{shard_file_name(shard)}")
             for shard in range(min(shard_count, _MAX_SHARDS))
@@ -826,6 +873,7 @@ DEMO_FILE_MODELS: Final[tuple[tuple[str, type[BaseModel]], ...]] = (
     (TAXONOMY_FILE, DemoTaxonomy),
     (PAPERS_INDEX_FILE, DemoPapersIndex),
     (TITLES_FILE, DemoTitles),
+    (CUBE_FILE, DemoCube),
     (f"{PAPERS_DIR}/{{shard}}.json", DemoPaperShard),
 )
 
@@ -851,12 +899,23 @@ def model_for_path(path: str) -> type[BaseModel] | None:
 
 DEMO_OPENAPI_TITLE: Final = "Research Radar 示範站資料檔"
 # 資料檔格式的版本：改了任何一個白名單模型的形狀就加一。
-DEMO_FORMAT_VERSION: Final = "1"
+# 2：加了 `cube.json`（Story 3.15）。
+DEMO_FORMAT_VERSION: Final = "2"
 
 
 def _operation_id(file_name: str) -> str:
     words = re.split(r"[^a-z0-9]+", file_name.removesuffix(".json").replace("{shard}", "shard"))
     return "getDemo" + "".join(word.capitalize() for word in words if word)
+
+
+class _MemberLikeJsonSchema(GenerateJsonSchema):
+    """預設值是 null 的欄位不列 `default`：和 FastAPI 產生的成員版 `openapi.json` 一樣，共用的形狀
+    （例如 `CubeRow` 的 `key_a`、`key_b`）兩邊才會完全相同（Story 3.15）。其他預設值照常列。"""
+
+    def default_schema(self, schema: core_schema.WithDefaultSchema) -> JsonSchemaValue:
+        if self.get_default_value(schema) is None:
+            return self.generate_inner(schema["schema"])
+        return super().default_schema(schema)
 
 
 def build_demo_openapi() -> dict[str, Any]:
@@ -865,6 +924,7 @@ def build_demo_openapi() -> dict[str, Any]:
     _, top = models_json_schema(
         [(model, "serialization") for _, model in DEMO_FILE_MODELS],
         ref_template="#/components/schemas/{model}",
+        schema_generator=_MemberLikeJsonSchema,
     )
     schemas = top.get("$defs", {})
     paths: dict[str, Any] = {}
@@ -1063,6 +1123,10 @@ def check_demo_files(
        沒有完整內容，就算它在 `full_paper_ids` 裡。
     7. 分片檔裡 `demo_eligible` 是 true 的論文一定在 `eligible_paper_ids`（`demo_eligible_paper_ids`
        另外算的），而且不在 `excluded_paper_ids`；不是布林也算失敗。直接看 JSON，不經過模型。
+    4. （計數方塊的部分，Story 3.15）`cube.json` 的每一格用 `papers-index.json` 重算：每個（期刊,
+       年份）的 `total` 等於索引裡那一格的篇數、`with_abstract` 等於其中 `has_abstract` 為真的篇數，
+       索引有的格子 `cube.json` 都有、反過來也是；兩個檔的快照編號與匯出編號相同。直接看 JSON，
+       不經過模型（`_cube_problems`）。
     """
     allowed = frozenset(full_paper_ids)
     eligible = frozenset(eligible_paper_ids)
@@ -1091,7 +1155,105 @@ def check_demo_files(
         problems.extend(_eligible_problems(path, content, eligible, excluded))
         text = _searchable_text(content)
         problems.extend(f"{path}：出現{label}" for label, needle in needles if needle in text)
+    problems.extend(_cube_problems(files))
     return problems
+
+
+# 重算時一格的鍵：（期刊代號, 年份）。
+_Cell = tuple[str, int]
+
+
+def _cube_problems(files: Mapping[str, bytes]) -> list[str]:
+    """第 4 項的計數方塊部分：`cube.json` 的每一格用同一次匯出的 `papers-index.json` 重算。
+
+    失敗原因只寫檔名、期刊代號（設定檔的代號，照印）與年份、篇數；兩個檔之一不是合法 JSON 或形狀
+    不對時只報一句（白名單模型那一項另外會報細節）。沒有 `cube.json` 時不檢查（manifest 的模型要求
+    它在，少了由那裡擋）。
+    """
+    cube_paths = [path for path in sorted(files) if model_for_path(path) is DemoCube]
+    index_paths = [path for path in sorted(files) if model_for_path(path) is DemoPapersIndex]
+    problems: list[str] = []
+    for cube_path in cube_paths:
+        export_id = cube_path.partition("/")[0]
+        index_path = data_file_path(export_id, PAPERS_INDEX_FILE)
+        if index_path not in index_paths:
+            problems.append(f"{cube_path}：同一次匯出沒有 {PAPERS_INDEX_FILE}，無法重算計數")
+            continue
+        cube = _json_object(files[cube_path])
+        index = _json_object(files[index_path])
+        if cube is None or index is None:
+            problems.append(f"{cube_path}：無法和 {PAPERS_INDEX_FILE} 對照重算（不是合法的 JSON）")
+            continue
+        for key in ("snapshot", "export_id"):
+            if cube.get(key) != index.get(key):
+                problems.append(f"{cube_path}：{key} 和 {PAPERS_INDEX_FILE} 不同")
+        expected = _index_cells(index)
+        found = _cube_cells(cube)
+        if expected is None or found is None:
+            problems.append(f"{cube_path}：無法和 {PAPERS_INDEX_FILE} 對照重算（欄位的形狀不對）")
+            continue
+        for cell in sorted(set(expected) | set(found)):
+            want = expected.get(cell, (0, 0))
+            got = found.get(cell, (0, 0))
+            if want != got:
+                journal, year = cell
+                problems.append(
+                    f"{cube_path}：{journal} {year} 的計數和 {PAPERS_INDEX_FILE} 重算的不同"
+                    f"（total {got[0]}／{want[0]}，with_abstract {got[1]}／{want[1]}）"
+                )
+        index_ids = index.get("id")
+        total = sum(count for count, _ in found.values())
+        if isinstance(index_ids, list) and total != len(index_ids):
+            problems.append(
+                f"{cube_path}：total 的合計（{total}）和 {PAPERS_INDEX_FILE} 的篇數"
+                f"（{len(index_ids)}）不同"
+            )
+    return problems
+
+
+def _json_object(content: bytes) -> dict[str, Any] | None:
+    try:
+        data = json.loads(content)
+    except ValueError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _index_cells(index: Mapping[str, Any]) -> dict[_Cell, tuple[int, int]] | None:
+    """索引的（期刊, 年份）→（篇數, 有摘要的篇數）；沒有期刊或年份的論文不算進任何一格。"""
+    journals, years, abstracts = index.get("journal"), index.get("year"), index.get("has_abstract")
+    if not (isinstance(journals, list) and isinstance(years, list) and isinstance(abstracts, list)):
+        return None
+    if not len(journals) == len(years) == len(abstracts):
+        return None
+    cells: dict[_Cell, tuple[int, int]] = {}
+    for journal, year, has_abstract in zip(journals, years, abstracts, strict=True):
+        if not isinstance(journal, str) or not isinstance(year, int) or isinstance(year, bool):
+            continue
+        total, with_abstract = cells.get((journal, year), (0, 0))
+        cells[(journal, year)] = (total + 1, with_abstract + (1 if has_abstract is True else 0))
+    return cells
+
+
+def _cube_cells(cube: Mapping[str, Any]) -> dict[_Cell, tuple[int, int]] | None:
+    """`cube.json` 的（期刊, 年份）→（`total`, `with_abstract`）；其他種類的列不算（模型那一項
+    會報）。"""
+    rows = cube.get("rows")
+    if not isinstance(rows, list):
+        return None
+    cells: dict[_Cell, tuple[int, int]] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            return None
+        journal, year, dim, n = row.get("journal"), row.get("year"), row.get("dim"), row.get("n")
+        if not isinstance(journal, str) or not isinstance(year, int) or not isinstance(n, int):
+            return None
+        total, with_abstract = cells.get((journal, year), (0, 0))
+        if dim == CubeDim.TOTAL.value:
+            cells[(journal, year)] = (total + n, with_abstract)
+        elif dim == CubeDim.WITH_ABSTRACT.value:
+            cells[(journal, year)] = (total, with_abstract + n)
+    return cells
 
 
 def _full_content_problems(

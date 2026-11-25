@@ -1,0 +1,96 @@
+{
+  "description": "百分比的顯示位數：整數、.5 進位（先消掉浮點誤差）；分母 0 是 null（畫面寫「—」，不是 0%）",
+  "cases": [
+    {
+      "name": "分母 0",
+      "kind": "zero_denominator",
+      "with_abstract": 0,
+      "total": 0,
+      "expected": null
+    },
+    {
+      "name": "全部都有",
+      "kind": "all",
+      "with_abstract": 40,
+      "total": 40,
+      "expected": "100%"
+    },
+    {
+      "name": "全部都沒有",
+      "kind": "none",
+      "with_abstract": 0,
+      "total": 61,
+      "expected": "0%"
+    },
+    {
+      "name": "一般",
+      "kind": "plain",
+      "with_abstract": 6941,
+      "total": 9646,
+      "expected": "72%"
+    },
+    {
+      "name": "剛好 .5 進位（39/40＝97.5%）",
+      "kind": "rounding",
+      "with_abstract": 39,
+      "total": 40,
+      "expected": "98%"
+    },
+    {
+      "name": "剛好 .5 進位（9/24＝37.5%）",
+      "kind": "rounding",
+      "with_abstract": 9,
+      "total": 24,
+      "expected": "38%"
+    },
+    {
+      "name": "浮點裡 57.4999… 的 .5（23/40＝57.5%）",
+      "kind": "plain",
+      "with_abstract": 23,
+      "total": 40,
+      "expected": "58%"
+    },
+    {
+      "name": "浮點裡 0.5 × 100 的 .5（1/200＝0.5%）",
+      "kind": "plain",
+      "with_abstract": 1,
+      "total": 200,
+      "expected": "1%"
+    },
+    {
+      "name": "差一點到 .5（49/99＝49.4949…%）",
+      "kind": "rounding",
+      "with_abstract": 49,
+      "total": 99,
+      "expected": "49%"
+    },
+    {
+      "name": "未滿 50% 卻顯示 50%（99/199＝49.7487…%）",
+      "kind": "rounding",
+      "with_abstract": 99,
+      "total": 199,
+      "expected": "50%"
+    },
+    {
+      "name": "差一點到 100%（199/200＝99.5%）",
+      "kind": "rounding",
+      "with_abstract": 199,
+      "total": 200,
+      "expected": "100%"
+    },
+    {
+      "name": "差一點到 100% 以下（398/401＝99.2518…%）",
+      "kind": "rounding",
+      "with_abstract": 398,
+      "total": 401,
+      "expected": "99%"
+    },
+    {
+      "name": "1 篇裡 0 篇",
+      "kind": "plain",
+      "with_abstract": 0,
+      "total": 1,
+      "expected": "0%"
+    }
+  ]
+}

@@ -36,6 +36,7 @@ def test_every_data_file_is_a_read_only_endpoint() -> None:
         "/{export_id}/taxonomy.json",
         "/{export_id}/papers-index.json",
         "/{export_id}/titles.json",
+        "/{export_id}/cube.json",
         "/{export_id}/papers/{shard}.json",
     ]
     assert all(set(operations) == {"get"} for operations in document["paths"].values())

@@ -331,12 +331,13 @@ export function LibraryPage({ shown, onMore, onSignedOut, memberId, onMemberChan
   }
 
   // 這一頁撐滿 main 的高度（外框 main 是直排的 flex）：底部選取列前面有一段會伸長的空白（最少 32px，設計稿 margin-top 32），
-  // 清單很短時選取列也在視窗最下面；有選取列時往下吃掉 main 的下內距（96px），選取列貼齊頁面底部
-  // （設計稿 library.html 390：.pp 至少一個視窗高、main flex:1、.dock 接在 main 後面；審查 R9）。
+  // 清單很短時選取列也在視窗最下面；有選取列時往下吃掉 main 的下內距（899px 以下 64px、900px 以上 96px），選取列貼齊
+  // 全站頁尾的上緣（設計稿 library.html 390：.pp 至少一個視窗高、main flex:1、.dock 接在 main 後面；審查 R9）。
+  // 選取列是 sticky，只在這一頁的範圍內移動：捲到最底時停在頁尾上面，不會蓋住頁尾（Story 3.15）。
   return (
     <div
       data-page="library"
-      className={`flex flex-1 flex-col text-s14 leading-normal tracking-0 text-text-primary split:max-w-reading-width ${dock === null ? "" : "-mb-24"}`}
+      className={`flex flex-1 flex-col text-s14 leading-normal tracking-0 text-text-primary split:max-w-reading-width ${dock === null ? "" : "-mb-[64px] split:-mb-24"}`}
     >
       <div>
         <h1 className="font-title-zh text-page-title-zh text-text-primary">{t("library.page.title")}</h1>

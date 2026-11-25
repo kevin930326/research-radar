@@ -23,9 +23,11 @@ from radar.config import (
     load_llm_batch_config,
     load_models_config,
     load_taxonomy,
+    load_trend_config,
     load_zh_summary_rules,
 )
 from radar.domain.ai_outputs import CallMode
+from radar.domain.contracts import build_trend_params
 from radar.domain.demo_export import DemoExportFailure
 from radar.domain.jobs import (
     EMBED_PAPERS,
@@ -278,6 +280,7 @@ def register_tasks(app: procrastinate.App, parts: WorkerParts, settings: Setting
                 context_values=load_context_values(),
                 journals=domain_config.journals,
                 exclusions=domain_config.demo_publishers.exclusions(),
+                params=build_trend_params(load_trend_config(), domain_config.journals),
                 publish=settings.demo_publish,
             )
         except ConfigError:
