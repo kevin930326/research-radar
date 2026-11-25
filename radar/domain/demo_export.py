@@ -161,6 +161,7 @@ class DemoExportFailure(StrEnum):
     OUTPUT_UNSAFE = "output_unsafe"  # 輸出位置是符號連結或跑出輸出資料夾（不寫）
     SUPERSEDED = "superseded"  # manifest 已經指向比這次新的匯出（不蓋回舊的）
     MANIFEST_UNREADABLE = "manifest_unreadable"  # 現有的 manifest 讀不懂（不知道新舊，不蓋）
+    OUTPUT_BUSY = "output_busy"  # 等發佈的檔案鎖超過時限（拿著的一方卡住了）
     # 行程被中斷（Ctrl-C 這類變成例外的中斷）。SIGTERM 不會變成例外：被系統結束的那一筆停在
     # running，6 小時後由 sweep 補排。
     INTERRUPTED = "interrupted"

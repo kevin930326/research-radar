@@ -5,8 +5,9 @@
 1. 一個短交易接手那一筆 `demo_export`（`update_demo_export_claimed`：`queued`，或卡在 `running` 超過
    `DEMO_EXPORT_RUNNING_STUCK` 的），拿到這一次的 `run_token`；已經結束或正由別的行程在做的不做。
 2. 先看 `preview/manifest.json` 是不是已經指向這一次（上一次換好 manifest、卻沒記上成功就中斷）：是
-   而且檔案的雜湊都對，就再 fsync 一次 `preview/`、補記成功、結束（不重寫）。現有的 manifest 讀不懂
-   （格式不合、別的版本寫的）時拒絕（`manifest_unreadable`），不當成沒有。
+   而且檔案的雜湊都對，就再 fsync 一次 `preview/`、補記成功、結束（不重寫）。已經指向比這次新的匯出
+   時直接記成 `superseded`（不讀資料、不寫檔；這一次就算之前發佈過，也已經被新的一批取代）。現有的
+   manifest 讀不懂（格式不合、別的版本寫的）時拒絕（`manifest_unreadable`），不當成沒有。
 3. **一個唯讀、REPEATABLE READ 的交易**（`Database.read_only_snapshot_transaction`）裡讀完全部的
    資料並做完自我檢查：匯出的資料只用 `PublicViewer` 經 repo 讀（最新已發佈的快照、每一篇
    `counted_paper` 的書目、出版社與分類、`demo_full_paper` 的摘要與兩個 AI 區塊），逐欄組成白名單
@@ -16,7 +17,10 @@
    `domain/demo_export.check_demo_files` 檢查全部的檔。沒過就丟 `DemoExportCheckError`，**什麼都
    不寫**。
 4. 交易結束後，在一個短交易裡拿資料庫的發佈鎖（CLI 與 worker 共用）、確認這一筆仍是自己接手的，再拿
-   輸出資料夾底下的**檔案鎖**（`fcntl.flock`；資料庫斷線也不會放掉）：現在的 manifest 沒有指向比這次
+   `preview/` 這個資料夾本身的**檔案鎖**（`fcntl.flock` 鎖打開的目錄 fd，不另外建鎖檔；資料庫斷線
+   也不會放掉；等太久記成 `output_busy`）。拿到檔案鎖之後、寫目錄前與換 manifest 前，各再確認一次
+   接手代號（資料庫斷線時這一句會失敗，什麼都不寫）與 `preview/` 還在原位（打開的目錄 fd 和
+   `<輸出資料夾>/preview` 是同一個資料夾）。現在的 manifest 沒有指向比這次
    新的匯出，才寫檔：資料檔先寫進暫存目錄（每個檔 fsync）、整個改名成 `preview/<匯出編號>/`（目錄
    已經存在就失敗、不覆寫），再 fsync `preview/`；換 manifest 前在檔案鎖裡再比一次新舊；
    `preview/manifest.json` 最後寫（暫存檔 fsync 後換名，換的那一下是原子的，再 fsync `preview/`）；
@@ -27,7 +31,7 @@
 輸出位置的讀寫一律相對於打開的目錄 fd（`O_DIRECTORY`、`O_NOFOLLOW`、`dir_fd`）：檢查之後有人把
 `preview` 換成符號連結，也寫不到別處。
 `RADAR_DEMO_PUBLISH` 預設關；這個 epic 不開：開了的話不讀資料、直接記成失敗（正式發佈還沒做）。
-這個模組只寫 `<輸出資料夾>/preview/`（與輸出資料夾底下的鎖檔），沒有寫 `data/` 的路徑；`preview`
+這個模組只寫 `<輸出資料夾>/preview/`（輸出資料夾本身沒有就建），沒有寫 `data/` 的路徑；`preview`
 是符號連結時拒絕。
 """
 
@@ -38,6 +42,7 @@ import os
 import re
 import shutil
 import stat
+import time
 import uuid
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import ExitStack, contextmanager
@@ -241,7 +246,8 @@ def run_demo_export(
     Raises:
         DemoExportCheckError: 自我檢查沒過（什麼都沒寫，manifest 不換）。
         DemoExportError: 其他已知的失敗（原因代碼見 `failure`）。
-        DemoExportTakenOverError: 做到一半被別的行程接手（什麼都沒寫，狀態不改）。
+        DemoExportTakenOverError: 做到一半被別的行程接手（狀態不改；拿到檔案鎖後才發現時，已經寫好的
+            匯出目錄留著，manifest 不換）。
         DemoExportPublishedUnrecordedError: manifest 已經換成這一次，但狀態沒記上（留在 `running`，
             之後接手時補記成功）。
         BaseException: 讀資料庫或寫檔的錯誤、中斷原樣往上丟（那一筆已記成 `failed`）。
@@ -539,9 +545,14 @@ def _summary(papers: list[DemoPaper]) -> DemoSummary:
 
 # --- 輸出位置、檔案鎖、補記成功、寫檔（自我檢查通過之後）---------------------------------------
 
-# 發佈用的檔案鎖（放在輸出資料夾底下）：寫匯出目錄到換 manifest 這一段，CLI、worker、範例產生器都拿
-# 這一把（`fcntl.flock`）。資料庫的發佈鎖在連線斷掉時會被放掉，這把只有行程結束才放。
-DEMO_OUTPUT_LOCK_FILE: Final = ".demo-publish.lock"
+# 發佈用的檔案鎖：鎖 `preview/` 這個資料夾本身（`fcntl.flock` 鎖打開的目錄 fd，不另外建
+# 鎖檔）。寫匯出目錄到換 manifest 這一段，同一台主機、同一個資料夾的 CLI 與 worker 都拿這一
+# 把。資料庫的發佈鎖在連線斷掉時會被放掉，這把只有放鎖或行程結束才放。範例產生器鎖的是
+# `web/e2e/fixtures/`，是另一把。
+# 等超過這個秒數就放棄（`output_busy`）：拿著的一方只在寫目錄到換 manifest 那幾秒拿著，等
+# 這麼久代表它卡住了；等的期間拿著資料庫交易與發佈鎖，不要無限等。
+DEMO_OUTPUT_LOCK_TIMEOUT_SECONDS: Final = 300.0
+_DEMO_OUTPUT_LOCK_POLL_SECONDS: Final = 0.05
 
 _DIR_FLAGS: Final = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 
@@ -592,26 +603,34 @@ def _open_output(output_root: Path) -> Iterator[_Output]:
         os.close(root_fd)
 
 
+def _try_lock(directory_fd: int) -> bool:
+    """試著拿 `directory_fd` 這個資料夾的排他檔案鎖（不等）；拿到回 True，別人拿著回 False。"""
+    try:
+        fcntl.flock(directory_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return False
+    return True
+
+
 @contextmanager
 def _locked(directory_fd: int) -> Iterator[None]:
-    """拿 `directory_fd` 底下的發佈檔案鎖（排他、會等）；離開時放掉。
+    """拿 `directory_fd` 這個資料夾本身的發佈檔案鎖（排他；別人拿著就每 0.05 秒再試，最多等
+    `DEMO_OUTPUT_LOCK_TIMEOUT_SECONDS`）；離開時放掉。不建任何檔。`flock` 以「打開的檔案」為單位，
+    所以要另外打開一個 fd 來鎖（同一個行程的兩次匯出也會互斥）。
 
     Raises:
-        DemoExportError: 鎖檔是符號連結（`output_unsafe`）。
+        DemoExportError: 等超過時限（`output_busy`）。
     """
+    descriptor = os.open(".", _DIR_FLAGS, dir_fd=directory_fd)
     try:
-        descriptor = os.open(
-            DEMO_OUTPUT_LOCK_FILE,
-            os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC,
-            0o600,
-            dir_fd=directory_fd,
-        )
-    except OSError as exc:
-        if exc.errno == errno.ELOOP:
-            raise _unsafe("發佈鎖檔是符號連結，不寫") from None
-        raise
-    try:
-        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        deadline = time.monotonic() + DEMO_OUTPUT_LOCK_TIMEOUT_SECONDS
+        while not _try_lock(descriptor):
+            if time.monotonic() >= deadline:
+                raise DemoExportError(
+                    DemoExportFailure.OUTPUT_BUSY,
+                    f"等發佈的檔案鎖超過 {DEMO_OUTPUT_LOCK_TIMEOUT_SECONDS:.0f} 秒，沒有寫",
+                )
+            time.sleep(_DEMO_OUTPUT_LOCK_POLL_SECONDS)
         try:
             yield
         finally:
@@ -622,8 +641,9 @@ def _locked(directory_fd: int) -> Iterator[None]:
 
 @contextmanager
 def demo_output_lock(directory: Path) -> Iterator[None]:
-    """拿 `directory` 底下的發佈檔案鎖（和匯出寫 `preview/` 時拿的是同一把）。範例產生器替換範例
-    資料夾時用（`tests/demo_preview.py`）。"""
+    """拿 `directory` 這個資料夾本身的檔案鎖（機制和匯出鎖 `preview/` 一樣；鎖的資料夾不同就是不同的
+    鎖）。範例產生器替換範例資料夾時鎖 `web/e2e/fixtures/`（`tests/demo_preview.py`）；測試鎖輸出的
+    `preview/` 來模擬別的行程拿著。"""
     directory_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
     try:
         with _locked(directory_fd):
@@ -710,11 +730,29 @@ def _is_complete_here(out: _Output, manifest: DemoManifest | None, run: DemoExpo
 
 
 def _published_here(out: _Output, run: DemoExportRun) -> bool:
-    """失敗處理用：manifest 已經指向這一次、檔案都完整；讀的時候出錯算不是。"""
+    """失敗處理用：`preview/` 還在原位，而且 manifest 已經指向這一次、檔案都完整；讀的時候
+    出錯算不是。"""
     try:
+        _check_in_place(out)
         return _is_complete_here(out, _read_manifest(out), run)
     except Exception:
         return False
+
+
+def _check_in_place(out: _Output) -> None:
+    """打開的 `preview/` 目錄 fd 還是 `<輸出資料夾>/preview` 那個資料夾（`st_dev`／`st_ino` 一樣）：
+    途中被搬走或換掉時，寫進去的東西讀者看不到，不能回報成功。
+
+    Raises:
+        DemoExportError: 不是同一個資料夾或已經不在（`output_unsafe`）。
+    """
+    opened = os.fstat(out.preview_fd)
+    try:
+        current = os.stat(out.preview_path, follow_symlinks=False)
+    except FileNotFoundError:
+        raise _unsafe("preview 在匯出途中被搬走了，不寫") from None
+    if (current.st_dev, current.st_ino) != (opened.st_dev, opened.st_ino):
+        raise _unsafe("preview 在匯出途中被搬走或換掉了，不寫")
 
 
 def _hold_publish(connection: DbConnection, run: DemoExportRun, token: uuid.UUID) -> None:
@@ -724,6 +762,16 @@ def _hold_publish(connection: DbConnection, run: DemoExportRun, token: uuid.UUID
         DemoExportTakenOverError: 已經被別的行程接手或已經結束。
     """
     Database.transaction_lock(connection, DEMO_PUBLISH_LOCK_KEY)
+    _check_owned(connection, run, token)
+
+
+def _check_owned(connection: DbConnection, run: DemoExportRun, token: uuid.UUID) -> None:
+    """這一筆還是自己接手的（同時鎖住那一列到交易結束）。拿到檔案鎖之後、每次寫檔前各確認一次：等
+    檔案鎖的期間資料庫連線可能斷掉、被別的行程接手；連線斷了時這一句會丟錯，一樣什麼都不寫。
+
+    Raises:
+        DemoExportTakenOverError: 已經被別的行程接手或已經結束。
+    """
     if not update_demo_export_if_owned(connection, run.id, token):
         raise DemoExportTakenOverError(run.export_id)
 
@@ -736,7 +784,8 @@ def _record_recovered(
     manifest: DemoManifest,
 ) -> DemoExportResult:
     """manifest 已經指向這一次、檔案都完整：先再 fsync 一次 `preview/`（上一次可能換好 manifest、
-    還沒 fsync 就中斷），才補記成功。"""
+    還沒 fsync 就中斷），才補記成功。`preview/` 不在原位時不補記。"""
+    _check_in_place(out)
     _fsync_dir(out.preview_fd)
     update_demo_export_finished(connection, run.id, run_token=token, failure=None)
     return DemoExportResult(
@@ -753,14 +802,21 @@ def _recover(
     """manifest 已經指向這一次、檔案都完整（上一次換好 manifest、卻沒記上成功就中斷）：補記成功、回
     這一次的結果；不是就回 None（照常匯出）。拿著兩把發佈鎖看，免得和正在寫的行程互相看到一半。
 
+    manifest 已經指向比這一次新的匯出時直接丟 `superseded`、不讀資料：這一次之前就算換好過
+    manifest（已發佈、沒記上成功），讀者現在看到的也是新的一批；沒有這一次的 manifest，檔案也
+    無從核對，所以不記成功（ADR-0061）。
+
     Raises:
         DemoExportTakenOverError: 這一筆已經被別的行程接手。
-        DemoExportError: manifest 讀不懂或不安全。
+        DemoExportError: manifest 讀不懂或不安全（`manifest_unreadable`、`output_unsafe`）、已經指向
+            比這次新的匯出（`superseded`）、等檔案鎖太久（`output_busy`）。
     """
     with database.transaction() as connection:
         _hold_publish(connection, run, token)
-        with _locked(out.root_fd):
+        with _locked(out.preview_fd):
+            _check_owned(connection, run, token)
             current = _read_manifest(out)
+            _check_not_superseded(current, run)
             if current is None or not _is_complete_here(out, current, run):
                 return None
             return _record_recovered(connection, out, run, token, current)
@@ -784,11 +840,14 @@ def _publish(
 ) -> DemoExportResult:
     """拿資料庫的發佈鎖、確認還是自己接手的，再拿檔案鎖：manifest 沒有指向比這次新的匯出才寫匯出
     目錄，換 manifest 前在檔案鎖裡再比一次；換好後 fsync `preview/`，同一個資料庫交易記成功。
+    寫目錄前、換 manifest 前各再確認一次接手代號與 `preview/` 還在原位；換完再確認一次
+    `preview/` 還在原位，才算已發佈。
 
     Raises:
-        DemoExportTakenOverError: 這一筆已經被別的行程接手（什麼都沒寫）。
+        DemoExportTakenOverError: 這一筆已經被別的行程接手（manifest 不換）。
         DemoExportError: manifest 已經指向比這次新的匯出（`superseded`）、讀不懂
-            （`manifest_unreadable`）、目錄已經存在、輸出位置不安全。
+            （`manifest_unreadable`）、目錄已經存在、輸出位置不安全或途中被搬走（`output_unsafe`）、
+            等檔案鎖太久（`output_busy`）。
         DemoExportPublishedUnrecordedError: manifest 已經換成這一次，之後的 fsync、記成功或 commit
             失敗（那一筆留在 `running`，之後接手時補記）。
     """
@@ -796,15 +855,22 @@ def _publish(
     try:
         with database.transaction() as connection:
             _hold_publish(connection, run, token)
-            with _locked(out.root_fd):
+            with _locked(out.preview_fd):
                 current = _read_manifest(out)
                 if current is not None and _is_complete_here(out, current, run):
                     # 別的行程（被接手前的同一筆）已經發佈好這一次：補記成功，不重寫。
                     return _record_recovered(connection, out, run, token, current)
                 _check_not_superseded(current, run)
+                _check_owned(connection, run, token)
+                _check_in_place(out)
                 _write_export_dir(out, run.export_id, files)
                 _check_not_superseded(_read_manifest(out), run)
+                _check_owned(connection, run, token)
+                _check_in_place(out)
                 _swap_manifest(out, files[MANIFEST_FILE])
+                # 換完確認 preview/ 還在原位才算已發佈：換的途中被搬走時，新的 manifest 在讀者看不到
+                # 的地方，記失敗（不回報成功、也不說已發佈）。
+                _check_in_place(out)
                 switched = True
                 _fsync_dir(out.preview_fd)
             update_demo_export_finished(connection, run.id, run_token=token, failure=None)

@@ -1,15 +1,17 @@
-"""範例產生器 `tests/demo_preview.py` 的防呆（Story 3.7 第 2 輪審查 G6）：目標的每一層上層都不准是
-符號連結、替換失敗時舊範例留著、整段拿發佈檔案鎖。全部在 pytest 的暫存資料夾裡做，不連資料庫、
+"""範例產生器 `tests/demo_preview.py` 的防呆（Story 3.7 第 2 輪審查 G6、第 3 輪 H5）：目標的
+每一層上層都不准是符號連結、搬移相對於目錄 fd、替換失敗時舊範例留著、連舊的都搬不回去時
+留著備份、整段拿 `web/e2e/fixtures/` 的檔案鎖。全部在 pytest 的暫存資料夾裡做，不連資料庫、
 不動 repo 裡的範例。"""
 
 import fcntl
 import os
+from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 import tests.demo_preview as demo_preview
-from radar.services.demo_export import DEMO_OUTPUT_LOCK_FILE
 
 
 def _layout(root: Path) -> Path:
@@ -41,27 +43,146 @@ def test_any_symlinked_level_is_refused(tmp_path: Path, link: str) -> None:
         demo_preview.check_target(root, real)
 
 
-def test_failed_replacement_puts_the_old_example_back(tmp_path: Path) -> None:
-    target = _layout(tmp_path)
-    missing = tmp_path / "work" / "fresh"  # 不存在：搬不進去
-    (tmp_path / "work").mkdir()
+@pytest.fixture
+def fixtures_fd(tmp_path: Path) -> Iterator[int]:
+    _layout(tmp_path)
+    descriptor = demo_preview.open_fixtures(tmp_path, tmp_path / "web" / "e2e" / "fixtures")
+    yield descriptor
+    os.close(descriptor)
+
+
+def _work(tmp_path: Path, *, fresh: bool) -> Path:
+    work = tmp_path / "web" / "e2e" / "fixtures" / ".work"
+    (work / "out").mkdir(parents=True)
+    if fresh:
+        (work / "out" / "preview").mkdir()
+        (work / "out" / "preview" / "manifest.json").write_text("new", encoding="utf-8")
+    return work
+
+
+@pytest.mark.parametrize("link", ["web", "web/e2e", "web/e2e/fixtures"])
+def test_opening_the_fixtures_refuses_any_symlinked_level(tmp_path: Path, link: str) -> None:
+    root = tmp_path / "repo"
+    _layout(root)
+    elsewhere = tmp_path / "elsewhere"
+    (root / link).rename(elsewhere)
+    (root / link).symlink_to(elsewhere, target_is_directory=True)
+
+    with pytest.raises(SystemExit, match="符號連結"):
+        demo_preview.open_fixtures(root, root / "web" / "e2e" / "fixtures")
+
+
+def test_failed_replacement_puts_the_old_example_back(tmp_path: Path, fixtures_fd: int) -> None:
+    _work(tmp_path, fresh=False)  # 沒有 out/preview：搬不進去
 
     with pytest.raises(FileNotFoundError):
-        demo_preview.replace_target(missing, tmp_path / "work" / "old", target)
+        demo_preview.replace_target(fixtures_fd, ".work", "demo-preview")
 
+    target = tmp_path / "web" / "e2e" / "fixtures" / "demo-preview"
     assert (target / "manifest.json").read_text(encoding="utf-8") == "old"
 
 
-def test_replacement_swaps_in_the_new_example(tmp_path: Path) -> None:
-    target = _layout(tmp_path)
-    fresh = tmp_path / "work" / "fresh"
-    fresh.mkdir(parents=True)
-    (fresh / "manifest.json").write_text("new", encoding="utf-8")
+def test_replacement_swaps_in_the_new_example(tmp_path: Path, fixtures_fd: int) -> None:
+    work = _work(tmp_path, fresh=True)
 
-    demo_preview.replace_target(fresh, tmp_path / "work" / "old", target)
+    demo_preview.replace_target(fixtures_fd, ".work", "demo-preview")
 
+    target = tmp_path / "web" / "e2e" / "fixtures" / "demo-preview"
     assert (target / "manifest.json").read_text(encoding="utf-8") == "new"
-    assert (tmp_path / "work" / "old" / "manifest.json").read_text(encoding="utf-8") == "old"
+    assert (work / "old" / "manifest.json").read_text(encoding="utf-8") == "old"
+
+
+def test_replacement_moves_relative_to_the_opened_fixtures(
+    tmp_path: Path, fixtures_fd: int
+) -> None:
+    # H5：打開之後 fixtures 被搬走、原位換成指到別處的符號連結：搬移仍在原本的資料夾裡做。
+    work = _work(tmp_path, fresh=True)
+    fixtures = tmp_path / "web" / "e2e" / "fixtures"
+    moved = tmp_path / "web" / "e2e" / "moved"
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    fixtures.rename(moved)
+    fixtures.symlink_to(elsewhere, target_is_directory=True)
+
+    demo_preview.replace_target(fixtures_fd, work.name, "demo-preview")
+
+    assert list(elsewhere.iterdir()) == []
+    assert (moved / "demo-preview" / "manifest.json").read_text(encoding="utf-8") == "new"
+
+
+def _fail_after_the_backup(monkeypatch: pytest.MonkeyPatch) -> None:
+    """第一次搬（舊的搬到備份）照做，之後每一次搬都失敗。"""
+    real = os.rename
+    calls: list[int] = []
+
+    def rename(*args: Any, **kwargs: Any) -> None:
+        calls.append(1)
+        if len(calls) > 1:
+            raise OSError(5, "disk")
+        real(*args, **kwargs)
+
+    monkeypatch.setattr(os, "rename", rename)
+
+
+def test_backup_is_kept_when_the_old_example_cannot_be_put_back(
+    tmp_path: Path, fixtures_fd: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # H5：新的搬不進去、舊的也搬不回去：丟 BackupKeptError，訊息帶備份的位置。
+    work = _work(tmp_path, fresh=True)
+    monkeypatch.setattr(demo_preview, "FIXTURES", tmp_path / "web" / "e2e" / "fixtures")
+    _fail_after_the_backup(monkeypatch)
+
+    with pytest.raises(demo_preview.BackupKeptError) as caught:
+        demo_preview.replace_target(fixtures_fd, ".work", "demo-preview")
+
+    monkeypatch.undo()
+    assert caught.value.backup == work / "old"
+    assert str(work / "old") in str(caught.value)
+    assert (work / "old" / "manifest.json").read_text(encoding="utf-8") == "old"
+
+
+def _patch_paths(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    fixtures = tmp_path / "web" / "e2e" / "fixtures"
+    monkeypatch.setattr(demo_preview, "ROOT", tmp_path)
+    monkeypatch.setattr(demo_preview, "FIXTURES", fixtures)
+    monkeypatch.setattr(demo_preview, "TARGET", fixtures / "demo-preview")
+
+    def export(output: Path) -> str:
+        (output / "preview").mkdir(parents=True)
+        (output / "preview" / "manifest.json").write_text("new", encoding="utf-8")
+        return "2-1"
+
+    monkeypatch.setattr(demo_preview, "_export", export)
+    monkeypatch.setattr(demo_preview, "check_complete", lambda preview: None)
+    return fixtures
+
+
+def test_generation_keeps_the_work_directory_when_the_backup_is_kept(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # H5：連舊的都搬不回去時，不在 finally 刪掉暫存資料夾（裡面有舊範例的備份）。
+    _layout(tmp_path)
+    fixtures = _patch_paths(monkeypatch, tmp_path)
+    _fail_after_the_backup(monkeypatch)
+
+    with pytest.raises(demo_preview.BackupKeptError) as caught:
+        demo_preview._generate_locked()
+
+    monkeypatch.undo()
+    assert (caught.value.backup / "manifest.json").read_text(encoding="utf-8") == "old"
+    assert caught.value.backup.parent.parent == fixtures
+
+
+def test_generation_cleans_up_the_work_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _layout(tmp_path)
+    fixtures = _patch_paths(monkeypatch, tmp_path)
+
+    assert demo_preview._generate_locked() == "2-1"
+
+    assert sorted(path.name for path in fixtures.iterdir()) == ["demo-preview"]
+    assert (fixtures / "demo-preview" / "manifest.json").read_text(encoding="utf-8") == "new"
 
 
 def test_generation_holds_the_output_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -72,7 +193,7 @@ def test_generation_holds_the_output_lock(tmp_path: Path, monkeypatch: pytest.Mo
     held: list[bool] = []
 
     def probe() -> str:
-        descriptor = os.open(target.parent / DEMO_OUTPUT_LOCK_FILE, os.O_RDWR)
+        descriptor = os.open(target.parent, os.O_RDONLY | os.O_DIRECTORY)
         try:
             with pytest.raises(BlockingIOError):
                 fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)

@@ -137,6 +137,5 @@ tmp/
 _bmad/config.user.toml
 _bmad/custom/config.user.toml
 
-# 示範站範例產生器（tests/demo_preview.py）的鎖檔與暫存資料夾（被直接殺掉時可能留下）
-web/e2e/fixtures/.demo-publish.lock
+# 示範站範例產生器（tests/demo_preview.py）的暫存資料夾（被直接殺掉、或舊範例搬不回去時留下）
 web/e2e/fixtures/.demo-preview.work-*/
