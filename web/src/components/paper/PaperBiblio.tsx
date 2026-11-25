@@ -62,27 +62,42 @@ function AbstractMark({ has }: { has: boolean }) {
 }
 
 const TAG_CLASS =
-  "inline-flex h-[26px] items-center rounded-full border border-border px-3 font-mono text-s13 tracking-004 whitespace-nowrap text-text-reading";
+  "inline-flex items-center rounded-full border border-border px-3 font-mono text-s13 tracking-004 whitespace-nowrap text-text-reading";
 
 /**
  * 一個主題或方法標籤：連到找論文、帶好這個分類（Story 3.14、AR-67；EXPERIENCE.md 畫面 8 第 2 點）。
  * 主題標籤直接選好「主題」篩選（畫面 12 第 6 點，不變成條件標籤）；找論文沒有方法的篩選，方法標籤帶進去是
  * 一個可以移除的條件標籤。站內連結，同一頁打開。滑過時字與框變亮（設計稿 a.tagl）。
  * 看得到的標籤 26px 高，連結本身 44px（ADR-0037），負外距讓這一列看起來一樣高。
- * 網址寫死成員版的找論文：示範站的論文頁（Story 3.9）要換成論文清單（ADR-0010 的 2026-11-20 更新）。
+ * 預設連到成員版的找論文；示範站（論文清單的每一列，Story 3.14 示範站；之後示範站的論文頁 3.9）給 `to="/papers"`
+ * 連到論文清單（ADR-0010 的 2026-11-20 更新）。
+ * `size="row"`：示範站論文清單的列（設計稿 papers-demo.html 的 a.tagl 寫 height 26px＋1px 框線、沒有 border-box，
+ * 看起來 28px 高）；論文頁維持 26px（成員版既有做法，不在這次改）。
  */
-function ClassificationTagLink({ field, value, children }: { field: "topic" | "method"; value: string; children: ReactNode }) {
+export function ClassificationTagLink({
+  field,
+  value,
+  children,
+  to = "/search",
+  size = "paper",
+}: {
+  field: "topic" | "method";
+  value: string;
+  children: ReactNode;
+  to?: "/search" | "/papers";
+  size?: "paper" | "row";
+}) {
   return (
     <Link
-      to="/search"
+      to={to}
       search={field === "topic" ? { topic: value } : { method: value }}
       data-topic-link={field === "topic" ? "" : undefined}
       data-method-link={field === "method" ? "" : undefined}
-      className="group -my-[9px] inline-flex h-tap-target items-center no-underline"
+      className={`group ${size === "row" ? "-my-[8px]" : "-my-[9px]"} inline-flex h-tap-target items-center no-underline`}
     >
       <span
         data-tag
-        className={`${TAG_CLASS} transition-[border-color,color] duration-250 group-hover:border-text-primary group-hover:text-text-primary`}
+        className={`${TAG_CLASS} ${size === "row" ? "h-[28px]" : "h-[26px]"} transition-[border-color,color] duration-250 group-hover:border-text-primary group-hover:text-text-primary`}
       >
         {children}
       </span>
@@ -90,13 +105,13 @@ function ClassificationTagLink({ field, value, children }: { field: "topic" | "m
   );
 }
 
-/** 「未分類」：直角方框、第三層文字色，不能點（設計稿「沒有摘要」）。 */
-function UnclassifiedTag() {
+/** 「未分類」：直角方框、第三層文字色，不能點（設計稿「沒有摘要」）。`size="row"` 同上（示範站論文清單的列，28px）。 */
+export function UnclassifiedTag({ size = "paper" }: { size?: "paper" | "row" } = {}) {
   const { t } = useTranslation("paper");
   return (
     <span
       data-tag="unclassified"
-      className="inline-flex h-[26px] items-center border border-hairline px-[10px] font-mono text-s13 tracking-004 whitespace-nowrap text-text-tertiary"
+      className={`inline-flex ${size === "row" ? "h-[28px]" : "h-[26px]"} items-center border border-hairline px-[10px] font-mono text-s13 tracking-004 whitespace-nowrap text-text-tertiary`}
     >
       {t("paper.classification.unclassified")}
     </span>

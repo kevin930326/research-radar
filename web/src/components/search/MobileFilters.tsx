@@ -1,6 +1,6 @@
 import { Dialog } from "@base-ui/react/dialog";
 import { Link } from "@tanstack/react-router";
-import { useId, useRef, useState, type ReactNode } from "react";
+import { useId, useRef, useState, type ComponentType, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 
 import { DESKTOP_QUERY, useCloseAcrossBreakpoint } from "../../hooks/use-close-across-breakpoint";
@@ -17,8 +17,15 @@ import { Caret, CrossIcon, FilterIcon } from "./parts";
 // 選了立刻套用（和桌機一樣寫進網址），所以「看 N 篇」的 N 就是目前條件的篇數（API 的 total），按了關上。
 // 行為用 Base UI Dialog（ADR-0010）：焦點留在裡面、Esc 關上、關上後焦點回到「篩選」。
 // 視窗變寬到桌機版時關上（桌機沒有這個畫面），焦點移到桌機的第一個篩選標籤（「篩選」按鈕已經看不到；審查 S2-4）。
+// 外殼（FilterSheet）和示範站論文清單（Story 3.14 示範站）共用：段落的選項與「清除篩選」連到哪裡由頁面給。
 
-type Section = "journal" | "year" | "topic";
+/** 滿版篩選的一段（可以展開收起）：標題、目前選了什麼、選項。 */
+export interface FilterSection {
+  key: string;
+  label: string;
+  value: string | null;
+  body: ReactNode;
+}
 
 interface MobileFiltersProps {
   state: FilterState;
@@ -28,25 +35,13 @@ interface MobileFiltersProps {
   children?: ReactNode;
 }
 
+/** 找論文的手機篩選：期刊、年份、主題三段；「清除篩選」連到只留範圍的網址。 */
 export function MobileFilters({ state, total, children }: MobileFiltersProps) {
   const { t } = useTranslation("search");
   const { t: tp } = useTranslation("paper");
-  const [open, setOpen] = useState(false);
-  const [section, setSection] = useState<Section | null>("journal");
-  const closedByBreakpoint = useRef(false);
-  const bodyId = useId();
-  const firstSectionRef = useRef<HTMLButtonElement>(null);
   const count = appliedFilterCount(state.params);
-  const changeOpen = (next: boolean) => {
-    if (next) setSection("journal");
-    setOpen(next);
-  };
-  useCloseAcrossBreakpoint(open, DESKTOP_QUERY, () => {
-    closedByBreakpoint.current = true;
-    setOpen(false);
-  });
   const unclassified = tp("paper.classification.unclassified");
-  const sections: { key: Section; label: string; value: string | null; body: ReactNode }[] = [
+  const sections: FilterSection[] = [
     { key: "journal", label: t("search.filter.journal"), value: journalValue(state, t), body: <JournalOptions state={state} size="sheet" /> },
     {
       key: "year",
@@ -57,8 +52,70 @@ export function MobileFilters({ state, total, children }: MobileFiltersProps) {
     { key: "topic", label: t("search.filter.topic"), value: topicValue(state, t, unclassified), body: <TopicOptions state={state} size="sheet" /> },
   ];
   return (
+    <FilterSheet
+      count={count}
+      total={total}
+      sections={sections}
+      ClearLink={({ onClick }) => (
+        // 連到「只留範圍」的網址（設計稿是連結）；按了它會不見，焦點先移到第一段的標題（審查 S2-3）。
+        <Link
+          to="/search"
+          search={clearConditions(state.params)}
+          replace
+          resetScroll={false}
+          onClick={onClick}
+          className="inline-flex min-h-tap-target items-center text-s14 tracking-004 text-accent-gold no-underline decoration-1 underline-offset-4 hover:underline"
+        >
+          {t("search.filter.clearAll")}
+        </Link>
+      )}
+    >
+      {children}
+    </FilterSheet>
+  );
+}
+
+interface FilterSheetProps {
+  /** 有套用幾項（按鈕寫「篩選 · N」；0 是「篩選」）。 */
+  count: number;
+  /** 目前條件的篇數；還不知道是 null。 */
+  total: number | null;
+  /** 一段一段的選項（打開時展開第一段）。 */
+  sections: FilterSection[];
+  /** 各段之後、底部之前的東西（示範站的「只看有摘要的」「只看有完整內容的」）。 */
+  extra?: ReactNode;
+  /** 底部的「清除篩選」（有套用時才出現）；`onClick` 把焦點移到第一段的標題（按了它會不見）。 */
+  ClearLink: ComponentType<{ onClick: () => void }>;
+  /** 篩選按鈕右邊、和它排在一起的東西。 */
+  children?: ReactNode;
+  /** 「篩選」按鈕那一排離上面多遠（找論文 12px；示範站論文清單 14px，設計稿）。 */
+  rowMarginClass?: string;
+}
+
+/**
+ * 手機滿版篩選的外殼（找論文與示範站論文清單共用）：「篩選」按鈕、滿版的標題與關閉、一段一段的選項（一次展開一段）、
+ * 底部固定的「清除篩選」與「看 N 篇」。每一段的選項與「清除篩選」連到哪裡由使用的頁面給。
+ */
+export function FilterSheet({ count, total, sections, extra, ClearLink, children, rowMarginClass = "mt-3" }: FilterSheetProps) {
+  const { t } = useTranslation("search");
+  const firstKey = sections[0]?.key ?? null;
+  const [open, setOpen] = useState(false);
+  const [section, setSection] = useState<string | null>(firstKey);
+  const closedByBreakpoint = useRef(false);
+  const bodyId = useId();
+  const firstSectionRef = useRef<HTMLButtonElement>(null);
+  const focusFirst = () => firstSectionRef.current?.focus();
+  const changeOpen = (next: boolean) => {
+    if (next) setSection(firstKey);
+    setOpen(next);
+  };
+  useCloseAcrossBreakpoint(open, DESKTOP_QUERY, () => {
+    closedByBreakpoint.current = true;
+    setOpen(false);
+  });
+  return (
     <Dialog.Root open={open} onOpenChange={changeOpen}>
-      <div className="mt-3 flex flex-wrap items-center gap-2 split:hidden">
+      <div className={`${rowMarginClass} flex flex-wrap items-center gap-2 split:hidden`}>
         {/* 看得到的按鈕 36px 高（設計稿），按鈕本身 44px（ADR-0037），負外距讓這一排和設計稿一樣高。 */}
         <Dialog.Trigger data-mobile-filter className="group -my-1 inline-flex h-tap-target cursor-pointer items-center bg-transparent p-[0px]">
           <span
@@ -115,20 +172,9 @@ export function MobileFilters({ state, total, children }: MobileFiltersProps) {
                 </div>
               );
             })}
+            {extra}
             <div className="sticky bottom-[0px] mt-auto flex items-center justify-between gap-4 border-t border-hairline bg-background px-[20px] py-[14px]">
-              {count > 0 ? (
-                // 連到「只留範圍」的網址（設計稿是連結）；按了它會不見，焦點先移到第一段的標題（審查 S2-3）。
-                <Link
-                  to="/search"
-                  search={clearConditions(state.params)}
-                  replace
-                  resetScroll={false}
-                  onClick={() => firstSectionRef.current?.focus()}
-                  className="inline-flex min-h-tap-target items-center text-s14 tracking-004 text-accent-gold no-underline decoration-1 underline-offset-4 hover:underline"
-                >
-                  {t("search.filter.clearAll")}
-                </Link>
-              ) : null}
+              {count > 0 ? <ClearLink onClick={focusFirst} /> : null}
               <span />
               <Dialog.Close className="h-12 cursor-pointer rounded-full bg-text-primary px-[28px] text-button tracking-006 text-on-button">
                 {total === null

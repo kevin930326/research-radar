@@ -7,6 +7,7 @@ import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
 
 import { OUT_DIRS, resolveBuildTarget } from "./build-target.ts";
+import { demoPreviewFiles } from "./demo-preview-server.ts";
 import { tailwindGuard } from "./tailwind-guard.ts";
 
 const here = (relative: string): string => fileURLToPath(new URL(relative, import.meta.url));
@@ -22,7 +23,13 @@ export default defineConfig(({ command, isPreview }) => {
   const target = resolveBuildTarget(process.env.VITE_BUILD_TARGET, command === "build");
   return {
     // tailwindGuard：用到不產生 CSS 的類別（例如 bg-red-500）時建置與開發伺服器失敗（ADR-0037）。
-    plugins: [tailwindGuard(), react(), tailwindcss()],
+    // demoPreviewFiles：示範站的開發伺服器與 vite preview 送出 preview/ 的範例檔（建置結果不含；Story 3.14）。
+    plugins: [
+      tailwindGuard(),
+      react(),
+      tailwindcss(),
+      ...(target === "demo" ? [demoPreviewFiles(process.env.DEMO_PREVIEW_DIR ?? here("./e2e/fixtures/demo-preview"))] : []),
+    ],
     resolve: {
       alias: {
         // 資料來源層（ADR-0010 第 1～3 點）：頁面只 import src/datasource（入口），

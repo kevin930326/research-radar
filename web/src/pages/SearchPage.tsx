@@ -370,7 +370,7 @@ function ClearLink({ params, className }: { params: SearchParams; className: str
 }
 
 /** 從連結帶進來的條件（「本週新增」、論文頁的方法）：暖白底的標籤，右邊「×」移除。 */
-function ConditionTag({ kind, label, onRemove }: { kind: "this_week" | "method"; label: string; onRemove: () => void }) {
+export function ConditionTag({ kind, label, onRemove }: { kind: "this_week" | "method"; label: string; onRemove: () => void }) {
   const { t } = useTranslation("search");
   return (
     <span

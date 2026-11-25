@@ -104,6 +104,30 @@ export function TopicOptions({ state, size }: { state: FilterState; size: Option
   );
 }
 
+/**
+ * 方法：每一個方法（示範站論文清單 Story 3.14 用；找論文沒有方法的選單）。沒有「未分類」：方法沒有這個代號
+ * （ADR-0050 第 6 點：方法不剩時沒有標籤）；設計稿 papers-demo.html 最後一個是「未分類」，列給 Kevin。
+ */
+export function MethodOptions({ state, size }: { state: FilterState; size: OptionSize }) {
+  const name = useId();
+  const selected = new Set(state.params.method?.split(",") ?? []);
+  return (
+    <>
+      {(state.names?.methods ?? []).map((method) => (
+        <FilterOption
+          key={method.key}
+          type="checkbox"
+          name={name}
+          size={size}
+          checked={selected.has(method.key)}
+          onChange={() => state.update((current) => ({ ...current, method: toggleKey(current.method, method.key) }))}
+          label={method.name}
+        />
+      ))}
+    </>
+  );
+}
+
 const PROBLEM_KEYS: Record<YearProblem, string> = {
   missing: "search.year.missing",
   tooEarly: "search.year.tooEarly",

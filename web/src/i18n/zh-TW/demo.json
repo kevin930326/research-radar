@@ -1,0 +1,27 @@
+{
+  "demo": {
+    "header": {
+      "scope": "示範站 · 靜態快照",
+      "papers": "論文"
+    },
+    "papers": {
+      "all": "全部論文",
+      "count": "{{count}} 篇",
+      "years": "{{years}} 年",
+      "titleHas": "標題有「{{query}}」",
+      "withAbstract": "有摘要",
+      "withFull": "有完整內容",
+      "separator": "、"
+    },
+    "filter": {
+      "abstractOnly": "只看有摘要的",
+      "fullOnly": "只看有完整內容的",
+      "title": "用標題裡的字篩選",
+      "clearTitle": "清除文字"
+    },
+    "row": {
+      "full": "有完整內容",
+      "biblioOnly": "只有書目"
+    }
+  }
+}
