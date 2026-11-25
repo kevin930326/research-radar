@@ -8,9 +8,18 @@ export function normalizeForTitleMatch(text: string): string {
   return text.normalize("NFKC").toLowerCase();
 }
 
+/**
+ * 這段字的比對函式：傳入「已經用 normalizeForTitleMatch 轉過的標題」，回答有沒有這段字。
+ * `query` 去掉前後空白後是空的，回 null（等於沒有條件）。清單很長時，標題先轉好一次、每次打字只轉查詢的字。
+ */
+export function titleMatcher(query: string): ((normalizedTitle: string) => boolean) | null {
+  const needle = normalizeForTitleMatch(query.trim());
+  if (needle === "") return null;
+  return (normalizedTitle) => normalizedTitle.includes(needle);
+}
+
 /** 標題裡有沒有這段字（`query` 去掉前後空白後是空的就算有）。 */
 export function titleMatches(title: string, query: string): boolean {
-  const needle = normalizeForTitleMatch(query.trim());
-  if (needle === "") return true;
-  return normalizeForTitleMatch(title).includes(needle);
+  const matcher = titleMatcher(query);
+  return matcher === null || matcher(normalizeForTitleMatch(title));
 }

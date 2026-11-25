@@ -34,9 +34,8 @@ interface Index {
 const MANIFEST = json<{ export_id: string; client_config: { paper_list_page_size: number } }>("manifest.json");
 const INDEX = json<Index>(`${MANIFEST.export_id}/papers-index.json`);
 const TITLES = json<{ titles: string[] }>(`${MANIFEST.export_id}/titles.json`).titles;
-const NAMES = json<{ names: { journals: { key: string; name: string }[]; topics: { key: string; name: string }[] } }>(
-  `${MANIFEST.export_id}/taxonomy.json`,
-).names;
+type Named = { key: string; name: string }[];
+const NAMES = json<{ names: { journals: Named; topics: Named; methods: Named } }>(`${MANIFEST.export_id}/taxonomy.json`).names;
 const SHARD = json<{ papers: { biblio: { biblio: { id: string; doi_url: string | null } } }[] }>(`${MANIFEST.export_id}/papers/000.json`).papers;
 const PAGE_SIZE = MANIFEST.client_config.paper_list_page_size;
 const TOTAL = TITLES.length;
@@ -55,6 +54,13 @@ function text(key: string): string {
 function fill(template: string, values: Record<string, string | number>): string {
   return template.replace(/\{\{(\w+)\}\}/g, (_, name: string) => String(values[name]));
 }
+
+/** 標題整行（設計稿：各段之間「 · 」，最後是篇數）；沒有條件時只有「全部論文」那一段。 */
+function heading(parts: string[], total: number): string {
+  return [...parts, fill(text("demo:demo.papers.count"), { count: total })].join(" · ");
+}
+
+const name = (list: Named, key: string) => list.find((entry) => entry.key === key)!.name;
 
 const rows = (page: Page) => page.locator("[data-paper-row]");
 const resultCount = (page: Page) => page.locator("[data-result-count]");
@@ -76,13 +82,32 @@ test.describe("demo paper list", () => {
     await expectCount(page, TOTAL);
     await expect(page.locator("[data-data-date]")).toBeVisible();
 
-    // 每列都有「● 有完整內容」或「○ 只有書目」，前 50 篇的數目和範例檔一樣。
-    const shownIds = await rows(page).evaluateAll((items) => items.map((item) => item.getAttribute("data-paper-row")));
-    const full = shownIds.filter((id) => INDEX.has_full_content[INDEX.id.indexOf(id!)]).length;
-    await expect(page.locator("[data-paper-row] [data-full-content='yes']")).toHaveCount(full);
-    await expect(page.locator("[data-paper-row] [data-full-content='no']")).toHaveCount(PAGE_SIZE - full);
-    await expect(page.locator("[data-paper-row] [data-full-content='yes']").first()).toHaveText(text("demo:demo.row.full"));
-    await expect(page.locator("[data-paper-row] [data-full-content='no']").first()).toHaveText(text("demo:demo.row.biblioOnly"));
+    await expect(page.locator("h1")).toHaveText(heading([text("demo:demo.papers.all")], TOTAL));
+
+    // 每列都有「● 有完整內容」或「○ 只有書目」：逐列和範例檔的 has_full_content 比（兩列對調也抓得到）。
+    const shownIds = await rows(page).evaluateAll((items) => items.map((item) => item.getAttribute("data-paper-row")!));
+    expect(shownIds).toHaveLength(PAGE_SIZE);
+    const full = shownIds.filter((id) => INDEX.has_full_content[INDEX.id.indexOf(id)]);
+    expect(full.length).toBeGreaterThan(0);
+    expect(full.length).toBeLessThan(PAGE_SIZE);
+    for (const id of shownIds) {
+      const hasFull = INDEX.has_full_content[INDEX.id.indexOf(id)]!;
+      const mark = page.locator(`[data-paper-row='${id}'] [data-full-content]`);
+      await expect(mark).toHaveAttribute("data-full-content", hasFull ? "yes" : "no");
+      await expect(mark).toHaveText(text(hasFull ? "demo:demo.row.full" : "demo:demo.row.biblioOnly"));
+    }
+    // 圓點：有完整內容是實心（有底色、沒有框），只有書目是空心（透明底、1px 框）。
+    const dot = async (id: string) =>
+      page.locator(`[data-paper-row='${id}'] [data-full-content] > span[aria-hidden='true']`).evaluate((element) => {
+        const style = getComputedStyle(element);
+        return { background: style.backgroundColor, border: style.borderTopWidth };
+      });
+    const solid = await dot(full[0]!);
+    expect(solid.background).not.toBe("rgba(0, 0, 0, 0)");
+    expect(solid.border).toBe("0px");
+    const hollow = await dot(shownIds.find((id) => !full.includes(id))!);
+    expect(hollow.background).toBe("rgba(0, 0, 0, 0)");
+    expect(hollow.border).toBe("1px");
 
     // 依年份新到舊。
     const years = shownIds.map((id) => INDEX.year[INDEX.id.indexOf(id!)] ?? 0);
@@ -90,6 +115,7 @@ test.describe("demo paper list", () => {
 
     // 「再載入 50 篇」：接著顯示，目前顯示幾篇寫進網址；全部顯示後按鈕不見。
     await expect(page.locator("[data-shown]")).toHaveText(fill(text("search:search.results.shown"), { shown: PAGE_SIZE, total: TOTAL }));
+    await expect(page.locator("[data-load-more]")).toHaveText(fill(text("search:search.results.more"), { count: PAGE_SIZE }));
     await page.locator("[data-load-more]").click();
     await expect(rows(page)).toHaveCount(TOTAL);
     await expect(page).toHaveURL(/[?&]shown=100(&|$)/);
@@ -104,11 +130,14 @@ test.describe("demo paper list", () => {
     await expect(rows(page)).toHaveCount(PAGE_SIZE);
     // 論文頁（Story 3.9）還沒做（AR-67）：標題不是連結。
     await expect(page.locator("[data-paper-row] h3 a")).toHaveCount(0);
-    // 開啟全文的連結和分片裡後端寫的 doi_url 一樣、開新分頁。
-    for (const paper of SHARD) {
+    // 開啟全文的連結和分片裡後端寫的 doi_url 一樣、開新分頁。只比畫面上有的列；先確認比到的篇數（不能空跑）。
+    const onPage = new Set(await rows(page).evaluateAll((items) => items.map((item) => item.getAttribute("data-paper-row")!)));
+    const checked = SHARD.filter((paper) => onPage.has(paper.biblio.biblio.id));
+    expect(checked.length).toBeGreaterThan(0);
+    expect(checked.some((paper) => paper.biblio.biblio.doi_url !== null)).toBe(true);
+    for (const paper of checked) {
       const { id, doi_url: doiUrl } = paper.biblio.biblio;
       const link = page.locator(`[data-paper-row='${id}'] [data-open-full-text]`);
-      if ((await page.locator(`[data-paper-row='${id}']`).count()) === 0) continue;
       if (doiUrl === null) await expect(link).toHaveCount(0);
       else {
         await expect(link).toHaveAttribute("href", doiUrl);
@@ -117,8 +146,8 @@ test.describe("demo paper list", () => {
     }
     // 主題標籤：同一頁打開，只帶這一個主題。
     const tag = page.locator("[data-paper-row] [data-topic-link]").first();
-    const name = (await tag.textContent())!.trim();
-    const key = NAMES.topics.find((topic) => topic.name === name)!.key;
+    const tagName = (await tag.textContent())!.trim();
+    const key = NAMES.topics.find((topic) => topic.name === tagName)!.key;
     await tag.click();
     await expect(page).toHaveURL(`${demo.baseURL}/papers?topic=${key}`);
     await expectCount(page, count((at) => INDEX.topics[at]?.includes(key) === true));
@@ -127,33 +156,51 @@ test.describe("demo paper list", () => {
   test("filters run in the browser and are written into the address", async ({ page }) => {
     await open(page);
     await expectCount(page, TOTAL);
-    const pressed = (name: string) => page.getByRole("button", { name, exact: true });
+    // 讀完檔之後，換條件、再載入都不再發請求（篩選在瀏覽器裡做，AD-20）。字型之類的資源不算，只看 fetch／XHR。
+    const later: string[] = [];
+    page.on("request", (request) => {
+      if (["fetch", "xhr"].includes(request.resourceType())) later.push(request.url());
+    });
+    const pressed = (label: string) => page.getByRole("button", { name: label, exact: true });
+    const withAbstract = text("demo:demo.papers.withAbstract");
+    const withFull = text("demo:demo.papers.withFull");
 
     await pressed(text("demo:demo.filter.abstractOnly")).click();
     await expect(page).toHaveURL(/[?&]abstract=true/);
     await expectCount(page, count((at) => INDEX.has_abstract[at]!));
+    await expect(page.locator("h1")).toHaveText(heading([withAbstract], count((at) => INDEX.has_abstract[at]!)));
     await expect(pressed(text("demo:demo.filter.abstractOnly"))).toHaveAttribute("aria-pressed", "true");
 
     await pressed(text("demo:demo.filter.fullOnly")).click();
     await expect(page).toHaveURL(/[?&]full=true/);
-    await expectCount(page, count((at) => INDEX.has_abstract[at]! && INDEX.has_full_content[at]!));
+    const both = (at: number) => INDEX.has_abstract[at]! && INDEX.has_full_content[at]!;
+    await expectCount(page, count(both));
+    await expect(page.locator("h1")).toHaveText(heading([withAbstract, withFull], count(both)));
 
     // 期刊（多選是「或」）。
     await page.locator("[data-filter-chip]").filter({ hasText: text("search:search.filter.journal") }).click();
-    const misq = NAMES.journals.find((journal) => journal.key === "misq")!.name;
-    const io = NAMES.journals.find((journal) => journal.key === "io")!.name;
+    const misq = name(NAMES.journals, "misq");
+    const io = name(NAMES.journals, "io");
     await page.getByRole("checkbox", { name: misq }).check();
     await page.getByRole("checkbox", { name: io }).check();
     await page.keyboard.press("Escape");
     await expect(page).toHaveURL(/[?&]journal=misq(%2C|,)io/);
     const journalMatch = (at: number) => ["misq", "io"].includes(INDEX.journal[at] ?? "");
-    await expectCount(page, count((at) => journalMatch(at) && INDEX.has_abstract[at]! && INDEX.has_full_content[at]!));
+    await expectCount(page, count((at) => journalMatch(at) && both(at)));
+    // 一個欄位選了好幾個：用分隔的標點接起來（自訂的寫法，列給 Kevin）。
+    await expect(page.locator("h1")).toHaveText(heading([[misq, io].join(text("demo:demo.papers.separator")), withAbstract, withFull], count((at) => journalMatch(at) && both(at))));
 
     // 標題裡的字（不分大小寫、字面比對）；也寫進網址。
     await page.locator("[data-title-query]").fill("PAPER 5");
     await expect(page).toHaveURL(/[?&]title=PAPER(\+|%20)5/);
     const titleMatch = (at: number) => TITLES[at]!.toLowerCase().includes("paper 5");
-    await expectCount(page, count((at) => titleMatch(at) && journalMatch(at) && INDEX.has_abstract[at]! && INDEX.has_full_content[at]!));
+    const titled = count((at) => titleMatch(at) && journalMatch(at) && both(at));
+    expect(titled).toBeGreaterThan(0);
+    await expectCount(page, titled);
+    await expect(page.locator("h1")).toHaveText(
+      heading([fill(text("demo:demo.papers.titleHas"), { query: "PAPER 5" }), [misq, io].join(text("demo:demo.papers.separator")), withAbstract, withFull], titled),
+    );
+    expect(later).toEqual([]);
 
     // 網址帶著條件重新打開，畫面一樣。
     const address = page.url();
@@ -165,6 +212,85 @@ test.describe("demo paper list", () => {
     await page.locator("[data-clear-all]:visible").click();
     await expect(page).toHaveURL(`${demo.baseURL}/papers?title=PAPER+5`);
     await expectCount(page, count(titleMatch));
+  });
+
+  test("the filter row has the journal, year, topic and method menus, and each one filters", async ({ page }) => {
+    await open(page);
+    await expectCount(page, TOTAL);
+    const later: string[] = [];
+    page.on("request", (request) => {
+      if (["fetch", "xhr"].includes(request.resourceType())) later.push(request.url());
+    });
+    const chip = (label: string) => page.locator("[data-filter-chip]").filter({ hasText: label });
+    // 四個選單、兩個「只看…的」、標題的字都在篩選列上。
+    for (const label of [
+      text("search:search.filter.journal"),
+      text("search:search.filter.year"),
+      text("search:search.filter.topic"),
+      text("paper:paper.classification.method"),
+    ]) {
+      await expect(chip(label)).toBeVisible();
+    }
+    await expect(page.locator("[data-toggle-chip]")).toHaveCount(2);
+    await expect(page.locator("[data-title-query]")).toBeVisible();
+
+    // 主題：範例裡最多篇的那一個。
+    const topicCounts = NAMES.topics.map(({ key }) => [key, count((at) => INDEX.topics[at]?.includes(key) === true)] as const);
+    const [topic] = topicCounts.reduce((best, entry) => (entry[1] > best[1] ? entry : best));
+    const topicMatch = (at: number) => INDEX.topics[at]?.includes(topic) === true;
+    await chip(text("search:search.filter.topic")).click();
+    await page.getByRole("checkbox", { name: name(NAMES.topics, topic), exact: true }).check();
+    await page.keyboard.press("Escape");
+    await expect(page).toHaveURL(new RegExp(`[?&]topic=${topic}(&|$)`));
+    await expectCount(page, count(topicMatch));
+    await expect(page.locator("h1")).toHaveText(heading([name(NAMES.topics, topic)], count(topicMatch)));
+
+    // 方法：這個主題裡最多篇的那一個。
+    const methodCounts = NAMES.methods.map(
+      ({ key }) => [key, count((at) => topicMatch(at) && INDEX.methods[at]?.includes(key) === true)] as const,
+    );
+    const [method] = methodCounts.reduce((best, entry) => (entry[1] > best[1] ? entry : best));
+    const methodMatch = (at: number) => topicMatch(at) && INDEX.methods[at]?.includes(method) === true;
+    expect(count(methodMatch)).toBeGreaterThan(0);
+    await chip(text("paper:paper.classification.method")).click();
+    await page.getByRole("checkbox", { name: name(NAMES.methods, method), exact: true }).check();
+    await page.keyboard.press("Escape");
+    await expect(page).toHaveURL(new RegExp(`[?&]method=${method}(&|$)`));
+    await expectCount(page, count(methodMatch));
+    await expect(page.locator("h1")).toHaveText(heading([name(NAMES.topics, topic), name(NAMES.methods, method)], count(methodMatch)));
+
+    // 年份：「近 3 年」；起訖年從網址讀（跟著今年變），篇數照範例檔算。
+    await chip(text("search:search.filter.year")).click();
+    // 整列是 label，點在 label 上（輸入框上面蓋著選項的字；同找論文的 e2e）。
+    await page.locator("label").filter({ has: page.getByRole("radio", { name: text("search:search.year.last3") }) }).click();
+    await page.keyboard.press("Escape");
+    await expect(page).toHaveURL(/[?&]from=\d{4}&to=\d{4}/);
+    const address = new URL(page.url()).searchParams;
+    const from = Number(address.get("from"));
+    const to = Number(address.get("to"));
+    const yearMatch = (at: number) => methodMatch(at) && INDEX.year[at] !== null && from <= INDEX.year[at]! && INDEX.year[at]! <= to;
+    await expectCount(page, count(yearMatch));
+    const years = fill(text("demo:demo.papers.years"), { years: from === to ? String(from) : `${from}–${to}` });
+    if (count(yearMatch) === 0) await expect(page.locator("[data-state='zero']")).toBeVisible();
+    await expect(page.locator("h1")).toHaveText(heading([name(NAMES.topics, topic), name(NAMES.methods, method), years], count(yearMatch)));
+    expect(later).toEqual([]);
+  });
+
+  test("the brand and the nav link go to the paper list", async ({ page }) => {
+    await open(page, "?abstract=true");
+    await expect(rows(page).first()).toBeVisible();
+    const papers = page.locator("header nav a").filter({ hasText: text("demo:demo.header.papers") });
+    await expect(papers).toHaveAttribute("href", "/papers");
+    // 帶著篩選條件時也標成目前這一頁。
+    await expect(papers).toHaveAttribute("data-status", "active");
+    await expect(page.locator("header [data-brand]")).toHaveAttribute("href", "/papers");
+    await page.locator("header [data-brand]").click();
+    await expect(page).toHaveURL(`${demo.baseURL}/papers`);
+    await expectCount(page, TOTAL);
+    await open(page, "?abstract=true");
+    await papers.click();
+    await expect(page).toHaveURL(`${demo.baseURL}/papers`);
+    await expectCount(page, TOTAL);
   });
 
   test("this week comes in as a removable condition", async ({ page }) => {
@@ -184,6 +310,26 @@ test.describe("demo paper list", () => {
     await expect(page).toHaveURL(/[?&]abstract=true/);
     await page.getByRole("button", { name: fill(text("search:search.mobile.apply"), { count: count((at) => INDEX.has_abstract[at]!) }) }).click();
     await expectCount(page, count((at) => INDEX.has_abstract[at]!));
+  });
+
+  test("phone: the sheet's clear filters link is not rebuilt when the conditions change", async ({ page }) => {
+    // 審查 3.14 P2：「清除篩選」以前每次重繪都拆掉重建，停在上面的焦點會掉。
+    await open(page, "?abstract=true", PHONE);
+    await expectCount(page, count((at) => INDEX.has_abstract[at]!));
+    await page.locator("[data-mobile-filter]").click();
+    const sheet = page.getByRole("dialog");
+    const clearAll = sheet.locator("[data-sheet-clear]");
+    await expect(clearAll).toHaveText(text("search:search.filter.clearAll"));
+    const before = await clearAll.elementHandle();
+    await sheet.getByRole("checkbox", { name: text("demo:demo.filter.fullOnly") }).check();
+    await expect(page).toHaveURL(/[?&]full=true/);
+    const both = count((at) => INDEX.has_abstract[at]! && INDEX.has_full_content[at]!);
+    await expect(sheet.getByRole("button", { name: fill(text("search:search.mobile.apply"), { count: both }) })).toBeVisible();
+    expect(await before!.evaluate((element) => element.isConnected)).toBe(true);
+    await clearAll.focus();
+    await sheet.getByRole("checkbox", { name: text("demo:demo.filter.fullOnly") }).evaluate((element) => (element as HTMLInputElement).click());
+    await expect(page).not.toHaveURL(/[?&]full=true/);
+    await expect(clearAll).toBeFocused();
   });
 
   test("no match shows the zero state with clear filters", async ({ page }) => {
@@ -216,6 +362,8 @@ test.describe("demo paper list", () => {
     await open(page);
     await expect(page.locator("[data-state='loading']")).toBeVisible();
     await expect(page.locator("[data-state='loading']")).toHaveAttribute("aria-label", text("search:search.results.loading"));
+    // State Patterns「7. 論文清單」：8 列論文列的骨架。
+    await expect(page.locator("[data-state='loading'] > div")).toHaveCount(8);
     await expect(page.locator("[data-data-date]")).toBeVisible();
     await expect(page.locator("h1")).toHaveText(text("demo:demo.papers.all"));
     await expect(rows(page)).toHaveCount(0);

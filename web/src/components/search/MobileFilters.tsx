@@ -1,11 +1,12 @@
 import { Dialog } from "@base-ui/react/dialog";
 import { Link } from "@tanstack/react-router";
-import { useId, useRef, useState, type ComponentType, type ReactNode } from "react";
+import { useId, useRef, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 
 import { DESKTOP_QUERY, useCloseAcrossBreakpoint } from "../../hooks/use-close-across-breakpoint";
 import { formatCount, splitTemplate } from "../../pages/paper-format";
 import { TRACKING_START_YEAR, appliedFilterCount, clearConditions } from "../../pages/search-filters";
+import type { ClearTarget } from "./FilterMenus";
 import { journalValue, topicValue, yearValue, type FilterState } from "./filters";
 import { JournalOptions, TopicOptions, YearOptions } from "./FilterLists";
 import { Caret, CrossIcon, FilterIcon } from "./parts";
@@ -56,19 +57,8 @@ export function MobileFilters({ state, total, children }: MobileFiltersProps) {
       count={count}
       total={total}
       sections={sections}
-      ClearLink={({ onClick }) => (
-        // 連到「只留範圍」的網址（設計稿是連結）；按了它會不見，焦點先移到第一段的標題（審查 S2-3）。
-        <Link
-          to="/search"
-          search={clearConditions(state.params)}
-          replace
-          resetScroll={false}
-          onClick={onClick}
-          className="inline-flex min-h-tap-target items-center text-s14 tracking-004 text-accent-gold no-underline decoration-1 underline-offset-4 hover:underline"
-        >
-          {t("search.filter.clearAll")}
-        </Link>
-      )}
+      // 連到「只留範圍」的網址（設計稿是連結）。
+      clear={{ to: "/search", search: clearConditions(state.params) }}
     >
       {children}
     </FilterSheet>
@@ -84,8 +74,11 @@ interface FilterSheetProps {
   sections: FilterSection[];
   /** 各段之後、底部之前的東西（示範站的「只看有摘要的」「只看有完整內容的」）。 */
   extra?: ReactNode;
-  /** 底部的「清除篩選」（有套用時才出現）；`onClick` 把焦點移到第一段的標題（按了它會不見）。 */
-  ClearLink: ComponentType<{ onClick: () => void }>;
+  /**
+   * 底部的「清除篩選」連到哪裡（有套用時才出現）。傳資料、由外殼自己畫連結：傳元件的話，頁面每次重繪都是新的元件，
+   * 連結會被拆掉重建，停在上面的焦點會掉（審查 3.14 P2）。
+   */
+  clear: ClearTarget;
   /** 篩選按鈕右邊、和它排在一起的東西。 */
   children?: ReactNode;
   /** 「篩選」按鈕那一排離上面多遠（找論文 12px；示範站論文清單 14px，設計稿）。 */
@@ -96,7 +89,7 @@ interface FilterSheetProps {
  * 手機滿版篩選的外殼（找論文與示範站論文清單共用）：「篩選」按鈕、滿版的標題與關閉、一段一段的選項（一次展開一段）、
  * 底部固定的「清除篩選」與「看 N 篇」。每一段的選項與「清除篩選」連到哪裡由使用的頁面給。
  */
-export function FilterSheet({ count, total, sections, extra, ClearLink, children, rowMarginClass = "mt-3" }: FilterSheetProps) {
+export function FilterSheet({ count, total, sections, extra, clear, children, rowMarginClass = "mt-3" }: FilterSheetProps) {
   const { t } = useTranslation("search");
   const firstKey = sections[0]?.key ?? null;
   const [open, setOpen] = useState(false);
@@ -174,7 +167,20 @@ export function FilterSheet({ count, total, sections, extra, ClearLink, children
             })}
             {extra}
             <div className="sticky bottom-[0px] mt-auto flex items-center justify-between gap-4 border-t border-hairline bg-background px-[20px] py-[14px]">
-              {count > 0 ? <ClearLink onClick={focusFirst} /> : null}
+              {count > 0 ? (
+                // 按了它會不見，焦點先移到第一段的標題（審查 S2-3）。
+                <Link
+                  to={clear.to}
+                  search={clear.search}
+                  replace
+                  resetScroll={false}
+                  onClick={focusFirst}
+                  data-sheet-clear
+                  className="inline-flex min-h-tap-target items-center text-s14 tracking-004 text-accent-gold no-underline decoration-1 underline-offset-4 hover:underline"
+                >
+                  {t("search.filter.clearAll")}
+                </Link>
+              ) : null}
               <span />
               <Dialog.Close className="h-12 cursor-pointer rounded-full bg-text-primary px-[28px] text-button tracking-006 text-on-button">
                 {total === null

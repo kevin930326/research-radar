@@ -81,13 +81,15 @@ describe("demo paper list filtering", () => {
     row("e", { journal: "misq", year: 2025, topics: ["e_commerce"], methods: ["survey_sem"], title: "BLOCKCHAIN and Platforms" }),
   ];
 
-  it("sorts by year, newest first, keeping export order inside a year and papers without a year last", () => {
-    expect(ids(filterDemoRows(rows, {}))).toEqual(["b", "e", "c", "a", "d"]);
+  it("sorts like the member list: year newest first, then id descending, papers without a year last", () => {
+    expect(ids(filterDemoRows(rows, {}))).toEqual(["e", "b", "c", "a", "d"]);
+    // 不看匯出的順序：倒過來給，結果一樣。
+    expect(ids(filterDemoRows([...rows].reverse(), {}))).toEqual(["e", "b", "c", "a", "d"]);
   });
 
   it("ORs journals and years, ANDs topics and methods, ANDs different fields", () => {
     expect(ids(filterDemoRows(rows, { journal: "misq,io" }))).toEqual(["e", "c", "a"]);
-    expect(ids(filterDemoRows(rows, { from: 2024, to: 2025 }))).toEqual(["b", "e", "c"]);
+    expect(ids(filterDemoRows(rows, { from: 2024, to: 2025 }))).toEqual(["e", "b", "c"]);
     expect(ids(filterDemoRows(rows, { topic: "erp" }))).toEqual(["b", "a"]);
     expect(ids(filterDemoRows(rows, { topic: "erp,e_commerce" }))).toEqual(["a"]);
     expect(ids(filterDemoRows(rows, { method: "experiment,survey_sem" }))).toEqual(["b"]);

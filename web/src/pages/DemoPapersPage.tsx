@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import type { TFunction } from "i18next";
 import { Link } from "@tanstack/react-router";
-import { Fragment, useState, type CSSProperties, type ReactNode } from "react";
+import { Fragment, useMemo, useState, type CSSProperties, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 
 import { DataDateBar } from "../components/DataDateBar";
@@ -11,6 +11,7 @@ import { ClassificationTagLink, UnclassifiedTag } from "../components/paper/Pape
 import { FilterMenu, type ClearTarget } from "../components/search/FilterMenus";
 import { JournalOptions, MethodOptions, TopicOptions, YearOptions } from "../components/search/FilterLists";
 import { focusFilters, journalName, topicName, type FilterState } from "../components/search/filters";
+import { ConditionTag, ErrorBar, More } from "../components/search/ListParts";
 import { FilterSheet, type FilterSection } from "../components/search/MobileFilters";
 import { OpenFullText } from "../components/search/PaperRows";
 import { CrossIcon, FilterOption, NoticeIcon, formatYears } from "../components/search/parts";
@@ -28,7 +29,6 @@ import {
   type DemoPapersParams,
 } from "./demo-papers-filters";
 import { externalUrl, formatCount } from "./paper-format";
-import { ConditionTag, ErrorBar, More } from "./SearchPage";
 import { TRACKING_START_YEAR, currentTaipeiYear, selectedKeys, type SearchParams } from "./search-filters";
 
 // 示範站的論文清單（Story 3.14 示範站；EXPERIENCE.md 畫面 7、State Patterns「7. 論文清單」；
@@ -105,7 +105,14 @@ export function DemoPapersPage({ params: addressParams, onUpdate }: DemoPapersPa
       update((current) => fromSearchParams(current, change(toSearchParams(current)))),
   };
   const failed = (manifest.isError && manifestData === null) || (index.isError && data === null);
-  const matched = data === null ? null : filterDemoRows(data.rows, params);
+  // 篩選結果只在資料或條件變了才重算（「再載入」只改顯示幾篇，不重篩；審查 3.14 P5）。條件每次重繪都是新物件，
+  // 所以用它的內容（不含顯示幾篇）當依據。
+  const conditionsKey = JSON.stringify({ ...params, shown: undefined });
+  const rowsData = data?.rows ?? null;
+  const matched = useMemo(
+    () => (rowsData === null ? null : filterDemoRows(rowsData, JSON.parse(conditionsKey) as DemoPapersParams)),
+    [rowsData, conditionsKey],
+  );
 
   const heading = headingParts(params, names, { t, thisWeek: ts("search.condition.thisWeek"), unclassified });
   const clear: ClearTarget = { to: "/papers", search: clearDemoConditions(params) };
@@ -205,7 +212,8 @@ export function DemoPapersPage({ params: addressParams, onUpdate }: DemoPapersPa
 
 /**
  * 標題那一行的各段（設計稿：每段後面接「 ·」，最後是篇數）。沒有條件是「全部論文」。
- * 一個欄位選了好幾個時用「、」接起來（設計稿只畫了一個的樣子，列給 Kevin）。
+ * 一個欄位選了好幾個時用「、」接起來（設計稿只畫了一個的樣子、EXPERIENCE.md 沒寫，是自訂的寫法，列給 Kevin；
+ * 預期檔裡這一條沒有出處，寫在預期檔 screens 的第 7 項）。
  * 顯示名稱還沒讀到時（載入中、錯誤）不寫期刊、主題、方法這幾段。
  */
 function headingParts(
@@ -436,18 +444,7 @@ function DemoMobileFilters({
       sections={sections}
       extra={extra}
       rowMarginClass="mt-[14px]"
-      ClearLink={({ onClick }) => (
-        <Link
-          to={clear.to}
-          search={clear.search}
-          replace
-          resetScroll={false}
-          onClick={onClick}
-          className="inline-flex min-h-tap-target items-center text-s14 tracking-004 text-accent-gold no-underline decoration-1 underline-offset-4 hover:underline"
-        >
-          {t("search.filter.clearAll")}
-        </Link>
-      )}
+      clear={clear}
     >
       {children}
     </FilterSheet>

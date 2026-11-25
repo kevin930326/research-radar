@@ -4,7 +4,7 @@
 // 標題裡的字；沒有範圍。期刊、年份、主題、方法、本週新增、目前顯示幾篇的網址寫法和找論文相同，直接用它的檢查。
 // 只處理資料，畫面上的字由 i18n 提供。
 import type { DemoPaperRow } from "../datasource/types";
-import { titleMatches } from "../datasource/title-match";
+import { normalizeForTitleMatch, titleMatcher } from "../datasource/title-match";
 import type { DisplayNames } from "../generated/model";
 import { currentTaipeiYear, knownOnly, selectedKeys, validateSearchParams, type SearchParams } from "./search-filters";
 
@@ -113,30 +113,52 @@ function hasAll(keys: readonly string[] | null, wanted: readonly string[]): bool
   return wanted.every((key) => keys.includes(key));
 }
 
+// 每一篇正規化過的標題（第一次比對時算、之後重用）：標題框每打一個字都要全部重篩，不必每次都對每一篇重做 NFKC
+// 與轉小寫（審查 3.14 P5）。列物件是讀檔時建好、之後不變的，所以用它當 key。
+const normalizedTitles = new WeakMap<DemoPaperRow, string>();
+
+function normalizedTitle(row: DemoPaperRow): string {
+  let value = normalizedTitles.get(row);
+  if (value === undefined) {
+    value = normalizeForTitleMatch(row.title);
+    normalizedTitles.set(row, value);
+  }
+  return value;
+}
+
+/** 依年份新到舊、同一年依 id 由大到小、沒有年份的放最後（成員版 ADR-0050 第 5 點：publication_year DESC NULLS LAST, id DESC）。 */
+function byYearThenId(a: DemoPaperRow, b: DemoPaperRow): number {
+  if (a.year !== b.year) {
+    if (a.year === null) return 1;
+    if (b.year === null) return -1;
+    return b.year - a.year;
+  }
+  return a.id < b.id ? 1 : a.id > b.id ? -1 : 0;
+}
+
 /**
  * 在瀏覽器裡篩（AD-20）：不同欄位之間「且」；期刊、年份多值「或」（年份是一段範圍）；主題、方法多值「且」
- * （AD-19、ADR-0050 第 2 點，和成員版同一套）；標題的字用資料來源層的比對規則。
- * 結果依年份排序（新到舊；同一年照匯出的列順序；沒有年份的放最後）。
+ * （AD-19、ADR-0050 第 2 點，和成員版同一套）；標題的字用資料來源層的比對規則（title-match.ts）。
+ * 結果的順序和成員版相同：年份新到舊、同一年 id 由大到小、沒有年份的放最後。
  */
 export function filterDemoRows(rows: readonly DemoPaperRow[], params: DemoPapersParams): DemoPaperRow[] {
   const journals = selectedKeys(params.journal);
   const topics = selectedKeys(params.topic);
   const methods = selectedKeys(params.method);
-  const matched = rows.filter(
-    (row) =>
-      (journals.length === 0 || (row.journal !== null && journals.includes(row.journal))) &&
-      (params.from === undefined ||
-        params.to === undefined ||
-        (row.year !== null && params.from <= row.year && row.year <= params.to)) &&
-      hasAll(row.topics, topics) &&
-      hasAll(row.methods, methods) &&
-      (params.abstract !== true || row.hasAbstract) &&
-      (params.full !== true || row.hasFullContent) &&
-      (params.this_week !== true || row.isNewThisWeek) &&
-      (params.title === undefined || titleMatches(row.title, params.title)),
-  );
-  return matched
-    .map((row, order) => ({ row, order }))
-    .sort((a, b) => (b.row.year ?? Number.NEGATIVE_INFINITY) - (a.row.year ?? Number.NEGATIVE_INFINITY) || a.order - b.order)
-    .map(({ row }) => row);
+  const matchTitle = params.title === undefined ? null : titleMatcher(params.title);
+  return rows
+    .filter(
+      (row) =>
+        (journals.length === 0 || (row.journal !== null && journals.includes(row.journal))) &&
+        (params.from === undefined ||
+          params.to === undefined ||
+          (row.year !== null && params.from <= row.year && row.year <= params.to)) &&
+        hasAll(row.topics, topics) &&
+        hasAll(row.methods, methods) &&
+        (params.abstract !== true || row.hasAbstract) &&
+        (params.full !== true || row.hasFullContent) &&
+        (params.this_week !== true || row.isNewThisWeek) &&
+        (matchTitle === null || matchTitle(normalizedTitle(row))),
+    )
+    .sort(byYearThenId);
 }
