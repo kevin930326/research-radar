@@ -20,7 +20,8 @@
 - 搬移與清理一律相對於打開的目錄 fd（`web/e2e/fixtures/` 從 repo 根往下逐層 `O_NOFOLLOW` 打開）：
   檢查之後上層被換成符號連結，也搬不到、刪不到 repo 外。
 - 換的時候先把舊範例搬到暫存資料夾，新的搬不進去就把舊的搬回來（不會兩邊都沒有）。連舊的都搬不回去
-  時，暫存資料夾（裡面有舊範例的備份）留著不刪，印出它的位置。
+  時，暫存資料夾（裡面有舊範例的備份）留著不刪，印出它的位置。不管是哪一種錯誤或中斷（包含途中按
+  Ctrl-C 的 `KeyboardInterrupt`），只要備份還在、範例位置卻是空的，暫存資料夾就留著。
 - `RADAR_TEST_ADMIN_DATABASE_URL` 一定要是 `127.0.0.1:55432`（測試用的資料庫）；沒設、或指到別的
   主機或埠（例如 5432 的真實資料）時拒絕執行。
 """
@@ -180,6 +181,23 @@ def replace_target(fixtures_fd: int, work: str, target: str) -> None:
         os.close(work_fd)
 
 
+def backup_stranded(fixtures_fd: int, work: str, target: str) -> bool:
+    """`<work>/old`（舊範例的備份）還在，範例位置 `target` 卻沒有東西：這時刪掉 `work` 會連
+    舊範例一起刪掉。看不出來（讀的時候出錯）也算是，寧可留著。"""
+    try:
+        if _exists(target, fixtures_fd):
+            return False
+        work_fd = os.open(work, _DIR_FLAGS, dir_fd=fixtures_fd)
+        try:
+            return _exists(WORK_BACKUP, work_fd)
+        finally:
+            os.close(work_fd)
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+
+
 def generate(admin_url: str) -> None:
     """產生範例資料，確認完整後才換掉 `TARGET`（見模組說明）。"""
     check_admin_url(admin_url)
@@ -203,6 +221,16 @@ def _generate_locked() -> str:
             replace_target(fixtures_fd, work, TARGET.name)
         except BackupKeptError:
             keep_work = True
+            raise
+        except BaseException:
+            # 例如還原舊範例途中按了 Ctrl-C（KeyboardInterrupt 不是 OSError，不會變成
+            # BackupKeptError）：備份還在、範例位置卻是空的，就留著暫存資料夾。
+            if backup_stranded(fixtures_fd, work, TARGET.name):
+                keep_work = True
+                print(
+                    f"範例資料夾沒有換成；舊範例的備份留在 {FIXTURES / work / WORK_BACKUP}",
+                    file=sys.stderr,
+                )
             raise
         finally:
             if not keep_work:

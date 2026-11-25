@@ -173,6 +173,74 @@ def test_generation_keeps_the_work_directory_when_the_backup_is_kept(
     assert caught.value.backup.parent.parent == fixtures
 
 
+def _interrupt_after_the_backup(monkeypatch: pytest.MonkeyPatch, *, restore: bool) -> None:
+    """第一次搬（舊的搬到備份）照做；`restore` 時第二次（新的搬進去）丟 OSError、第三次（舊的
+    搬回來）丟 KeyboardInterrupt，不然第二次就丟 KeyboardInterrupt。"""
+    real = os.rename
+    calls: list[int] = []
+
+    def rename(*args: Any, **kwargs: Any) -> None:
+        calls.append(1)
+        if len(calls) == 1:
+            real(*args, **kwargs)
+            return
+        if restore and len(calls) == 2:
+            raise OSError(5, "disk")
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(os, "rename", rename)
+
+
+@pytest.mark.parametrize("restore", [True, False], ids=["while-restoring", "while-replacing"])
+def test_generation_keeps_the_backup_when_interrupted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    restore: bool,
+) -> None:
+    # 第 4 輪（Codex 第 3 次複查高 #8 剩下的）：還原舊範例途中（或搬新的進去時）按 Ctrl-C，
+    # KeyboardInterrupt 不是 OSError；備份還在、範例位置是空的，就不在 finally 刪掉暫存資料夾。
+    _layout(tmp_path)
+    fixtures = _patch_paths(monkeypatch, tmp_path)
+    _interrupt_after_the_backup(monkeypatch, restore=restore)
+
+    with pytest.raises(KeyboardInterrupt):
+        demo_preview._generate_locked()
+
+    monkeypatch.undo()
+    (work,) = [path for path in fixtures.iterdir() if path.name != "demo-preview"]
+    assert not (fixtures / "demo-preview").exists()
+    assert (work / "old" / "manifest.json").read_text(encoding="utf-8") == "old"
+    assert str(work / "old") in capsys.readouterr().err
+
+
+def test_generation_interrupted_after_the_old_example_is_back_cleans_up(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 範例位置有東西（舊的已經搬回來）時，中斷照樣清掉暫存資料夾。
+    _layout(tmp_path)
+    fixtures = _patch_paths(monkeypatch, tmp_path)
+    real = os.rename
+    calls: list[int] = []
+
+    def rename(*args: Any, **kwargs: Any) -> None:
+        calls.append(1)
+        if len(calls) == 2:
+            raise OSError(5, "disk")
+        real(*args, **kwargs)
+        if len(calls) == 3:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(os, "rename", rename)
+
+    with pytest.raises(KeyboardInterrupt):
+        demo_preview._generate_locked()
+
+    monkeypatch.undo()
+    assert sorted(path.name for path in fixtures.iterdir()) == ["demo-preview"]
+    assert (fixtures / "demo-preview" / "manifest.json").read_text(encoding="utf-8") == "old"
+
+
 def test_generation_cleans_up_the_work_directory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

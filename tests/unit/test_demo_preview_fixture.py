@@ -151,6 +151,19 @@ def test_every_paper_state_is_covered() -> None:
     assert named("ieee excluded publisher")["full"] is None
     assert named("ieee journal only")["full"] is None
 
+    # 第 4 輪：demo_eligible 兩種「沒有摘要」都有（3.9 論文頁分「沒有摘要」與「只有書目」）；
+    # 授權不允許、IEEE 兩篇是 false；有完整內容的都是 true。
+    def flags(part: str) -> tuple[bool, bool]:
+        biblio = named(part)["biblio"]
+        return biblio["demo_eligible"], biblio["has_abstract"]
+
+    assert flags("eligible without abstract") == (True, False)
+    assert flags("title only classification") == (False, False)
+    assert flags("biblio only not open") == (False, True)
+    assert flags("ieee excluded publisher")[0] is False
+    assert flags("ieee journal only")[0] is False
+    assert all(paper["biblio"]["demo_eligible"] for paper in papers if paper["full"] is not None)
+
 
 def test_every_filter_has_both_sides() -> None:
     index = _load(f"{_export_id()}/{PAPERS_INDEX_FILE}")

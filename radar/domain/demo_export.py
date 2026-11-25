@@ -206,6 +206,8 @@ class DemoPaperFacts:
     - `publisher_ids`、`publisher_names`：出版社自己那一版的出版社 ID 與名稱（含上層出版社），
       匯出時再用排除清單直接判一次（ADR-0007 第 6 項、ADR-0061）；不寫進任何檔。
     - `abstract_source`：目前的摘要的來源；沒有目前的摘要是 None。
+    - `demo_eligible`：資料庫存的 `paper.demo_eligible`（寫入時由 `policy.is_demo_eligible` 判定，
+      view `demo_full_paper` 用的就是這一欄）。匯出時還要再對排除清單擋一次（`demo_eligible_for`）。
     - `in_demo_full_paper`：在 view `demo_full_paper` 裡（示範站有完整內容）。
     - `is_new_this_week`：第一次算進的快照（`first_snapshot_id`）就是最新已發佈的快照。
 
@@ -229,6 +231,7 @@ class DemoPaperFacts:
     publisher_ids: tuple[str, ...]
     publisher_names: tuple[str, ...]
     abstract_source: AbstractSource | None
+    demo_eligible: bool
     in_demo_full_paper: bool
     is_new_this_week: bool
 
@@ -248,7 +251,8 @@ class DemoPaperFacts:
 @dataclass(frozen=True, slots=True)
 class DemoPublisherFacts:
     """`repo/papers.list_demo_publisher_facts` 讀出的一篇論文的出版社與期刊欄位（自我檢查第 6 項：
-    直接用出版社欄位查，不經過 `demo_eligible`，ADR-0007）。
+    直接用出版社欄位查，不經過 `demo_eligible`，ADR-0007），以及資料庫存的 `demo_eligible`（自我
+    檢查核對匯出的 `demo_eligible` 用，`demo_eligible_paper_ids`）。
 
     Raises:
         ValueError: `publisher_ids`、`publisher_names` 不是字串的 tuple。
@@ -258,10 +262,47 @@ class DemoPublisherFacts:
     publisher_ids: tuple[str, ...]
     publisher_names: tuple[str, ...]
     journal_issn_l: str | None
+    demo_eligible: bool = False
 
     def __post_init__(self) -> None:
         _check_text_tuple("publisher_ids", self.publisher_ids)
         _check_text_tuple("publisher_names", self.publisher_names)
+
+
+def demo_eligible_for(
+    stored: bool,
+    publisher_ids: Sequence[str],
+    publisher_names: Sequence[str],
+    journal_issn_l: str | None,
+    exclusions: PublisherExclusions,
+) -> bool:
+    """匯出寫進 `DemoPaperBiblio.demo_eligible` 的值：資料庫存的 `demo_eligible`
+    （`is_demo_eligible` 寫入時判的，含授權、出版社、期刊排除清單；view `demo_full_paper` 用
+    同一欄），而且出版社與期刊這時直接對排除清單也沒有對上（清單改了還沒 `radar reparse` 時，
+    舊的 true 在這裡擋掉；和不給完整內容的那一道是同一次判定，兩者不會矛盾）。不另外判授權：
+    授權只在 `is_demo_eligible` 判（ADR-0007 第 5 點）。
+    """
+    return stored and not exclusions.matches(
+        publisher_ids, publisher_names, journal_issn_l=journal_issn_l
+    )
+
+
+def demo_eligible_paper_ids(
+    papers: Iterable[DemoPublisherFacts], exclusions: PublisherExclusions
+) -> frozenset[uuid.UUID]:
+    """自我檢查用：`demo_eligible` 可以是 true 的論文 id（`demo_eligible_for` 同一個判定，但用另外
+    一句讀出的出版社欄位算，不拿組檔用的那份結果檢查自己）。"""
+    return frozenset(
+        paper.paper_id
+        for paper in papers
+        if demo_eligible_for(
+            paper.demo_eligible,
+            paper.publisher_ids,
+            paper.publisher_names,
+            paper.journal_issn_l,
+            exclusions,
+        )
+    )
 
 
 def excluded_publisher_paper_ids(
@@ -537,6 +578,9 @@ class DemoPaperBiblio(BaseModel):
     - `links`：取得全文的連結（開放取用版本目前一律是 null：成員版也還沒有來源，ADR-0061）。
     - `classification`：分類標籤與 AI 標章的資料；摘要來源不允許公開的論文是 null（AD-20）。
     - `has_abstract`：有沒有目前的摘要；`has_full_content`：示範站有沒有完整內容；
+      `demo_eligible`：授權允許示範站轉載完整內容（`demo_eligible_for`：和 view `demo_full_paper`
+      同一欄判定，再對排除清單擋一次；只是是或否，不帶授權字串或出版社比對細節，ADR-0007、ADR-0061）。
+      有完整內容的一定是 true；true 但沒有完整內容＝授權允許、沒有可公開的摘要。
       `is_new_this_week`：本週新增。
     """
 
@@ -547,12 +591,15 @@ class DemoPaperBiblio(BaseModel):
     classification: DemoClassificationBlock | None
     has_abstract: StrictBool
     has_full_content: StrictBool
+    demo_eligible: StrictBool
     is_new_this_week: StrictBool
 
     @model_validator(mode="after")
     def _check(self) -> Self:
         if self.has_full_content and not self.has_abstract:
             raise ValueError("有完整內容的論文一定有摘要")
+        if self.has_full_content and not self.demo_eligible:
+            raise ValueError("有完整內容的論文一定是 demo_eligible")
         if self.links.doi_url != self.biblio.doi_url:
             raise ValueError("links.doi_url 要和書目的 doi_url 一樣")
         return self
@@ -999,6 +1046,7 @@ def check_demo_files(
     *,
     full_paper_ids: Iterable[uuid.UUID],
     forbidden: Sequence[ForbiddenText],
+    eligible_paper_ids: Iterable[uuid.UUID],
     excluded_paper_ids: Iterable[uuid.UUID] = (),
 ) -> list[str]:
     """寫 `manifest.json` 之前的自我檢查（ADR-0007「寫出之前的自我檢查」第 1、2、3 項與第 6 項的
@@ -1013,8 +1061,11 @@ def check_demo_files(
        JSON 解開後的每個字串、百分比編碼還原後的寫法都找）。
     6. `excluded_paper_ids`（出版社或期刊在「示範站不放完整內容」清單裡的論文，直接用出版社欄位查）
        沒有完整內容，就算它在 `full_paper_ids` 裡。
+    7. 分片檔裡 `demo_eligible` 是 true 的論文一定在 `eligible_paper_ids`（`demo_eligible_paper_ids`
+       另外算的），而且不在 `excluded_paper_ids`；不是布林也算失敗。直接看 JSON，不經過模型。
     """
     allowed = frozenset(full_paper_ids)
+    eligible = frozenset(eligible_paper_ids)
     excluded = frozenset(excluded_paper_ids)
     known = _model_field_names(model for _, model in DEMO_FILE_MODELS)
     needles = [(item.label, _fold(item.text)) for item in forbidden if item.text]
@@ -1037,6 +1088,7 @@ def check_demo_files(
                     f"（{len(errors)} 個錯誤，第一個在 {where}：{kind}）"
                 )
         problems.extend(_full_content_problems(path, content, allowed, excluded))
+        problems.extend(_eligible_problems(path, content, eligible, excluded))
         text = _searchable_text(content)
         problems.extend(f"{path}：出現{label}" for label, needle in needles if needle in text)
     return problems
@@ -1080,6 +1132,35 @@ def _full_content_problems(
     return problems
 
 
+def _eligible_problems(
+    path: str, content: bytes, eligible: frozenset[uuid.UUID], excluded: frozenset[uuid.UUID]
+) -> list[str]:
+    """第 7 項：分片檔裡標成 `demo_eligible` 的論文，另外算的判定也要是可以（不合法的 JSON 由
+    `_full_content_problems` 報）。"""
+    if model_for_path(path) is not DemoPaperShard:
+        return []
+    try:
+        data = json.loads(content)
+    except ValueError:
+        return []
+    problems: list[str] = []
+    papers = data.get("papers") if isinstance(data, dict) else None
+    for position, item in enumerate(papers if isinstance(papers, list) else []):
+        paper_id = _paper_id_of(item)
+        biblio = item.get("biblio") if isinstance(item, dict) else None
+        flag = biblio.get("demo_eligible") if isinstance(biblio, dict) else None
+        if flag is False or (flag is True and paper_id in eligible and paper_id not in excluded):
+            continue
+        who = _who(paper_id, position)
+        if flag is True:
+            problems.append(
+                f"{path}：{_eligible_reason(paper_id, excluded, who)}標成 demo_eligible"
+            )
+        else:
+            problems.append(f"{path}：{who} 的 demo_eligible 不是布林")
+    return problems
+
+
 def _who(paper_id: uuid.UUID | None, position: int) -> str:
     """失敗原因裡指一篇論文：看得懂的 ID 照印；看不懂的只印第幾列（不印原字串）。"""
     return f"論文 {paper_id}" if paper_id is not None else f"第 {position} 列（ID 看不懂）的論文"
@@ -1089,6 +1170,12 @@ def _reason(paper_id: uuid.UUID | None, excluded: frozenset[uuid.UUID], who: str
     if paper_id is not None and paper_id in excluded:
         return f"排除清單裡的出版社或期刊的{who} "
     return f"不在 demo_full_paper 的{who} "
+
+
+def _eligible_reason(paper_id: uuid.UUID | None, excluded: frozenset[uuid.UUID], who: str) -> str:
+    if paper_id is not None and paper_id in excluded:
+        return f"排除清單裡的出版社或期刊的{who} "
+    return f"授權不允許轉載的{who} "
 
 
 def _paper_id_of(item: object) -> uuid.UUID | None:

@@ -676,7 +676,7 @@
       },
       "DemoPaperBiblio": {
         "additionalProperties": false,
-        "description": "第一層：全部論文（`counted_paper`）都有（ADR-0007 第 4 點）。\n\n- `biblio`：書目（`DemoBiblio`）。\n- `links`：取得全文的連結（開放取用版本目前一律是 null：成員版也還沒有來源，ADR-0061）。\n- `classification`：分類標籤與 AI 標章的資料；摘要來源不允許公開的論文是 null（AD-20）。\n- `has_abstract`：有沒有目前的摘要；`has_full_content`：示範站有沒有完整內容；\n  `is_new_this_week`：本週新增。",
+        "description": "第一層：全部論文（`counted_paper`）都有（ADR-0007 第 4 點）。\n\n- `biblio`：書目（`DemoBiblio`）。\n- `links`：取得全文的連結（開放取用版本目前一律是 null：成員版也還沒有來源，ADR-0061）。\n- `classification`：分類標籤與 AI 標章的資料；摘要來源不允許公開的論文是 null（AD-20）。\n- `has_abstract`：有沒有目前的摘要；`has_full_content`：示範站有沒有完整內容；\n  `demo_eligible`：授權允許示範站轉載完整內容（`demo_eligible_for`：和 view `demo_full_paper`\n  同一欄判定，再對排除清單擋一次；只是是或否，不帶授權字串或出版社比對細節，ADR-0007、ADR-0061）。\n  有完整內容的一定是 true；true 但沒有完整內容＝授權允許、沒有可公開的摘要。\n  `is_new_this_week`：本週新增。",
         "properties": {
           "biblio": {
             "$ref": "#/components/schemas/DemoBiblio"
@@ -702,6 +702,10 @@
             "title": "Has Full Content",
             "type": "boolean"
           },
+          "demo_eligible": {
+            "title": "Demo Eligible",
+            "type": "boolean"
+          },
           "is_new_this_week": {
             "title": "Is New This Week",
             "type": "boolean"
@@ -713,6 +717,7 @@
           "classification",
           "has_abstract",
           "has_full_content",
+          "demo_eligible",
           "is_new_this_week"
         ],
         "title": "DemoPaperBiblio",
