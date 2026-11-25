@@ -1,0 +1,42 @@
+{
+  "note": "名字有後綴（Jr.、III、Sr.）：沒有逗號的寫法、「姓, 名, 後綴」、「名 姓, 後綴」三種；後綴不是姓",
+  "input": {
+    "title": "Fake Paper Ten on Name Suffixes",
+    "authors": ["Robert L. Fakesmith Jr.", "Fakejones, John, III", "Martin Fakeking, Sr."],
+    "year": 2022,
+    "journal": "Fake Journal of Names",
+    "volume": "8",
+    "issue": "4",
+    "first_page": "33",
+    "last_page": "47",
+    "doi": "10.1234/fake.0010"
+  },
+  "apa": "Fakesmith, R. L., Jr., Fakejones, J., III, & Fakeking, M., Sr. (2022). Fake Paper Ten on Name Suffixes. Fake Journal of Names, 8(4), 33–47. https://doi.org/10.1234/fake.0010",
+  "ris": [
+    "TY  - JOUR",
+    "AU  - Fakesmith, Robert L., Jr.",
+    "AU  - Fakejones, John, III",
+    "AU  - Fakeking, Martin, Sr.",
+    "TI  - Fake Paper Ten on Name Suffixes",
+    "T2  - Fake Journal of Names",
+    "PY  - 2022",
+    "VL  - 8",
+    "IS  - 4",
+    "SP  - 33",
+    "EP  - 47",
+    "DO  - 10.1234/fake.0010",
+    "ER  - "
+  ],
+  "bibtex": [
+    "@article{fakesmith2022fake,",
+    "  author = {Fakesmith, Jr., Robert L. and Fakejones, III, John and Fakeking, Sr., Martin},",
+    "  title = {Fake Paper Ten on Name Suffixes},",
+    "  journal = {Fake Journal of Names},",
+    "  year = {2022},",
+    "  volume = {8},",
+    "  number = {4},",
+    "  pages = {33--47},",
+    "  doi = {10.1234/fake.0010}",
+    "}"
+  ]
+}

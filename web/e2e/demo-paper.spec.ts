@@ -247,3 +247,31 @@ test("demo citation: bibliography only papers download BibTeX in the browser", a
   await expect(button).toHaveText(text("paper:paper.cite.downloadBibtex"));
   expect(requests.filter((url) => !url.startsWith("blob:"))).toEqual([]);
 });
+
+// 第 1 輪審查修正（PR #133）：示範站的「下載 RIS」。預期值照 tests/golden/exports/README.md 的規則、對 Fake Paper 1 手寫。
+const FAKE_1_RIS = [
+  "TY  - JOUR",
+  "AU  - 1, Test Author",
+  "AU  - Author, Second",
+  "TI  - Fake Paper 1: full content",
+  "T2  - MIS Quarterly",
+  "PY  - 2025",
+  "VL  - 1",
+  "IS  - 1",
+  "SP  - 1",
+  "EP  - 9",
+  "DO  - 10.9999/demo.1",
+  "ER  - ",
+];
+
+test("demo citation: download RIS makes the file in the browser and the button keeps its text", async ({ page }) => {
+  const requests: string[] = [];
+  await openPaper(page, 1);
+  page.on("request", (request) => requests.push(request.url()));
+  const button = page.locator("[data-cite='rail'] [data-cite='ris']");
+  const [download] = await Promise.all([page.waitForEvent("download"), button.click()]);
+  expect(download.suggestedFilename()).toBe("12025fake.ris");
+  expect(readFileSync((await download.path())!, "utf-8")).toBe(`${FAKE_1_RIS.join("\r\n")}\r\n`);
+  await expect(button).toHaveText(text("paper:paper.cite.downloadRis"));
+  expect(requests.filter((url) => !url.startsWith("blob:"))).toEqual([]);
+});

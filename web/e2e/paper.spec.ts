@@ -469,3 +469,68 @@ test("citation: when the clipboard refuses, nothing is shown and the text stays"
   await expect(button).not.toHaveAttribute("aria-disabled");
   expect(await clipboard()).toEqual([]);
 });
+
+// 第 1 輪審查修正（PR #133）：「已複製」恰好 2 秒（假時鐘）、瀏覽器沒有剪貼簿、期刊的顯示名稱還沒讀到時不能按。
+
+test("citation: copied lasts exactly 2000 ms (fake clock)", async ({ page }) => {
+  const clipboard = await recordClipboard(page);
+  const start = new Date("2026-11-20T09:00:00+08:00");
+  await page.clock.install({ time: start });
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await page.goto(url("normal"));
+  await expect(page.locator("h1")).toHaveText(paperPage("normal").paper.title);
+  // 時間停住，之後只照 runFor 走。
+  await page.clock.pauseAt(new Date(start.getTime() + 60_000));
+  const button = page.locator("[data-cite='rail'] [data-cite='apa']");
+  await button.click();
+  await expect(button).toHaveText(COPIED);
+  expect(await clipboard()).toEqual([NORMAL_APA]);
+  await page.clock.runFor(1999);
+  await expect(button).toHaveText(COPIED);
+  await expect(button).toHaveAttribute("aria-disabled", "true");
+  await page.clock.runFor(1);
+  await expect(button).toHaveText(COPY_APA);
+  await expect(button).not.toHaveAttribute("aria-disabled");
+});
+
+test("citation: when the browser has no clipboard API (not https), nothing is shown and the text stays", async ({ page }) => {
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: undefined });
+  });
+  const errors: string[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await page.goto(url("normal"));
+  await expect(page.locator("h1")).toHaveText(paperPage("normal").paper.title);
+  const button = page.locator("[data-cite='rail'] [data-cite='apa']");
+  await button.click();
+  await page.waitForTimeout(300);
+  await expect(button).toHaveText(COPY_APA);
+  await expect(button).not.toHaveAttribute("aria-disabled");
+  expect(errors).toEqual([]);
+});
+
+test("citation: while the journal's display name has not loaded, the three buttons cannot be pressed; after retry they work", async ({
+  page,
+  apiMock,
+}) => {
+  const clipboard = await recordClipboard(page);
+  apiMock.displayNames = "failed";
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await page.goto(url("normal"));
+  await expect(page.locator("[data-names='failed']")).toBeVisible();
+  for (const name of ["apa", "ris", "bibtex"]) {
+    await expect(page.locator(`[data-cite='rail'] [data-cite='${name}']`), name).toBeDisabled();
+  }
+  await page.locator("[data-cite='rail'] [data-cite='apa']").click({ force: true });
+  await expect(page.locator("[data-cite='rail'] [data-cite='apa']")).toHaveText(COPY_APA);
+  expect(await clipboard()).toEqual([]);
+  apiMock.displayNames = "ok";
+  await page.locator("[data-names='failed']").getByRole("button", { name: RETRY }).click();
+  await expect(page.locator("[data-names='failed']")).toHaveCount(0);
+  for (const name of ["apa", "ris", "bibtex"]) {
+    await expect(page.locator(`[data-cite='rail'] [data-cite='${name}']`), name).toBeEnabled();
+  }
+  await page.locator("[data-cite='rail'] [data-cite='apa']").click();
+  expect(await clipboard()).toEqual([NORMAL_APA]);
+});

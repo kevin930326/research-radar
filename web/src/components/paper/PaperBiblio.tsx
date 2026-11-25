@@ -11,6 +11,7 @@ import { MessageBar } from "../MessageBar";
 import { PaperTitle } from "../PaperText";
 import { TEXT_LINK_CLASS } from "../TextLink";
 import { taipeiDate } from "../taipei-date";
+import { journalName } from "./citation";
 import { MONO_LABEL_CLASS, NoteLine, badgeProvenance, useFailedText, usePaperSite } from "./parts";
 
 // 論文頁的書目（EXPERIENCE.md 畫面 8 第 1、2 點；設計稿 paper.html 的第一塊）：資料日期列、英文標題（h1）、作者、
@@ -298,10 +299,7 @@ interface PaperBiblioProps {
 export function PaperBiblio({ page, names, onRetryNames, firstBadge, abstractMark }: PaperBiblioProps) {
   const { t } = useTranslation("paper");
   const { paper } = page;
-  const journal =
-    paper.journal === null || names === null
-      ? null
-      : (names.journals.find((entry) => entry.key === paper.journal)?.name ?? null);
+  const journal = journalName(paper.journal, names);
   // 顯示名稱沒讀到、而這一頁用得到它（期刊名稱或分類標籤）：分類那一行的位置顯示訊息條＋「重試」。
   const namesFailed = names === null && (paper.journal !== null || classificationHasTags(page.classification));
   const volume = formatVolume(paper);

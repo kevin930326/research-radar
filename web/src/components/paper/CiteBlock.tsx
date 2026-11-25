@@ -13,12 +13,14 @@ import { RAIL_LABEL_CLASS } from "./parts";
 // 設計稿畫成連結（<a href="#">），這裡是按鈕：三個都是動作、不是到別的頁面（列給 Kevin）。
 // 設計稿每個高 36px；可以按的範圍補到 44×44（ADR-0037），用上下各 -4px 的外距讓間距和設計稿一樣。
 // 字放在裡面一個 36px 高的 span：三顆按鈕的按鈕框上下互相疊 8px，字的框不疊（200% 放大的重疊檢查看的是字）。
+// 期刊的顯示名稱還沒讀到（或讀取失敗）時引用不完整：三顆先不能按（`waiting`；沿用論文頁其他按鈕忙碌時的
+// disabled＋cursor-default，不加新的樣子），讀到後才能按。
 
 /** 「已複製」維持多久（EXPERIENCE.md 畫面 8、Component Patterns「即時回饋」）。 */
 export const COPIED_MS = 2000;
 
 const ACTION_CLASS =
-  "group -my-1 inline-flex min-h-tap-target min-w-tap-target cursor-pointer items-center self-start bg-transparent p-[0px] text-left text-accent-gold aria-disabled:cursor-default aria-disabled:text-text-primary";
+  "group -my-1 inline-flex min-h-tap-target min-w-tap-target cursor-pointer items-center self-start bg-transparent p-[0px] text-left text-accent-gold aria-disabled:cursor-default aria-disabled:text-text-primary disabled:cursor-default";
 
 /** 按鈕上的字：設計稿的 36px 高；滑過時加底線（「已複製」不加）。 */
 function ActionText({ children, underline = true }: { children: string; underline?: boolean }) {
@@ -41,7 +43,7 @@ function downloadFile(name: string, content: string, type: string) {
   window.setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-export function CiteBlock({ source, mobile = false }: { source: CitationSource; mobile?: boolean }) {
+export function CiteBlock({ source, mobile = false, waiting = false }: { source: CitationSource; mobile?: boolean; waiting?: boolean }) {
   const { t } = useTranslation("paper");
   const [copied, setCopied] = useState(false);
 
@@ -52,7 +54,7 @@ export function CiteBlock({ source, mobile = false }: { source: CitationSource; 
   }, [copied]);
 
   const copy = async () => {
-    if (copied) return;
+    if (copied || waiting) return;
     try {
       await navigator.clipboard.writeText(formatApa(source));
       setCopied(true);
@@ -73,26 +75,29 @@ export function CiteBlock({ source, mobile = false }: { source: CitationSource; 
           data-cite="apa"
           aria-live="polite"
           aria-disabled={copied ? "true" : undefined}
+          disabled={waiting}
           onClick={() => void copy()}
           className={ACTION_CLASS}
         >
-          <ActionText underline={!copied}>{copied ? t("paper.cite.copied") : t("paper.cite.copyApa")}</ActionText>
+          <ActionText underline={!copied && !waiting}>{copied ? t("paper.cite.copied") : t("paper.cite.copyApa")}</ActionText>
         </button>
         <button
           type="button"
           data-cite="ris"
+          disabled={waiting}
           onClick={() => downloadFile(`${bibtexKey(source)}.ris`, formatRis(source), "application/x-research-info-systems;charset=utf-8")}
           className={ACTION_CLASS}
         >
-          <ActionText>{t("paper.cite.downloadRis")}</ActionText>
+          <ActionText underline={!waiting}>{t("paper.cite.downloadRis")}</ActionText>
         </button>
         <button
           type="button"
           data-cite="bibtex"
+          disabled={waiting}
           onClick={() => downloadFile(`${bibtexKey(source)}.bib`, formatBibtex(source), "application/x-bibtex;charset=utf-8")}
           className={ACTION_CLASS}
         >
-          <ActionText>{t("paper.cite.downloadBibtex")}</ActionText>
+          <ActionText underline={!waiting}>{t("paper.cite.downloadBibtex")}</ActionText>
         </button>
       </div>
     </section>

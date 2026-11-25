@@ -2,12 +2,24 @@
 // 1. tests/golden/exports/ 的資料檔（手寫的標準答案，出處見那裡的 README.md）三種格式逐字相同；有一筆沒有 DOI。
 // 2. 特殊字元的性質測試（property-based）：repo 沒有 fast-check、這一輪不加套件，所以用固定種子的小型隨機產生器
 //    （mulberry32），每個性質跑 PROPERTY_RUNS 組；失敗時訊息裡印出種子、第幾組與輸入，可以照樣重現。
+//    平常（含 CI）只用固定的種子；本機要多試種子時設 CITATION_PROPERTY_SEEDS=200（種子 1～200 再各跑一次）。
 import { readFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
 
-import { bibtexKey, citationSource, escapeBibtex, formatApa, formatBibtex, formatRis, type CitationSource } from "./citation";
+import {
+  bibtexKey,
+  citationSource,
+  encodedDoiUrl,
+  citationWaiting,
+  escapeBibtex,
+  formatApa,
+  formatBibtex,
+  formatRis,
+  journalName,
+  type CitationSource,
+} from "./citation";
 import type { PaperPageResponse } from "../../generated/model";
 
 const GOLDEN_DIR = fileURLToPath(new URL("../../../../tests/golden/exports/", import.meta.url));
@@ -27,7 +39,7 @@ const GOLDEN: [string, GoldenCase][] = readdirSync(GOLDEN_DIR)
 
 describe("citation export golden files", () => {
   it("has the cases the story asks for", () => {
-    expect(GOLDEN.length).toBeGreaterThanOrEqual(9);
+    expect(GOLDEN.length).toBeGreaterThanOrEqual(13);
     // 至少一筆沒有 DOI（State Patterns「8. 論文頁」）、一筆沒有作者、一筆沒有年份、一筆沒有卷期頁碼。
     expect(GOLDEN.some(([, golden]) => golden.input.doi === null)).toBe(true);
     expect(GOLDEN.some(([, golden]) => golden.input.authors.length === 0)).toBe(true);
@@ -87,12 +99,44 @@ describe("citationSource", () => {
   it("leaves the journal out when the display names did not load", () => {
     expect(citationSource(page, null).journal).toBeNull();
   });
+
+  it("waits (buttons cannot be pressed) only while a paper with a journal has no display names", () => {
+    expect(citationWaiting(page, null)).toBe(true);
+    expect(citationWaiting(page, names as never)).toBe(false);
+    const noJournal = { paper: { ...page.paper, journal: null } } as unknown as PaperPageResponse;
+    expect(citationWaiting(noJournal, null)).toBe(false);
+  });
+
+  it("journalName: display name, or null when not loaded or unknown", () => {
+    expect(journalName("fake-journal", names as never)).toBe("Journal of Fake Information Systems");
+    expect(journalName("other", names as never)).toBeNull();
+    expect(journalName("fake-journal", null)).toBeNull();
+    expect(journalName(null, names as never)).toBeNull();
+  });
+
+  // 和 datasource/static/preview.ts 的 doiUrl 同一組手寫預期值（後端 Python quote(doi, safe="/")）。
+  it("encodedDoiUrl encodes DOI characters like Python quote(doi, safe='/')", () => {
+    expect(encodedDoiUrl("10.1000/abc(1)def")).toBe("https://doi.org/10.1000/abc%281%29def");
+    expect(encodedDoiUrl("10.1000/a b<c>")).toBe("https://doi.org/10.1000/a%20b%3Cc%3E");
+    expect(encodedDoiUrl("10.1000/x;y!z*'")).toBe("https://doi.org/10.1000/x%3By%21z%2A%27");
+    expect(encodedDoiUrl("10.1000/A-Z_a.z~0")).toBe("https://doi.org/10.1000/A-Z_a.z~0");
+  });
+
+  it("the APA link is the API's doi_url (same link as the paper page)", () => {
+    const encoded = { ...page, paper: { ...page.paper, doi: "10.1234/a<b>", doi_url: "https://doi.org/10.1234/a%3Cb%3E" } } as unknown as PaperPageResponse;
+    expect(formatApa(citationSource(encoded, names as never)).endsWith(" https://doi.org/10.1234/a%3Cb%3E")).toBe(true);
+    // API 的連結不是 http(s)：照後端同一個規則從 DOI 組。
+    const bad = { ...page, paper: { ...page.paper, doi: "10.1234/a<b>", doi_url: "javascript:alert(1)" } } as unknown as PaperPageResponse;
+    expect(formatApa(citationSource(bad, names as never)).endsWith(" https://doi.org/10.1234/a%3Cb%3E")).toBe(true);
+  });
 });
 
 // ---- 性質測試 ----
 
 const SEED = 0x3_10_2026;
 const PROPERTY_RUNS = 500;
+const EXTRA_SEEDS = Number(process.env.CITATION_PROPERTY_SEEDS ?? "0");
+const SEEDS = [SEED, ...Array.from({ length: Number.isInteger(EXTRA_SEEDS) && EXTRA_SEEDS > 0 ? EXTRA_SEEDS : 0 }, (_, index) => index + 1)];
 
 /** mulberry32：32 位元的小型隨機產生器，種子一樣、序列就一樣。 */
 function mulberry32(seed: number): () => number {
@@ -106,12 +150,26 @@ function mulberry32(seed: number): () => number {
   };
 }
 
-// 字元池：英數、空白與換行、BibTeX 與 LaTeX 的特殊字元、引號、重音字母、中文、表情符號（兩個 UTF-16 單位）、獨立的 and。
+// 字元池：英數、空白與換行、BibTeX 與 LaTeX 的特殊字元、引號、重音字母、中文、表情符號（兩個 UTF-16 單位）、獨立的 and，
+// 各種換行與控制字元（CR、NEL U+0085、U+2028、U+2029、C0、DEL、C1）、姓名後綴、轉寫表裡的字母。
 const POOL: string[] = [
   ..."abcXYZ019 -.,:;?!",
   ..."{}\\\"'&%$#_~^@=",
   "\n",
   "\t",
+  "\r",
+  "\u0085",
+  "\u2028",
+  "\u2029",
+  "\u0000",
+  "\u001e",
+  "\u007f",
+  "\u009b",
+  " Jr.",
+  " III",
+  "ß",
+  "ø",
+  "Ł",
   "é",
   "ü",
   "Å",
@@ -130,7 +188,8 @@ function generator(random: () => number) {
   return (): CitationSource => ({
     title: text(40),
     // 很多位作者與沒有作者都要出現。
-    authors: Array.from({ length: random() < 0.15 ? 0 : int(random() < 0.2 ? 30 : 5) }, () => text(20)),
+    // 0～30 位。
+    authors: Array.from({ length: random() < 0.15 ? 0 : int(random() < 0.2 ? 31 : 5) }, () => text(20)),
     year: random() < 0.25 ? null : 1900 + int(140),
     journal: maybe(20),
     volume: maybe(4),
@@ -143,16 +202,18 @@ function generator(random: () => number) {
 
 /** 每一組都跑 check；丟出錯誤時把種子、第幾組、輸入一起印出來。 */
 function forAll(name: string, check: (source: CitationSource) => void) {
-  it(`${name} (${PROPERTY_RUNS} runs, seed ${SEED})`, () => {
-    const next = generator(mulberry32(SEED));
-    for (let run = 0; run < PROPERTY_RUNS; run += 1) {
-      const source = next();
-      try {
-        check(source);
-      } catch (error) {
-        throw new Error(`property "${name}" failed: seed=${SEED} run=${run} input=${JSON.stringify(source)}\n${String(error)}`, {
-          cause: error,
-        });
+  it(`${name} (${PROPERTY_RUNS} runs, seeds ${SEEDS.length === 1 ? SEED : `${SEED} and 1-${SEEDS.length - 1}`})`, () => {
+    for (const seed of SEEDS) {
+      const next = generator(mulberry32(seed));
+      for (let run = 0; run < PROPERTY_RUNS; run += 1) {
+        const source = next();
+        try {
+          check(source);
+        } catch (error) {
+          throw new Error(`property "${name}" failed: seed=${seed} run=${run} input=${JSON.stringify(source)}\n${String(error)}`, {
+            cause: error,
+          });
+        }
       }
     }
   });
@@ -199,23 +260,38 @@ function unescapeBibtex(text: string): string {
   return result;
 }
 
-/** author 欄位在大括號外層用「 and 」切開後的人數。 */
-function bibtexAuthorCount(bibtex: string): number {
+/**
+ * 照 BibTeX 讀 author 欄位的規則切出每一位：只在大括號外層、前後是空白的 and（不分大小寫）切開。
+ * 回傳每一位的字（大括號外層的部分，大括號裡面換成 "{}"，用來數逗號）。
+ */
+function bibtexAuthors(bibtex: string): string[] {
   const line = bibtex.split("\n").find((entry) => entry.startsWith("  author = {"));
-  if (line === undefined) return 0;
+  if (line === undefined) return [];
   const value = line.slice("  author = {".length, line.endsWith(",") ? -2 : -1);
+  // 大括號外層的字；裡面的字換成同樣長度的「x」，切開的位置才對得上。
   let depth = 0;
-  let count = 1;
-  for (let index = 0; index < value.length; index += 1) {
-    const char = value[index];
+  let outer = "";
+  for (const char of value) {
     if (char === "{") depth += 1;
+    outer += depth === 0 || char === "{" ? char : "x";
     if (char === "}") depth -= 1;
-    if (depth === 0 && value.startsWith(" and ", index)) count += 1;
   }
-  return count;
+  return outer.split(/\s+and\s+/iu);
 }
 
-const nonBlankAuthors = (source: CitationSource) => source.authors.filter((name) => name.replace(/[\s,]/g, "") !== "").length;
+/** 照實作的規則該有幾位：只有空白、控制字元、逗號的名字不算。 */
+const nonBlankAuthors = (source: CitationSource) =>
+  source.authors.filter((name) => name.replace(/[\s\p{Cc}\u2028\u2029,]/gu, "") !== "").length;
+
+/** 換行、控制字元、行分隔符號。 */
+const LINE_BREAK_OR_CONTROL = /[\p{Cc}\u2028\u2029]/u;
+
+/** 跳脫的寫法都拿掉之後，剩下的字裡不准有 BibTeX／LaTeX 的特殊字元（漏跳脫一個就抓得到）。 */
+function hasUnescapedSpecial(escaped: string): boolean {
+  let rest = escaped;
+  for (const [sequence] of UNESCAPES) rest = rest.split(sequence).join("");
+  return /[\\{}&%$#_~^]/u.test(rest);
+}
 
 describe("citation export properties", () => {
   forAll("BibTeX braces are always balanced", (source) => {
@@ -229,9 +305,21 @@ describe("citation export properties", () => {
     }
   });
 
+  forAll("every BibTeX special character in title and journal is escaped", (source) => {
+    for (const value of [source.title, source.journal ?? ""]) expect(hasUnescapedSpecial(escapeBibtex(value))).toBe(false);
+    for (const line of formatBibtex(source).split("\n")) {
+      const field = /^ {2}(title|journal) = \{(.*)\},?$/u.exec(line);
+      if (field !== null) expect(hasUnescapedSpecial(field[2]!), line).toBe(false);
+    }
+  });
+
   forAll("BibTeX has one entry per author and one line per field", (source) => {
     const bibtex = formatBibtex(source);
-    expect(bibtexAuthorCount(bibtex)).toBe(nonBlankAuthors(source));
+    const authors = bibtexAuthors(bibtex);
+    expect(authors).toHaveLength(nonBlankAuthors(source));
+    // 每一位在大括號外最多兩個逗號（姓, 後綴, 名）；BibTeX 讀到三個以上會報錯。
+    for (const author of authors) expect(author.split(",").length - 1, author).toBeLessThanOrEqual(2);
+    expect(bibtex.replace(/\n/gu, "")).not.toMatch(LINE_BREAK_OR_CONTROL);
     const lines = bibtex.split("\n");
     expect(lines[0]).toBe(`@article{${bibtexKey(source)},`);
     expect(lines.at(-2)).toBe("}");
@@ -247,7 +335,8 @@ describe("citation export properties", () => {
     expect(lines.at(-1)).toBe("ER  - ");
     for (const line of lines) {
       expect(line).toMatch(/^[A-Z][A-Z0-9] {2}- /);
-      expect(line).not.toMatch(/[\r\n]/);
+      // 內容裡沒有任何換行或控制字元（NEL、U+2028 這類有的讀取程式會當換行）。
+      expect(line).not.toMatch(LINE_BREAK_OR_CONTROL);
     }
     expect(lines.filter((line) => line.startsWith("AU  - "))).toHaveLength(nonBlankAuthors(source));
     expect(lines.filter((line) => line.startsWith("ER  - "))).toHaveLength(1);
@@ -259,7 +348,7 @@ describe("citation export properties", () => {
 
   forAll("APA is one line; the DOI link is there exactly when there is a DOI", (source) => {
     const apa = formatApa(source);
-    expect(apa).not.toMatch(/[\r\n\t]/);
+    expect(apa).not.toMatch(LINE_BREAK_OR_CONTROL);
     expect(apa.includes("https://doi.org/")).toBe(source.doi !== null);
     expect(apa).toContain(source.year === null ? "(n.d.)." : `(${source.year}).`);
     expect(formatRis(source).includes("\r\nDO  - ")).toBe(source.doi !== null);

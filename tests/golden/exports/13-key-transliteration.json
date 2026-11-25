@@ -1,0 +1,41 @@
+{
+  "note": "引用鍵的轉寫表：ß → ss、ø → o、Ø → O（不會被 NFKD 拆開的字母照寫死的表換）；名字裡的 Ł、æ 在三種格式照原字",
+  "input": {
+    "title": "Øresund Fake Paper",
+    "authors": ["Søren Fakeßtrøm", "Łucja Fakeæby"],
+    "year": 2018,
+    "journal": "Fake Nordic Journal",
+    "volume": "2",
+    "issue": "2",
+    "first_page": "11",
+    "last_page": "20",
+    "doi": "10.1234/fake.0013"
+  },
+  "apa": "Fakeßtrøm, S., & Fakeæby, Ł. (2018). Øresund Fake Paper. Fake Nordic Journal, 2(2), 11–20. https://doi.org/10.1234/fake.0013",
+  "ris": [
+    "TY  - JOUR",
+    "AU  - Fakeßtrøm, Søren",
+    "AU  - Fakeæby, Łucja",
+    "TI  - Øresund Fake Paper",
+    "T2  - Fake Nordic Journal",
+    "PY  - 2018",
+    "VL  - 2",
+    "IS  - 2",
+    "SP  - 11",
+    "EP  - 20",
+    "DO  - 10.1234/fake.0013",
+    "ER  - "
+  ],
+  "bibtex": [
+    "@article{fakesstrom2018oresund,",
+    "  author = {Fakeßtrøm, Søren and Fakeæby, Łucja},",
+    "  title = {Øresund Fake Paper},",
+    "  journal = {Fake Nordic Journal},",
+    "  year = {2018},",
+    "  volume = {2},",
+    "  number = {2},",
+    "  pages = {11--20},",
+    "  doi = {10.1234/fake.0013}",
+    "}"
+  ]
+}

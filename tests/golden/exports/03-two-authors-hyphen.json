@@ -1,5 +1,5 @@
 {
-  "note": "兩位作者（最後一位前面也要逗號＋&）、名字有連字號、有中間名、沒有期、只有起始頁",
+  "note": "兩位作者（最後一位前面也要逗號＋&）、名字有連字號、有中間名、沒有期、只有文章編號（e101：沒有迄頁、不是純數字，APA 寫 Article e101）",
   "input": {
     "title": "Fake Paper Three about Two Authors",
     "authors": ["Jean-Paul Fakename", "Mary Ann Lee-Test"],
@@ -11,7 +11,7 @@
     "last_page": null,
     "doi": "10.1234/fake.0003"
   },
-  "apa": "Fakename, J.-P., & Lee-Test, M. A. (2023). Fake Paper Three about Two Authors. Fake Systems Review, 12, e101. https://doi.org/10.1234/fake.0003",
+  "apa": "Fakename, J.-P., & Lee-Test, M. A. (2023). Fake Paper Three about Two Authors. Fake Systems Review, 12, Article e101. https://doi.org/10.1234/fake.0003",
   "ris": [
     "TY  - JOUR",
     "AU  - Fakename, Jean-Paul",
