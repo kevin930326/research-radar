@@ -3,7 +3,7 @@ import { useTranslation } from "react-i18next";
 import type { SummaryField, ZhSummaryBlock } from "../../generated/model";
 import { AiBadge } from "../AiBadge";
 import { AiText } from "../AiText";
-import { BlockLine, NoteLine, SECTION_CLASS, SectionHeading, badgeProvenance } from "./parts";
+import { BlockLine, NoteLine, SECTION_CLASS, SectionHeading, badgeProvenance, useFailedText } from "./parts";
 
 // 中文重點（EXPERIENCE.md 畫面 8 第 3 點；設計稿 paper.html「正常狀態」的第二塊）：四欄（研究問題、方法、理論、發現），
 // AI 標章，固定一行「供篩選閱讀，不可直接放入論文」。四欄自動換行、不限行數（每欄最長約 100 字）。
@@ -36,6 +36,7 @@ interface ZhSummarySectionProps {
 
 export function ZhSummarySection({ block, firstBadge }: ZhSummarySectionProps) {
   const { t } = useTranslation("paper");
+  const failedText = useFailedText();
   const heading = t("paper.summary.heading");
   let body;
   switch (block.state) {
@@ -44,12 +45,12 @@ export function ZhSummarySection({ block, firstBadge }: ZhSummarySectionProps) {
       body =
         block.provenance === null ? (
           <BlockLine state={block.state} provenance="missing">
-            {t("paper.state.failed")}
+            {failedText}
           </BlockLine>
         ) : null;
       break;
     case "failed":
-      body = <BlockLine state={block.state}>{t("paper.state.failed")}</BlockLine>;
+      body = <BlockLine state={block.state}>{failedText}</BlockLine>;
       break;
     case "pending_interactive":
     case "pending_batch":

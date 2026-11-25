@@ -29,8 +29,8 @@ export function DemoHeader() {
       <nav className="hidden items-center text-nav leading-normal split:flex">
         <Link
           to="/papers"
-          // 帶著篩選條件時也算在這一頁（網址參數不比）。
-          activeOptions={{ includeSearch: false }}
+          // 帶著篩選條件時也算在這一頁（網址參數不比）；論文頁（/papers/<ID>）不算（設計稿 paper-demo.html 的「論文」是一般的字色）。
+          activeOptions={{ exact: true, includeSearch: false }}
           className="group py-[13px] pl-4 text-text-secondary no-underline transition-[color] duration-200 hover:text-text-primary data-[status=active]:text-text-primary"
         >
           <span className="border-b border-transparent pb-[6px] group-data-[status=active]:border-accent-gold">{t("demo.header.papers")}</span>

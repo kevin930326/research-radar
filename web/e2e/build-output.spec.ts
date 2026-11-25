@@ -67,3 +67,27 @@ test("demo build has no member features and ships no preview fixtures", ({ brows
   const files = readdirSync(`${WEB_ROOT}dist-demo`, { recursive: true }).map(String);
   expect(files.filter((name) => name.startsWith("preview") || name.endsWith(".json"))).toEqual([]);
 });
+
+// Story 3.9：示範站的論文頁和成員版共用版面與區塊，但成員版的論文頁才有的「我的文獻庫」、成員版的資料來源不進示範站的建置。
+// 示範站論文頁的記號（data-demo-paper、只有書目的說明）只在示範站；成員版論文頁的我的文獻庫（data-library）只在成員版。
+// 上面那條已經擋 /api/、data-library；這一條另外證明論文頁的程式真的在示範站的建置裡（不是因為頁面沒進建置才找不到）。
+test("demo build has the demo paper page but not the member paper page's library", ({ browserName }) => {
+  test.skip(browserName !== "chromium", "build output is checked once");
+  const member = jsText("dist");
+  const demo = jsText("dist-demo");
+  for (const marker of ["data-demo-paper", "biblio-only", "/papers/$paperId"]) {
+    expect(demo.includes(marker), `demo has ${marker}`).toBe(true);
+  }
+  for (const marker of ["data-demo-paper", "biblio-only"]) {
+    expect(member.includes(marker), `member has ${marker}`).toBe(false);
+  }
+  // 共用的論文頁區塊在兩邊都有；成員版論文頁的我的文獻庫（輔助欄、手機底部的加入）只在成員版。
+  for (const marker of ["paper-zh-summary", "paper-research-model"]) {
+    expect(member.includes(marker), `member has ${marker}`).toBe(true);
+    expect(demo.includes(marker), `demo has ${marker}`).toBe(true);
+  }
+  for (const marker of ["add-mobile", "paper-library"]) {
+    expect(member.includes(marker), `member has ${marker}`).toBe(true);
+    expect(demo.includes(marker), `demo has ${marker}`).toBe(false);
+  }
+});

@@ -1,4 +1,5 @@
-import type { ReactNode } from "react";
+import { createContext, useContext, type ReactNode } from "react";
+import { useTranslation } from "react-i18next";
 
 import type { Provenance as BadgeProvenance } from "../AiBadge";
 import type { Provenance } from "../../generated/model";
@@ -83,4 +84,25 @@ export function badgeProvenance(provenance: Provenance | null): BadgeProvenance 
     return null;
   }
   return { model: provenance.model, generatedAt: provenance.generated_at, verified: provenance.human_verified };
+}
+
+/**
+ * 論文頁在哪一個站（Story 3.9）：共用的區塊只有兩處不同，由外層用 PaperSiteContext 告訴它們。
+ * - 「沒有產生成功」那一行：成員版「沒有產生成功，可以請管理者重跑」；示範站只寫「沒有產生成功」
+ *   （EXPERIENCE.md State Patterns「8. 論文頁」：訪客找不到管理者；設計稿 paper-demo.html「沒有產生成功」）。
+ * - 分類標籤連到哪裡：成員版到找論文（/search），示範站到論文清單（/papers；EXPERIENCE.md 畫面 8 第 2 點）。
+ * 沒有包的時候是成員版（成員版的頁面與既有測試都不用改）。
+ */
+export type PaperSite = "member" | "demo";
+
+export const PaperSiteContext = createContext<PaperSite>("member");
+
+export function usePaperSite(): PaperSite {
+  return useContext(PaperSiteContext);
+}
+
+/** 「沒有產生成功」那一行的字（見 PaperSite）。 */
+export function useFailedText(): string {
+  const { t } = useTranslation(["paper", "demo"]);
+  return usePaperSite() === "demo" ? t("demo:demo.paper.failed") : t("paper:paper.state.failed");
 }
