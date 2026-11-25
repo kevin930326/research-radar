@@ -158,6 +158,9 @@ test.describe("demo paper page", () => {
     for (const path of ["/papers/00000000-0000-4000-8000-000000000000", "/papers/not-a-paper"]) {
       await page.goto(`${demo.baseURL}${path}`);
       await expect(page.locator("main h1")).toHaveText(text("common:states.notFound.message"));
+      // 「找不到這一頁」就是頁面標題（h1），分頁名稱也是它（State Patterns「全站共用」）。
+      await expect(page.locator("h1")).toHaveCount(1);
+      await expect(page).toHaveTitle(text("common:states.notFound.message"));
       await expect(page.locator("header [data-brand]")).toBeVisible();
     }
     // 其他網址仍然是找不到這一頁。

@@ -92,6 +92,8 @@ export function badgeProvenance(provenance: Provenance | null): BadgeProvenance 
  *   （EXPERIENCE.md State Patterns「8. 論文頁」：訪客找不到管理者；設計稿 paper-demo.html「沒有產生成功」）。
  * - 分類標籤連到哪裡：成員版到找論文（/search），示範站到論文清單（/papers；EXPERIENCE.md 畫面 8 第 2 點）。
  * 沒有包的時候是成員版（成員版的頁面與既有測試都不用改）。
+ * 之後在共用區塊（書目、分類、中文重點、研究模型等）加成員才有的功能（回報錯誤、修正分類…），示範站也會帶到：
+ * 要用 PaperLayout 的 `member` 或 PaperSite 擋掉，並在 e2e/build-output.spec.ts 加這個功能的記號。
  */
 export type PaperSite = "member" | "demo";
 

@@ -275,6 +275,10 @@ describe("demo paper page", () => {
     expect(html).toContain(t("paper:paper.biblio.noAbstract"));
     // 只根據標題的分類（範例這一篇是標題分類）。
     expect(html).toContain(t("paper:paper.classification.titleOnly"));
+    // 分類照常（標籤加 AI 標章）。
+    expect(html).toContain('data-block="classification" data-block-state="ready"');
+    expect(html).toContain('href="/papers?topic=erp"');
+    expect(html).toContain(t("ai:ai.badge.full"));
     expect(html).not.toContain(t("demo:demo.paper.biblioOnly"));
     expectNoMemberFeatures(html);
   });
@@ -327,6 +331,13 @@ describe("demo paper page", () => {
     expect(pending.raw.biblio.classification?.state).toBe("pending_batch");
     expect(pending.html).toContain('data-block="classification" data-block-state="pending_batch"');
     expect(pending.html).toContain(t("paper:paper.state.pending"));
+    // 中文重點、研究模型也是 pending_batch：同一句。
+    expect(pending.raw.full).toMatchObject({ zh_summary: { state: "pending_batch" }, research_model: { state: "pending_batch" } });
+    for (const block of ["zh_summary", "research_model"]) {
+      const section = pending.html.slice(pending.html.indexOf(`data-block="${block}"`));
+      expect(section, block).toMatch(new RegExp(`^data-block="${block}" data-block-state="pending_batch"`));
+      expect(section.slice(0, section.indexOf("</section>")), block).toContain(t("paper:paper.state.pending"));
+    }
 
     const failed = await render(4);
     expect(failed.raw.biblio.classification?.state).toBe("failed");
