@@ -1,7 +1,10 @@
 // (7) 站內連結檢查（AR-67）：pages.ts 的每一頁（加上「找不到這一頁」）把連結與按鈕點一遍，
 // 每個落點都必須是有效頁面（landing.ts：HTTP 成功、在頁面清單裡、有 h1、沒有「找不到這一頁」）。
 // 之後每個 Story 都要通過。
-import { errors } from "@playwright/test";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+
+import { errors, type Page } from "@playwright/test";
 
 import { LIST_FIXTURES, createApiState } from "./api-mock.ts";
 import { TEXT } from "./expected.ts";
@@ -25,6 +28,47 @@ const LIST_ROWS: Record<string, { selector: string; count: number }> = {
     count: Math.min(LIST_FIXTURES.rows.filter((entry) => entry.personal).length, LIST_FIXTURES.clientConfig.library_page_size),
   },
 };
+
+/**
+ * 示範站論文清單（Story 3.14）一次列 50 篇、每列有好幾個連結，每點一個都要重開一次頁面，30 秒點不完（固定逾時，
+ * 顧問 2026-11-26 查出、Kevin 准許）：論文列只點前 3 列裡的連結與按鈕，列以外的連結與按鈕照舊全部點。
+ * 列數從範例匯出算（manifest 的篇數與一次顯示的篇數取小的），先確認清單真的列出來了才往下數。
+ */
+const DEMO_FIXTURE = fileURLToPath(new URL("./fixtures/demo-preview/manifest.json", import.meta.url));
+const DEMO_MANIFEST = JSON.parse(readFileSync(DEMO_FIXTURE, "utf-8")) as {
+  summary: { paper_count: number };
+  client_config: { paper_list_page_size: number };
+};
+const DEMO_ROWS_CLICKED = 3;
+const DEMO_LIST_ROWS: Record<string, { selector: string; count: number }> = {
+  "/papers": {
+    selector: "[data-paper-row]",
+    count: Math.min(DEMO_MANIFEST.summary.paper_count, DEMO_MANIFEST.client_config.paper_list_page_size),
+  },
+};
+
+/** 這一頁要點的元素的位置（第幾個）：在第 DEMO_ROWS_CLICKED 列以後的論文列裡的跳過，其他全留。 */
+async function indexesToClick(
+  page: Page,
+  selector: string,
+  rowSelector: string | undefined,
+): Promise<number[]> {
+  const total = await page.locator(selector).count();
+  if (rowSelector === undefined) {
+    return Array.from({ length: total }, (_, index) => index);
+  }
+  const skip = await page.locator(selector).evaluateAll(
+    (elements, [rows, keep]) => {
+      const all = Array.from(document.querySelectorAll(rows as string));
+      return elements.map((element) => {
+        const row = element.closest(rows as string);
+        return row !== null && all.indexOf(row) >= (keep as number);
+      });
+    },
+    [rowSelector, DEMO_ROWS_CLICKED] as const,
+  );
+  return skip.flatMap((skipped, index) => (skipped ? [] : [index]));
+}
 
 for (const site of SITES) {
   for (const path of [...site.pages, MISSING_PATH]) {
@@ -52,17 +96,24 @@ for (const site of SITES) {
         expect(listRows.count).toBeGreaterThan(0);
         await expect(page.locator(`main ${listRows.selector}`)).toHaveCount(listRows.count);
       }
+      const demoRows = site.name === "demo" ? DEMO_LIST_ROWS[path] : undefined;
+      if (demoRows !== undefined) {
+        // 示範站清單也一樣：真的列出來了（列數從範例匯出算）才往下數。
+        expect(demoRows.count).toBeGreaterThan(DEMO_ROWS_CLICKED);
+        await expect(page.locator(`main ${demoRows.selector}`)).toHaveCount(demoRows.count);
+      }
       const linkCount = await page.locator("main a[href]").count();
+      const linkIndexes = await indexesToClick(page, "main a[href]", demoRows && `main ${demoRows.selector}`);
       // 看得到的按鈕才點：同一個按鈕在另一種寬度才出現的（例如論文頁手機版底部的「開啟全文」，Story 3.8）
       // 用 CSS 藏起來，點不到；它在那一種寬度的行為由各自的測試看。
       const buttons = page.locator("main button:visible");
-      const buttonCount = await buttons.count();
+      const buttonIndexes = await indexesToClick(page, "main button:visible", demoRows && `main ${demoRows.selector}`);
       if (listRows !== undefined) {
         // 有清單的頁面一定有東西可點（N1：什麼都沒點就結束要失敗）；每一列的標題都是連結。
         expect(linkCount).toBeGreaterThanOrEqual(listRows.count);
       }
 
-      for (let index = 0; index < linkCount; index += 1) {
+      for (const index of linkIndexes) {
         await open();
         const link = page.locator("main a[href]").nth(index);
         const href = (await link.getAttribute("href")) ?? "";
@@ -83,7 +134,7 @@ for (const site of SITES) {
         await expectValidLanding(page, site, responses, `${path} → ${href}`);
       }
 
-      for (let index = 0; index < buttonCount; index += 1) {
+      for (const index of buttonIndexes) {
         await open();
         const before = page.url();
         await buttons.nth(index).click();
