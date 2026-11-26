@@ -105,7 +105,130 @@ if (MODE === "walk-getrole" || MODE === "walk-run") {
   }
 }
 
-for (const site of MODE === "perrule" || MODE === "element" || MODE.startsWith("walk") ? [] : SITES) {
+// trace：對論文頁的每個 section[aria-labelledby] 算角色；算之前把常用的原生 API 包起來，每次呼叫先用同步請求
+// 把名稱送到測試端（page.route 攔下），當掉時印出最後 8 筆呼叫。
+if (MODE === "trace") {
+  for (const site of SITES) {
+    for (const path of site.pages.filter((page) => /^\/papers\/[0-9a-f]/.test(page))) {
+      test(`trace ${site.name} ${path}`, async ({ page }) => {
+        const calls: string[] = [];
+        await page.route(/\/__probe\//, (route) => {
+          calls.push(decodeURIComponent(route.request().url().split("/__probe/")[1] ?? ""));
+          return route.fulfill({ status: 204, body: "" });
+        });
+        await page.goto(`${site.baseURL}${path}`);
+        await expect(page.locator("main")).toBeVisible();
+        await page.evaluate(axeCore.source);
+        const count = await page.evaluate(() => {
+          (window as unknown as { axe: { setup: (node: Node) => void } }).axe.setup(document);
+          const describe = (target: unknown): string => {
+            if (target instanceof Element) return `${target.tagName.toLowerCase()}${target.id ? `#${target.id}` : ""}`;
+            if (target instanceof Text) return "#text";
+            if (target instanceof Document) return "document";
+            if (target instanceof CanvasRenderingContext2D) return `ctx(${target.font})`;
+            return typeof target;
+          };
+          let depth = 0;
+          const send = (label: string) => {
+            const request = new XMLHttpRequest();
+            request.open("GET", `/__probe/${encodeURIComponent(label.slice(0, 180))}`, false);
+            request.send();
+          };
+          const wrap = (owner: object, name: string, kind: "value" | "get") => {
+            const descriptor = Object.getOwnPropertyDescriptor(owner, name);
+            if (descriptor === undefined) return;
+            const original = kind === "value" ? descriptor.value : descriptor.get;
+            if (typeof original !== "function") return;
+            const wrapped = function (this: unknown, ...args: unknown[]) {
+              if (depth === 0) {
+                depth++;
+                try {
+                  const first = args[0];
+                  const extra = typeof first === "string" ? ` "${first.slice(0, 60)}"` : first instanceof Node ? ` ${describe(first)}` : "";
+                  send(`${name} on ${describe(name === "getComputedStyle" ? first : this)}${name === "getComputedStyle" ? ` ${String(args[1] ?? "")}` : extra}`);
+                } finally {
+                  depth--;
+                }
+              }
+              return original.apply(this, args);
+            };
+            Object.defineProperty(owner, name, kind === "value" ? { ...descriptor, value: wrapped } : { ...descriptor, get: wrapped });
+          };
+          wrap(window, "getComputedStyle", "value");
+          for (const name of ["getBoundingClientRect", "getClientRects", "closest", "matches", "querySelector", "querySelectorAll", "getAttribute", "hasAttribute", "getRootNode", "checkVisibility", "getAnimations", "getAttributeNode", "attachShadow"])
+            wrap(Element.prototype, name, "value");
+          for (const name of ["getElementById", "elementsFromPoint", "elementFromPoint", "createElement", "createRange", "createTreeWalker"]) wrap(Document.prototype, name, "value");
+          for (const name of ["measureText", "fillText", "getImageData", "clearRect"]) wrap(CanvasRenderingContext2D.prototype, name, "value");
+          wrap(HTMLCanvasElement.prototype, "getContext", "value");
+          for (const name of ["getClientRects", "getBoundingClientRect", "selectNodeContents", "setStart"]) wrap(Range.prototype, name, "value");
+          wrap(CSSStyleDeclaration.prototype, "getPropertyValue", "value");
+          for (const name of ["innerText", "offsetWidth", "offsetHeight", "offsetParent", "inert"]) wrap(HTMLElement.prototype, name, "get");
+          for (const name of ["textContent", "nodeValue", "isConnected", "assignedSlot"]) wrap(Node.prototype, name, "get");
+          for (const name of ["scrollHeight", "scrollWidth", "clientHeight", "clientWidth", "shadowRoot", "slot"]) wrap(Element.prototype, name, "get");
+          return document.querySelectorAll("section[aria-labelledby]").length;
+        });
+        for (let index = 0; index < count; index++) {
+          calls.push(`== getRole section #${index}`);
+          try {
+            await page.evaluate((index) => {
+              const axe = (window as unknown as { axe: any }).axe; // eslint-disable-line @typescript-eslint/no-explicit-any
+              return axe.commons.aria.getRole(document.querySelectorAll("section[aria-labelledby]")[index]);
+            }, index);
+          } catch (error) {
+            console.log(`TRACE-CRASH ${site.name} ${path} calls=${calls.length}\n${calls.slice(-8).map((call) => `  LAST ${call}`).join("\n")}`);
+            throw error;
+          }
+        }
+        console.log(`TRACE-OK ${site.name} ${path} calls=${calls.length}`);
+      });
+    }
+  }
+}
+
+// steps：不包 API，把「section 的角色」拆成幾步，各用一次 evaluate，看當在哪一步。
+const STEPS = ["refs", "visible-h2", "subtree-h2", "name-h2", "labelledby-section", "role-section"];
+if (MODE === "steps") {
+  for (const site of SITES) {
+    for (const path of site.pages.filter((page) => /^\/papers\/[0-9a-f]/.test(page))) {
+      test(`steps ${site.name} ${path}`, async ({ page }) => {
+        await page.goto(`${site.baseURL}${path}`);
+        await expect(page.locator("main")).toBeVisible();
+        await page.evaluate(axeCore.source);
+        const count = await page.evaluate(() => {
+          (window as unknown as { axe: { setup: (node: Node) => void } }).axe.setup(document);
+          return document.querySelectorAll("section[aria-labelledby]").length;
+        });
+        for (let index = 0; index < count; index++) {
+          for (const step of STEPS) {
+            try {
+              await page.evaluate(
+                ({ index, step }) => {
+                  const axe = (window as unknown as { axe: any }).axe; // eslint-disable-line @typescript-eslint/no-explicit-any
+                  const section = document.querySelectorAll("section[aria-labelledby]")[index] as Element;
+                  const heading = document.getElementById(section.getAttribute("aria-labelledby") ?? "");
+                  const vSection = axe.utils.getNodeFromTree(section);
+                  const vHeading = heading === null ? null : axe.utils.getNodeFromTree(heading);
+                  if (step === "refs") return heading === null ? "none" : heading.tagName;
+                  if (step === "visible-h2") return heading === null ? null : axe.commons.dom.isVisibleToScreenReaders(heading);
+                  if (step === "subtree-h2") return vHeading === null ? null : axe.commons.text.subtreeText(vHeading, { inLabelledByContext: true, startNode: vSection });
+                  if (step === "name-h2") return vHeading === null ? null : axe.commons.text.accessibleTextVirtual(vHeading, { inLabelledByContext: true, startNode: vSection });
+                  if (step === "labelledby-section") return axe.commons.aria.arialabelledbyText(vSection);
+                  return axe.commons.aria.getRole(section);
+                },
+                { index, step },
+              );
+            } catch (error) {
+              console.log(`STEP-CRASH ${step} section#${index} ${site.name} ${path}`);
+              throw error;
+            }
+          }
+        }
+      });
+    }
+  }
+}
+
+for (const site of MODE === "perrule" || MODE === "element" || MODE.startsWith("walk") || MODE === "trace" || MODE === "steps" ? [] : SITES) {
   for (const path of [...site.pages, MISSING_PATH]) {
     test(`${site.name} ${path}: no axe violations`, async ({ page }) => {
       await page.goto(`${site.baseURL}${path}`);

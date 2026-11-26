@@ -20,13 +20,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { name: Q0-base, mode: element, prefs: "{}", repeat: "15" }
-          - { name: Q1-walk-getrole, mode: walk-getrole, prefs: "{}", repeat: "15" }
-          - { name: Q2-walk-run, mode: walk-run, prefs: "{}", repeat: "15" }
-          - { name: Q3-no-ion, mode: element, prefs: "{\"javascript.options.ion\":false}", repeat: "15" }
-          - { name: Q4-no-jit, mode: element, prefs: "{\"javascript.options.ion\":false,\"javascript.options.baselinejit\":false,\"javascript.options.blinterp\":false}", repeat: "15" }
-          - { name: Q5-full-suite-no-jit, mode: full, prefs: "{\"javascript.options.ion\":false,\"javascript.options.baselinejit\":false,\"javascript.options.blinterp\":false}", repeat: "5" }
-          - { name: Q6-no-incremental-gc, mode: element, prefs: "{\"javascript.options.mem.gc_incremental\":false,\"javascript.options.mem.gc_parallel_marking\":false}", repeat: "15" }
+          - { name: Z0-base, mode: element, prefs: "{}", repeat: "15" }
+          - { name: T1-trace, mode: trace, prefs: "{}", repeat: "15" }
+          - { name: T2-trace, mode: trace, prefs: "{}", repeat: "15" }
+          - { name: S1-steps, mode: steps, prefs: "{}", repeat: "15" }
+          - { name: S2-steps, mode: steps, prefs: "{}", repeat: "15" }
     defaults:
       run:
         working-directory: web
@@ -90,6 +88,8 @@ jobs:
           echo "--- 每頁當掉次數"
           grep -E '✘' probe/list.log | sed -E 's/.*› //; s/: no axe.*//' | sort | uniq -c || true
           echo "--- 當掉時的元素"
+          grep -ohE 'STEP-CRASH [^ ]+' probe/list.log | sort | uniq -c || true
+          grep -ohE 'LAST .*' probe/list.log | sort | uniq -c | sort -rn | head -30 || true
           grep -ohE 'CRASH-AT .*' probe/list.log | sed -E 's/#([0-9]+)\/[0-9]+//' | sort | uniq -c | sort -rn | head -40 || true
           echo "--- 錯誤種類"
           grep -oE 'Error: .{0,80}' probe/list.log | sort | uniq -c | sort -rn | head -10 || true
