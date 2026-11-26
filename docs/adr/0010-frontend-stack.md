@@ -152,3 +152,38 @@ web/src/
 - 資料來源層的型別多了 `clientConfig()` 與 `list()`；示範站的實作在 3.14 示範站部分之前是 `papers: null`，示範站的建置不會用到這兩個函式。
 - 3.14 的驗收條件有一部分（示範站的論文清單與入口）留到 3.7 之後，PR 說明列出還沒驗的條件。
 - 論文頁的分類標籤（`web/src/components/paper/PaperBiblio.tsx` 的 `ClassificationTagLink`，主題與方法）寫死連到成員版的 `/search`；示範站有論文頁（Story 3.9）時，示範站要換成連到論文清單。
+
+## 2026-11-26 更新：Firefox 跑 axe 時論文頁當掉的原因與修法
+
+**發生什麼事。** 2026-11-17 那一節的重試擋不住了：#132～#138 的 CI 每次都有一到兩頁論文頁在 Firefox 當掉，而且重試也當，`web` 一直是紅的。這次在探測分支（`ci/firefox-crash-probe`，draft PR #139，不合併）上推了 6 次、做了實驗，查到原因。
+
+**查到的原因。** Firefox 159（Playwright 1.65 帶的版本）讀「ARIA 元素反射屬性」時，網頁內容行程會讀寫空指標而當掉。ARIA 元素反射屬性是瀏覽器新加的 JS 屬性，例如 `element.ariaLabelledByElements`，直接拿到 `aria-labelledby` 指到的那些元素。axe 4.14 處理 `aria-labelledby`、`aria-describedby` 這類參照時會讀它：解析參照時先讀它、讀不到才看屬性字串；取屬性值時先看屬性字串、空的才讀它。這和 Mozilla 的 Bugzilla 2090055 吻合（同一個屬性從兩個 JS 世界讀取時，在 `Element::GetAttrAssociatedElementsForBindings` 當掉，位址 0；Firefox 163 修好）。
+
+證據（都是只跑 firefox、不重試、同一頁重複跑的次數）：
+
+- 當掉是內容行程的 SIGSEGV：核心紀錄有一串 `Web Content[…]: segfault at 0 … in libxul.so`，每次同一個位置；當時可用記憶體還有 12 GB 以上，不是記憶體不足（run 45797173442）。
+- 只有論文頁會當（9 頁 ×20 次當 45 次）；其他頁 ×20 次 0 次；不跑 axe 只開頁面 0 次；workers 改成 1 照樣當（run 45797173442）。
+- 排除 color-contrast 的 68 條規則一條一條單獨跑：只有 aria-allowed-attr、aria-prohibited-attr、aria-conditional-attr、nested-interactive、label-content-name-mismatch 會當，這 5 條都會算元素的角色（run 45799178176）；color-contrast 單獨跑不當（run 45797173442）。
+- 拿掉 aside、sticky、h1 的 lang、br、text-wrap: balance 都照樣當（run 45802854522）；關掉 Firefox 的 JIT、漸進式 GC 也照樣當（run 45805822926）。
+- 把「算 section 的角色」拆成幾步分開呼叫：32 次當掉全部當在「算 `section` 的 `aria-labelledby` 文字」那一步（裡面包含讀反射屬性與算被指到的標題的文字）；前一步直接算標題的名稱不會當（run 45807462639）。單看這一步不能確定是讀反射屬性那一下，要配下一點。
+- 不跑 axe，只在頁面裡讀 `ariaLabelledByElements`／`ariaDescribedByElements`：135 次當 38 次（run 45813269253）。關掉 Playwright 的 trace 照樣當（同一個 run）。
+
+**還沒查到的。** `a11y.spec.ts` 以外也在 Firefox 跑 axe 的 `nav.spec.ts`、`a11y-floor.spec.ts` 沒有量，也沒有套這次的修法（不在這一輪准改的檔案裡）。非論文頁 axe 也會讀這些屬性（本機 chromium 數過，非論文頁每頁 3～945 次，「找不到這一頁」0～3 次），在 Firefox 卻不會當；bug 說要「兩個 JS 世界」都讀過才會當，論文頁上另一個世界是誰沒有查到。這部分是推測。
+
+**2026-11-17 那一節後來查到的。** 那一節寫「每次只當一項、當在不同頁面」，並推測「原因在 Firefox 或 axe 裡面」（`web/playwright.config.ts` 的註解寫「不是程式的問題」）。這一輪 `a11y.spec.ts` 當掉的都是論文頁：成員版 4 頁、示範站 5 頁每一頁都會當，所以每次看起來不同頁；2026-11-16 那次是「導覽列的測試」，這一輪沒有查。原因確實不在我們的程式，而在 Firefox 159。那一節的重試設定不變。
+
+**考慮過的選項。**
+
+- A. firefox 跑 axe 時，用 AxeBuilder 的 `axeSource` 選項注入「axe 原始碼＋`axe.configure` 把 9 個參照類屬性的反射屬性名稱拿掉」，axe 改讀屬性字串、用 id 找元素（axe 原本就有的路徑）。
+- B. 用 Firefox 的偏好設定關掉 ARIA 元素反射。試過一個設定名稱沒有生效（run 45813269253 印出屬性仍在），正確名稱沒查到。
+- C. 升級到帶 Firefox 163 以上的 Playwright。這一輪不准升級套件，留給 Kevin 決定。
+- D. 跳過 Firefox 的 axe、或跳過論文頁。會少檢查，不准。
+
+**決定。** A（`web/e2e/a11y.spec.ts`），只套在 firefox。反射屬性名稱設成 `false`（設成 `null` 時，axe 合併設定會把它變成空物件，只是碰巧有效）。Firefox 上的效果由 #132～#138 的 CI 驗證（寫這一節時還沒跑，結果寫在 PR 說明）：#138 連續 3 次 `web` 都不能有任何一次 Firefox 當掉（連重試才過的也算）；沒修好時一次完全不當的機率約 0.75⁹≈7.5%。
+
+**取捨。**
+
+- 檢查範圍不變：規則、標籤、頁面、三種引擎都一樣。本機用 chromium（它也支援反射屬性）對 #132 的 16 頁各跑一次預設與 A：axe 讀反射屬性的次數從 0～945 次變成 0 次；違規、通過、無法判定的規則、每個節點的位置、每項檢查的 id 與 data，以及不適用的規則清單，16 頁全部相同（沒有比各檢查的 relatedNodes）。
+- 會不一樣的情況：如果哪天頁面改用 JS 設 `element.ariaLabelledByElements = […]`、不寫 `aria-labelledby` 屬性，firefox 上的 axe 看不到這個參照（chromium、webkit 照常看得到）。自訂元素用 ElementInternals 設的參照也一樣。我們現在沒有這兩種寫法。
+- `axe-core` 是 `@axe-core/playwright` 帶進來的（同一個版本），測試直接 import 它拿原始碼，package.json 沒有改。升級 `@axe-core/playwright` 時要確認兩邊還是同一個版本，不然 Firefox 跑的 axe 會和另外兩種引擎不同。
+- 升到 Firefox 163 以上的 Playwright 之後，這段可以拿掉。
