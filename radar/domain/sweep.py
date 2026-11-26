@@ -17,12 +17,16 @@ import re
 from dataclasses import dataclass
 from datetime import timedelta
 
-from radar.domain.jobs import RUN_WEEKLY_UPDATE, SUBMIT_LLM_BATCH, JobSpec
+from radar.domain.jobs import RUN_DEMO_EXPORT, RUN_WEEKLY_UPDATE, SUBMIT_LLM_BATCH, JobSpec
 from radar.domain.llm_batches import QUEUED_STUCK_AFTER, SUBMITTING_STALE_AFTER
 
 # 表名與欄名直接組進 SQL，所以只收小寫識別字（PostgreSQL 的名稱上限 63 個字元）；
 # 開頭要是英文字母，`<表名>_id` 才會是合法的工作參數名稱。
 _IDENTIFIER = re.compile(r"[a-z][a-z0-9_]{0,62}")
+
+# 示範站匯出停在排隊中、執行中多久算卡住（Story 3.7）。
+DEMO_EXPORT_QUEUED_STUCK = timedelta(hours=1)
+DEMO_EXPORT_RUNNING_STUCK = timedelta(hours=6)
 
 # 一張表一次最多重新排入幾列；剩下的下一輪（15 分鐘後）再排。
 SWEEP_BATCH_LIMIT = 500
@@ -96,5 +100,15 @@ SWEEP_REGISTRY: tuple[SweepEntry, ...] = (
         "updated_at",
         SUBMIT_LLM_BATCH,
         SUBMITTING_STALE_AFTER,
+    ),
+    # 示範站匯出（Story 3.7、AD-14 第 264 行）。`queued`：`radar export-demo` 建好列、還沒開始就中斷
+    # 的，1 小時後交給 worker 做。`running`：做到一半行程不在了的（一次匯出約一萬篇、平常幾分鐘），
+    # 6 小時後再排一次；匯出工作不管成功失敗最後都把列改成 `succeeded`／`failed`（移出起始狀態）。
+    # 工作帶 `demo_export` 這把鎖，同時只跑一個。
+    SweepEntry(
+        "demo_export", "status", "queued", "updated_at", RUN_DEMO_EXPORT, DEMO_EXPORT_QUEUED_STUCK
+    ),
+    SweepEntry(
+        "demo_export", "status", "running", "updated_at", RUN_DEMO_EXPORT, DEMO_EXPORT_RUNNING_STUCK
     ),
 )

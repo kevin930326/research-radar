@@ -9,6 +9,7 @@ from collections.abc import Iterator
 from contextlib import ExitStack, contextmanager
 from datetime import UTC, datetime, timedelta
 from functools import partial
+from pathlib import Path
 
 import procrastinate
 
@@ -25,10 +26,12 @@ from radar.config import (
     load_zh_summary_rules,
 )
 from radar.domain.ai_outputs import CallMode
+from radar.domain.demo_export import DemoExportFailure
 from radar.domain.jobs import (
     EMBED_PAPERS,
     PLAN_LLM_BATCHES,
     POLL_BATCHES,
+    RUN_DEMO_EXPORT,
     RUN_WEEKLY_UPDATE,
     SUBMIT_LLM_BATCH,
     SWEEP,
@@ -48,6 +51,7 @@ from radar.entrypoints.bootstrap import (
     code_version,
 )
 from radar.ports import LlmProvider
+from radar.services.demo_export import DemoExportSetup, fail_demo_export, run_demo_export
 from radar.services.embeddings import embed_papers
 from radar.services.llm_batches import (
     LlmBatchSetup,
@@ -72,6 +76,15 @@ class EmbeddingJobFailedError(Exception):
     def __init__(self, reason: str) -> None:
         self.reason = reason
         super().__init__(f"向量化失敗（{reason}）")
+
+
+class DemoExportJobError(Exception):
+    """示範站匯出工作失敗。訊息只有原本的錯誤類別（細節由 service 記在日誌、原因代碼記在
+    `demo_export`）；不串原例外，理由同 `AdapterSetupError`。"""
+
+    def __init__(self, error_type: str) -> None:
+        self.error_type = error_type
+        super().__init__(f"示範站匯出失敗（{error_type}）")
 
 
 class AdapterSetupError(Exception):
@@ -250,6 +263,44 @@ def register_tasks(app: procrastinate.App, parts: WorkerParts, settings: Setting
                 parts.send_heartbeat,
             )
 
+    def run_demo_export_job(demo_export_id: uuid.UUID) -> None:
+        # 示範站匯出（Story 3.7、ADR-0061）：只寫 RADAR_DEMO_EXPORT_DIR/preview/。現在只有 sweep
+        # 補排停在 queued／running 的那一筆。沒設資料夾、或開了 RADAR_DEMO_PUBLISH（正式發佈還沒
+        # 做）時 service 把那一筆記成 failed（移出起始狀態，sweep 不再補排）。執行時才讀設定檔；
+        # 讀失敗時也把那一筆記成 failed（config_error），不然 sweep 會一直補排；ConfigError 原樣
+        # 往上丟（和其他工作一樣；訊息照設計只有環境變數或設定檔的名稱與原因，不含設定值）。進了
+        # 匯出服務之後的例外只記類別名稱，不串原例外：訊息可能帶主機、帳號或被擋的內容。
+        try:
+            domain_config = load_domain_config()
+            setup = DemoExportSetup(
+                models=load_models_config(),
+                taxonomy=load_taxonomy(),
+                context_values=load_context_values(),
+                journals=domain_config.journals,
+                exclusions=domain_config.demo_publishers.exclusions(),
+                publish=settings.demo_publish,
+            )
+        except ConfigError:
+            fail_demo_export(
+                SystemViewer(), parts.database, demo_export_id, DemoExportFailure.CONFIG_ERROR
+            )
+            raise
+        error_type: str | None = None
+        try:
+            run_demo_export(
+                SystemViewer(),
+                parts.database,
+                setup,
+                demo_export_id,
+                None if settings.demo_export_dir is None else Path(settings.demo_export_dir),
+                clock=lambda: datetime.now(UTC),
+            )
+        except Exception as exc:
+            error_type = type(exc).__name__
+        if error_type is not None:
+            # 在 except 外面丟：Procrastinate 記失敗時會印 __context__。
+            raise DemoExportJobError(error_type)
+
     def load_scope() -> ScopeSettings:
         # 執行時才讀 config/journals.yaml：抓完後才改設定也照新的追蹤範圍算 in_scope。
         # 一起帶 config/demo_publishers.yaml 的排除清單，寫入時算 demo_eligible（ADR-0052）。
@@ -308,4 +359,13 @@ def register_tasks(app: procrastinate.App, parts: WorkerParts, settings: Setting
     # 查結果不做工作層的重試：下一次 cron（15 分鐘後）接著做，匯入是冪等的。
     register_job(
         app, POLL_BATCHES, poll_batches_job, max_retries=0, retry_wait=settings.job_retry_wait
+    )
+    # 示範站匯出不做工作層的重試：失敗時那一筆已經記成 failed，再跑一次要重新排一筆（自我檢查沒過
+    # 重跑也一樣）。
+    register_job(
+        app,
+        RUN_DEMO_EXPORT,
+        run_demo_export_job,
+        max_retries=0,
+        retry_wait=settings.job_retry_wait,
     )

@@ -161,3 +161,16 @@ def visible_to_system_only(viewer: Viewer) -> str:
     if not isinstance(viewer, SystemViewer):
         raise TypeError(f"只給 SystemViewer（現在是 {type(viewer).__name__}）")
     return "TRUE"
+
+
+def visible_snapshot_facts(viewer: Viewer) -> str:
+    """快照編號與截止時間（`snapshot` 表）的 SQL 條件：系統工作與示範站匯出（`PublicViewer`，
+    Story 3.7）讀得到，都回 `TRUE`。已發佈的快照編號與截止時間本來就印在示範站與每個統計回應上，
+    不是私人資料；建立中、失敗的快照由呼叫的查詢自己用 `status` 篩掉。
+
+    Raises:
+        TypeError: `viewer` 不是 `SystemViewer` 或 `PublicViewer`（成員的畫面用系統身分讀快照）。
+    """
+    if not isinstance(viewer, SystemViewer | PublicViewer):
+        raise TypeError(f"只給 SystemViewer 或 PublicViewer（現在是 {type(viewer).__name__}）")
+    return "TRUE"

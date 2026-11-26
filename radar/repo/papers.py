@@ -41,6 +41,7 @@ from sqlalchemy.dialects.postgresql import ARRAY
 
 from radar.domain.ai_outputs import CurrentAbstract, PaperLlmSource
 from radar.domain.annotations import AnnotationPaperFacts, AnnotationPaperText
+from radar.domain.demo_export import DemoPaperFacts, DemoPublisherFacts
 from radar.domain.identifiers import ExternalId, IdentifierScheme
 from radar.domain.llm_batches import PaperAiSource
 from radar.domain.paper_page import PaperPageFacts
@@ -62,8 +63,9 @@ from radar.domain.papers import (
 from radar.domain.policy import is_demo_eligible
 from radar.domain.processing import ProcessingFacts
 from radar.domain.scope import ScopeSettings, is_in_scope
+from radar.domain.snapshot import SnapshotStatus
 from radar.domain.trial_runs import TrialCandidate
-from radar.domain.viewer import SystemViewer, Viewer
+from radar.domain.viewer import PublicViewer, SystemViewer, Viewer
 from radar.repo.db import Database
 from radar.repo.models import Base
 from radar.repo.visibility import visible_in_own_library, visible_papers, visible_to_system_only
@@ -1211,6 +1213,116 @@ def list_demo_eligible_facts(
         )
         for paper_id, primary_license, publisher_ids, publisher_names, journal_issn_l in rows
     ]
+
+
+def list_demo_paper_facts(viewer: PublicViewer, connection: Connection) -> list[DemoPaperFacts]:
+    """示範站匯出要的每一篇論文（Story 3.7、AD-20）：`viewer` 看得到的（訪客＝`counted_paper` 裡的）
+    書目、最早記上的 DOI 與 OpenAlex ID、出版社 ID 與名稱（匯出時再用排除清單判一次，不寫進檔）、
+    目前的摘要的來源（不讀摘要內容）、在不在 view `demo_full_paper`、是不是本週新增
+    （`first_snapshot_id` 是最新已發佈的快照）。
+
+    一句帶可見條件的查詢。排序就是示範站資料檔的列順序：出版年新到舊（沒有年份的在最後）、同一年
+    依 id 由大到小（和找論文清單一樣）。只讀，不寫。
+    """
+    visible = visible_papers(viewer, alias="paper")
+    rows = (
+        connection.execute(
+            text(
+                "SELECT paper.id, paper.title, paper.authors,"
+                " paper.publication_year, paper.journal_issn_l, paper.volume, paper.issue,"
+                " paper.first_page, paper.last_page, paper.cited_by_count,"
+                " paper.publisher_ids, paper.publisher_names,"
+                " (SELECT d.value_norm FROM external_id AS d"
+                "  WHERE d.paper_id = paper.id AND d.scheme = :doi"
+                "  ORDER BY d.created_at, d.id LIMIT 1) AS doi,"
+                " (SELECT o.value_norm FROM external_id AS o"
+                "  WHERE o.paper_id = paper.id AND o.scheme = :openalex"
+                "  ORDER BY o.created_at, o.id LIMIT 1) AS openalex_id,"
+                " a.source AS abstract_source, paper.demo_eligible,"
+                " EXISTS (SELECT 1 FROM demo_full_paper AS f WHERE f.id = paper.id)"
+                " AS in_demo_full_paper,"
+                " paper.first_snapshot_id IS NOT DISTINCT FROM"
+                " (SELECT s.id FROM snapshot AS s WHERE s.status = :published"
+                "  ORDER BY s.number DESC LIMIT 1) AS is_new_this_week"
+                " FROM paper LEFT JOIN paper_abstract AS a"
+                " ON a.paper_id = paper.id AND a.is_current"
+                f" WHERE {visible}"
+                " ORDER BY paper.publication_year DESC NULLS LAST, paper.id DESC"
+            ),
+            {
+                "doi": IdentifierScheme.DOI.value,
+                "openalex": IdentifierScheme.OPENALEX.value,
+                "published": SnapshotStatus.PUBLISHED.value,
+            },
+        )
+        .mappings()
+        .all()
+    )
+    return [
+        DemoPaperFacts(
+            paper_id=row["id"],
+            title=row["title"],
+            authors=tuple(row["authors"]),
+            publication_year=row["publication_year"],
+            journal_issn_l=row["journal_issn_l"],
+            volume=row["volume"],
+            issue=row["issue"],
+            first_page=row["first_page"],
+            last_page=row["last_page"],
+            cited_by_count=row["cited_by_count"],
+            doi=row["doi"],
+            openalex_id=row["openalex_id"],
+            publisher_ids=tuple(row["publisher_ids"]),
+            publisher_names=tuple(row["publisher_names"]),
+            abstract_source=(
+                None if row["abstract_source"] is None else AbstractSource(row["abstract_source"])
+            ),
+            demo_eligible=row["demo_eligible"],
+            in_demo_full_paper=row["in_demo_full_paper"],
+            # 還沒有任何已發佈的快照時 `first_snapshot_id` 也一定是 NULL（`counted_paper` 只收已發佈
+            # 快照的論文），訪客看不到任何一篇，不會走到這裡。
+            is_new_this_week=bool(row["is_new_this_week"]),
+        )
+        for row in rows
+    ]
+
+
+def list_demo_publisher_facts(
+    viewer: PublicViewer, connection: Connection
+) -> list[DemoPublisherFacts]:
+    """`viewer` 看得到的每一篇論文的出版社 ID、名稱與期刊 ISSN-L（示範站匯出的自我檢查第 6 項用，
+    Story 3.7、ADR-0007：排除清單直接用出版社欄位查），以及資料庫存的 `demo_eligible`（第 7 項：核對
+    匯出的 `demo_eligible`）。和 `list_demo_paper_facts` 另外一句讀：自我檢查不拿組檔用的那份結果來
+    檢查自己。只讀，不寫。
+    """
+    visible = visible_papers(viewer, alias="paper")
+    rows = connection.execute(
+        text(
+            "SELECT paper.id, paper.publisher_ids, paper.publisher_names, paper.journal_issn_l,"
+            f" paper.demo_eligible FROM paper WHERE {visible} ORDER BY paper.id"
+        )
+    )
+    return [
+        DemoPublisherFacts(
+            paper_id=paper_id,
+            publisher_ids=tuple(publisher_ids),
+            publisher_names=tuple(publisher_names),
+            journal_issn_l=journal_issn_l,
+            demo_eligible=demo_eligible,
+        )
+        for paper_id, publisher_ids, publisher_names, journal_issn_l, demo_eligible in rows
+    ]
+
+
+def list_demo_full_paper_ids(viewer: PublicViewer, connection: Connection) -> frozenset[uuid.UUID]:
+    """view `demo_full_paper` 裡、`viewer` 看得到的論文 id（示範站匯出的自我檢查用，Story 3.7）。
+
+    和 `list_demo_paper_facts` 的 `in_demo_full_paper` 是同一個 view，但另外一句讀：自我檢查不拿
+    組檔用的那份結果來檢查自己。只讀，不寫。
+    """
+    visible = visible_papers(viewer, alias="f")
+    rows = connection.execute(text(f"SELECT f.id FROM demo_full_paper AS f WHERE {visible}"))
+    return frozenset(uuid.UUID(str(value)) for value in rows.scalars())
 
 
 def update_papers_not_demo_eligible(connection: Connection, paper_ids: Sequence[uuid.UUID]) -> int:

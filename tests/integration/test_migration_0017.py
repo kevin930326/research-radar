@@ -84,7 +84,7 @@ def test_downgrade_to_0016_and_upgrade_again(db: TestDatabase) -> None:
 
     migrate(db)
 
-    assert db.revisions() == {"0021"}
+    assert db.revisions() == {"0022"}
     assert {"ended_at", "imported_at"} <= _columns(db)
     [(definition,)] = _index(db)
     assert "UNIQUE" in definition
@@ -153,7 +153,7 @@ def test_upgrade_again_after_batches_were_imported(db: TestDatabase) -> None:
 
     migrate(db)
 
-    assert db.revisions() == {"0021"}
+    assert db.revisions() == {"0022"}
     rows = {
         uuid.UUID(str(row[0])): row[1:]
         for row in execute(
