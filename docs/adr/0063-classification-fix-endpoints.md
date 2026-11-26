@@ -40,10 +40,14 @@ Story 2.7 已經有寫入人工判斷的函式（`repo/judgments.create_judgment
 一 A、二 A、三 A。
 
 1. **兩個端點**：`GET`／`POST /api/v1/papers/{paper_id}/classification-fixes`。都要登入；都比對 `X-Radar-Expected-Member`（ADR-0055：不同 409 `member_changed`、格式不對 400，都在讀寫之前）；`POST` 另外要本站的 `Origin`。看不到、不存在、被排除的論文與不是 UUID 的 ID 一律同一個 404。回應都是 `no-store`。
-2. **規則**（`check_classification_fix`）：主題、方法各至少一個；每個都是**現在分類表**這一欄的 `key`（所以 `unclassified`、放錯欄位、不存在、大小寫不同都不收）；不重複；兩欄都和目前的有效值一樣（當集合比，AI 的值沒有排序）就不收；理由選填，去掉頭尾空白，空的當作沒寫，最多 100 個字（Unicode 字元），不能有控制字元與存不進資料庫的字。
-3. **寫入**：`services/judgments.fix_classification` 在一個交易裡：拿這一篇的交易級鎖 → 讀論文（同論文頁的可見性）→ 讀目前的有效分類 → 驗 → 寫主題、方法兩筆 `judgment_event`（`previous_keys` 是修正前的值；角色是 admin 或 member）→ 寫一筆稽核（`repo/audit.create_audit_event`，就是 AD-26 說的 `record()`；detail 是兩筆事件的 ID 與選的 key，沒有理由）→ 重讀分類區塊與歷史回傳。任何一步失敗整個交易退回。
-4. **歷史**：`repo/judgments.list_classification_fix_events` 接 `visible_papers`、只讀成員的顯示名稱；`domain.group_fix_history` 把同一位成員、同一個時間（同一個交易）的兩筆合成一筆，新的在前。回應每筆只有時間、姓名、主題、方法、理由——沒有成員 ID、沒有 email（測試檢查）。
-5. **管理指令**：`radar classification disagreements` 列出 `effective_classification.members_disagree` 的論文，每位成員最新一次選的主題、方法與時間（台北時間）。意見不同只由 view 判定，指令不另算。
+   **`POST` 錯誤的先後**：`Origin` 不對 403 → 沒登入 401 → 預期成員不同 409／格式不對 400 → 論文看不到、不存在、壞 ID 404 → 本文不對 422。看不到的論文在路由的相依項裡查（`services/judgments.paper_is_visible`），相依項比本文的驗證先跑，所以看不到的論文帶壞本文也是 404，分不出論文存不存在；寫入時服務層會再查一次。
+2. **規則**（`check_classification_fix`）：主題、方法各至少一個；每個都是**現在分類表**這一欄的 `key`（所以 `unclassified`、放錯欄位、不存在、大小寫不同都不收）；不重複；兩欄都和目前的有效值一樣（當集合比，AI 的值沒有排序）就不收；理由選填，去掉頭尾空白，空的當作沒寫，最多 100 個字（Unicode code point，表情符號算一個字；前端輸入框同一種算法），不能有控制字元、行分隔符 U+2028、段落分隔符 U+2029 與存不進資料庫的字；分類沒有成功的結果（還在產生、沒有產生成功）時不收（見取捨）。
+3. **寫入**：`services/judgments.fix_classification` 在一個交易裡：讀論文（同論文頁的可見性；看不到就不去排隊等鎖）→ 拿這一篇的交易級鎖 → 拿到鎖後再讀一次論文 → 取一次 `clock_timestamp()` 當這次寫入的時間 → 讀目前的有效分類 → 驗 → 寫主題、方法兩筆 `judgment_event`（`previous_keys` 是修正前的值；角色是 admin 或 member）→ 寫一筆稽核（detail 是兩筆事件的 ID 與選的 key，沒有理由）→ 重讀分類區塊與歷史回傳。任何一步失敗整個交易退回（稽核寫入失敗時兩欄也退回，有整合測試）。
+   - 稽核：AD-26 與驗收條件寫的 `repo.audit.record()` 在程式裡沒有這個名字；寫稽核的唯一函式是 `repo/audit.create_audit_event`（Story 2.12 因為 repo 的函式要用動詞前綴而這樣命名，見 `repo/audit.py` 檔頭），它用呼叫端傳進來的交易連線、不自己 commit。
+   - 時間：兩筆事件與稽核共用拿到鎖之後取的 `clock_timestamp()`，不用資料庫預設的 `now()`（交易開始的時間）。否則甲先開交易、乙先拿到鎖並提交、甲再拿到鎖時，甲的紀錄會比乙早，歷史順序和有效值都會變成乙的（有兩條連線的整合測試）。
+4. **歷史**：`repo/judgments.list_classification_fix_events` 接 `visible_papers` 與 `visible_member_judgments`（只給成員與系統身分，公開身分執行時就丟錯）、只讀成員的顯示名稱；服務層 `get_classification_fixes` 只收成員身分（型別與執行時都擋）；`domain.group_fix_history` 把同一位成員、同一個時間（同一個交易）的兩筆合成一筆，新的在前。回應每筆只有時間、姓名、主題、方法、理由——沒有成員 ID、沒有 email（測試檢查）。
+5. **管理指令**：`radar classification disagreements` 列出 `effective_classification.members_disagree` 的論文，每位成員主題、方法**各自**最新一次選的 key 與那一次的時間（台北時間）。意見不同只由 view 判定，指令不另算；按欄取最新和 view 的單位一樣，所以造成意見不同的那一欄一定印得出來。
+   - 誰能跑：只限能登入主機、拿得到資料庫設定的維運者。指令以 `SystemViewer` 只讀、不檢查應用程式的管理者角色，連哪個資料庫由執行環境的設定（`DATABASE_URL`）決定；輸出有論文標題與成員姓名，沒有 email、成員 ID 與理由。正式主機上誰拿得到這個執行環境，由 Kevin 確認部署權限。
 6. **示範站**：分類只帶 `key` 與 `human_verified`（既有的 `DemoClassificationField` 白名單）；歷史、人數、姓名、理由都不進匯出（整合測試檢查匯出檔）。前端的修正分類只在成員版的建置（`e2e/build-output.spec.ts` 檢查記號）。
 7. **前端**：分類那一行由共用的 `ClassificationLine` 畫標籤與標章，成員版用一個 render 函式（`ClassificationFixRender`）把「有 N 位成員修正過」、「修正分類」、歷史與表單排進去；共用元件不 import 修正分類。寫入照我的文獻庫的做法（`readAs` 當預期成員、409 整頁換人、401 回登入頁、送出之後換了人就不改快取）。人工值在資料庫裡照 key 的字母排，畫面照分類表的順序排（設計稿）。
 
@@ -56,6 +60,6 @@ Story 2.7 已經有寫入人工判斷的函式（`repo/judgments.create_judgment
 ## 取捨
 
 - 同一位成員想「同意」目前的值（送一樣的）會被擋（422）：兩欄都沒變就沒有東西可記。要記「我核對過、同意」得另外設計（列給 Kevin）。
-- 後端收「還沒有分類結果」（產生中、沒產生成功）的論文的修正（目前的值當作沒有）；畫面照設計稿只在有標籤時給入口。要不要在畫面上開放，列給 Kevin。
+- **分類沒有成功的論文能不能修正：等 Kevin 決定，先拒收。** 後端在分類沒有成功的結果（產生中、沒產生成功）時回 422（原因代號 `no_ai_classification`，什麼都不寫），和畫面照設計稿只在有標籤時給入口一致。Kevin 決定開放時，要一起改後端這一條、畫面的入口與設計稿。
 - `judgment_event.ai_result_id` 這次不寫：論文頁讀分類區塊的函式沒有帶出那一筆 AI 結果的 ID；事件裡有 `previous_keys`，看得出改之前是什麼。
 - 422 不分原因：有人繞過前端時畫面只說「沒有送出成功」，不會說是哪一條。

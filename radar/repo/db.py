@@ -2,6 +2,7 @@
 
 from collections.abc import Iterator
 from contextlib import contextmanager
+from datetime import datetime
 from typing import Final
 
 import structlog
@@ -326,6 +327,13 @@ class Database:
         限制（預設 `connect_timeout` 秒），所以持有這把鎖的交易要很短。不開新交易、不 commit。
         """
         connection.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": key})
+
+    @staticmethod
+    def clock_timestamp(connection: Connection) -> datetime:
+        """資料庫現在的時間（`clock_timestamp()`：這一刻，不是交易開始的時間 `now()`）。拿到鎖之後
+        取一次當這次寫入的時間，排隊的寫入新舊才會和實際寫入的順序一樣（Story 3.11 修正分類）。"""
+        value: datetime = connection.execute(text("SELECT clock_timestamp()")).scalar_one()
+        return value
 
     @staticmethod
     def transaction_lock_shared(connection: Connection, key: int) -> None:

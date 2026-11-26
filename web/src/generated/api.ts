@@ -491,7 +491,8 @@ export const getFixClassificationUrl = (paperId: string,) => {
  * 目前一樣）、理由選填（100 字以內），立即生效、不能撤回；回修正後的分類區塊與歷史。看不到、
  * 不存在、ID 不是 UUID 都回同一個 404；送來的值不收 422 `request_invalid`（什麼都不寫）；
  * 沒登入 401；`Origin` 缺少或不是本站 403 `origin_rejected`；`X-Radar-Expected-Member` 和
- * 登入的成員不同 409 `member_changed`、格式不對 400 `expected_member_invalid`。
+ * 登入的成員不同 409 `member_changed`、格式不對 400 `expected_member_invalid`。看不到的論文
+ * 帶壞本文也是 404（先查論文、再驗本文）。
  * @summary Fix Classification
  */
 export const fixClassification = async (paperId: string,

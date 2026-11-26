@@ -3,8 +3,11 @@
 - **一次送兩欄**（決定第 98 項）：主題與方法各至少一個、每個都是**現在分類表**
   （`config/taxonomy.yaml`）的 `key`、不重複；整組和目前的有效值一樣（兩欄都沒變）就不收。
   所以不能改成 `unclassified`（它不是分類表的 `key`），送出後兩欄一定都是人工值（「已核對」）。
-- **理由選填**：前後空白去掉；去掉後是空字串當作沒寫；上限 `REASON_MAX_LENGTH` 個字（Unicode 字元，
-  不是位元組）；不能含控制字元（一行的輸入框打不出來；NUL、換行、Tab 都算）與存不進資料庫的字。
+- **理由選填**：前後空白去掉；去掉後是空字串當作沒寫；上限 `REASON_MAX_LENGTH` 個字（Unicode
+  code point，不是位元組也不是 UTF-16 單位；前端同一種算法）；不能含控制字元（一行的輸入框打不出來；
+  NUL、換行、Tab 都算）、行分隔符 U+2028、段落分隔符 U+2029 與存不進資料庫的字。
+- **分類沒有成功的論文先不收**（`NO_AI_CLASSIFICATION`）：能不能修正等 Kevin 決定（TASK 第 6 部分
+  第 8 點），決定前後端拒收，和畫面不給入口一致。
 - 成員送來的值一律當使用者輸入驗（AGENTS.md），前端的檢查不算數。錯誤只帶原因代號
   （`ClassificationFixProblem`），**不回顯成員送的值**（日誌與回應都不放）。
 - 歷史（決定第 96 項）：一次送出寫兩筆 `judgment_event`（主題、方法；同一個交易，`created_at`
@@ -44,7 +47,10 @@ class ClassificationFixProblem(StrEnum):
     UNCHANGED = "unchanged"  # 兩欄都和目前的有效值一樣
     REASON_NOT_TEXT = "reason_not_text"  # 理由不是字串
     REASON_TOO_LONG = "reason_too_long"  # 理由超過 100 字
-    REASON_INVALID_CHARACTER = "reason_invalid_character"  # 理由有控制字元或存不進資料庫的字
+    REASON_INVALID_CHARACTER = (
+        "reason_invalid_character"  # 理由有控制字元、分隔符或存不進資料庫的字
+    )
+    NO_AI_CLASSIFICATION = "no_ai_classification"  # 分類沒有成功的結果（等 Kevin 決定前不收）
 
 
 class ClassificationFixInvalidError(ValueError):
@@ -115,13 +121,18 @@ def _check_keys(value: object, field: TaxonomyField, taxonomy: Taxonomy) -> tupl
     return tuple(sorted(keys))
 
 
+# 理由裡不收的字元類別：控制字元、落單的代理字元、行分隔符、段落分隔符。
+_REJECTED_CATEGORIES: Final = frozenset({"Cc", "Cs", "Zl", "Zp"})
+
+
 def _check_reason(value: object) -> str | None:
     if value is None:
         return None
     if not isinstance(value, str):
         raise ClassificationFixInvalidError(ClassificationFixProblem.REASON_NOT_TEXT, "reason")
-    # 先看字元再去空白：換行、Tab 這類控制字元在頭尾也不收（一行的輸入框打不出來）。
-    if any(unicodedata.category(char) in {"Cc", "Cs"} for char in value):
+    # 先看字元再去空白：換行、Tab 這類控制字元在頭尾也不收（一行的輸入框打不出來）。行分隔符
+    # U+2028（Zl）、段落分隔符 U+2029（Zp）不是控制字元，但一樣會讓理由變成好幾行，也不收。
+    if any(unicodedata.category(char) in _REJECTED_CATEGORIES for char in value):
         raise ClassificationFixInvalidError(
             ClassificationFixProblem.REASON_INVALID_CHARACTER, "reason"
         )
@@ -154,11 +165,18 @@ def check_classification_fix(
     """驗成員送來的一次修正（見模組說明）。`current` 是同一把鎖裡讀到的目前有效值。
 
     Raises:
-        ClassificationFixInvalidError: 不收的原因（主題先驗、再驗方法、理由，最後比對目前的值）。
+        ClassificationFixInvalidError: 不收的原因（主題先驗、再驗方法、理由，再看分類有沒有成功的
+            結果，最後比對目前的值）。
     """
     topics = _check_keys(topic, TaxonomyField.TOPIC, taxonomy)
     methods = _check_keys(method, TaxonomyField.METHOD, taxonomy)
     cleaned = _check_reason(reason)
+    # 分類沒有成功的結果（還在產生、沒有產生成功等）：能不能修正等 Kevin 決定，先不收
+    # （ADR-0063 取捨）。
+    if current.topic is None and current.method is None:
+        raise ClassificationFixInvalidError(
+            ClassificationFixProblem.NO_AI_CLASSIFICATION, "classification"
+        )
     # 目前的值可能是 AI 給的順序（沒排序）：比的是集合（排好再比）。
     if topics == _sorted_or_none(current.topic) and methods == _sorted_or_none(current.method):
         raise ClassificationFixInvalidError(ClassificationFixProblem.UNCHANGED, "classification")
@@ -256,15 +274,64 @@ def group_fix_history(
     return tuple(entries)
 
 
-def latest_per_member(
-    events: Iterable[ClassificationFixEvent],
-) -> tuple[ClassificationFixEntry, ...]:
-    """每位成員各自最新的那一次送出（管理指令列出意見不同時用；新的在前）。同一位成員改了名字也算同一位
-    （依成員 ID，不依姓名）。"""
-    by_member: dict[uuid.UUID, list[ClassificationFixEvent]] = {}
+@dataclass(frozen=True, slots=True)
+class MemberPicks:
+    """管理指令的一位成員：每一欄各自最新的選擇與那一次的時間（UTC）。那一欄沒修正過是 None。
+
+    和有效值 view 判定「意見不同」的單位一樣（同一欄，每位成員各取最新一筆），所以造成意見不同的
+    那一欄一定印得出來，即使那位成員之後只改了另一欄。
+    """
+
+    member_name: str
+    topic: tuple[str, ...] | None
+    topic_at: datetime | None
+    method: tuple[str, ...] | None
+    method_at: datetime | None
+
+    def __post_init__(self) -> None:
+        if (self.topic is None) != (self.topic_at is None):
+            raise ValueError("主題與它的時間要一起有或一起沒有")
+        if (self.method is None) != (self.method_at is None):
+            raise ValueError("方法與它的時間要一起有或一起沒有")
+        if self.topic is None and self.method is None:
+            raise ValueError("至少要有一欄")
+        for at, name in ((self.topic_at, "topic_at"), (self.method_at, "method_at")):
+            if at is not None:
+                _check_aware(at, name)
+
+    @property
+    def latest_at(self) -> datetime:
+        """兩欄裡比較新的那個時間。"""
+        return max(at for at in (self.topic_at, self.method_at) if at is not None)
+
+
+def latest_picks_per_member(events: Iterable[ClassificationFixEvent]) -> tuple[MemberPicks, ...]:
+    """每位成員、每一欄各自最新的選擇（管理指令列出意見不同時用）。同一欄的新舊照（時間, 事件 ID）
+    比，和有效值 view 的 `created_at DESC, id DESC` 一樣。同一位成員改了名字也算同一位
+    （依成員 ID），
+    姓名取最新那一筆事件的。成員照兩欄裡比較新的時間排，新的在前。"""
+    latest: dict[tuple[uuid.UUID, TaxonomyField], ClassificationFixEvent] = {}
+    newest_event: dict[uuid.UUID, ClassificationFixEvent] = {}
     for event in events:
-        by_member.setdefault(event.member_id, []).append(event)
-    newest: list[ClassificationFixEntry] = []
-    for member_events in by_member.values():
-        newest.append(group_fix_history(member_events)[0])
-    return tuple(sorted(newest, key=lambda entry: entry.fixed_at, reverse=True))
+        rank = (event.fixed_at, event.event_id)
+        key = (event.member_id, TaxonomyField(event.field))
+        kept = latest.get(key)
+        if kept is None or rank > (kept.fixed_at, kept.event_id):
+            latest[key] = event
+        top = newest_event.get(event.member_id)
+        if top is None or rank > (top.fixed_at, top.event_id):
+            newest_event[event.member_id] = event
+    picks: list[MemberPicks] = []
+    for member_id, top in newest_event.items():
+        topic = latest.get((member_id, TaxonomyField.TOPIC))
+        method = latest.get((member_id, TaxonomyField.METHOD))
+        picks.append(
+            MemberPicks(
+                member_name=top.member_name,
+                topic=None if topic is None else topic.keys,
+                topic_at=None if topic is None else topic.fixed_at,
+                method=None if method is None else method.keys,
+                method_at=None if method is None else method.fixed_at,
+            )
+        )
+    return tuple(sorted(picks, key=lambda pick: pick.latest_at, reverse=True))

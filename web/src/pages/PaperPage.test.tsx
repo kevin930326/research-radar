@@ -770,7 +770,8 @@ describe("classification fix on the paper page", () => {
     );
   });
 
-  it("without the control (and on the demo site) there is no fix entry", () => {
+  // 示範站沒有修正分類：由 datasource/demo-paper-classification-fix.test.tsx 與 e2e/build-output.spec.ts 保證（這裡渲染的是成員版的 PaperPage）。
+  it("without the control there is no fix entry", () => {
     expect(render(fixture("normal"))).not.toContain("data-classification-fix");
   });
 });

@@ -273,7 +273,7 @@
       },
       "post": {
         "summary": "Fix Classification",
-        "description": "修正一篇看得到的論文的分類：主題與方法一次送（各至少一個、都是分類表的 key、兩欄不能都和\n目前一樣）、理由選填（100 字以內），立即生效、不能撤回；回修正後的分類區塊與歷史。看不到、\n不存在、ID 不是 UUID 都回同一個 404；送來的值不收 422 `request_invalid`（什麼都不寫）；\n沒登入 401；`Origin` 缺少或不是本站 403 `origin_rejected`；`X-Radar-Expected-Member` 和\n登入的成員不同 409 `member_changed`、格式不對 400 `expected_member_invalid`。",
+        "description": "修正一篇看得到的論文的分類：主題與方法一次送（各至少一個、都是分類表的 key、兩欄不能都和\n目前一樣）、理由選填（100 字以內），立即生效、不能撤回；回修正後的分類區塊與歷史。看不到、\n不存在、ID 不是 UUID 都回同一個 404；送來的值不收 422 `request_invalid`（什麼都不寫）；\n沒登入 401；`Origin` 缺少或不是本站 403 `origin_rejected`；`X-Radar-Expected-Member` 和\n登入的成員不同 409 `member_changed`、格式不對 400 `expected_member_invalid`。看不到的論文\n帶壞本文也是 404（先查論文、再驗本文）。",
         "operationId": "fix_classification",
         "parameters": [
           {

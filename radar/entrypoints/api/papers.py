@@ -16,6 +16,9 @@
   也是）。
   送來的值不收（不是分類表的 key、沒選、和目前一樣、理由太長等，`domain/classification_fixes`）
   一律 422 `request_invalid`，本文不回顯送來的值；什麼都不寫。
+  POST 錯誤的先後（ADR-0063）：`Origin` 403 → 沒登入 401 → 預期成員 409／400 → 論文看不到 404 →
+  本文不對 422。看不到的論文在相依項裡查（`visible_paper`），相依項比本文的驗證先跑，所以壞本文
+  不會蓋過 404。
 - 處理函式的名稱就是 operationId（`paper`、`display_names`、`client_config`、
   `classification_fixes`、`fix_classification`，全站唯一）。
 - 一定要在 `mount_web` 之前裝（`install_paper_routes` 會檢查）。
@@ -63,6 +66,7 @@ from radar.services.judgments import (
     ClassificationFixes,
     fix_classification,
     get_classification_fixes,
+    paper_is_visible,
 )
 from radar.services.paper_page import PaperPageSetup, get_paper_page
 
@@ -89,6 +93,7 @@ class PaperRoutes:
     """論文頁路由要用的函式與資料（`build_paper_routes` 組；測試換成假的函式）。
 
     `load_paper`：成員看得到的那篇論文的資料，不存在或看不到回 None。
+    `paper_visible`：成員看不看得到那篇論文（修正分類在驗本文之前先查）。
     `load_classification_fixes`：那篇論文的分類區塊與修正歷史；看不到回 None。
     `fix_classification`：成員修正那篇論文的分類；看不到回 None，送來的值不收丟
     `ClassificationFixInvalidError`。
@@ -97,6 +102,7 @@ class PaperRoutes:
     load_paper: Callable[[MemberViewer, uuid.UUID], PaperPage | None]
     display_names: DisplayNames
     client_config: ClientConfig
+    paper_visible: Callable[[MemberViewer, uuid.UUID], bool]
     load_classification_fixes: Callable[[MemberViewer, uuid.UUID], ClassificationFixes | None]
     fix_classification: Callable[
         [MemberViewer, uuid.UUID, ClassificationFixBody], ClassificationFixes | None
@@ -114,6 +120,9 @@ def build_paper_routes(
 
     def load_paper(viewer: MemberViewer, paper_id: uuid.UUID) -> PaperPage | None:
         return get_paper_page(viewer, database, setup, paper_id, now=clock())
+
+    def paper_visible(viewer: MemberViewer, paper_id: uuid.UUID) -> bool:
+        return paper_is_visible(viewer, database, paper_id)
 
     def load_classification_fixes(
         viewer: MemberViewer, paper_id: uuid.UUID
@@ -138,6 +147,7 @@ def build_paper_routes(
         load_paper=load_paper,
         display_names=display_names,
         client_config=client_config,
+        paper_visible=paper_visible,
         load_classification_fixes=load_classification_fixes,
         fix_classification=fix,
     )
@@ -242,10 +252,15 @@ def install_paper_routes(app: FastAPI, routes: PaperRoutes, auth_routes: AuthRou
 
     router = APIRouter(prefix=API_V1_PREFIX, dependencies=[Depends(origin_dependency(auth_routes))])
 
-    def expected_member(request: Request) -> AuthenticatedMember:
-        # 修正分類的寫入：先認 session（沒登入 401），再比對預期成員（409／400）；相依項在本文驗證
-        # 之前跑，所以沒登入的請求不會先得到 422。
-        return member_as_expected(request, auth_routes)
+    def visible_paper(paper_id: str, request: Request) -> tuple[AuthenticatedMember, uuid.UUID]:
+        # 修正分類的寫入：先認 session（沒登入 401）、比對預期成員（409／400），再解析 ID、查這位
+        # 成員看不看得到（看不到、不存在、壞 ID 都 404）。相依項在本文驗證之前跑，所以沒登入或
+        # 看不到的請求不會先得到 422（ADR-0063 錯誤的先後）。
+        member = member_as_expected(request, auth_routes)
+        parsed = _parse_paper_id(paper_id)
+        if not routes.paper_visible(member.viewer, parsed):
+            raise _not_found()
+        return member, parsed
 
     @router.get("/papers/{paper_id}")
     def paper(paper_id: str, request: Request, response: Response) -> PaperPageResponse:
@@ -276,17 +291,17 @@ def install_paper_routes(app: FastAPI, routes: PaperRoutes, auth_routes: AuthRou
 
     @router.post("/papers/{paper_id}/classification-fixes")
     def fix_classification(
-        paper_id: str,
+        target: Annotated[tuple[AuthenticatedMember, uuid.UUID], Depends(visible_paper)],
         body: ClassificationFixBody,
-        member: Annotated[AuthenticatedMember, Depends(expected_member)],
         response: Response,
     ) -> ClassificationFixesResponse:
         """修正一篇看得到的論文的分類：主題與方法一次送（各至少一個、都是分類表的 key、兩欄不能都和
         目前一樣）、理由選填（100 字以內），立即生效、不能撤回；回修正後的分類區塊與歷史。看不到、
         不存在、ID 不是 UUID 都回同一個 404；送來的值不收 422 `request_invalid`（什麼都不寫）；
         沒登入 401；`Origin` 缺少或不是本站 403 `origin_rejected`；`X-Radar-Expected-Member` 和
-        登入的成員不同 409 `member_changed`、格式不對 400 `expected_member_invalid`。"""
-        parsed = _parse_paper_id(paper_id)
+        登入的成員不同 409 `member_changed`、格式不對 400 `expected_member_invalid`。看不到的論文
+        帶壞本文也是 404（先查論文、再驗本文）。"""
+        member, parsed = target
         try:
             fixes = routes.fix_classification(member.viewer, parsed, body)
         except ClassificationFixInvalidError as exc:

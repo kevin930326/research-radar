@@ -27,8 +27,7 @@
       "hint": "送出後不能撤回，改錯了再修正一次",
       "sending": "送出中…",
       "failed": "沒有送出成功。你選的還在，再試一次",
-      "current": "目前採用",
-      "remaining": "剩 {{n}} 字"
+      "current": "目前採用"
     },
     "summary": {
       "heading": "中文重點",

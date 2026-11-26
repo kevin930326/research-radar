@@ -292,7 +292,9 @@ export function ClassificationLine({ block, names, firstBadge, fix }: Classifica
       {value.method === null || value.method.keys.length === 0 ? null : (
         <TagGroup label={t("paper.classification.method")} field={value.method} names={methods} kind="method" />
       )}
-      <AiBadge provenance={badgeProvenance(provenance)} first={firstBadge} triggerClassName="-my-[9px]" />
+      {/* 標章的按鈕 44px（ADR-0037）。成員版（有修正分類）用 −13px 讓它只佔標章本身的 18px：表單開著時 390 寬那一行只剩標章，
+          −9px（佔 26px）會讓那一行比設計稿高 8px（審查 3.11 T12）；其他時候那一行由 28px 的小按鈕撐，列高不變。示範站照原本。 */}
+      <AiBadge provenance={badgeProvenance(provenance)} first={firstBadge} triggerClassName={fix === undefined ? "-my-[9px]" : "-my-[13px]"} />
     </>
   );
   const titleOnly =

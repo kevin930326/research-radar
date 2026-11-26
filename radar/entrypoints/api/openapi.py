@@ -59,6 +59,10 @@ def _not_ready() -> bool:
     _not_for_requests()
 
 
+def _paper_visible(_viewer: MemberViewer, _paper_id: uuid.UUID) -> bool:
+    _not_for_requests()
+
+
 def _load_classification_fixes(
     _viewer: MemberViewer, _paper_id: uuid.UUID
 ) -> ClassificationFixes | None:
@@ -119,6 +123,7 @@ def build_schema_app() -> FastAPI:
             load_paper=_load_paper,
             display_names=DisplayNames(journals=(), topics=(), methods=()),
             client_config=build_client_config(),
+            paper_visible=_paper_visible,
             load_classification_fixes=_load_classification_fixes,
             fix_classification=_fix_classification,
         ),

@@ -10,7 +10,10 @@ ADR-0035、Story 2.7）。
 - 有效值不在這裡讀：讀 `effective_*` view（`repo/ai_blocks.py`）。權限檢查與同一個交易寫稽核在
   `services/judgments.py`（3.11、3.12、Epic 10）。
 - 讀取：分類修正的歷史（`list_classification_fix_events`，Story 3.11）接 `visible_papers`，看不到的
-  論文一筆都不回；成員只讀顯示名稱（`member.display_name`），不讀 email。
+  論文一筆都不回；成員只讀顯示名稱（`member.display_name`），不讀 email。只給成員與維運身分：公開
+  身分（示範站產生器）在執行時就被擋（示範站不帶修正歷史，ADR-0063）。
+- `created_at` 可以由呼叫端給（修正分類在拿到鎖之後取一次 `clock_timestamp()`，兩欄與稽核共用，
+  歷史與有效值的新舊才會和實際寫入的順序一樣）；沒給是資料庫的 `now()`。
 - 寫入一律用 `text()` SQL；函式收呼叫端開好的交易連線，不 commit。
 """
 
@@ -38,9 +41,9 @@ from sqlalchemy.dialects.postgresql import JSONB
 from radar.domain.classification_fixes import ClassificationFixEvent
 from radar.domain.judgments import ActorRole, JudgmentKind, JudgmentTarget, NewJudgmentEvent
 from radar.domain.taxonomy import TaxonomyField
-from radar.domain.viewer import Viewer
+from radar.domain.viewer import MemberViewer, SystemViewer
 from radar.repo.models import Base
-from radar.repo.visibility import visible_papers
+from radar.repo.visibility import visible_member_judgments, visible_papers
 
 # --- 表的定義（`alembic check` 拿來和資料庫比對；遷移 0014 建表） -----------------------------
 
@@ -144,21 +147,22 @@ judgment_event_table = Table(
 
 _INSERT: Final = text(
     "INSERT INTO judgment_event (kind, member_id, actor_role, target_type, target_id, related_id,"
-    " field, old_value, new_value, reason, ai_result_id, report_event_id)"
+    " field, old_value, new_value, reason, ai_result_id, report_event_id, created_at)"
     " VALUES (:kind, :member_id, :actor_role, :target_type, :target_id, :related_id, :field,"
     " CAST(:old_value AS jsonb), CAST(:new_value AS jsonb), :reason, :ai_result_id,"
-    " :report_event_id)"
+    " :report_event_id, COALESCE(CAST(:created_at AS timestamptz), now()))"
     " RETURNING id"
 )
 
 # 處理結果：原本那筆要是同一筆 zh_summary、同一欄的回報；已經有處理結果就不寫（UNIQUE）。
 _INSERT_RESOLUTION: Final = text(
     "INSERT INTO judgment_event (kind, member_id, actor_role, target_type, target_id, related_id,"
-    " field, old_value, new_value, reason, ai_result_id, report_event_id)"
+    " field, old_value, new_value, reason, ai_result_id, report_event_id, created_at)"
     " SELECT CAST(:kind AS text), CAST(:member_id AS uuid), CAST(:actor_role AS text),"
     " CAST(:target_type AS text), CAST(:target_id AS uuid), CAST(:related_id AS uuid),"
     " CAST(:field AS text), CAST(:old_value AS jsonb), CAST(:new_value AS jsonb),"
-    " CAST(:reason AS text), CAST(:ai_result_id AS uuid), report.id"
+    " CAST(:reason AS text), CAST(:ai_result_id AS uuid), report.id,"
+    " COALESCE(CAST(:created_at AS timestamptz), now())"
     " FROM judgment_event AS report"
     " WHERE report.id = :report_event_id AND report.kind = 'summary_report'"
     " AND report.target_type = :target_type AND report.target_id = :target_id"
@@ -175,8 +179,11 @@ def _json(value: object) -> str | None:
 # --- 寫入 ---------------------------------------------------------------------------------
 
 
-def create_judgment_event(connection: Connection, event: NewJudgmentEvent) -> uuid.UUID | None:
-    """新增一筆人工判斷事件，回它的 id。在呼叫端開好的交易裡做，不 commit。
+def create_judgment_event(
+    connection: Connection, event: NewJudgmentEvent, *, created_at: datetime | None = None
+) -> uuid.UUID | None:
+    """新增一筆人工判斷事件，回它的 id。在呼叫端開好的交易裡做，不 commit。`created_at` 沒給是
+    資料庫的 `now()`（交易開始的時間）。
 
     處理結果（`summary_report_resolution`）指到的不是同一筆 `zh_summary`、同一欄的回報（不存在、
     是別種事件、對象或欄位不同），或那筆回報已經有處理結果時，什麼都不寫、回 None；其他種類
@@ -184,9 +191,12 @@ def create_judgment_event(connection: Connection, event: NewJudgmentEvent) -> uu
 
     Raises:
         TypeError: `event` 不是 `NewJudgmentEvent`（形狀在它建構時已經驗過）。
+        ValueError: `created_at` 沒有時區。
     """
     if not isinstance(event, NewJudgmentEvent):
         raise TypeError("event 要是 NewJudgmentEvent")
+    if created_at is not None and (created_at.tzinfo is None or created_at.utcoffset() is None):
+        raise ValueError("created_at 要是帶時區的時間")
     kind = JudgmentKind(event.kind)
     old_value, new_value = event.json_values()
     params: dict[str, object] = {
@@ -202,6 +212,7 @@ def create_judgment_event(connection: Connection, event: NewJudgmentEvent) -> uu
         "reason": event.reason,
         "ai_result_id": event.ai_result_id,
         "report_event_id": event.report_event_id,
+        "created_at": created_at,
     }
     sql = _INSERT_RESOLUTION if kind is JudgmentKind.SUMMARY_REPORT_RESOLUTION else _INSERT
     value = connection.execute(sql, params).scalar_one_or_none()
@@ -212,11 +223,18 @@ def create_judgment_event(connection: Connection, event: NewJudgmentEvent) -> uu
 
 
 def list_classification_fix_events(
-    viewer: Viewer, connection: Connection, paper_ids: Iterable[uuid.UUID]
+    viewer: MemberViewer | SystemViewer, connection: Connection, paper_ids: Iterable[uuid.UUID]
 ) -> list[ClassificationFixEvent]:
     """這些論文（`viewer` 看得到的）的分類修正事件，新的在前（`created_at DESC, id DESC`）。看不到、
     不存在的論文沒有任何一筆。每筆帶修正的成員的顯示名稱（不帶 email）；`new_value` 照 view 的做法
-    去重、排序（"C" 定序）。"""
+    去重、排序（"C" 定序）。
+
+    Raises:
+        TypeError: `viewer` 不是成員或維運身分（公開身分讀不到修正歷史；
+            `visible_member_judgments`）。
+    """
+    # 先判身分（paper_ids 是空的也一樣擋公開身分）。
+    judgments_visible = visible_member_judgments(viewer)
     wanted = sorted(set(paper_ids))
     if not wanted:
         return []
@@ -230,7 +248,8 @@ def list_classification_fix_events(
             " FROM judgment_event AS j"
             " JOIN paper ON paper.id = j.target_id"
             " JOIN member AS m ON m.id = j.member_id"
-            f" WHERE {visible} AND j.kind = :kind AND j.target_type = :target"
+            f" WHERE {visible} AND {judgments_visible} AND j.kind = :kind"
+            " AND j.target_type = :target"
             " AND j.target_id = ANY(CAST(:ids AS uuid[]))"
             " ORDER BY j.created_at DESC, j.id DESC"
         ),

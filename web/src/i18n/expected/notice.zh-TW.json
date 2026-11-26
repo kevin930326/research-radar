@@ -82,7 +82,6 @@
     "paper:paper.fix.sending": "送出中…",
     "paper:paper.fix.failed": "沒有送出成功。你選的還在，再試一次",
     "paper:paper.fix.current": "目前採用",
-    "paper:paper.fix.remaining": "剩 {{n}} 字",
     "paper:paper.summary.heading": "中文重點",
     "paper:paper.summary.researchQuestion": "研究問題",
     "paper:paper.summary.method": "方法",

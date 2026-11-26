@@ -2,8 +2,9 @@
 
 後端的每一條規則各有一條測試（前端的檢查不算數）：主題與方法各至少一個、每個都是現在分類表的
 `key`（不收 `unclassified`、放錯欄位、不存在的 key、重複）、和目前的有效值不同才收、理由選填與上限
-100 字、理由不收控制字元與存不進資料庫的字。錯誤訊息不回顯成員送的值。分類表用真的
-`config/taxonomy.yaml`。資料全是測試自己編的。
+100 字（code point）、理由不收控制字元、行分隔符與段落分隔符、存不進資料庫的字；分類沒有成功的
+論文先不收（等 Kevin 決定）。錯誤訊息不回顯成員送的值。分類表用真的 `config/taxonomy.yaml`。
+資料全是測試自己編的（成員名字是明顯的假名）。
 """
 
 import uuid
@@ -28,12 +29,15 @@ from radar.domain.classification_fixes import (
     ClassificationFixInvalidError,
     ClassificationFixProblem,
     CurrentClassification,
+    MemberPicks,
     check_classification_fix,
     classification_fix_lock_key,
     group_fix_history,
-    latest_per_member,
+    latest_picks_per_member,
 )
 from radar.domain.taxonomy import TaxonomyField
+from radar.domain.viewer import MemberViewer, PublicViewer, SystemViewer
+from radar.repo.visibility import visible_member_judgments
 from tests.llm_support import ROOT
 
 TAXONOMY = load_taxonomy({"RADAR_CONFIG_DIR": str(ROOT / "config")})
@@ -162,10 +166,20 @@ def test_changing_one_field_is_enough_and_both_are_sent(
     assert (fix.topic, fix.method) == (tuple(topic), tuple(method))
 
 
-def test_without_a_current_value_any_valid_fix_is_new() -> None:
-    fix = _check(topic=["e_commerce"], method=["experiment"], current=NOTHING)
+def test_without_a_successful_ai_classification_the_fix_is_rejected() -> None:
+    # 分類沒有成功的論文能不能修正等 Kevin 決定（TASK 第 6 部分第 8 點）；決定前後端不收
+    # （triage T7）。
+    error = _problem(topic=["e_commerce"], method=["experiment"], current=NOTHING)
 
-    assert fix.topic == ("e_commerce",)
+    assert error.problem is ClassificationFixProblem.NO_AI_CLASSIFICATION
+    assert "e_commerce" not in str(error)
+
+
+def test_an_old_value_on_one_field_is_still_a_current_classification() -> None:
+    # 只有一欄有值（Story 2.7 之前或只修正過一欄）不算「沒有分類」。
+    fix = _check(current=CurrentClassification(topic=("e_commerce",), method=None))
+
+    assert fix.method == ("experiment",)
 
 
 def test_reason_is_optional_and_blank_counts_as_none() -> None:
@@ -184,7 +198,25 @@ def test_reason_up_to_100_characters() -> None:
     assert "字" not in str(error)
 
 
-@pytest.mark.parametrize("reason", ["一行\n兩行", "tab\there", "nul\x00", "bell\x07", "\ud800"])
+def test_reason_length_counts_code_points_not_utf16_units() -> None:
+    # 表情符號是一個 code point、兩個 UTF-16 單位：算一個字（前端同一種算法，triage T16）。
+    assert _check(reason="😀" * 100).reason == "😀" * 100
+    assert _problem(reason="😀" * 101).problem is ClassificationFixProblem.REASON_TOO_LONG
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "一行\n兩行",
+        "tab\there",
+        "nul\x00",
+        "bell\x07",
+        "\ud800",
+        "行分隔\u2028第二行",
+        "段落分隔\u2029第二段",
+        "\u2028",
+    ],
+)
 def test_reason_rejects_control_and_unstorable_characters(reason: str) -> None:
     assert _problem(reason=reason).problem is ClassificationFixProblem.REASON_INVALID_CHARACTER
 
@@ -254,7 +286,7 @@ def _event(
         event_id=uuid.UUID(int=n),
         paper_id=kw.get("paper", PAPER),
         member_id=member,
-        member_name="陳柏翰" if member == CHEN else "林怡君",
+        member_name="測試成員甲" if member == CHEN else "測試成員乙",
         fixed_at=at,
         field=field,
         keys=keys,
@@ -275,8 +307,8 @@ def test_one_submission_is_one_entry_newest_first() -> None:
     history = group_fix_history(reversed(events))
 
     assert [(e.member_name, e.topic, e.method, e.reason) for e in history] == [
-        ("陳柏翰", ("digital_platforms", "e_commerce"), ("experiment",), "跨平台"),
-        ("林怡君", ("social_media_communities",), ("experiment",), None),
+        ("測試成員甲", ("digital_platforms", "e_commerce"), ("experiment",), "跨平台"),
+        ("測試成員乙", ("social_media_communities",), ("experiment",), None),
     ]
     assert history[0].fixed_at == T2
 
@@ -306,19 +338,62 @@ def test_history_is_for_one_paper_only() -> None:
         group_fix_history(events)
 
 
-def test_latest_per_member_keeps_each_members_newest_submission() -> None:
+def test_latest_picks_take_each_field_on_its_own() -> None:
+    # 甲先改了主題與方法，後來只改主題：方法仍是早先那一次（有效值 view 也是按欄取最新），
+    # 時間各自分開。
     events = [
         _event(1, CHEN, T1, TaxonomyField.TOPIC, ("erp",)),
         _event(2, CHEN, T1, TaxonomyField.METHOD, ("survey_sem",)),
         _event(3, LIN, T1 + timedelta(days=1), TaxonomyField.TOPIC, ("social_media_communities",)),
         _event(4, LIN, T1 + timedelta(days=1), TaxonomyField.METHOD, ("experiment",)),
         _event(5, CHEN, T2, TaxonomyField.TOPIC, ("e_commerce",)),
-        _event(6, CHEN, T2, TaxonomyField.METHOD, ("experiment",)),
     ]
 
-    picks = latest_per_member(events)
+    picks = latest_picks_per_member(reversed(events))
 
-    assert [(p.member_name, p.topic, p.fixed_at) for p in picks] == [
-        ("陳柏翰", ("e_commerce",), T2),
-        ("林怡君", ("social_media_communities",), T1 + timedelta(days=1)),
+    assert picks == (
+        MemberPicks("測試成員甲", ("e_commerce",), T2, ("survey_sem",), T1),
+        MemberPicks(
+            "測試成員乙",
+            ("social_media_communities",),
+            T1 + timedelta(days=1),
+            ("experiment",),
+            T1 + timedelta(days=1),
+        ),
+    )
+
+
+def test_latest_picks_break_ties_by_event_id() -> None:
+    # 同一個時間的兩筆同欄事件（不會發生，保險）：事件 ID 大的算新的，和 view 的 `id DESC` 一樣。
+    events = [
+        _event(2, CHEN, T1, TaxonomyField.TOPIC, ("erp",)),
+        _event(1, CHEN, T1, TaxonomyField.TOPIC, ("e_commerce",)),
     ]
+
+    [pick] = latest_picks_per_member(events)
+
+    assert (pick.topic, pick.method, pick.method_at) == (("erp",), None, None)
+
+
+def test_member_picks_need_matching_times() -> None:
+    with pytest.raises(ValueError, match="主題"):
+        MemberPicks("測試成員甲", ("erp",), None, None, None)
+    with pytest.raises(ValueError, match="至少"):
+        MemberPicks("測試成員甲", None, None, None, None)
+    with pytest.raises(ValueError, match="時區"):
+        MemberPicks("測試成員甲", ("erp",), datetime(2026, 11, 1), None, None)
+
+
+# --- 誰讀得到修正歷史（triage T1）--------------------------------------------------------------
+
+
+@pytest.mark.parametrize("viewer", [MemberViewer(member_id=CHEN, is_admin=False), SystemViewer()])
+def test_members_and_the_system_may_read_fix_history(viewer: MemberViewer | SystemViewer) -> None:
+    assert visible_member_judgments(viewer) == "TRUE"
+
+
+@pytest.mark.parametrize("viewer", [PublicViewer(), object()])
+def test_the_public_viewer_never_reads_fix_history(viewer: object) -> None:
+    # 示範站產生器（公開身分）讀不到修正歷史、姓名與理由：不組查詢、直接丟錯。
+    with pytest.raises(TypeError, match="成員"):
+        visible_member_judgments(viewer)  # type: ignore[arg-type]

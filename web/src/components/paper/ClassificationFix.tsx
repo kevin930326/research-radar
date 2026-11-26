@@ -1,4 +1,4 @@
-import { useId, useState, type ReactNode } from "react";
+import { useEffect, useId, useRef, useState, type ReactNode, type RefObject } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { ClassificationFixBody, ClassificationFixEntryResponse, DisplayNames } from "../../generated/model";
@@ -11,17 +11,23 @@ import { InfoGlyph, MONO_LABEL_CLASS } from "./parts";
 // `data-classification-fix`）。
 // - 分類那一行：標籤、AI 標章、「有 N 位成員修正過[，意見不同]」（可以按，展開／收起歷史）、「修正分類」（表單開著時不顯示）。
 // - 「修正分類」在那一行下面原地展開表單：主題與方法各一組可複選的標籤（照分類表的順序，目前的分類先選好）、
-//   「理由」＋「選填」（100 字以內，接近上限出現「剩 N 字」）、「送出修正」「取消」、最下面一行「送出後不能撤回，改錯了再修正一次」。
+//   「理由」＋「選填」（100 字以內，字數算 code point，和後端一樣）、「送出修正」「取消」、最下面一行「送出後不能撤回，改錯了再修正一次」。
+//   「剩 N 字」的門檻與樣子沒有設計稿（README 要求先問 Kevin），先不做，只擋 100 字。
 //   兩組各至少選一個、而且和目前的分類不同，才能按「送出修正」。
 // - 送出中：按鈕寫「送出中…」、標籤與理由不能改、「取消」不顯示。沒有成功：按鈕上方一行「沒有送出成功。你選的還在，再試一次」，
 //   選的與寫的都留著。成功：表單收起來，分類那一行換成新的（外層換上 API 回的分類區塊：「◆ 已核對」＋人數）。
 // - 歷史新的在上：日期（台北）、姓名、選的主題與方法（照分類表的順序），有寫理由的多一行；兩筆以上時第一筆標「目前採用」。
 // 小的可點的東西（人數、「修正分類」、標籤）看起來照設計稿的高度；按鈕本身至少 44×44，用負外距讓那一行看起來一樣高（ADR-0037）。
+// 鍵盤：打開表單時焦點移到第一個選中的標籤（「修正分類」在表單開著時不顯示）；表單收起（取消或送出成功）時焦點回到「修正分類」。
 
-/** 理由的上限（後端 REASON_MAX_LENGTH；決定第 98 項）。 */
+/** 理由的上限（後端 REASON_MAX_LENGTH；決定第 98 項）。算 code point（表情符號算一個字），和後端一樣。 */
 export const REASON_MAX_LENGTH = 100;
-/** 剩幾個字以內才出現「剩 N 字」（EXPERIENCE.md「文字輸入」：接近上限才出現；門檻沒有規定，列給 Kevin）。 */
-export const REMAINING_HINT_FROM = 20;
+
+/** 理由最多 REASON_MAX_LENGTH 個 code point（輸入框的 maxLength 算的是 UTF-16 單位，表情符號會算兩個，所以自己截）。 */
+export function clampReason(value: string): string {
+  const points = [...value];
+  return points.length > REASON_MAX_LENGTH ? points.slice(0, REASON_MAX_LENGTH).join("") : value;
+}
 
 /** 修正分類要的資料與動作：由成員版的路由（routes/classification-fix.ts）給。 */
 export interface ClassificationFixControl {
@@ -117,6 +123,7 @@ function FixForm({
   onChange,
   onSend,
   onCancel,
+  formRef,
 }: {
   form: FormState;
   names: DisplayNames;
@@ -124,10 +131,10 @@ function FixForm({
   onChange: (next: FormState) => void;
   onSend: () => void;
   onCancel: () => void;
+  formRef: RefObject<HTMLDivElement | null>;
 }) {
   const { t } = useTranslation("paper");
   const reasonId = useId();
-  const remainingId = useId();
   const busy = form.status === "sending";
   const unchanged = sameKeys(form.topic, current.topic) && sameKeys(form.method, current.method);
   const canSend = !busy && form.topic.length > 0 && form.method.length > 0 && !unchanged;
@@ -135,9 +142,8 @@ function FixForm({
     const list = form[field];
     onChange({ ...form, [field]: list.includes(key) ? list.filter((item) => item !== key) : [...list, key] });
   };
-  const remaining = REASON_MAX_LENGTH - [...form.reason].length;
   return (
-    <div data-fix-form={form.status} className="mt-6 border-t border-hairline pt-6">
+    <div ref={formRef} data-fix-form={form.status} className="mt-6 border-t border-hairline pt-6">
       <PickGroup
         label={t("paper.classification.topic")}
         options={names.topics}
@@ -164,19 +170,12 @@ function FixForm({
         <input
           id={reasonId}
           type="text"
-          maxLength={REASON_MAX_LENGTH}
           autoComplete="off"
           readOnly={busy}
           value={form.reason}
-          aria-describedby={remaining <= REMAINING_HINT_FROM ? remainingId : undefined}
-          onChange={(event) => onChange({ ...form, reason: event.target.value })}
+          onChange={(event) => onChange({ ...form, reason: clampReason(event.target.value) })}
           className="block h-tap-target w-full rounded-none border-0 border-b border-border bg-transparent p-[0px] font-body text-s16 tracking-001 text-text-primary transition-[border-color] duration-250 read-only:text-text-secondary focus:border-accent-gold"
         />
-        {remaining <= REMAINING_HINT_FROM ? (
-          <div id={remainingId} data-fix-remaining="" className="mt-2 font-mono text-s13 tracking-006 text-text-tertiary">
-            {t("paper.fix.remaining", { n: remaining })}
-          </div>
-        ) : null}
       </div>
       {form.status === "failed" ? (
         <div role="alert" data-fix-failed="" className="mt-4 flex items-start gap-[9px] text-s14 leading-160 text-danger">
@@ -257,19 +256,41 @@ function History({ entries, names }: { entries: readonly ClassificationFixEntryR
 export function ClassificationFixArea({ parts, control }: { parts: ClassificationRowParts; control: ClassificationFixControl }) {
   const { t } = useTranslation("paper");
   const [form, setForm] = useState<FormState | null>(null);
+  // 連點兩下時第二下還看不到 sending（同一次畫面），用 ref 擋（同 routes/member.tsx 的 usePaperLibrary）。
+  const sending = useRef(false);
+  // 表單打開或收起之後焦點要去哪裡（使用者按了才移；第一次畫面不動焦點）。
+  const [focusTo, setFocusTo] = useState<{ target: "form" | "open"; token: number } | null>(null);
+  const formRef = useRef<HTMLDivElement | null>(null);
+  const openRef = useRef<HTMLButtonElement | null>(null);
+  useEffect(() => {
+    if (focusTo === null) return;
+    if (focusTo.target === "open") {
+      openRef.current?.focus();
+    } else {
+      const picks = formRef.current?.querySelectorAll<HTMLButtonElement>("[data-fix-pick]");
+      const first = [...(picks ?? [])].find((pick) => pick.getAttribute("aria-pressed") === "true") ?? picks?.[0];
+      first?.focus();
+    }
+  }, [focusTo]);
+  const moveFocus = (target: "form" | "open") => setFocusTo((previous) => ({ target, token: (previous?.token ?? 0) + 1 }));
   const { names, block } = parts;
   const current = {
     topic: currentKeys(block.value?.topic?.keys, names.topics),
     method: currentKeys(block.value?.method?.keys, names.methods),
   };
   const send = () => {
-    if (form === null || form.status === "sending") return;
+    if (form === null || form.status === "sending" || sending.current) return;
+    sending.current = true;
     const draft = form;
     setForm({ ...draft, status: "sending" });
     const reason = draft.reason.trim();
     void control
       .send({ topic: draft.topic, method: draft.method, ...(reason === "" ? {} : { reason }) })
-      .then((done) => setForm(done ? null : { ...draft, status: "failed" }));
+      .then((done) => {
+        sending.current = false;
+        setForm(done ? null : { ...draft, status: "failed" });
+        if (done) moveFocus("open");
+      });
   };
   let row: ReactNode = parts.tags;
   if (parts.countLabel !== null) {
@@ -295,9 +316,13 @@ export function ClassificationFixArea({ parts, control }: { parts: Classificatio
         {row}
         {form === null ? (
           <button
+            ref={openRef}
             type="button"
             data-fix-open=""
-            onClick={() => setForm({ ...current, reason: "", status: "idle" })}
+            onClick={() => {
+              setForm({ ...current, reason: "", status: "idle" });
+              moveFocus("form");
+            }}
             className={LINK_CLASS}
           >
             {t("paper.fix.open")}
@@ -309,7 +334,18 @@ export function ClassificationFixArea({ parts, control }: { parts: Classificatio
         <History entries={control.history} names={names} />
       ) : null}
       {form === null ? null : (
-        <FixForm form={form} names={names} current={current} onChange={setForm} onSend={send} onCancel={() => setForm(null)} />
+        <FixForm
+          form={form}
+          names={names}
+          current={current}
+          onChange={setForm}
+          onSend={send}
+          onCancel={() => {
+            setForm(null);
+            moveFocus("open");
+          }}
+          formRef={formRef}
+        />
       )}
     </div>
   );

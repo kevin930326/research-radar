@@ -4,7 +4,8 @@
 - `GET`／`POST /api/v1/papers/{paper_id}/classification-fixes` 都要登入（401），先認 session 再
   比對 `X-Radar-Expected-Member`（不符 409、格式不對 400，都不呼叫 services）；POST 要本站的
   `Origin`（403）。
-- 看不到（假函式回 None）與不是 UUID 的 ID 都回同一個 404。
+- 看不到（假函式回 None）與不是 UUID 的 ID 都回同一個 404。POST 在驗本文之前先查看不看得到：
+  看不到或壞 ID 帶壞本文也是 404（ADR-0063 錯誤的先後），不呼叫寫入。
 - 送來的值不收（services 丟 `ClassificationFixInvalidError`）→ 422 `request_invalid`，本文剛好是
   RFC 9457 的四個欄位，不回顯送來的值；本文形狀不對（多欄位、不是字串的清單）也是 422，不呼叫
   services。
@@ -74,6 +75,7 @@ class FakeFixes:
     # 換掉讀到的分類區塊（沒給就用 FIXES）。
     blocks: dict[uuid.UUID, AiBlock] = field(default_factory=dict)
     reads: list[tuple[MemberViewer, uuid.UUID]] = field(default_factory=list)
+    checks: list[tuple[MemberViewer, uuid.UUID]] = field(default_factory=list)
     writes: list[tuple[MemberViewer, uuid.UUID, ClassificationFixBody]] = field(
         default_factory=list
     )
@@ -83,6 +85,10 @@ class FakeFixes:
         if paper_id in self.blocks:
             return ClassificationFixes(classification=self.blocks[paper_id], history=())
         return FIXES if paper_id == VISIBLE_ID else None
+
+    def visible(self, viewer: MemberViewer, paper_id: uuid.UUID) -> bool:
+        self.checks.append((viewer, paper_id))
+        return paper_id == VISIBLE_ID or paper_id in self.blocks
 
     def fix(
         self, viewer: MemberViewer, paper_id: uuid.UUID, body: ClassificationFixBody
@@ -98,6 +104,7 @@ class FakeFixes:
             load_paper=lambda _viewer, _paper_id: None,
             display_names=DISPLAY_NAMES,
             client_config=build_client_config(),
+            paper_visible=self.visible,
             load_classification_fixes=self.load,
             fix_classification=self.fix,
         )
@@ -141,6 +148,7 @@ def test_both_need_a_session(method: str, token: str | None) -> None:
     assert response.status_code == 401
     assert response.json()["code"] == "not_authenticated"
     assert fake.reads == []
+    assert fake.checks == []
     assert fake.writes == []
 
 
@@ -184,6 +192,7 @@ def test_expected_member_mismatch_reads_and_writes_nothing(
     assert response.headers["cache-control"] == "no-store"
     assert response.json()["code"] == code
     assert fake.reads == []
+    assert fake.checks == []
     assert fake.writes == []
 
 
@@ -217,9 +226,36 @@ def test_hidden_and_malformed_ids_get_the_same_404(method: str) -> None:
             "code": "not_found",
         }
     assert hidden.content == malformed.content
-    # 不是 UUID 的不呼叫 services。
-    calls = fake.reads if method == "GET" else fake.writes
+    # 不是 UUID 的不呼叫 services；POST 看不到的只查了看不看得到，不呼叫寫入。
+    calls = fake.reads if method == "GET" else fake.checks
     assert [call[1] for call in calls] == [uuid.UUID(int=7)]
+    assert fake.writes == []
+
+
+@pytest.mark.parametrize("paper_id", [uuid.UUID(int=7), "not-a-uuid"])
+@pytest.mark.parametrize("body", [{"topic": "e_commerce"}, ["e_commerce"], {"extra": 1}])
+def test_a_hidden_paper_with_a_bad_body_is_still_404(paper_id: object, body: Any) -> None:
+    # 錯誤的先後（ADR-0063）：先解析 ID、查看不看得到，再驗本文；壞本文不會蓋過 404。
+    fake = FakeFixes()
+    client = fake.client()
+
+    response = _send(client, "POST", paper_id, body=body)
+    hidden_good_body = _send(client, "POST", uuid.UUID(int=7))
+
+    assert response.status_code == 404
+    assert response.json()["code"] == "not_found"
+    assert response.content == hidden_good_body.content
+    assert fake.writes == []
+
+
+def test_a_visible_paper_with_a_bad_body_is_422_after_the_check() -> None:
+    fake = FakeFixes()
+
+    response = _send(fake.client(), "POST", body={"topic": "e_commerce"})
+
+    assert response.status_code == 422
+    assert fake.checks == [(MEMBER.viewer, VISIBLE_ID)]
+    assert fake.writes == []
 
 
 def test_fixing_passes_the_body_as_sent_and_returns_the_new_state() -> None:

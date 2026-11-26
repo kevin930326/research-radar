@@ -1466,7 +1466,7 @@
       "classificationHistory": [
         {
           "fixed_at": "2026-11-19T02:30:00Z",
-          "member_name": "陳柏翰",
+          "member_name": "測試成員甲",
           "topic": [
             "platforms",
             "trust"
@@ -1478,7 +1478,7 @@
         },
         {
           "fixed_at": "2026-11-14T02:30:00Z",
-          "member_name": "林怡君",
+          "member_name": "測試成員乙",
           "topic": [
             "trust"
           ],
@@ -1666,7 +1666,7 @@
       "classificationHistory": [
         {
           "fixed_at": "2026-11-19T02:30:00Z",
-          "member_name": "陳柏翰",
+          "member_name": "測試成員甲",
           "topic": [
             "platforms",
             "trust"
