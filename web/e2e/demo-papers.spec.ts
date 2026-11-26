@@ -301,10 +301,10 @@ test.describe("demo paper list", () => {
     await chip(text("paper:paper.classification.method")).click();
     // 等上一個選單拆掉（還焦點就在這一刻），剛開的選單還在、焦點在它裡面。
     await expect(firstTopic).toHaveCount(0);
-    await expect(firstMethod).toBeVisible();
-    await expect
-      .poll(() => page.evaluate(() => document.activeElement?.closest("[role='dialog']")?.contains(document.activeElement) === true))
-      .toBe(true);
+    const methodMenu = page.locator("[role='dialog']").filter({ has: firstMethod });
+    await expect(methodMenu).toBeVisible();
+    await expect(methodMenu).not.toHaveAttribute("data-ending-style");
+    await expect.poll(() => methodMenu.evaluate((menu) => menu.contains(document.activeElement))).toBe(true);
     await expect(page.locator("[role='dialog']")).toHaveCount(1);
   });
 

@@ -100,8 +100,10 @@ export function FilterMenu({ label, value, width, clear, children }: MenuProps) 
                 return document.querySelector<HTMLElement>("[data-mobile-filter]");
               }
               // 關閉動畫（0.2 秒）結束時才還焦點。這段時間裡已經點了別的標籤、開了別的選單、或點進標題輸入框，
-              // 焦點就留在那裡，不拉回這個標籤：拉回來會把剛開的選單關掉，或讓打的字不見（epic-3j 查到的）。
-              // 焦點還在這個選單裡（或隨選單拆掉落到 body）才照常回到標籤。
+              // 焦點就留在那裡，不拉回這個標籤：拉回來會把剛開的選單關掉，或焦點停在錯的標籤上（epic-3j 查到的）。
+              // Base UI 本來有「焦點已經移到別處就不還」的保護，但 finalFocus 給函式時會跳過它（連回傳 true 也一樣），
+              // 所以這裡自己判斷；不要改回 `return true`。
+              // 焦點還在這個選單裡、或落在 body（選單一關就不能聚焦，Esc 關掉時焦點會先落到這裡）才照常回到標籤。
               const active = document.activeElement;
               return active === null || active === document.body || popupRef.current?.contains(active) === true;
             }}
