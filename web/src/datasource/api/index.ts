@@ -248,6 +248,8 @@ const impl = {
   session,
   papers,
   library,
+  // 成員版沒有獨立的論文清單：篇數連結一律開找論文（EXPERIENCE.md 畫面 7）。
+  demoPapers: null,
   // e2e 用它確認示範站的建置結果不含 API 程式（成員版的建置結果帶著 /api/v1）。
   apiBase: API_BASE,
 };

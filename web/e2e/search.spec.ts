@@ -499,6 +499,33 @@ test.describe("search: filters", () => {
     await expect(sheet.locator("[data-filter-section='journal'] > button")).toBeFocused();
   });
 
+  test("phone: the sheet's clear filters link keeps the focus when the count comes back", async ({ page, apiMock }) => {
+    // 審查 3.14 P2：手機滿版篩選拆出共用外殼後，「清除篩選」曾在每次重繪時被拆掉重建（篇數回來、頁面重繪），
+    // 停在上面的焦點會掉。做法：讓篇數的請求停著，焦點放在「清除篩選」，放行後焦點還在、元素還是同一個。
+    await openSearch(page, "?topic=e_commerce", PHONE);
+    await expect(rows(page)).toHaveCount(Math.min(expectedTotal("topic=e_commerce"), PAGE_SIZE));
+    const journal = AIS_CORE.find((key) => expectedTotal(`topic=e_commerce&journal=${key}`) !== expectedTotal("topic=e_commerce"))!;
+    const journalName = PAPER_FIXTURES.displayNames.journals.find((entry) => entry.key === journal)!.name;
+    const total = expectedTotal(`topic=e_commerce&journal=${journal}`);
+    await page.locator("[data-mobile-filter]").click();
+    const sheet = page.getByRole("dialog");
+    const clearAll = sheet.getByRole("link", { name: text("search:search.filter.clearAll") });
+    await expect(clearAll).toBeVisible();
+    const [listGate, release] = gate();
+    apiMock.listGate = listGate;
+    await sheet.getByRole("checkbox", { name: journalName }).evaluate((element) => (element as HTMLInputElement).click());
+    await expect(page).toHaveURL(new RegExp(`[?&]journal=${journal}(&|$)`));
+    await expect.poll(() => listRequests(apiMock.requests).some((params) => params.get("journal") === journal)).toBe(true);
+    await clearAll.focus();
+    await expect(clearAll).toBeFocused();
+    const before = await clearAll.elementHandle();
+    apiMock.listGate = null;
+    release();
+    await expect(sheet.getByRole("button", { name: fill(text("search:search.mobile.apply"), { count: total }) })).toBeVisible();
+    await expect(clearAll).toBeFocused();
+    expect(await before!.evaluate((element) => element.isConnected)).toBe(true);
+  });
+
   test("phone: clearing after a custom year range shows no limit and the default boxes again", async ({ page }) => {
     // 確認審查 N1：手機篩選開著時年份那一段不會重建；網址的年份拿掉了，單選鈕與兩個框也要跟著回到預設。
     const thisYear = taipeiYear();

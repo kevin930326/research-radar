@@ -4,7 +4,7 @@ import { useId, useRef, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 
 import { PHONE_QUERY, useCloseAcrossBreakpoint } from "../../hooks/use-close-across-breakpoint";
-import { TRACKING_START_YEAR, type SearchParams } from "../../pages/search-filters";
+import { TRACKING_START_YEAR } from "../../pages/search-filters";
 import { journalValue, topicValue, yearValue, type FilterState } from "./filters";
 import { JournalOptions, TopicOptions, YearOptions } from "./FilterLists";
 import { Caret } from "./parts";
@@ -26,17 +26,27 @@ const MENU_TOP = 40;
 const TAP_EXTRA = 6;
 const CHIP_HEIGHT = 32;
 
+/** 「清除」連到哪裡：路徑與網址參數。 */
+export interface ClearTarget {
+  to: "/search" | "/papers";
+  search: object;
+}
+
 interface MenuProps {
   label: string;
   value: string | null;
   /** 選單寬度（設計稿：期刊 490、年份與主題 260）。 */
   width: "wide" | "narrow";
-  /** 期刊與主題有選時底部「清除」連到的條件；年份是 null。 */
-  clear: SearchParams | null;
+  /**
+   * 期刊與主題有選時底部「清除」連到的網址（找論文是 /search、示範站論文清單是 /papers，加上拿掉這個篩選的條件）；
+   * 年份是 null。
+   */
+  clear: ClearTarget | null;
   children: ReactNode;
 }
 
-function FilterMenu({ label, value, width, clear, children }: MenuProps) {
+/** 一個篩選選單（桌機）：標籤＋下拉的選項；找論文與示範站論文清單共用。 */
+export function FilterMenu({ label, value, width, clear, children }: MenuProps) {
   const { t } = useTranslation("search");
   const [open, setOpen] = useState(false);
   const labelId = useId();
@@ -97,8 +107,8 @@ function FilterMenu({ label, value, width, clear, children }: MenuProps) {
             {clear !== null && selected ? (
               <div className="flex justify-end border-t border-hairline px-4 py-[10px] text-s13">
                 <Link
-                  to="/search"
-                  search={clear}
+                  to={clear.to}
+                  search={clear.search}
                   replace
                   resetScroll={false}
                   onClick={() => popupRef.current?.querySelector<HTMLElement>("input")?.focus()}
@@ -126,7 +136,7 @@ export function FilterMenus({ state }: { state: FilterState }) {
         label={t("search.filter.journal")}
         value={journalValue(state, t)}
         width="wide"
-        clear={{ ...state.params, journal: undefined, shown: undefined }}
+        clear={{ to: "/search", search: { ...state.params, journal: undefined, shown: undefined } }}
       >
         <JournalOptions state={state} size="menu" />
       </FilterMenu>
@@ -137,7 +147,7 @@ export function FilterMenus({ state }: { state: FilterState }) {
         label={t("search.filter.topic")}
         value={topicValue(state, t, unclassified)}
         width="narrow"
-        clear={{ ...state.params, topic: undefined, shown: undefined }}
+        clear={{ to: "/search", search: { ...state.params, topic: undefined, shown: undefined } }}
       >
         <TopicOptions state={state} size="menu" />
       </FilterMenu>

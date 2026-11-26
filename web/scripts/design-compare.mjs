@@ -9,11 +9,13 @@
 //   --ref    設計稿的 HTML 檔（必填）
 //   --url    做出來的畫面網址（必填；先自己把開發伺服器或 vite preview 開起來）
 //   --click  打開設計稿後要依序點的文字（切換列的選項、分頁等），可以給很多次
-//   --click-url  打開做出來的畫面後要依序點的文字，可以給很多次
+//   --click-url  打開做出來的畫面後要依序點的文字，可以給很多次（--click 與 --click-url 都只點看得到的）
 //   --width  視窗寬度，預設 1280；手機用 390
 //   --height 視窗高度，預設 900
 //   --out    截圖與報告要放的資料夾，預設 ./design-compare-out
 //   --within 只比對設計稿裡這個 CSS 選擇器底下的文字（例如只做了其中一段時）
+//   --url-wait 做出來的畫面要等到什麼時候才量：networkidle（預設，網路安靜下來）或 load（頁面載入完）。
+//              量「載入中」這種請求故意停著不回的狀態時用 load（網路永遠不會安靜），之後一樣再等字型與 300ms。
 //   --expect-missing  一個文字檔，一行一段「設計稿有、這個 Story 還不做」的文字（空白不算）。
 //                     一行要和整段文字完全相同；只想寫開頭幾個字，行尾加「…」。
 //                     清單裡的缺少不算差異；清單裡這次沒用到的會另外列出來（那段已經做出來的，要從清單拿掉）。
@@ -42,6 +44,10 @@ function parseArgs(argv) {
     else if (key === "--out") args.out = value;
     else if (key === "--within") args.within = value;
     else if (key === "--expect-missing") args.expectMissing = value;
+    else if (key === "--url-wait") {
+      if (value !== "networkidle" && value !== "load") throw new Error("--url-wait 只能是 networkidle 或 load");
+      args.urlWait = value;
+    }
     else throw new Error(`不認得的參數：${key}`);
     i += 1;
   }
@@ -200,12 +206,13 @@ function differs(key, ref, impl) {
   return a !== b;
 }
 
-async function open(browser, target, clicks, size) {
+async function open(browser, target, clicks, size, waitUntil = "networkidle") {
   const page = await browser.newPage({ viewport: size });
   // 等到網路安靜下來：延遲載入的路由、要等資料的畫面才不會只量到一半。
-  await page.goto(target, { waitUntil: "networkidle" });
+  await page.goto(target, { waitUntil });
   for (const text of clicks) {
-    await page.getByText(text, { exact: true }).first().click();
+    // 只點看得到的那一個：桌機與手機的元件都在頁面上、只是其中一個藏起來時（同一段字），才點得到對的。
+    await page.getByText(text, { exact: true }).filter({ visible: true }).first().click();
   }
   await page.evaluate(() => document.fonts.ready);
   await page.waitForTimeout(300);
@@ -218,7 +225,7 @@ mkdirSync(args.out, { recursive: true });
 const browser = await chromium.launch();
 try {
   const refPage = await open(browser, pathToFileURL(resolve(args.ref)).href, args.click, size);
-  const implPage = await open(browser, args.url, args.clickUrl, size);
+  const implPage = await open(browser, args.url, args.clickUrl, size, args.urlWait);
   const ref = await refPage.evaluate(collect, args.within ?? null);
   const impl = await implPage.evaluate(collect, null);
   if (ref.error) throw new Error(`設計稿：${ref.error}`);

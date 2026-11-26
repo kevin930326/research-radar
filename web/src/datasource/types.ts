@@ -1,6 +1,7 @@
 // 資料來源層的函式清單（AD-21、ADR-0010）：成員版（api）與示範站（static）兩種實作都要滿足它。
 // 頁面與元件只能 import 入口（datasource/index.ts）與這個檔。
 import type {
+  AiBlockState,
   ClientConfig,
   DisplayNames,
   LibraryItemResponse,
@@ -10,6 +11,8 @@ import type {
   PaperListResponse,
   PaperPageResponse,
   PaperRow,
+  Provenance,
+  SnapshotRef,
 } from "../generated/model";
 
 /** 這份建置是哪一個站：成員版或示範站。 */
@@ -169,6 +172,59 @@ export interface LibrarySource {
   restore(paperId: string, expectedMemberId?: string): Promise<LibraryChangeResult>;
 }
 
+/**
+ * 示範站論文清單的一列（Story 3.14 示範站；`preview/<匯出編號>/papers-index.json` 第 i 個值＋`titles.json` 第 i 個標題，
+ * demo-openapi.json 的 `DemoPapersIndex`、`DemoTitles`）。欄位照匯出的原樣，只把來歷的位置換成來歷本身。
+ */
+export interface DemoPaperRow {
+  id: string;
+  title: string;
+  doi: string | null;
+  /** DOI 的連結（`https://doi.org/…`，資料來源層照後端的規則從 DOI 組出來）；沒有 DOI 是 null。 */
+  doiUrl: string | null;
+  /** 期刊代號（taxonomy.json 的 key）。 */
+  journal: string | null;
+  year: number | null;
+  /** 分類區塊的狀態；摘要來源不允許公開的論文是 null（沒有標籤）。 */
+  classificationState: AiBlockState | null;
+  /** 分類的來歷（AI 標章）；沒有來歷是 null。 */
+  classificationProvenance: Provenance | null;
+  /** 有效分類的代號；沒有值是 null。 */
+  topics: string[] | null;
+  methods: string[] | null;
+  hasAbstract: boolean;
+  hasFullContent: boolean;
+  isNewThisWeek: boolean;
+}
+
+/** 示範站論文清單要用的全部資料：快照、匯出編號、一頁幾篇、顯示名稱，與每一篇（照匯出的列順序）。 */
+/** 示範站 `preview/manifest.json` 裡論文清單要用的部分（快照、匯出編號、一次顯示幾篇、列出的檔）。 */
+export interface DemoManifest {
+  snapshot: SnapshotRef;
+  exportId: string;
+  /** manifest 的 `client_config.paper_list_page_size`（一次顯示幾篇；AD-21：前端不另外寫一份）。 */
+  pageSize: number;
+  /** manifest 列出的檔（相對於 `preview/` 的路徑）。 */
+  files: readonly string[];
+}
+
+export interface DemoPaperIndex {
+  snapshot: SnapshotRef;
+  exportId: string;
+  /** manifest 的 `client_config.paper_list_page_size`（一次顯示幾篇；AD-21：前端不另外寫一份）。 */
+  pageSize: number;
+  names: DisplayNames;
+  rows: DemoPaperRow[];
+}
+
+/** 示範站的論文清單（只有示範站有；讀 `preview/` 的靜態檔，篩選在瀏覽器裡做）。 */
+export interface DemoPaperSource {
+  /** 讀 manifest（資料截至哪一天先用它顯示）；讀不到或形狀不對就丟出例外。 */
+  manifest(): Promise<DemoManifest>;
+  /** 讀 manifest 指到的分類表、索引、標題；任何一個讀不到、形狀不對、和 manifest 不是同一次匯出就丟出例外。 */
+  index(manifest: DemoManifest): Promise<DemoPaperIndex>;
+}
+
 export interface DataSource {
   siteKind(): SiteKind;
   /** 成員版的登入狀態；示範站是 null（示範站的後端功能不存在，State Patterns「全站共用」）。 */
@@ -177,4 +233,6 @@ export interface DataSource {
   papers: PaperSource | null;
   /** 我的文獻庫（Story 3.17）；示範站沒有，是 null。 */
   library: LibrarySource | null;
+  /** 示範站的論文清單（Story 3.14 示範站）；成員版沒有（篇數連結開找論文），是 null。 */
+  demoPapers: DemoPaperSource | null;
 }

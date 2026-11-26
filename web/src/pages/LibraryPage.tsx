@@ -3,6 +3,7 @@ import { useEffect, useRef, useState, useSyncExternalStore, type CSSProperties, 
 import { useTranslation } from "react-i18next";
 
 import { NEW_TAB_NOTE_ID, NewTabNote } from "../components/ExternalArrow";
+import { ErrorBar, More } from "../components/search/ListParts";
 import { Meta, OpenFullText, RemoveText, RowTitle } from "../components/search/PaperRows";
 import { NoticeIcon } from "../components/search/parts";
 import { DESKTOP_QUERY } from "../hooks/use-close-across-breakpoint";
@@ -10,7 +11,6 @@ import type { LibraryItem } from "../datasource/types";
 import { useLibraryChange, type LibraryAction } from "../routes/library-change";
 import { clientConfigQuery, displayNamesQuery, libraryListKey, libraryListQuery } from "../routes/paper-queries";
 import { externalUrl, formatCount, splitTemplate } from "./paper-format";
-import { ErrorBar, More } from "./SearchPage";
 
 // 我的文獻庫（Story 3.17；EXPERIENCE.md 畫面 13、State Patterns「13. 我的文獻庫」；設計稿 docs/ux/reference/screens/library.html）。
 // 照 AR-67 的基本版：標題、篇數、論文列（勾選框、標題、期刊 · 年份、「移出」＋「開啟全文」）、勾選後的選取列、再載入。

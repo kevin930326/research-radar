@@ -23,8 +23,9 @@ export const SITES: Site[] = [
   // /login 是登入頁（Story 3.5），不用登入；其他頁要登入（測試裡由 api-mock.ts 回「已登入」）。
   // /search 是找論文（Story 3.14）；/ 導到 /search。/library 是我的文獻庫（Story 3.17）。
   { name: "member", baseURL: MEMBER_URL, pages: ["/search", "/library", "/notice", "/login", ...PAPER_PAGES] },
-  // 示範站首頁在 Epic 13、論文清單在 3.14 的示範站部分（等 3.7）才有；目前沒有頁面，只檢查「找不到這一頁」。
-  { name: "demo", baseURL: DEMO_URL, pages: [] },
+  // 示範站：/papers 是論文清單（Story 3.14 示範站，讀 fixtures/demo-preview 的範例匯出）；首頁（Epic 13）、
+  // 論文頁（Story 3.9）還沒做，其他網址是「找不到這一頁」。
+  { name: "demo", baseURL: DEMO_URL, pages: ["/papers"] },
 ];
 
 /**

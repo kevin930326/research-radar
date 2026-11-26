@@ -65,6 +65,8 @@ interface OptionProps {
    * （設計稿左邊還有縮寫那一欄，Kevin 2026-11-20 決定先顯示全名，縮寫之後補）。
    */
   detail?: ReactNode;
+  /** 名稱的字級：一般 14px；示範站手機滿版篩選的「只看有摘要的」「只看有完整內容的」是 16px、字距 0.04em（設計稿 papers-demo.html）。 */
+  labelSize?: "default" | "large";
 }
 
 /**
@@ -72,7 +74,7 @@ interface OptionProps {
  * 前面畫一個勾選框或圓點。輸入框比整列往內縮 5px：全站的焦點外框外擴 4px，畫出來剛好在整列往內 1px 的地方
  * （設計稿 outline-offset:-1px），不蓋到上下的選項，也不用改全站的焦點規則（ADR-0037；審查 S2-8）。
  */
-export function FilterOption({ type, name, checked, onChange, size, label, detail }: OptionProps) {
+export function FilterOption({ type, name, checked, onChange, size, label, detail, labelSize = "default" }: OptionProps) {
   return (
     <label
       className={`relative flex cursor-pointer items-center gap-3 transition-[background-color] duration-150 hover:bg-menu-item-hover ${OPTION_CLASS[size]}`}
@@ -86,7 +88,11 @@ export function FilterOption({ type, name, checked, onChange, size, label, detai
       />
       {type === "checkbox" ? <CheckBox checked={checked} /> : <RadioMark checked={checked} />}
       {label === undefined ? null : (
-        <span className={`relative text-s14 tracking-002 ${checked ? "text-text-primary" : "text-text-reading"}`}>{label}</span>
+        <span
+          className={`relative ${labelSize === "large" ? "text-s16 tracking-004" : "text-s14 tracking-002"} ${checked ? "text-text-primary" : "text-text-reading"}`}
+        >
+          {label}
+        </span>
       )}
       {detail === undefined ? null : (
         <span className="relative min-w-[0px] truncate text-s13 tracking-0 text-text-secondary">{detail}</span>
