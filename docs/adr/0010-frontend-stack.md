@@ -179,7 +179,7 @@ web/src/
 - C. 升級到帶 Firefox 163 以上的 Playwright。這一輪不准升級套件，留給 Kevin 決定。
 - D. 跳過 Firefox 的 axe、或跳過論文頁。會少檢查，不准。
 
-**決定。** A（`web/e2e/a11y.spec.ts`），只套在 firefox。反射屬性名稱設成 `false`（設成 `null` 時，axe 合併設定會把它變成空物件，只是碰巧有效）。Firefox 上的效果由 #132～#138 的 CI 驗證（寫這一節時還沒跑，結果寫在 PR 說明）：#138 連續 3 次 `web` 都不能有任何一次 Firefox 當掉（連重試才過的也算）；沒修好時一次完全不當的機率約 0.75⁹≈7.5%。
+**決定。** A（`web/e2e/a11y.spec.ts`），只套在 firefox。反射屬性名稱設成 `false`（設成 `null` 時，axe 合併設定會把它變成空物件，只是碰巧有效）。Firefox 上的效果由 #132～#138 的 CI 驗證（寫這一節時還沒跑，結果寫在 PR 說明）：#138 連續 3 次 `web` 都不能有任何一次 Firefox 當掉（連重試才過的也算）；沒修好時一次完全不當的機率約 0.75⁹≈7.5%。另外兩個也在 Firefox 跑 axe 的檔（`nav.spec.ts`、`a11y-floor.spec.ts`）後來也套了同一個修法，三個檔共用 `web/e2e/axe-source.ts`（epic-3j）。
 
 **取捨。**
 
