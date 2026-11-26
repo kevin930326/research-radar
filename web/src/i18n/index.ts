@@ -6,6 +6,7 @@ import { initReactI18next } from "react-i18next";
 import ai from "./zh-TW/ai.json";
 import caveat from "./zh-TW/caveat.json";
 import common from "./zh-TW/common.json";
+import coverage from "./zh-TW/coverage.json";
 import demo from "./zh-TW/demo.json";
 import errors from "./zh-TW/errors.json";
 import library from "./zh-TW/library.json";
@@ -18,10 +19,10 @@ import search from "./zh-TW/search.json";
 export const LANGUAGE = "zh-TW";
 
 export const resources = {
-  [LANGUAGE]: { common, notice, caveat, ai, errors, login, nav, paper, search, library, demo },
+  [LANGUAGE]: { common, notice, caveat, ai, errors, login, nav, paper, search, library, demo, coverage },
 } as const;
 
-export const NAMESPACES = ["common", "notice", "caveat", "ai", "errors", "login", "nav", "paper", "search", "library", "demo"] as const;
+export const NAMESPACES = ["common", "notice", "caveat", "ai", "errors", "login", "nav", "paper", "search", "library", "demo", "coverage"] as const;
 
 void i18n.use(initReactI18next).init({
   lng: LANGUAGE,

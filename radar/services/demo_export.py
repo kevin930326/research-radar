@@ -7,7 +7,8 @@
 2. 先看 `preview/manifest.json` 是不是已經指向這一次（上一次換好 manifest、卻沒記上成功就中斷）：是
    而且檔案的雜湊都對，就再 fsync 一次 `preview/`、補記成功、結束（不重寫）。已經指向比這次新的匯出
    時直接記成 `superseded`（不讀資料、不寫檔；這一次就算之前發佈過，也已經被新的一批取代）。現有的
-   manifest 讀不懂（格式不合、別的版本寫的）時拒絕（`manifest_unreadable`），不當成沒有。
+   manifest 讀不懂（格式不合、別的版本寫的）時拒絕（`manifest_unreadable`），不當成沒有；上一版
+   （沒有 `cube.json`，`PreviousDemoManifest`）寫的照樣讀得懂（ADR-0062「升版」）。
 3. **一個唯讀、REPEATABLE READ 的交易**（`Database.read_only_snapshot_transaction`）裡讀完全部的
    資料並做完自我檢查：匯出的資料只用 `PublicViewer` 經 repo 讀（最新已發佈的快照、每一篇
    `counted_paper` 的書目、出版社與分類、`demo_full_paper` 的摘要與兩個 AI 區塊），逐欄組成白名單
@@ -62,11 +63,14 @@ from radar.domain.contracts import (
     FullTextLinks,
     PaperAbstract,
     SnapshotRef,
+    TrendParams,
     build_display_names,
     doi_url,
     openalex_url,
 )
+from radar.domain.cube import build_cube_rows
 from radar.domain.demo_export import (
+    CUBE_FILE,
     DEMO_FILE_PATH_PATTERN,
     MANIFEST_FILE,
     PAPERS_DIR,
@@ -77,6 +81,7 @@ from radar.domain.demo_export import (
     TITLES_FILE,
     DemoBiblio,
     DemoClassificationBlock,
+    DemoCube,
     DemoExportFailure,
     DemoExportRun,
     DemoFileEntry,
@@ -93,6 +98,7 @@ from radar.domain.demo_export import (
     DemoTitles,
     DemoZhSummaryBlock,
     ForbiddenText,
+    PreviousDemoManifest,
     build_demo_client_config,
     check_demo_files,
     data_file_path,
@@ -129,6 +135,7 @@ from radar.repo.papers import (
     list_demo_publisher_facts,
 )
 from radar.repo.snapshots import find_latest_published_snapshot
+from radar.repo.stats import list_cube_counts
 from radar.services.ai_blocks import demo_ai_block_settings
 
 log = structlog.get_logger(__name__)
@@ -141,13 +148,15 @@ class DemoExportSetup:
     """匯出要的設定（入口讀好設定檔組成；services 不讀設定）：模型（判定 AI 區塊「目前這組鍵」）、
     分類表、情境值清單、追蹤的期刊（ISSN-L → 期刊代號、顯示名稱）、示範站不放完整內容的出版社與
     期刊（`config/demo_publishers.yaml`）、自我檢查要找的金絲雀字串（測試環境放；正式環境是空的）、
-    `RADAR_DEMO_PUBLISH`（預設關）。"""
+    `RADAR_DEMO_PUBLISH`（預設關）。`params` 是 `cube.json` 的規則設定值
+    （`contracts.build_trend_params` 組好，Story 3.15）。"""
 
     models: ModelsConfig
     taxonomy: Taxonomy
     context_values: ContextValues
     journals: JournalsConfig
     exclusions: PublisherExclusions
+    params: TrendParams
     canaries: tuple[str, ...] = ()
     publish: bool = False
 
@@ -393,6 +402,15 @@ def _build_and_check(
             # 舊的 demo_eligible 還是 true、但出版社或期刊在排除清單裡（清單改了還沒 reparse）。
             log.warning("示範站可用的舊判定和排除清單不一致，這幾篇不給完整內容", count=stale)
         files = _data_files(setup, ref, export_id, papers)
+        # 計數方塊（Story 3.15）：同一個交易、同一個訪客身分經 repo 數（AD-5、AD-19），和成員版的
+        # 計數方塊同一個查詢；自我檢查再用 papers-index.json 重算每一格。
+        cube = DemoCube(
+            snapshot=ref,
+            export_id=export_id,
+            params=setup.params,
+            rows=build_cube_rows(list_cube_counts(viewer, connection), setup.journals),
+        )
+        files[data_file_path(export_id, CUBE_FILE)] = dump_demo_file(cube)
         manifest = DemoManifest(
             snapshot=ref,
             export_id=export_id,
@@ -418,6 +436,7 @@ def _build_and_check(
             forbidden=forbidden,
             eligible_paper_ids=eligible_ids,
             excluded_paper_ids=excluded,
+            journal_keys=[journal.key for journal in setup.journals.journals],
         )
     if problems:
         raise DemoExportCheckError(problems)
@@ -594,8 +613,8 @@ _TAKEN_OVER_DIR: Final = {
 class _Progress:
     """這一次匯出做到哪。`run_demo_export` 建，失敗處理看它（中斷也一樣看得到）：
 
-    - `switched`：manifest 已經換成這一次（已發佈）。`_swap_manifest` 換名成功時設；換名之後、
-      設好之前就停下時，由 `_publish` 的清理重讀 manifest 補設。
+    - `switched`：manifest 已經換成這一次（已發佈）。`_swap_manifest` 換名成功時設；換名之後、設好
+      之前就停下時，由 `_publish` 的清理重讀 manifest 補設。
     - `replacing`：已經開始換 manifest 的名（`_swap_manifest` 換名前設）；清理只在這之後才需要重讀
       manifest 看換了沒有。
     - `written`：這次寫的匯出目錄的 (`st_dev`, `st_ino`)（取自改名前的暫存目錄，改名不變）。改名前
@@ -737,8 +756,8 @@ def _read_manifest(out: _Output) -> DemoManifest | None:
 
     Raises:
         DemoExportError: manifest 是符號連結或不是一般檔案（`output_unsafe`）；讀不懂（JSON 壞掉、
-            不符合模型、別的版本寫的；`manifest_unreadable`）時拒絕，不當成沒有：不知道它指向的是
-            不是比這次新的匯出，不能蓋。
+            新版與上一版的模型都不符合；`manifest_unreadable`）時拒絕，不當成沒有：不知道它指向的
+            是不是比這次新的匯出，不能蓋。上一版（`PreviousDemoManifest`）寫的照樣讀得懂。
     """
     try:
         content = _read_at(out.preview_fd, MANIFEST_FILE)
@@ -750,6 +769,12 @@ def _read_manifest(out: _Output) -> DemoManifest | None:
         return None
     try:
         return DemoManifest.model_validate_json(content)
+    except ValidationError:
+        pass
+    try:
+        # 升版後第一次匯出：現在的 manifest 是上一版寫的（沒有 cube.json），只為了讀懂它指向哪一次
+        # （ADR-0062「升版」）；鎖、接手、換 manifest 的流程不變，寫出的一律是新版。
+        return PreviousDemoManifest.model_validate_json(content)
     except ValidationError:
         raise DemoExportError(
             DemoExportFailure.MANIFEST_UNREADABLE,

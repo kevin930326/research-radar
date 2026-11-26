@@ -23,11 +23,12 @@ from radar.config import (
     load_domain_config,
     load_models_config,
     load_taxonomy,
+    load_trend_config,
 )
 from radar.domain import prompt_hashes
 from radar.domain.ai_outputs import CallMode, GatewayConfig, LlmTask
 from radar.domain.budget import BudgetConfig
-from radar.domain.contracts import build_client_config, build_display_names
+from radar.domain.contracts import build_client_config, build_display_names, build_trend_params
 from radar.domain.fingerprints import prompt_sha256, schema_sha256
 from radar.domain.llm import (
     LlmBatchRequest,
@@ -245,9 +246,13 @@ def library_routes(database: Database) -> LibraryRoutes:
 
 
 def paper_list_routes(database: Database) -> PaperListRoutes:
-    """和正式的 `main()` 同一個組法的找論文清單路由（期刊與分類表用真的 `config/`，Story 3.13）。"""
+    """和正式的 `main()` 同一個組法的找論文清單與計數方塊路由（期刊、分類表與趨勢設定用真的
+    `config/`，Story 3.13、3.15）。"""
     setup = paper_page_setup()
-    return build_paper_list_routes(database, setup.journals, setup.taxonomy)
+    params = build_trend_params(
+        load_trend_config({"RADAR_CONFIG_DIR": str(ROOT / "config")}), setup.journals
+    )
+    return build_paper_list_routes(database, setup.journals, setup.taxonomy, params)
 
 
 def execute(db: TestDatabase, sql: str, *params: object) -> list[tuple[Any, ...]]:

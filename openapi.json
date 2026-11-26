@@ -584,6 +584,35 @@
           }
         }
       }
+    },
+    "/api/v1/cube": {
+      "get": {
+        "summary": "Cube",
+        "description": "計數方塊：每本追蹤期刊每一年算數的論文篇數（`total`）與其中有摘要的篇數\n（`with_abstract`），加上規則用到的設定值（`params`）與目前已發佈的快照（還沒有是 null）。\n只有計數，比例由前端算。沒登入 401。",
+        "operationId": "cube",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CubeResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "錯誤（RFC 9457）",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -868,6 +897,108 @@
         ],
         "title": "ConstructItem",
         "description": "研究模型提到的一個構面。信效度的數字是字串（`Decimal`，不經浮點）。"
+      },
+      "CubeDim": {
+        "type": "string",
+        "enum": [
+          "total",
+          "with_abstract",
+          "pending_classification",
+          "topic",
+          "topic_pair",
+          "method"
+        ],
+        "title": "CubeDim",
+        "description": "計數方塊的一列是哪一種計數（AD-19、ADR-0011「計數方塊」）。剛好這六種。"
+      },
+      "CubeResponse": {
+        "properties": {
+          "rows": {
+            "items": {
+              "$ref": "#/components/schemas/CubeRow"
+            },
+            "type": "array",
+            "title": "Rows"
+          },
+          "params": {
+            "$ref": "#/components/schemas/TrendParams"
+          },
+          "snapshot": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SnapshotRef"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "rows",
+          "params",
+          "snapshot"
+        ],
+        "title": "CubeResponse",
+        "description": "成員版的計數方塊（`GET /api/v1/cube`）：只有計數，不給比例（AD-19）。\n\n- `rows`：Story 1.10 定義的 `total` 與 `with_abstract` 兩種列（期刊照設定的順序、年份遞增）；\n  主題、方法等其他種類等用到的 Story 再加（ADR-0062）。\n- `params`：規則用到的設定值。\n- `snapshot`：目前已發佈的快照；一個都還沒發佈時是 null，這時 `rows` 是空的（算數的論文只算\n  已發佈快照的，AD-5）。"
+      },
+      "CubeRow": {
+        "properties": {
+          "journal": {
+            "type": "string",
+            "maxLength": 64,
+            "pattern": "^[a-z][a-z0-9_]*$",
+            "title": "Journal"
+          },
+          "year": {
+            "type": "integer",
+            "title": "Year"
+          },
+          "dim": {
+            "$ref": "#/components/schemas/CubeDim"
+          },
+          "key_a": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Key A"
+          },
+          "key_b": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Key B"
+          },
+          "n": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "N"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "journal",
+          "year",
+          "dim",
+          "n"
+        ],
+        "title": "CubeRow",
+        "description": "計數方塊的一列（一格）：（`journal`, `year`, `dim`, `key_a`, `key_b`, `n`）。\n\n- `journal` 是設定檔的期刊代號（不是 ISSN-L）。\n- 主題、方法用設定檔的代號，未分類是 `unclassified`；`topic_pair` 把字母順序在前的放\n  `key_a`（ADR-0011）。\n- 只給計數，不給比例：比例由前端的 `web/src/stats/` 用這些格子算。"
       },
       "DisplayName": {
         "properties": {
@@ -1995,6 +2126,54 @@
         ],
         "title": "SupportLevel",
         "description": "支持與否（PRD FR-3）。只有實證檢定判定支持與否；其他證據類型一律 `not_determined`。"
+      },
+      "TrendParams": {
+        "properties": {
+          "timezone": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Timezone"
+          },
+          "tracking_start_year": {
+            "type": "integer",
+            "maximum": 9999.0,
+            "minimum": 1900.0,
+            "title": "Tracking Start Year"
+          },
+          "current_year_cutoff": {
+            "type": "string",
+            "pattern": "^(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])$",
+            "title": "Current Year Cutoff"
+          },
+          "growth_window_years": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Growth Window Years"
+          },
+          "baseline_years": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Baseline Years"
+          },
+          "low_coverage_threshold": {
+            "type": "number",
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Low Coverage Threshold"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "timezone",
+          "tracking_start_year",
+          "current_year_cutoff",
+          "growth_window_years",
+          "baseline_years",
+          "low_coverage_threshold"
+        ],
+        "title": "TrendParams",
+        "description": "趨勢與覆蓋率的規則用到的設定值（ADR-0011 的 `params`）：成員版的計數方塊回應、示範站的\n`cube.json`、`tests/golden/stats/` 的資料檔都用這一個形狀。前端的 `web/src/stats/` 只用傳進來\n的值，不寫死。\n\n- `timezone`：資料截止日用的時區（IANA 名稱）。\n- `tracking_start_year`：追蹤起始年（`journals.yaml` 的 `start_year`）。\n- `current_year_cutoff`：當年度納入「成長最快」的分界日（`MM-DD`，含當天）。\n- `growth_window_years`：成長最快每組幾年。\n- `baseline_years`：原始篇數的對照值取最早幾個完整年度。\n- `low_coverage_threshold`：摘要覆蓋率低於這個比例就標成偏低（0 到 1）。"
       },
       "ZhSummaryBlock": {
         "properties": {

@@ -144,6 +144,17 @@ def _client_config(_ctx: PermissionContext) -> EndpointRequest:
     return EndpointRequest()
 
 
+@REGISTRY.case(
+    "GET",
+    "/api/v1/cube",
+    exempt="計數方塊只有實驗室看得到的算數論文（counted_paper）的篇數，每位成員看到的一樣，"
+    "不含任何成員自己的資料（Story 3.15）",
+    status=200,
+)
+def _cube(_ctx: PermissionContext) -> EndpointRequest:
+    return EndpointRequest()
+
+
 # --- 個人文獻庫（Story 3.16）-------------------------------------------------------------------
 
 

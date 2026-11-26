@@ -1,0 +1,87 @@
+{
+  "description": "偏低的門檻用 params 傳進來的值，不寫死 50%",
+  "params": {
+    "timezone": "Asia/Taipei",
+    "tracking_start_year": 2024,
+    "current_year_cutoff": "07-01",
+    "growth_window_years": 3,
+    "baseline_years": 3,
+    "low_coverage_threshold": 0.8
+  },
+  "journals": [
+    "misq"
+  ],
+  "rows": [
+    {
+      "journal": "misq",
+      "year": 2024,
+      "dim": "total",
+      "key_a": null,
+      "key_b": null,
+      "n": 10
+    },
+    {
+      "journal": "misq",
+      "year": 2024,
+      "dim": "with_abstract",
+      "key_a": null,
+      "key_b": null,
+      "n": 7
+    },
+    {
+      "journal": "misq",
+      "year": 2025,
+      "dim": "total",
+      "key_a": null,
+      "key_b": null,
+      "n": 10
+    },
+    {
+      "journal": "misq",
+      "year": 2025,
+      "dim": "with_abstract",
+      "key_a": null,
+      "key_b": null,
+      "n": 8
+    }
+  ],
+  "cases": [
+    {
+      "name": "門檻 0.8",
+      "as_of": "2025-09-01T00:00:00Z",
+      "expected": {
+        "years": [
+          2024,
+          2025
+        ],
+        "currentYear": 2025,
+        "rows": [
+          {
+            "journal": "misq",
+            "cells": [
+              {
+                "year": 2024,
+                "total": 10,
+                "withAbstract": 7,
+                "ratio": 0.7,
+                "reason": null,
+                "low": true
+              },
+              {
+                "year": 2025,
+                "total": 10,
+                "withAbstract": 8,
+                "ratio": 0.8,
+                "reason": null,
+                "low": false
+              }
+            ]
+          }
+        ],
+        "total": 20,
+        "withAbstract": 15,
+        "ratio": 0.75
+      }
+    }
+  ]
+}

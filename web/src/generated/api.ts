@@ -6,6 +6,7 @@
  */
 import type {
   ClientConfig,
+  CubeResponse,
   DisplayNames,
   FakeLoginBody,
   FakeLoginOptionsResponse,
@@ -792,4 +793,57 @@ export const listPapers = async (params?: ListPapersParams, options?: RequestIni
 
   const data: listPapersResponse['data'] = body ? JSON.parse(body) : {}
   return { data, status: res.status, headers: res.headers } as listPapersResponse
+}
+
+
+
+export type cubeResponse200 = {
+  data: CubeResponse
+  status: 200
+}
+
+export type cubeResponseDefault = {
+  data: ProblemDetails
+  status: Exclude<HTTPStatusCodes, 200>
+}
+
+export type cubeResponseSuccess = (cubeResponse200) & {
+  headers: Headers;
+};
+export type cubeResponseError = (cubeResponseDefault) & {
+  headers: Headers;
+};
+
+export type cubeResponse = (cubeResponseSuccess | cubeResponseError)
+
+export const getCubeUrl = () => {
+
+
+
+
+  return `/api/v1/cube`
+}
+
+/**
+ * 計數方塊：每本追蹤期刊每一年算數的論文篇數（`total`）與其中有摘要的篇數
+ * （`with_abstract`），加上規則用到的設定值（`params`）與目前已發佈的快照（還沒有是 null）。
+ * 只有計數，比例由前端算。沒登入 401。
+ * @summary Cube
+ */
+export const cube = async ( options?: RequestInit): Promise<cubeResponse> => {
+
+  const res = await fetch(getCubeUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: cubeResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as cubeResponse
 }

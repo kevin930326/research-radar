@@ -45,7 +45,8 @@ function RootNotFound() {
 }
 
 // 兩種建置共用的最外層。找不到的網址一律由這裡顯示（router 設 notFoundMode: "root"），不經過登入檢查。
-// 頁尾歸 Story 3.15（Kevin 2026-11-16 決定，AR-67）。
+// 全站頁尾（Story 3.15）跟著有導覽列的外框（成員版 AppLayout、示範站 demoLayout）；這裡沒有導覽列（找不到的網址、
+// 還沒確認身分時的載入中與載入失敗、登入頁），也不放頁尾。
 export const rootRoute = createRootRouteWithContext<RouterContext>()({
   component: RootLayout,
   notFoundComponent: RootNotFound,

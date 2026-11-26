@@ -6,7 +6,7 @@
 //   node scripts/design-compare.mjs --ref ../docs/ux/reference/screens/login-account.html \
 //     --click "使用須知（已登入）" --url http://127.0.0.1:5173/notice --width 1280 --out /tmp/compare
 //
-//   --ref    設計稿的 HTML 檔（必填）
+//   --ref    設計稿的 HTML 檔（必填）；後面可以接「#狀態」，打開時帶這個網址片段（切換列有同名選項時用）
 //   --url    做出來的畫面網址（必填；先自己把開發伺服器或 vite preview 開起來）
 //   --click  打開設計稿後要依序點的文字（切換列的選項、分頁等），可以給很多次
 //   --click-url  打開做出來的畫面後要依序點的文字，可以給很多次（--click 與 --click-url 都只點看得到的）
@@ -226,7 +226,10 @@ const size = { width: args.width, height: args.height };
 mkdirSync(args.out, { recursive: true });
 const browser = await chromium.launch();
 try {
-  const refPage = await open(browser, pathToFileURL(resolve(args.ref)).href, args.click, size);
+  // 設計稿檔名後面可以接「#狀態」（例如 coverage.html#demo-error）：切換列有同名的選項（成員版、示範站都有「正常」）時用。
+  const [refPath, refHash] = args.ref.split("#");
+  const refUrl = pathToFileURL(resolve(refPath)).href + (refHash === undefined ? "" : `#${refHash}`);
+  const refPage = await open(browser, refUrl, args.click, size);
   const implPage = await open(browser, args.url, args.clickUrl, size, args.urlWait);
   const ref = await refPage.evaluate(collect, args.within ?? null);
   const impl = await implPage.evaluate(collect, null);

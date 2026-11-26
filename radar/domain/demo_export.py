@@ -9,7 +9,8 @@
 - **目錄**：`preview/manifest.json` 與 `preview/<匯出編號>/…`（`RADAR_DEMO_PUBLISH` 開的時候是
   `data/`，結構相同；這個 epic 不開）。資料檔的路徑由 `data_file_path`、`shard_file_name` 決定。
 - **自我檢查**（`check_demo_files`，寫 manifest 之前）：ADR-0007 第 1、2、3 項，與第 6 項的分片
-  與索引部分（排除清單裡的出版社或期刊的論文沒有完整內容）。第 4 項（重算計數）、第 5 項與第 6 項的
+  與索引部分（排除清單裡的出版社或期刊的論文沒有完整內容）；第 4 項的計數方塊部分（`cube.json`
+  每一格用 `papers-index.json` 重算，Story 3.15）。第 4 項的趨勢、關係部分、第 5 項與第 6 項的
   關係、問答、首頁部分由之後的 Story 補（ADR-0061「留到之後」）。
 - 這裡只有純函式與模型；讀資料庫、寫檔在 `services/demo_export.py`。
 """
@@ -34,7 +35,8 @@ from pydantic import (
     ValidationError,
     model_validator,
 )
-from pydantic.json_schema import models_json_schema
+from pydantic.json_schema import GenerateJsonSchema, JsonSchemaValue, models_json_schema
+from pydantic_core import core_schema
 
 from radar.domain.ai_blocks import (
     AiBlock,
@@ -47,12 +49,15 @@ from radar.domain.ai_blocks import (
 )
 from radar.domain.contracts import (
     ConstructItem,
+    CubeDim,
+    CubeRow,
     DisplayNames,
     FullTextLinks,
     HypothesisItem,
     PaperAbstract,
     Provenance,
     SnapshotRef,
+    TrendParams,
     UtcDateTime,
     doi_url,
     openalex_url,
@@ -69,6 +74,8 @@ MANIFEST_FILE: Final = "manifest.json"
 TAXONOMY_FILE: Final = "taxonomy.json"
 PAPERS_INDEX_FILE: Final = "papers-index.json"
 TITLES_FILE: Final = "titles.json"
+# 計數方塊（Story 3.15、ADR-0062）：和成員版 `GET /api/v1/cube` 同一個形狀，多 `export_id`。
+CUBE_FILE: Final = "cube.json"
 PAPERS_DIR: Final = "papers"
 # 論文詳情每 200 篇一個分片檔（ADR-0007「檔案」）：第 i 列在第 ⌊i÷200⌋ 個分片。
 SHARD_SIZE: Final = 200
@@ -729,11 +736,52 @@ class DemoTaxonomy(BaseModel):
     names: DisplayNames
 
 
+# 示範站的計數方塊只有這兩種列（Story 1.10 的定義；ADR-0062）。
+_DEMO_CUBE_DIMS: Final = (CubeDim.TOTAL, CubeDim.WITH_ABSTRACT)
+_DEMO_CUBE_DIM_VALUES: Final = frozenset(dim.value for dim in _DEMO_CUBE_DIMS)
+
+
+class DemoCube(BaseModel):
+    """`cube.json`：計數方塊（Story 3.15、AD-19、ADR-0062），和成員版 `CubeResponse` 同一個形狀，
+    多 `export_id`。只有計數、不給比例；比例由前端的 `web/src/stats/` 算。
+
+    - `rows`：每個有論文的（期刊, 年份）剛好一列 `total`（大於 0）與一列 `with_abstract`（不超過
+      `total`），沒有其他種類的列，不重複。
+    - `params`：規則用到的設定值（`TrendParams`）。
+    """
+
+    model_config = _WHITELIST
+
+    snapshot: SnapshotRef
+    export_id: ExportId
+    params: TrendParams
+    rows: tuple[CubeRow, ...]
+
+    @model_validator(mode="after")
+    def _check(self) -> Self:
+        counts: dict[tuple[str, int], dict[CubeDim, int]] = {}
+        for row in self.rows:
+            if row.dim not in _DEMO_CUBE_DIMS:
+                raise ValueError("cube.json 只有 total 與 with_abstract 兩種列")
+            cell = counts.setdefault((row.journal, row.year), {})
+            if row.dim in cell:
+                raise ValueError("同一個期刊、年份的同一種列不能重複")
+            cell[row.dim] = row.n
+        for cell in counts.values():
+            if set(cell) != set(_DEMO_CUBE_DIMS):
+                raise ValueError("每個期刊、年份都要有 total 與 with_abstract")
+            if cell[CubeDim.TOTAL] == 0:
+                raise ValueError("沒有論文的期刊、年份不列")
+            if cell[CubeDim.WITH_ABSTRACT] > cell[CubeDim.TOTAL]:
+                raise ValueError("with_abstract 不能比 total 多")
+        return self
+
+
 # manifest 列的資料檔路徑：`<匯出編號>/` 加上認得的檔名，或 `<匯出編號>/papers/NNN.json`（不會有
 # `..` 這種路徑段）。
 DEMO_FILE_PATH_PATTERN: Final = (
     r"^[1-9][0-9]{0,8}-[1-9][0-9]{0,8}/"
-    r"(?:taxonomy\.json|papers-index\.json|titles\.json|papers/[0-9]{3}\.json)$"
+    r"(?:taxonomy\.json|papers-index\.json|titles\.json|cube\.json|papers/[0-9]{3}\.json)$"
 )
 
 
@@ -786,8 +834,8 @@ def build_demo_client_config() -> DemoClientConfig:
 
 class DemoManifest(BaseModel):
     """`manifest.json`：現在該讀哪一次匯出（最後才寫，只有它會被覆寫）。列的每個檔都在這次的匯出
-    目錄底下（路徑開頭是自己的 `export_id`），不重複，而且是完整的一批：分類表、索引、標題與每一個
-    分片（個數照 `summary.paper_count` 算）都列了。"""
+    目錄底下（路徑開頭是自己的 `export_id`），不重複，而且是完整的一批：分類表、索引、標題、計數
+    方塊與每一個分片（個數照 `summary.paper_count` 算）都列了。"""
 
     model_config = _WHITELIST
 
@@ -800,24 +848,41 @@ class DemoManifest(BaseModel):
 
     @model_validator(mode="after")
     def _check(self) -> Self:
-        paths = [entry.path for entry in self.files]
-        if any(not path.startswith(f"{self.export_id}/") for path in paths):
-            raise ValueError("manifest 列的檔要在自己這次的匯出目錄底下")
-        if len(set(paths)) != len(paths):
-            raise ValueError("manifest 列的檔不能重複")
-        # 一批完整的匯出（G7）：分類表、索引、標題都在，分片從 000 起連號、個數和篇數對得上
-        # （每 SHARD_SIZE 篇一個；0 篇沒有分片）。
-        shard_count = -(-self.summary.paper_count // SHARD_SIZE)
-        expected = {
-            data_file_path(self.export_id, name)
-            for name in (TAXONOMY_FILE, PAPERS_INDEX_FILE, TITLES_FILE)
-        } | {
-            data_file_path(self.export_id, f"{PAPERS_DIR}/{shard_file_name(shard)}")
-            for shard in range(min(shard_count, _MAX_SHARDS))
-        }
-        if set(paths) != expected:
-            raise ValueError("manifest 列的檔不齊全，或和篇數對不上")
+        _check_manifest_files(self, (TAXONOMY_FILE, PAPERS_INDEX_FILE, TITLES_FILE, CUBE_FILE))
         return self
+
+
+class PreviousDemoManifest(DemoManifest):
+    """上一版（格式版本 1，Story 3.15 之前）的 `manifest.json`：沒有 `cube.json`，其他和
+    `DemoManifest` 相同。**只用來讀「現在的 manifest」**（`services/demo_export._read_manifest`）：
+    升版後第一次匯出時，舊環境的 manifest 還是上一版寫的，讀得懂才知道它指向哪一次、能不能蓋
+    （ADR-0062「升版」）。寫出的 manifest 一律是 `DemoManifest`。"""
+
+    @model_validator(mode="after")
+    def _check(self) -> Self:
+        _check_manifest_files(self, (TAXONOMY_FILE, PAPERS_INDEX_FILE, TITLES_FILE))
+        return self
+
+
+def _check_manifest_files(manifest: DemoManifest, names: tuple[str, ...]) -> None:
+    """manifest 列的每個檔都在自己這次的匯出目錄底下、不重複，而且是完整的一批（G7）：`names`
+    都在，分片從 000 起連號、個數和篇數對得上（每 SHARD_SIZE 篇一個；0 篇沒有分片）。
+
+    Raises:
+        ValueError: 任何一項不符合。
+    """
+    paths = [entry.path for entry in manifest.files]
+    if any(not path.startswith(f"{manifest.export_id}/") for path in paths):
+        raise ValueError("manifest 列的檔要在自己這次的匯出目錄底下")
+    if len(set(paths)) != len(paths):
+        raise ValueError("manifest 列的檔不能重複")
+    shard_count = -(-manifest.summary.paper_count // SHARD_SIZE)
+    expected = {data_file_path(manifest.export_id, name) for name in names} | {
+        data_file_path(manifest.export_id, f"{PAPERS_DIR}/{shard_file_name(shard)}")
+        for shard in range(min(shard_count, _MAX_SHARDS))
+    }
+    if set(paths) != expected:
+        raise ValueError("manifest 列的檔不齊全，或和篇數對不上")
 
 
 # 每一種資料檔對應的模型；順序也是 `demo-openapi.json` 的端點順序。
@@ -826,6 +891,7 @@ DEMO_FILE_MODELS: Final[tuple[tuple[str, type[BaseModel]], ...]] = (
     (TAXONOMY_FILE, DemoTaxonomy),
     (PAPERS_INDEX_FILE, DemoPapersIndex),
     (TITLES_FILE, DemoTitles),
+    (CUBE_FILE, DemoCube),
     (f"{PAPERS_DIR}/{{shard}}.json", DemoPaperShard),
 )
 
@@ -851,12 +917,23 @@ def model_for_path(path: str) -> type[BaseModel] | None:
 
 DEMO_OPENAPI_TITLE: Final = "Research Radar 示範站資料檔"
 # 資料檔格式的版本：改了任何一個白名單模型的形狀就加一。
-DEMO_FORMAT_VERSION: Final = "1"
+# 2：加了 `cube.json`（Story 3.15）。
+DEMO_FORMAT_VERSION: Final = "2"
 
 
 def _operation_id(file_name: str) -> str:
     words = re.split(r"[^a-z0-9]+", file_name.removesuffix(".json").replace("{shard}", "shard"))
     return "getDemo" + "".join(word.capitalize() for word in words if word)
+
+
+class _MemberLikeJsonSchema(GenerateJsonSchema):
+    """預設值是 null 的欄位不列 `default`：和 FastAPI 產生的成員版 `openapi.json` 一樣，共用的形狀
+    （例如 `CubeRow` 的 `key_a`、`key_b`）兩邊才會完全相同（Story 3.15）。其他預設值照常列。"""
+
+    def default_schema(self, schema: core_schema.WithDefaultSchema) -> JsonSchemaValue:
+        if self.get_default_value(schema) is None:
+            return self.generate_inner(schema["schema"])
+        return super().default_schema(schema)
 
 
 def build_demo_openapi() -> dict[str, Any]:
@@ -865,6 +942,7 @@ def build_demo_openapi() -> dict[str, Any]:
     _, top = models_json_schema(
         [(model, "serialization") for _, model in DEMO_FILE_MODELS],
         ref_template="#/components/schemas/{model}",
+        schema_generator=_MemberLikeJsonSchema,
     )
     schemas = top.get("$defs", {})
     paths: dict[str, Any] = {}
@@ -1048,6 +1126,7 @@ def check_demo_files(
     forbidden: Sequence[ForbiddenText],
     eligible_paper_ids: Iterable[uuid.UUID],
     excluded_paper_ids: Iterable[uuid.UUID] = (),
+    journal_keys: Iterable[str] = (),
 ) -> list[str]:
     """寫 `manifest.json` 之前的自我檢查（ADR-0007「寫出之前的自我檢查」第 1、2、3 項與第 6 項的
     分片與索引部分）。回傳失敗原因（空的＝全部通過）；原因只寫檔名、已知的欄位名稱與陣列位置、錯誤
@@ -1063,6 +1142,19 @@ def check_demo_files(
        沒有完整內容，就算它在 `full_paper_ids` 裡。
     7. 分片檔裡 `demo_eligible` 是 true 的論文一定在 `eligible_paper_ids`（`demo_eligible_paper_ids`
        另外算的），而且不在 `excluded_paper_ids`；不是布林也算失敗。直接看 JSON，不經過模型。
+    4. （計數方塊的部分，Story 3.15）`cube.json` 的每一格用 `papers-index.json` 重算：每個（期刊,
+       年份）的 `total` 等於索引裡那一格的篇數、`with_abstract` 等於其中 `has_abstract` 為真的篇數，
+       索引有的格子 `cube.json` 都有、反過來也是（`cube.json` 多一格也失敗，就算那格是 0 篇）；
+       每一格剛好一列 `total`、一列 `with_abstract`，重複的列、其他種類的列、不是整數（含布林）或
+       負的篇數都失敗；兩個檔的快照編號與匯出編號相同。直接看 JSON，不經過模型（`_cube_problems`）。
+       失敗原因裡的期刊只印 `journal_keys`（設定檔的期刊代號）裡有的，其他的只印第幾格，不回顯檔裡
+       的值。
+    8. `manifest.json` 列的檔和實際要寫的檔（`manifest.json` 以外）剛好是同一批：列了卻沒有、認得的
+       資料檔有了卻沒列都失敗（manifest 的模型只檢查它列得齊不齊，不知道實際有哪些檔）。
+    9. `manifest.json` 的 `summary` 的 `paper_count`、`with_abstract_count`、`full_content_count`
+       用同一次匯出的 `papers-index.json` 重算（ADR-0007 第 4 項「可點的讀數」），讀數要是 JSON 的
+       整數（`60.0`、布林都失敗）。8、9 直接看 JSON，不經過模型（`_manifest_problems`）；沒有
+       `manifest.json` 也失敗。
     """
     allowed = frozenset(full_paper_ids)
     eligible = frozenset(eligible_paper_ids)
@@ -1091,7 +1183,223 @@ def check_demo_files(
         problems.extend(_eligible_problems(path, content, eligible, excluded))
         text = _searchable_text(content)
         problems.extend(f"{path}：出現{label}" for label, needle in needles if needle in text)
+    problems.extend(_cube_problems(files, frozenset(journal_keys)))
+    problems.extend(_manifest_problems(files))
     return problems
+
+
+# 重算時一格的鍵：（期刊代號, 年份）。
+_Cell = tuple[str, int]
+
+
+def _cube_problems(files: Mapping[str, bytes], journal_keys: frozenset[str]) -> list[str]:
+    """第 4 項的計數方塊部分：`cube.json` 的每一格用同一次匯出的 `papers-index.json` 重算。
+
+    失敗原因只寫檔名、年份、篇數，期刊只印 `journal_keys` 裡有的代號（其他的寫「第幾格」，不回顯
+    檔裡的值：自我檢查也會處理欄位壞掉的檔，ADR-0061 的日誌限制）；兩個檔之一不是合法 JSON 或形狀
+    不對時只報一句（白名單模型那一項另外會報細節）。沒有 `cube.json` 時這裡不檢查（manifest 列了卻
+    沒有這個檔由 `_manifest_problems` 擋）。
+    """
+    cube_paths = [path for path in sorted(files) if model_for_path(path) is DemoCube]
+    index_paths = [path for path in sorted(files) if model_for_path(path) is DemoPapersIndex]
+    problems: list[str] = []
+    for cube_path in cube_paths:
+        export_id = cube_path.partition("/")[0]
+        index_path = data_file_path(export_id, PAPERS_INDEX_FILE)
+        if index_path not in index_paths:
+            problems.append(f"{cube_path}：同一次匯出沒有 {PAPERS_INDEX_FILE}，無法重算計數")
+            continue
+        cube = _json_object(files[cube_path])
+        index = _json_object(files[index_path])
+        if cube is None or index is None:
+            problems.append(f"{cube_path}：無法和 {PAPERS_INDEX_FILE} 對照重算（不是合法的 JSON）")
+            continue
+        for key in ("snapshot", "export_id"):
+            if cube.get(key) != index.get(key):
+                problems.append(f"{cube_path}：{key} 和 {PAPERS_INDEX_FILE} 不同")
+        expected = _index_cells(index)
+        found = _cube_cells(cube)
+        if expected is None or isinstance(found, str):
+            reason = "欄位的形狀不對" if expected is None else found
+            problems.append(f"{cube_path}：無法和 {PAPERS_INDEX_FILE} 對照重算（{reason}）")
+            continue
+        # 雙向核對：只有一邊有的格子也算不同（就算那格是 0 篇），不拿 0 補缺的那一邊。
+        for position, cell in enumerate(sorted(set(expected) | set(found)), start=1):
+            want = expected.get(cell)
+            got = found.get(cell)
+            if want == got:
+                continue
+            journal, year = cell
+            where = journal if journal in journal_keys else f"第 {position} 格（期刊不在設定檔）"
+            want_total, want_abstract = want or (0, 0)
+            got_total, got_abstract = got or (0, 0)
+            if got is None:
+                detail = f"cube.json 沒有這一格，{PAPERS_INDEX_FILE} 有 {want_total} 篇"
+            elif want is None:
+                detail = f"{PAPERS_INDEX_FILE} 沒有這一格，cube.json 列了 total {got_total}"
+            else:
+                detail = (
+                    f"total {got_total}／{want_total}，"
+                    f"with_abstract {got_abstract}／{want_abstract}"
+                )
+            problems.append(
+                f"{cube_path}：{where} {year} 的計數和 {PAPERS_INDEX_FILE} 重算的不同（{detail}）"
+            )
+        index_ids = index.get("id")
+        total = sum(count for count, _ in found.values())
+        if isinstance(index_ids, list) and total != len(index_ids):
+            problems.append(
+                f"{cube_path}：total 的合計（{total}）和 {PAPERS_INDEX_FILE} 的篇數"
+                f"（{len(index_ids)}）不同"
+            )
+    return problems
+
+
+# manifest 的 summary 用索引重算的三個讀數：（summary 的欄位, 索引的欄）；篇數是 `id` 的個數。
+_SUMMARY_FROM_INDEX: Final = (
+    ("with_abstract_count", "has_abstract"),
+    ("full_content_count", "has_full_content"),
+)
+
+
+def _manifest_problems(files: Mapping[str, bytes]) -> list[str]:
+    """第 8、9 項：manifest 列的檔和實際的檔是同一批；summary 的三個讀數用索引重算。
+
+    失敗原因只寫程式自己組的檔名、summary 的欄位名稱與整數；manifest 裡看不懂的路徑或值不回顯
+    （寫「第幾個」或「?」）。沒有 `manifest.json` 就失敗（沒有它就核對不了「實際有卻沒列」）；
+    manifest 不是合法 JSON 或形狀不對時只報一句（白名單模型那一項另外會報細節）。
+    """
+    if MANIFEST_FILE not in files:
+        return [f"{MANIFEST_FILE}：沒有這個檔，無法核對列的檔與讀數"]
+    manifest = _json_object(files[MANIFEST_FILE])
+    entries = None if manifest is None else manifest.get("files")
+    if manifest is None or not isinstance(entries, list):
+        return [f"{MANIFEST_FILE}：無法核對列的檔與讀數（不是合法的 JSON 或形狀不對）"]
+    problems: list[str] = []
+    listed: set[str] = set()
+    for position, entry in enumerate(entries, start=1):
+        path = entry.get("path") if isinstance(entry, dict) else None
+        if not isinstance(path, str):
+            problems.append(f"{MANIFEST_FILE}：列的第 {position} 個檔沒有路徑")
+            continue
+        listed.add(path)
+        if path not in files:
+            shown = path if re.fullmatch(DEMO_FILE_PATH_PATTERN, path) else f"第 {position} 個檔"
+            problems.append(f"{MANIFEST_FILE}：列了 {shown}，實際沒有這個檔")
+    for path in sorted(set(files) - listed - {MANIFEST_FILE}):
+        # 不認得的檔第 1 項已經報了（「不是認得的資料檔」），這裡只報認得卻沒列的。
+        if model_for_path(path) is not None:
+            problems.append(f"{path}：manifest.json 沒有列")
+    problems.extend(_summary_problems(manifest, files))
+    return problems
+
+
+def _summary_problems(manifest: Mapping[str, Any], files: Mapping[str, bytes]) -> list[str]:
+    export_id = manifest.get("export_id")
+    summary = manifest.get("summary")
+    if not (isinstance(export_id, str) and _EXPORT_ID.fullmatch(export_id)):
+        return [f"{MANIFEST_FILE}：export_id 不對，無法用 {PAPERS_INDEX_FILE} 重算讀數"]
+    index_path = data_file_path(export_id, PAPERS_INDEX_FILE)
+    index = _json_object(files[index_path]) if index_path in files else None
+    if index is None or not isinstance(summary, dict):
+        return [f"{MANIFEST_FILE}：無法用 {PAPERS_INDEX_FILE} 重算 summary 的讀數"]
+    ids = index.get("id")
+    expected: dict[str, int | None] = {"paper_count": len(ids) if isinstance(ids, list) else None}
+    for field_name, column in _SUMMARY_FROM_INDEX:
+        values = index.get(column)
+        # 欄要是長度和 `id` 一樣、全部是布林的陣列；有一個不是布林就算形狀不對（不默默當成沒有）。
+        well_formed = (
+            isinstance(values, list)
+            and isinstance(ids, list)
+            and len(values) == len(ids)
+            and all(isinstance(value, bool) for value in values)
+        )
+        expected[field_name] = (
+            sum(1 for value in values if value is True)
+            if well_formed and isinstance(values, list)
+            else None
+        )
+    problems: list[str] = []
+    for field_name, want in expected.items():
+        got = summary.get(field_name)
+        if want is None:
+            problems.append(
+                f"{MANIFEST_FILE}：{PAPERS_INDEX_FILE} 的形狀不對，無法重算 {field_name}"
+            )
+        elif type(got) is not int or got != want:
+            # 只收 JSON 的整數：`60.0` 和 60 相等、布林是 int 的子類別，都要擋。
+            shown = got if type(got) is int else "?"
+            problems.append(
+                f"{MANIFEST_FILE}：summary.{field_name}（{shown}）和 {PAPERS_INDEX_FILE} 重算的"
+                f"（{want}）不同"
+            )
+    return problems
+
+
+def _json_object(content: bytes) -> dict[str, Any] | None:
+    try:
+        data = json.loads(content)
+    except ValueError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _index_cells(index: Mapping[str, Any]) -> dict[_Cell, tuple[int, int]] | None:
+    """索引的（期刊, 年份）→（篇數, 有摘要的篇數）；沒有期刊或年份（null）的論文不算進任何一格。
+
+    期刊不是字串也不是 null、年份不是整數（布林不算）也不是 null、`has_abstract` 不是布林時，整份
+    算形狀不對（回傳 None），不默默略過。
+    """
+    journals, years, abstracts = index.get("journal"), index.get("year"), index.get("has_abstract")
+    if not (isinstance(journals, list) and isinstance(years, list) and isinstance(abstracts, list)):
+        return None
+    if not len(journals) == len(years) == len(abstracts):
+        return None
+    cells: dict[_Cell, tuple[int, int]] = {}
+    for journal, year, has_abstract in zip(journals, years, abstracts, strict=True):
+        if not isinstance(has_abstract, bool):
+            return None
+        if journal is not None and not isinstance(journal, str):
+            return None
+        if year is not None and type(year) is not int:
+            return None
+        if journal is None or year is None:
+            continue
+        total, with_abstract = cells.get((journal, year), (0, 0))
+        cells[(journal, year)] = (total + 1, with_abstract + (1 if has_abstract is True else 0))
+    return cells
+
+
+def _cube_cells(cube: Mapping[str, Any]) -> dict[_Cell, tuple[int, int]] | str:
+    """`cube.json` 的（期刊, 年份）→（`total`, `with_abstract`）；形狀不對時回傳原因（不含檔裡的
+    值）。
+
+    和 `DemoCube` 的規則各自檢查一次（這裡不經過模型）：每一格剛好一列 `total`、一列
+    `with_abstract`；其他種類的列、重複的列、缺其中一種列、年份或篇數不是整數（布林不算）、篇數是
+    負的，都算形狀不對。
+    """
+    rows = cube.get("rows")
+    if not isinstance(rows, list):
+        return "rows 不是陣列"
+    seen: dict[_Cell, dict[str, int]] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            return "有一列不是物件"
+        journal, year, dim, n = row.get("journal"), row.get("year"), row.get("dim"), row.get("n")
+        if not isinstance(journal, str) or type(year) is not int or type(n) is not int or n < 0:
+            return "有一列的期刊、年份或篇數形狀不對"
+        if dim not in _DEMO_CUBE_DIM_VALUES:
+            return "有 total、with_abstract 以外的列"
+        cell = seen.setdefault((journal, year), {})
+        if dim in cell:
+            return "同一格的同一種列重複"
+        cell[dim] = n
+    cells: dict[_Cell, tuple[int, int]] = {}
+    for key, cell in seen.items():
+        if set(cell) != set(_DEMO_CUBE_DIM_VALUES):
+            return "有一格缺 total 或 with_abstract 的列"
+        cells[key] = (cell[CubeDim.TOTAL.value], cell[CubeDim.WITH_ABSTRACT.value])
+    return cells
 
 
 def _full_content_problems(

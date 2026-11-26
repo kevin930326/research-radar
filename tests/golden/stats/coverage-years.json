@@ -1,0 +1,222 @@
+{
+  "description": "年份欄：只到當年度（資料截止日在 params.timezone 的那一年），比當年度晚的出版年不列欄但照算進收錄；不在表格裡的期刊也照算進收錄；台北已經跨年、UTC 還沒跨年的那一刻",
+  "params": {
+    "timezone": "Asia/Taipei",
+    "tracking_start_year": 2023,
+    "current_year_cutoff": "07-01",
+    "growth_window_years": 3,
+    "baseline_years": 3,
+    "low_coverage_threshold": 0.5
+  },
+  "journals": [
+    "misq"
+  ],
+  "rows": [
+    {
+      "journal": "misq",
+      "year": 2024,
+      "dim": "total",
+      "key_a": null,
+      "key_b": null,
+      "n": 5
+    },
+    {
+      "journal": "misq",
+      "year": 2024,
+      "dim": "with_abstract",
+      "key_a": null,
+      "key_b": null,
+      "n": 5
+    },
+    {
+      "journal": "misq",
+      "year": 2027,
+      "dim": "total",
+      "key_a": null,
+      "key_b": null,
+      "n": 3
+    },
+    {
+      "journal": "misq",
+      "year": 2027,
+      "dim": "with_abstract",
+      "key_a": null,
+      "key_b": null,
+      "n": 1
+    },
+    {
+      "journal": "jes",
+      "year": 2024,
+      "dim": "total",
+      "key_a": null,
+      "key_b": null,
+      "n": 2
+    },
+    {
+      "journal": "jes",
+      "year": 2024,
+      "dim": "with_abstract",
+      "key_a": null,
+      "key_b": null,
+      "n": 2
+    }
+  ],
+  "cases": [
+    {
+      "name": "台北 2026-06-30 23:59:59",
+      "as_of": "2026-06-30T15:59:59Z",
+      "expected": {
+        "years": [
+          2023,
+          2024,
+          2025,
+          2026
+        ],
+        "currentYear": 2026,
+        "rows": [
+          {
+            "journal": "misq",
+            "cells": [
+              {
+                "year": 2023,
+                "total": 0,
+                "withAbstract": 0,
+                "ratio": null,
+                "reason": "empty_year",
+                "low": false
+              },
+              {
+                "year": 2024,
+                "total": 5,
+                "withAbstract": 5,
+                "ratio": 1,
+                "reason": null,
+                "low": false
+              },
+              {
+                "year": 2025,
+                "total": 0,
+                "withAbstract": 0,
+                "ratio": null,
+                "reason": "empty_year",
+                "low": false
+              },
+              {
+                "year": 2026,
+                "total": 0,
+                "withAbstract": 0,
+                "ratio": null,
+                "reason": "empty_year",
+                "low": false
+              }
+            ]
+          }
+        ],
+        "total": 10,
+        "withAbstract": 8,
+        "ratio": 0.8
+      }
+    },
+    {
+      "name": "UTC 2025-12-31 16:00（台北已經是 2026-01-01）",
+      "as_of": "2025-12-31T16:00:00Z",
+      "expected": {
+        "years": [
+          2023,
+          2024,
+          2025,
+          2026
+        ],
+        "currentYear": 2026,
+        "rows": [
+          {
+            "journal": "misq",
+            "cells": [
+              {
+                "year": 2023,
+                "total": 0,
+                "withAbstract": 0,
+                "ratio": null,
+                "reason": "empty_year",
+                "low": false
+              },
+              {
+                "year": 2024,
+                "total": 5,
+                "withAbstract": 5,
+                "ratio": 1,
+                "reason": null,
+                "low": false
+              },
+              {
+                "year": 2025,
+                "total": 0,
+                "withAbstract": 0,
+                "ratio": null,
+                "reason": "empty_year",
+                "low": false
+              },
+              {
+                "year": 2026,
+                "total": 0,
+                "withAbstract": 0,
+                "ratio": null,
+                "reason": "empty_year",
+                "low": false
+              }
+            ]
+          }
+        ],
+        "total": 10,
+        "withAbstract": 8,
+        "ratio": 0.8
+      }
+    },
+    {
+      "name": "UTC 2025-12-31 15:59:59（台北還是 2025-12-31）",
+      "as_of": "2025-12-31T15:59:59Z",
+      "expected": {
+        "years": [
+          2023,
+          2024,
+          2025
+        ],
+        "currentYear": 2025,
+        "rows": [
+          {
+            "journal": "misq",
+            "cells": [
+              {
+                "year": 2023,
+                "total": 0,
+                "withAbstract": 0,
+                "ratio": null,
+                "reason": "empty_year",
+                "low": false
+              },
+              {
+                "year": 2024,
+                "total": 5,
+                "withAbstract": 5,
+                "ratio": 1,
+                "reason": null,
+                "low": false
+              },
+              {
+                "year": 2025,
+                "total": 0,
+                "withAbstract": 0,
+                "ratio": null,
+                "reason": "empty_year",
+                "low": false
+              }
+            ]
+          }
+        ],
+        "total": 10,
+        "withAbstract": 8,
+        "ratio": 0.8
+      }
+    }
+  ]
+}

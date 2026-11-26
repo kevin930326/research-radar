@@ -32,7 +32,9 @@ from radar.config import (
     load_models_config,
     load_settings,
     load_taxonomy,
+    load_trend_config,
 )
+from radar.domain.contracts import build_trend_params
 from radar.domain.demo_export import DemoExportBusyError
 from radar.domain.viewer import SystemViewer
 from radar.entrypoints.bootstrap import build_database
@@ -74,6 +76,7 @@ def export_demo() -> None:
             context_values=load_context_values(),
             journals=domain_config.journals,
             exclusions=domain_config.demo_publishers.exclusions(),
+            params=build_trend_params(load_trend_config(), domain_config.journals),
             publish=settings.demo_publish,
         )
     except ConfigError as exc:

@@ -1,8 +1,9 @@
 import { queryOptions, useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
-import { Outlet, createRoute, lazyRouteComponent, redirect, useLocation, useNavigate, useRouter } from "@tanstack/react-router";
+import { Link, Outlet, createRoute, lazyRouteComponent, redirect, useLocation, useNavigate, useRouter } from "@tanstack/react-router";
 import { useEffect, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 
+import { SiteFooter } from "../components/SiteFooter";
 import { SiteHeader } from "../components/SiteHeader";
 import type { LibraryControl } from "../components/paper/LibraryBlock";
 import { LoadFailed } from "../components/states/LoadFailed";
@@ -10,6 +11,7 @@ import { Offline } from "../components/states/Offline";
 import { NotFound } from "../components/states/NotFound";
 import { PageLoading } from "../components/states/PageLoading";
 import type { PaperPage as PaperPageData } from "../datasource/types";
+import { CoveragePage, NUMBER_LINK_CLASS } from "../pages/CoveragePage";
 import { LibraryPage } from "../pages/LibraryPage";
 import { LoginPage } from "../pages/LoginPage";
 import { NoticePage } from "../pages/NoticePage";
@@ -65,12 +67,14 @@ function AppLayout() {
   return (
     <div className={`${PAGE_FRAME_CLASS} flex min-h-screen flex-col ${mobileMenuOpen ? "max-split:hidden" : ""}`}>
       <SiteHeader member={member} mobileMenuOpen={mobileMenuOpen} onMobileMenuChange={setMobileMenuOpen} />
-      {/* 標題離導覽列：900px 以上 72px、899px 以下 40px（設計稿）；頁尾歸 Story 3.15（Kevin 2026-11-16 決定）。 */}
-      {/* main 也是直排的 flex：頁面可以撐滿剩下的高度（我的文獻庫的底部選取列在清單很短時也貼在視窗最下面；審查 R9）。 */}
-      <main className="flex flex-1 flex-col px-gutter-mobile pt-[40px] pb-24 tablet:px-gutter-tablet split:pt-[72px] wide:px-gutter-desktop">
+      {/* 標題離導覽列：900px 以上 72px、899px 以下 40px（設計稿）。下內距是內容到頁尾的距離：899px 以下 64px、900px 以上 96px。 */}
+      {/* main 也是直排的 flex：頁面可以撐滿剩下的高度（我的文獻庫的底部選取列在清單很短時也貼在頁尾上面；審查 R9）。 */}
+      <main className="flex flex-1 flex-col px-gutter-mobile pt-[40px] pb-[64px] tablet:px-gutter-tablet split:pt-[72px] split:pb-24 wide:px-gutter-desktop">
         <Offline />
         <Outlet />
       </main>
+      {/* 全站頁尾（Story 3.15）：和導覽列、內容同一個外框（ADR-0054）。 */}
+      <SiteFooter site="member" />
     </div>
   );
 }
@@ -123,6 +127,79 @@ const noticeRoute = createRoute({
   getParentRoute: () => appRoute,
   path: "/notice",
   component: NoticePage,
+});
+
+// 資料涵蓋範圍（Story 3.15）：計數方塊、顯示名稱（期刊的全名）與「本週新增」的篇數（找論文清單的總篇數）。
+// 三個都讀到才顯示；任一個讀不到是「沒有載入成功」（按「重新整理」重讀沒讀到的）；任一個回 401 照登入過期處理。
+// 計數方塊每週才更新一次：5 分鐘內回來直接用快取（和找論文清單一樣）。
+const COVERAGE_STALE_MS = 5 * 60 * 1000;
+const cubeQuery = queryOptions({
+  queryKey: ["coverage", "cube"],
+  queryFn: () => paperSource().cube(),
+  retry: false,
+  staleTime: COVERAGE_STALE_MS,
+});
+const thisWeekQuery = queryOptions({
+  queryKey: ["coverage", "this-week"],
+  queryFn: () => paperSource().list({ this_week: true }, 1),
+  retry: false,
+  staleTime: COVERAGE_STALE_MS,
+});
+
+const coverageRoute = createRoute({
+  getParentRoute: () => appRoute,
+  path: "/coverage",
+  component: function CoverageRoute() {
+    const queryClient = useQueryClient();
+    const navigate = useNavigate();
+    const href = useLocation({ select: (location) => location.href });
+    const cube = useQuery(cubeQuery);
+    const names = useQuery(displayNamesQuery);
+    const thisWeek = useQuery(thisWeekQuery);
+    const signedOut = cube.data?.kind === "signedOut" || names.data?.kind === "signedOut" || thisWeek.data?.kind === "signedOut";
+    useEffect(() => {
+      if (!signedOut) return;
+      void (async () => {
+        await clearMemberQueries(queryClient);
+        await navigate({ to: "/login", search: { next: href, expired: true as const }, replace: true });
+      })();
+    }, [signedOut, queryClient, navigate, href]);
+    if (signedOut) return null;
+    const cubeData = cube.data?.kind === "found" ? cube.data.cube : null;
+    const namesData = names.data?.kind === "found" ? names.data.names : null;
+    // 「本週新增」用找論文清單的總篇數；清單的列不用（列裡有成員專屬的欄位，這裡只要篇數）。
+    const listData = thisWeek.data?.kind === "found" ? thisWeek.data.list : null;
+    const failed = cube.isError || names.isError || thisWeek.isError || thisWeek.data?.kind === "memberChanged";
+    // 快照還沒發佈（snapshot 是 null）不會發生（State Patterns「9.」：空的不會發生）；真的遇到時當成沒有載入成功。
+    const noSnapshot = cubeData !== null && cubeData.snapshot === null;
+    const snapshot = cubeData?.snapshot ?? listData?.snapshot ?? null;
+    const ready = cubeData !== null && cubeData.snapshot !== null && namesData !== null && listData !== null;
+    return (
+      <CoveragePage
+        site="member"
+        state={failed || noSnapshot ? "error" : ready ? "ready" : "loading"}
+        snapshot={snapshot}
+        data={
+          ready && cubeData.snapshot !== null
+            ? { rows: cubeData.rows, params: cubeData.params, names: namesData, snapshot: cubeData.snapshot, third: listData.total }
+            : null
+        }
+        links={{
+          third: (children) => (
+            <Link to="/search" search={{ this_week: true }} className={NUMBER_LINK_CLASS}>
+              {children}
+            </Link>
+          ),
+        }}
+        onRetry={() => {
+          for (const query of [cube, names, thisWeek]) {
+            if (query.isError || query.data?.kind === "memberChanged") void query.refetch({ cancelRefetch: false });
+          }
+          if (noSnapshot) void cube.refetch({ cancelRefetch: false });
+        }}
+      />
+    );
+  },
 });
 
 const searchRoute = createRoute({
@@ -436,7 +513,7 @@ function FollowMemberChange({ result }: { result: object }) {
   return <PageLoading />;
 }
 
-const appTree = appRoute.addChildren([indexRoute, noticeRoute, searchRoute, libraryRoute, paperRoute]);
+const appTree = appRoute.addChildren([indexRoute, noticeRoute, coverageRoute, searchRoute, libraryRoute, paperRoute]);
 
 export const routeTree = import.meta.env.DEV
   ? rootRoute.addChildren([loginRoute, appTree, ...devRoutes()])

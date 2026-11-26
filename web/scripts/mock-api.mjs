@@ -26,6 +26,9 @@
 //   --list-file     找論文的假清單，預設 e2e/fixtures/paper-list.json（格式同那一份；可以多一個 displayNames，
 //                   換掉論文頁假資料裡的顯示名稱）
 //
+// Story 3.15 加上計數方塊（/api/v1/cube，資料涵蓋範圍）：資料來自 --cube-file（預設 e2e/fixtures/cube.json；
+// 那一份可以多一個 displayNames，換掉顯示名稱，給設計稿比對用 14 本期刊）。
+// 資料涵蓋範圍：http://127.0.0.1:4180/__mock/coverage 列出每一種狀態怎麼看（啟動時也印出來）。
 // 論文頁：http://127.0.0.1:4180/__mock/papers 列出每一種狀態的網址（啟動時也印出來）。
 // 找論文：http://127.0.0.1:4180/__mock/search 列出每一種狀態怎麼看（啟動時也印出來）。
 // 我的文獻庫：http://127.0.0.1:4180/__mock/library 列出每一種狀態怎麼看（啟動時也印出來）。
@@ -51,6 +54,8 @@
 //   http://127.0.0.1:4180/__mock?library=failed          我的文獻庫的清單：ok／failed（「錯誤」）／expired（401）
 //   http://127.0.0.1:4180/__mock?libraryDelay=600000     我的文獻庫的清單要等幾毫秒（看載入中的骨架）
 //   http://127.0.0.1:4180/__mock?libraryEmpty=1          文獻庫清空（看「空的」；0 是回到一開始的那幾篇）
+//   http://127.0.0.1:4180/__mock?cube=failed             計數方塊：ok／failed（伺服器錯誤：「沒有載入成功」）／expired（401）
+//   http://127.0.0.1:4180/__mock?cubeDelay=600000        計數方塊要等幾毫秒（看載入中的骨架）
 //   http://127.0.0.1:4180/__mock?libraryTotal=128        文獻庫清單回報的總篇數改成這個數字（設計稿比對用；0 是不改）
 //   http://127.0.0.1:4180/__mock?libraryChange=failed    加入、移出、復原：ok／failed（伺服器錯誤）／expired（401）
 //   http://127.0.0.1:4180/__mock?libraryChangeDelay=5000 加入、移出、復原要等幾毫秒才回（看送出中：按鈕停用）
@@ -100,6 +105,7 @@ function parseArgs(argv) {
     signedIn: false,
     papersFile: "e2e/fixtures/papers.json",
     listFile: "e2e/fixtures/paper-list.json",
+    cubeFile: "e2e/fixtures/cube.json",
   };
   for (let i = 0; i < argv.length; i += 1) {
     const key = argv[i];
@@ -113,6 +119,7 @@ function parseArgs(argv) {
     else if (key === "--member-name") args.memberName = value;
     else if (key === "--papers-file") args.papersFile = value;
     else if (key === "--list-file") args.listFile = value;
+    else if (key === "--cube-file") args.cubeFile = value;
     else throw new Error(`unknown option: ${key}`);
     i += 1;
   }
@@ -128,6 +135,8 @@ const MEMBERS = [
 const PAPERS = JSON.parse(readFileSync(resolve(WEB_ROOT, args.papersFile), "utf-8"));
 const LIST = JSON.parse(readFileSync(resolve(WEB_ROOT, args.listFile), "utf-8"));
 if (LIST.displayNames !== undefined) PAPERS.displayNames = LIST.displayNames;
+const CUBE = JSON.parse(readFileSync(resolve(WEB_ROOT, args.cubeFile), "utf-8"));
+if (CUBE.displayNames !== undefined) PAPERS.displayNames = CUBE.displayNames;
 const scenario = {
   login: "ok",
   logout: "ok",
@@ -139,6 +148,8 @@ const scenario = {
   listDelayAfter: 0,
   listTotal: 0,
   listFailAfter: 0,
+  cube: "ok",
+  cubeDelay: 0,
   library: "ok",
   libraryDelay: 0,
   libraryTotal: 0,
@@ -295,6 +306,12 @@ async function api(req, res, path, query) {
   }
   if (req.method === "GET" && path === "/api/v1/papers") {
     return paperList(req, res, query);
+  }
+  if (req.method === "GET" && path === "/api/v1/cube") {
+    await sleep(scenario.cubeDelay);
+    if (currentMember(req) === null || scenario.cube === "expired") return problem(res, 401, "not_authenticated");
+    if (scenario.cube === "failed") return problem(res, 500, "internal_error");
+    return json(res, 200, { rows: CUBE.rows, params: CUBE.params, snapshot: CUBE.snapshot });
   }
   if (req.method === "GET" && path.startsWith("/api/v1/papers/")) {
     const member = currentMember(req);
@@ -511,6 +528,18 @@ function searchIndex() {
   ];
 }
 
+/** 資料涵蓋範圍每一種狀態怎麼看（給人看的清單）。 */
+function coverageIndex() {
+  const base = `http://127.0.0.1:${args.port}`;
+  return [
+    { label: "ok", url: `${base}/__mock?cube=ok&cubeDelay=0&list=ok&listDelay=0`, note: "先打開這個，再開 /coverage：正常（三個讀數、覆蓋率表、名詞說明）" },
+    { label: "page", url: `${base}/coverage`, note: "資料涵蓋範圍" },
+    { label: "loading", url: `${base}/__mock?cubeDelay=600000`, note: "先打開這個，再開 /coverage：讀數與表格的骨架" },
+    { label: "error", url: `${base}/__mock?cube=failed`, note: "先打開這個，再開 /coverage：沒有載入成功" },
+    { label: "expired", url: `${base}/__mock?cube=expired`, note: "先打開這個，再開 /coverage：回登入頁（登入已經過期）" },
+  ];
+}
+
 /** 我的文獻庫每一種狀態怎麼看（給人看的清單）。 */
 function libraryIndex() {
   const base = `http://127.0.0.1:${args.port}`;
@@ -580,10 +609,10 @@ function paperIndex() {
 }
 
 function control(res, query) {
-  for (const key of ["login", "logout", "names", "list", "library", "libraryChange", "select"]) {
+  for (const key of ["login", "logout", "names", "list", "cube", "library", "libraryChange", "select"]) {
     if (query.has(key)) scenario[key] = query.get(key);
   }
-  for (const key of ["loginDelay", "logoutDelay", "listDelay", "listDelayAfter", "listTotal", "listFailAfter", "libraryDelay", "libraryTotal", "libraryChangeDelay", "removeRow", "openPicked", "blockPopups", "libraryHang"]) {
+  for (const key of ["loginDelay", "logoutDelay", "listDelay", "listDelayAfter", "listTotal", "listFailAfter", "cubeDelay", "libraryDelay", "libraryTotal", "libraryChangeDelay", "removeRow", "openPicked", "blockPopups", "libraryHang"]) {
     if (query.has(key)) scenario[key] = Number(query.get(key));
   }
   if (query.has("listDelayAfter") || query.has("listFailAfter")) listRequests = 0;
@@ -634,6 +663,7 @@ createServer((req, res) => {
   if (url.pathname === "/__mock/papers") return json(res, 200, paperIndex());
   if (url.pathname === "/__mock/search") return json(res, 200, searchIndex());
   if (url.pathname === "/__mock/library") return json(res, 200, libraryIndex());
+  if (url.pathname === "/__mock/coverage") return json(res, 200, coverageIndex());
   if (url.pathname === "/__mock/inject.js") return send(res, 200, injectScript(), { ...SECURITY_HEADERS, "Content-Type": TYPES[".js"] });
   if (url.pathname.startsWith("/api/")) {
     api(req, res, url.pathname, url.searchParams).catch((error) => {
@@ -648,4 +678,5 @@ createServer((req, res) => {
   for (const row of paperIndex()) process.stdout.write(`  ${row.label.padEnd(18)} ${row.url}\n`);
   for (const row of searchIndex()) process.stdout.write(`  search ${row.label.padEnd(11)} ${row.url}\n`);
   for (const row of libraryIndex()) process.stdout.write(`  library ${row.label.padEnd(13)} ${row.url}\n`);
+  for (const row of coverageIndex()) process.stdout.write(`  coverage ${row.label.padEnd(12)} ${row.url}\n`);
 });

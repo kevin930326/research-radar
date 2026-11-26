@@ -1,0 +1,19 @@
+# 趨勢與覆蓋率的規則用到的設定值（ADR-0011、ADR-0062）。
+#
+# 這些值放進計數方塊回應與示範站 cube.json 最外層的 params，前端的統計模組（web/src/stats/）
+# 只用傳進來的值，不寫死。追蹤起始年取 journals.yaml 的 start_year，時區是資料截止日用的
+# Asia/Taipei，兩個都不在這裡重寫一份。
+#
+# 前四個值在 PRD 標了 [ASSUMPTION]。
+
+# 當年度納入「成長最快」的分界日（月-日，含當天）。
+current_year_cutoff: "07-01"
+
+# 成長最快每組幾年。
+growth_window_years: 3
+
+# 原始篇數的對照值取最早幾個完整年度。
+baseline_years: 3
+
+# 摘要覆蓋率低於這個比例（0 到 1）就標成偏低。
+low_coverage_threshold: 0.5

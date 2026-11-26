@@ -534,3 +534,35 @@ test("citation: while the journal's display name has not loaded, the three butto
   await page.locator("[data-cite='rail'] [data-cite='apa']").click();
   expect(await clipboard()).toEqual([NORMAL_APA]);
 });
+
+// 全站頁尾（Story 3.15）和手機版底部固定列互不遮蓋：捲到中間時固定列貼在視窗底部、頁尾在視窗外；捲到最底時固定列
+// 停在頁尾上面（sticky 只在 main 的範圍內移動），頁尾整個看得到、連結點得到。
+test("phone: the bottom bar and the site footer never cover each other", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(url("normal"));
+  await expect(page.locator("h1")).toBeVisible();
+  const bar = page.locator("[data-full-text='bar']");
+  const footer = page.locator("footer[data-site-footer]");
+  const top = (await bar.boundingBox())!;
+  expect(top.y + top.height).toBeCloseTo(844, 0);
+  expect((await footer.boundingBox())!.y).toBeGreaterThanOrEqual(844);
+
+  await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
+  await expect(footer).toBeInViewport({ ratio: 0.99 });
+  const end = (await bar.boundingBox())!;
+  const footerBox = (await footer.boundingBox())!;
+  expect(end.y + end.height, "bar bottom is above the footer top").toBeLessThanOrEqual(footerBox.y + 0.5);
+  const link = (await footer.locator("a").first().boundingBox())!;
+  const onTop = await page.evaluate(
+    ([x, y]) => document.elementFromPoint(x!, y!)?.closest("footer") !== null,
+    [link.x + link.width / 2, link.y + link.height / 2],
+  );
+  expect(onTop, "footer link is not covered").toBe(true);
+  // 固定列的按鈕也沒有被頁尾蓋住。
+  const button = (await page.locator("[data-full-text='open-mobile']").boundingBox())!;
+  const buttonOnTop = await page.evaluate(
+    ([x, y]) => document.elementFromPoint(x!, y!)?.closest("[data-full-text='bar']") !== null,
+    [button.x + button.width / 2, button.y + button.height / 2],
+  );
+  expect(buttonOnTop, "bar button is not covered").toBe(true);
+});

@@ -28,6 +28,8 @@ const member = SITES[0]!;
 const SCREENSHOT_DIR = fileURLToPath(new URL("./screenshots/", import.meta.url));
 const DESKTOP = { width: 1280, height: 900 };
 const PHONE = { width: 390, height: 844 };
+/** 全站頁尾在 899px 以下的高度（Story 3.15；寫死，算法見 page-frame.spec.ts）。 */
+const PHONE_FOOTER_HEIGHT = 101;
 const ROWS = LIST_FIXTURES.rows;
 const WITH_DOI = ROWS.filter((entry) => entry.row.doi_url !== null).map((entry) => entry.row.id);
 const NO_DOI = ROWS.filter((entry) => entry.row.doi_url === null).map((entry) => entry.row.id);
@@ -1397,7 +1399,8 @@ test.describe("my library page on a phone: the selection dock (R9, R11)", () => 
     const dock = page.locator("[data-library-dock]");
     await expect(dock).toBeVisible();
     const box = (await dock.boundingBox())!;
-    expect(box.y + box.height).toBeCloseTo(PHONE.height, 0);
+    // Story 3.15 起視窗最下面是全站頁尾（899px 以下高 101px，page-frame.spec.ts）：選取列貼在頁尾上面。
+    expect(box.y + box.height).toBeCloseTo(PHONE.height - PHONE_FOOTER_HEIGHT, 0);
     // 清單在它上面，沒有被蓋住。
     const last = (await rows(page).last().boundingBox())!;
     expect(last.y + last.height).toBeLessThanOrEqual(box.y);
@@ -2251,5 +2254,46 @@ test.describe("following a member change reads only as the new member (ADR-0055,
     expect(after.filter((read) => read.expected !== B.member_id).every((read) => read.expected === A.member_id && read.status === 409)).toBe(true);
     expect(idsOf(state, B.member_id)).toEqual([bOnly]);
     expect(idsOf(state, A.member_id)).toEqual([aOnly]);
+  });
+});
+
+// 全站頁尾（Story 3.15）和手機底部選取列互不遮蓋：清單很短時選取列在頁尾上面；清單很長、捲到最底時選取列停在
+// 頁尾上面（sticky 只在這一頁的範圍內移動），頁尾整個看得到；捲到中間時頁尾在視窗外，選取列貼在視窗底部。
+test.describe("my library page on a phone: the dock and the site footer", () => {
+  async function expectApart(page: Page): Promise<void> {
+    const dock = (await page.locator("[data-library-dock]").boundingBox())!;
+    const footer = (await page.locator("footer[data-site-footer]").boundingBox())!;
+    expect(dock.y + dock.height, "dock bottom is above the footer top").toBeLessThanOrEqual(footer.y + 0.5);
+    // 頁尾的連結點得到（最上面的元素是它自己，不是選取列）。
+    const link = page.locator("footer[data-site-footer] a").first();
+    const linkBox = (await link.boundingBox())!;
+    const onTop = await page.evaluate(
+      ([x, y]) => document.elementFromPoint(x!, y!)?.closest("footer") !== null,
+      [linkBox.x + linkBox.width / 2, linkBox.y + linkBox.height / 2],
+    );
+    expect(onTop, "footer link is not covered").toBe(true);
+  }
+
+  test("a short library: the footer is below the dock", async ({ page, apiMock }) => {
+    apiMock.libraryIds = WITH_DOI.slice(0, 1);
+    await openLibrary(page, PHONE);
+    await checkbox(page, apiMock.libraryIds[0]!).check();
+    await expect(page.locator("[data-library-dock]")).toBeVisible();
+    await expectApart(page);
+  });
+
+  test("a long library scrolled to the end: the dock stops above the footer", async ({ page, apiMock }) => {
+    apiMock.libraryIds = [...WITH_DOI.slice(0, 12), NO_DOI[0]!];
+    await openLibrary(page, PHONE);
+    await checkbox(page, apiMock.libraryIds[0]!).check();
+    // 捲到中間：選取列貼在視窗底部，頁尾在視窗外。
+    const dock = page.locator("[data-library-dock]");
+    const middle = (await dock.boundingBox())!;
+    expect(middle.y + middle.height).toBeCloseTo(PHONE.height, 0);
+    expect((await page.locator("footer[data-site-footer]").boundingBox())!.y).toBeGreaterThanOrEqual(PHONE.height);
+    await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
+    // 頁面高度有小數（不到 1px 落在視窗外）。
+    await expect(page.locator("footer[data-site-footer]")).toBeInViewport({ ratio: 0.99 });
+    await expectApart(page);
   });
 });

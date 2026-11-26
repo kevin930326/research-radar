@@ -29,11 +29,13 @@ import type {
   FakeLoginOptionsResponse,
   FakeLoginResultResponse,
   MemberResponse,
+  CubeResponse,
   PaperListResponse,
   PaperPageResponse,
   PaperRow,
   SnapshotRef,
 } from "../src/generated/model";
+import cubeFixture from "./fixtures/cube.json" with { type: "json" };
 import listFixtures from "./fixtures/paper-list.json" with { type: "json" };
 import fixtures from "./fixtures/papers.json" with { type: "json" };
 
@@ -249,11 +251,20 @@ export interface ApiMockState {
   libraryChange: "ok" | "failed" | "expired";
   /** 加入、移出、復原：設了就等它 resolve 才回（看送出中）。 */
   libraryChangeGate: Promise<void> | null;
+  /** 計數方塊（資料涵蓋範圍）：成功／伺服器錯誤（500）／登入過期（401）。 */
+  cube: "ok" | "failed" | "expired";
+  /** 計數方塊：設了就等它 resolve 才回（看載入中的骨架）。 */
+  cubeGate: Promise<void> | null;
+  /** 計數方塊回的內容（預設 fixtures/cube.json；測試可以換，例如沒有快照）。 */
+  cubeBody: CubeResponse;
   /** 收到的請求（依序）。 */
   requests: ApiRequest[];
   /** 沒帶 X-Radar-Expected-Member 的加入、移出、復原（fixtures.ts 在測試結束時要求是空的；ADR-0055）。 */
   writesWithoutExpectedMember: ApiRequest[];
 }
+
+/** 成員版資料涵蓋範圍的假計數方塊（Story 3.15；數字是編的）。 */
+export const CUBE_FIXTURE: CubeResponse = { rows: cubeFixture.rows, params: cubeFixture.params, snapshot: cubeFixture.snapshot } as CubeResponse;
 
 /** 加入、移出、復原帶的「這個分頁以為的成員」標頭（小寫：Playwright 給的標頭名稱都是小寫）。 */
 export const EXPECTED_MEMBER_HEADER = "x-radar-expected-member";
@@ -315,6 +326,9 @@ export function createApiState(): ApiMockState {
     libraryGate: null,
     libraryChange: "ok",
     libraryChangeGate: null,
+    cube: "ok",
+    cubeGate: null,
+    cubeBody: CUBE_FIXTURE,
     requests: [],
     writesWithoutExpectedMember: [],
   };
@@ -399,6 +413,14 @@ export async function installApiMock(page: Page, state: ApiMockState): Promise<v
       state.requests.push({ method, path, body });
       if (state.member === null) return problem(route, 401, "not_authenticated");
       return json(route, state.clientConfig);
+    }
+    if (method === "GET" && path === "/api/v1/cube") {
+      state.requests.push({ method, path, body });
+      const asker = state.member;
+      await state.cubeGate;
+      if (asker === null || state.cube === "expired") return problem(route, 401, "not_authenticated");
+      if (state.cube === "failed") return problem(route, 500, "internal_error");
+      return json(route, state.cubeBody);
     }
     if (method === "GET" && path === "/api/v1/papers") {
       state.requests.push({ method, path: `${path}${url.search}`, body });

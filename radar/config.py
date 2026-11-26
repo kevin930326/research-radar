@@ -27,6 +27,7 @@ from radar.domain.llm_batches import LlmBatchConfig
 from radar.domain.pricing import ModelsConfig
 from radar.domain.settings import MigrationSettings, Settings, heartbeat_url_field
 from radar.domain.taxonomy import Taxonomy, taxonomy_registry_problems
+from radar.domain.trend_config import TrendConfig
 from radar.domain.validators.zh_summary import (
     ZhSummaryAcronyms,
     ZhSummaryRules,
@@ -189,6 +190,9 @@ CONTEXT_VALUES_FILE = "context_values.yaml"
 EMBEDDINGS_FILE = "embeddings.yaml"
 # Batch 送出（Story 2.9、ADR-0041）：Batch 規劃的工作讀（`load_llm_batch_config`）。
 LLM_BATCHES_FILE = "llm_batches.yaml"
+# 趨勢與覆蓋率的規則設定值（ADR-0011、ADR-0062）：計數方塊的 API 與示範站匯出讀
+# （`load_trend_config`）。
+TREND_FILE = "trend.yaml"
 
 
 def config_dir(environ: Mapping[str, str] | None = None) -> Path:
@@ -378,6 +382,23 @@ def load_llm_batch_config(environ: Mapping[str, str] | None = None) -> LlmBatchC
     """
     problems: list[str] = []
     config = _load_yaml_model(config_dir(environ), LLM_BATCHES_FILE, LlmBatchConfig, problems)
+    if problems or config is None:
+        raise ConfigError(problems)
+    return config
+
+
+def load_trend_config(environ: Mapping[str, str] | None = None) -> TrendConfig:
+    """讀 `RADAR_CONFIG_DIR` 下的 `trend.yaml`（分界日、每組幾年、對照值取幾年、低覆蓋率門檻）
+    並驗證。
+
+    讀法與錯誤格式和 `load_domain_config` 相同（「檔名：欄位路徑：原因」）。
+
+    Raises:
+        ConfigError: 缺檔、不是合法 YAML、鍵寫兩次或內容不對（例如分界日不是存在的日期、
+            門檻不在 0 到 1 之間）。
+    """
+    problems: list[str] = []
+    config = _load_yaml_model(config_dir(environ), TREND_FILE, TrendConfig, problems)
     if problems or config is None:
         raise ConfigError(problems)
     return config

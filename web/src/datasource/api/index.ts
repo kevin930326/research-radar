@@ -2,6 +2,7 @@
 import {
   addLibraryItem,
   clientConfig as getClientConfig,
+  cube as getCube,
   displayNames as getDisplayNames,
   fakeLogin,
   fakeLoginOptions,
@@ -23,6 +24,7 @@ import {
 } from "../../generated/model";
 import type {
   ClientConfigResult,
+  CubeResult,
   DataSource,
   DisplayNamesResult,
   LibraryChangeResult,
@@ -146,6 +148,17 @@ const papers: PaperSource = {
       return { kind: "signedOut" };
     }
     throw new Error(`GET ${API_BASE}/client-config: HTTP ${response.status}`);
+  },
+
+  async cube(): Promise<CubeResult> {
+    const response = await getCube();
+    if (response.status === 200) {
+      return { kind: "found", cube: response.data };
+    }
+    if (response.status === 401) {
+      return { kind: "signedOut" };
+    }
+    throw new Error(`GET ${API_BASE}/cube: HTTP ${response.status}`);
   },
 
   async list(filters: PaperListFilters, limit: number, previous?: PaperList | null, expectedMemberId?: string): Promise<PaperListResult> {
