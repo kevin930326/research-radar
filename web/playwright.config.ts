@@ -10,7 +10,14 @@ const isCI = Boolean(process.env.CI);
 const browsers = isCI
   ? [
       { name: "chromium", use: { ...devices["Desktop Chrome"] } },
-      { name: "firefox", use: { ...devices["Desktop Firefox"] } },
+      // 【探測分支專用】PROBE_PREFS（JSON）給 firefox 的偏好設定。
+      {
+        name: "firefox",
+        use: {
+          ...devices["Desktop Firefox"],
+          launchOptions: { firefoxUserPrefs: JSON.parse(process.env.PROBE_PREFS ?? "{}") as Record<string, boolean | number | string> },
+        },
+      },
       { name: "webkit", use: { ...devices["Desktop Safari"] } },
     ]
   : [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }];

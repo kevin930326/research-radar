@@ -1,6 +1,7 @@
 // (6) axe（WCAG 2.1 A／AA）掃兩種建置的每個頁面，加上「找不到這一頁」。
 // 【探測分支 ci/firefox-crash-probe 專用，不合併】PROBE_MODE 控制怎麼跑 axe，用來找 firefox 當掉的原因。
 import AxeBuilder from "@axe-core/playwright";
+import axeCore from "axe-core";
 
 import { expect, test } from "./fixtures.ts";
 import { MISSING_PATH, SITES } from "./pages.ts";
@@ -69,7 +70,42 @@ if (MODE === "element") {
   }
 }
 
-for (const site of MODE === "perrule" || MODE === "element" ? [] : SITES) {
+// walk：注入 axe 後逐個元素呼叫（getrole：只算角色；run：對單一元素跑 PROBE_ONLY 的規則），當掉時印出最後一個元素。
+if (MODE === "walk-getrole" || MODE === "walk-run") {
+  for (const site of SITES) {
+    for (const path of site.pages.filter((page) => /^\/papers\/[0-9a-f]/.test(page))) {
+      test(`${MODE} ${site.name} ${path}`, async ({ page }) => {
+        await page.goto(`${site.baseURL}${path}`);
+        await expect(page.locator("main")).toBeVisible();
+        await page.evaluate(axeCore.source);
+        const signatures = await page.evaluate(() => {
+          (window as unknown as { axe: { setup: (node: Node) => void } }).axe.setup(document);
+          return [...document.querySelectorAll("*")].map((e) => `${e.tagName.toLowerCase()} ${[...e.attributes].map((a) => `${a.name}=${a.value.slice(0, 40)}`).join(" ")}`.slice(0, 200));
+        });
+        for (const [index, signature] of signatures.entries()) {
+          try {
+            await page.evaluate(
+              async ({ index, mode, rules }) => {
+                const axe = (window as unknown as { axe: any }).axe; // eslint-disable-line @typescript-eslint/no-explicit-any
+                const node = document.querySelectorAll("*")[index];
+                if (mode === "walk-getrole") return axe.commons.aria.getRole(node);
+                axe.teardown();
+                await axe.run({ include: [node] }, { runOnly: { type: "rule", values: rules } });
+                return null;
+              },
+              { index, mode: MODE, rules: ONLY },
+            );
+          } catch (error) {
+            console.log(`CRASH-AT ${site.name} ${path} #${index}/${signatures.length} ${signature}`);
+            throw error;
+          }
+        }
+      });
+    }
+  }
+}
+
+for (const site of MODE === "perrule" || MODE === "element" || MODE.startsWith("walk") ? [] : SITES) {
   for (const path of [...site.pages, MISSING_PATH]) {
     test(`${site.name} ${path}: no axe violations`, async ({ page }) => {
       await page.goto(`${site.baseURL}${path}`);
@@ -80,7 +116,7 @@ for (const site of MODE === "perrule" || MODE === "element" ? [] : SITES) {
         return;
       }
       let builder = new AxeBuilder({ page });
-      builder = ONLY.length > 0 ? builder.withRules(ONLY) : builder.withTags(TAGS);
+      builder = MODE === "full" ? builder.withTags(TAGS) : builder.withRules(ONLY);
       if (DISABLE.length > 0) builder = builder.disableRules(DISABLE);
       if (MODE === "legacy") builder = builder.setLegacyMode(true);
       const results = await builder.analyze();
