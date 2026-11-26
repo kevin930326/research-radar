@@ -62,7 +62,7 @@ from radar.repo.ai_outputs import find_rejected_ai_result_id
 from radar.repo.llm_batches import find_batch_attention_run
 from radar.repo.llm_ledger import find_running_call_mode
 from radar.repo.papers import find_paper_llm_source, find_paper_processing_facts
-from radar.repo.visibility import visible_papers
+from radar.repo.visibility import visible_papers, visible_summary_report_marks
 
 
 def find_ai_block(
@@ -93,11 +93,15 @@ def find_ai_block(
     effective: AiBlock | None
     match product:
         case AiProduct.ZH_SUMMARY:
+            # 回報的標記只有成員與系統讀得到；示範站產生器讀成空的（Story 3.12）。
+            marks = visible_summary_report_marks(viewer)
             row = (
                 connection.execute(
                     text(
                         "SELECT e.zh_summary_id, e.input_kind, e.generated_at, e.model,"
-                        " e.research_question, e.method, e.theory, e.findings, e.reported_fields"
+                        " e.research_question, e.method, e.theory, e.findings,"
+                        f" CASE WHEN {marks} THEN e.reported_fields ELSE ARRAY[]::text[] END"
+                        " AS reported_fields"
                         " FROM effective_zh_summary AS e JOIN paper ON paper.id = e.paper_id"
                         f" WHERE {visible} AND e.paper_id = :paper_id"
                     ),

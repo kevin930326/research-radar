@@ -12,6 +12,10 @@ ADR-0035、Story 2.7）。
 - 讀取：分類修正的歷史（`list_classification_fix_events`，Story 3.11）接 `visible_papers`，看不到的
   論文一筆都不回；成員只讀顯示名稱（`member.display_name`），不讀 email。只給成員與維運身分：公開
   身分（示範站產生器）在執行時就被擋（示範站不帶修正歷史，ADR-0063）。
+- 讀取：還沒處理的中文重點回報（`list_open_summary_reports`、`find_open_summary_report`，
+  Story 3.12）只給管理指令（系統身分；回報指向 `zh_summary`，這裡不接論文的可見條件，所以只准系統
+  身分）。帶回報的成員的顯示名稱與說明，不帶 email。論文頁的標記不從這裡讀
+  （`effective_zh_summary.reported_fields`，只有欄位名稱）。
 - `created_at` 可以由呼叫端給（修正分類在拿到鎖之後取一次 `clock_timestamp()`，兩欄與稽核共用，
   歷史與有效值的新舊才會和實際寫入的順序一樣）；沒給是資料庫的 `now()`。
 - 寫入一律用 `text()` SQL；函式收呼叫端開好的交易連線，不 commit。
@@ -39,11 +43,22 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import JSONB
 
 from radar.domain.classification_fixes import ClassificationFixEvent
-from radar.domain.judgments import ActorRole, JudgmentKind, JudgmentTarget, NewJudgmentEvent
+from radar.domain.judgments import (
+    ActorRole,
+    JudgmentKind,
+    JudgmentTarget,
+    NewJudgmentEvent,
+    SummaryField,
+)
+from radar.domain.summary_reports import SummaryReportEvent
 from radar.domain.taxonomy import TaxonomyField
 from radar.domain.viewer import MemberViewer, SystemViewer
 from radar.repo.models import Base
-from radar.repo.visibility import visible_member_judgments, visible_papers
+from radar.repo.visibility import (
+    visible_member_judgments,
+    visible_papers,
+    visible_to_system_only,
+)
 
 # --- 表的定義（`alembic check` 拿來和資料庫比對；遷移 0014 建表） -----------------------------
 
@@ -275,3 +290,79 @@ def list_classification_fix_events(
             )
         )
     return events
+
+
+_OPEN_REPORTS_FROM: Final = (
+    "SELECT j.id, j.target_id, j.field, m.display_name, j.created_at, j.reason"
+    " FROM judgment_event AS j"
+    " JOIN member AS m ON m.id = j.member_id"
+)
+_OPEN_REPORTS_WHERE: Final = (
+    " AND j.kind = :kind AND j.target_type = :target"
+    " AND NOT EXISTS (SELECT 1 FROM judgment_event AS resolution"
+    " WHERE resolution.kind = :resolution_kind AND resolution.report_event_id = j.id)"
+)
+
+
+def _report_event(row: tuple[object, ...]) -> SummaryReportEvent:
+    report_id, summary_id, field, name, created_at, reason = row
+    assert isinstance(created_at, datetime)
+    return SummaryReportEvent(
+        report_id=uuid.UUID(str(report_id)),
+        zh_summary_id=uuid.UUID(str(summary_id)),
+        field=SummaryField(str(field)),
+        member_name=str(name),
+        reported_at=created_at,
+        note=str(reason),
+    )
+
+
+def _report_params() -> dict[str, object]:
+    return {
+        "kind": JudgmentKind.SUMMARY_REPORT.value,
+        "target": JudgmentTarget.ZH_SUMMARY.value,
+        "resolution_kind": JudgmentKind.SUMMARY_REPORT_RESOLUTION.value,
+    }
+
+
+def list_open_summary_reports(
+    viewer: SystemViewer, connection: Connection
+) -> list[SummaryReportEvent]:
+    """還沒有處理結果的中文重點回報，舊的在前（`created_at, id`）。每筆帶回報的成員的顯示名稱與說明
+    （不帶 email）。
+
+    Raises:
+        TypeError: `viewer` 不是系統身分。
+    """
+    # 回報的人與說明是成員的人工判斷紀錄（公開身分讀不到）；回報指向 zh_summary、不接論文的
+    # 可見條件，所以再限系統身分（成員身分也不給）。
+    judgments = visible_member_judgments(viewer)
+    system_only = visible_to_system_only(viewer)
+    rows = connection.execute(
+        text(
+            f"{_OPEN_REPORTS_FROM} WHERE {judgments} AND {system_only}{_OPEN_REPORTS_WHERE}"
+            " ORDER BY j.created_at, j.id"
+        ),
+        _report_params(),
+    )
+    return [_report_event(tuple(row)) for row in rows]
+
+
+def find_open_summary_report(
+    viewer: SystemViewer, connection: Connection, report_id: uuid.UUID
+) -> SummaryReportEvent | None:
+    """一筆還沒有處理結果的中文重點回報；不存在、不是回報、已經處理過回 None。
+
+    Raises:
+        TypeError: `viewer` 不是系統身分。
+    """
+    judgments = visible_member_judgments(viewer)
+    system_only = visible_to_system_only(viewer)
+    row = connection.execute(
+        text(
+            f"{_OPEN_REPORTS_FROM} WHERE {judgments} AND {system_only}{_OPEN_REPORTS_WHERE}"
+            " AND j.id = :report_id"
+        ),
+        {**_report_params(), "report_id": report_id},
+    ).one_or_none()
+    return None if row is None else _report_event(tuple(row))

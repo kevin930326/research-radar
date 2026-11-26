@@ -176,6 +176,25 @@ def visible_member_judgments(viewer: Viewer) -> str:
     return "TRUE"
 
 
+def visible_summary_report_marks(viewer: Viewer) -> str:
+    """「這一欄有成員回報可能有誤」的標記（`effective_zh_summary.reported_fields`，
+    Story 3.12）讀不讀得到的 SQL 布林運算式：成員與系統工作是 `TRUE`；示範站產生器
+    （`PublicViewer`）是 `FALSE`——它讀中文重點的內容，但標記一律讀成空的（示範站不帶回報，
+    ADR-0007 白名單也擋）。標記只有欄位名稱；誰回報、說明另經 `visible_member_judgments`，
+    公開身分直接丟錯。
+
+    Raises:
+        TypeError: `viewer` 不是三種讀者身分之一。
+    """
+    match viewer:
+        case MemberViewer() | SystemViewer():
+            return "TRUE"
+        case PublicViewer():
+            return "FALSE"
+        case _:
+            raise TypeError(f"不認得的讀者身分：{type(viewer).__name__}")
+
+
 def visible_snapshot_facts(viewer: Viewer) -> str:
     """快照編號與截止時間（`snapshot` 表）的 SQL 條件：系統工作與示範站匯出（`PublicViewer`，
     Story 3.7）讀得到，都回 `TRUE`。已發佈的快照編號與截止時間本來就印在示範站與每個統計回應上，

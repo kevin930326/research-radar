@@ -29,6 +29,15 @@
       "failed": "沒有送出成功。你選的還在，再試一次",
       "current": "目前採用"
     },
+    "report": {
+      "open": "回報錯誤",
+      "field": "哪一欄",
+      "note": "說明",
+      "send": "送出回報",
+      "sending": "送出中…",
+      "cancel": "取消",
+      "failed": "沒有送出成功。你寫的還在，再試一次"
+    },
     "summary": {
       "heading": "中文重點",
       "researchQuestion": "研究問題",

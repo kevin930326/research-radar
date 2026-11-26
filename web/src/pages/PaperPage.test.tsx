@@ -150,7 +150,7 @@ describe("paper page: three AI blocks with content", () => {
       .split(/<[^>]+>/)
       .map((segment) => segment.replace(/\s+/g, ""))
       .filter((segment) => segment !== "");
-    expect(LATER_STORIES.length).toBeGreaterThan(7);
+    expect(LATER_STORIES.length).toBeGreaterThan(6);
     for (const text of LATER_STORIES) {
       expect(segments).not.toContain(text);
     }
@@ -773,5 +773,51 @@ describe("classification fix on the paper page", () => {
   // 示範站沒有修正分類：由 datasource/demo-paper-classification-fix.test.tsx 與 e2e/build-output.spec.ts 保證（這裡渲染的是成員版的 PaperPage）。
   it("without the control there is no fix entry", () => {
     expect(render(fixture("normal"))).not.toContain("data-classification-fix");
+  });
+});
+
+// 回報錯誤（Story 3.12；EXPERIENCE.md 畫面 8 第 3 點；設計稿 paper.html 的「回報錯誤」）。表單的互動（展開、選、送出中、
+// 沒有成功、送出後、鍵盤）在 e2e/summary-report.spec.ts。
+describe("summary report on the paper page", () => {
+  const library = { inLibrary: false, busy: false, focusToken: 0, onAdd: () => {}, onRemove: () => {} };
+  const OPEN = TEXT["paper:paper.report.open"]!;
+
+  function renderReport(page: PaperPageResponse): string {
+    return renderToStaticMarkup(
+      <RouterContextProvider router={router}>
+        <PaperPage page={page} names={NAMES} library={library} summaryReport={{ send: async () => true }} />
+      </RouterContextProvider>,
+    );
+  }
+
+  it("a ready summary has the report entry at the right of the heading row, form closed", () => {
+    const html = block(renderReport(fixture("normal")), "zh_summary");
+    expect(html).toContain("data-summary-report");
+    expect(html).toMatch(new RegExp(`<button type="button" data-report-open=""[^>]*>${OPEN}</button>`));
+    // 標題列（h2 與標章）之後、四欄之前。
+    expect(html.indexOf("data-ai-badge")).toBeLessThan(html.indexOf("data-report-open"));
+    expect(html.indexOf("data-report-open")).toBeLessThan(html.indexOf("data-summary-field"));
+    expect(html).not.toContain("data-report-form");
+  });
+
+  it.each(["zh-failed", "empty", "pending"])("%s: no report entry", (label) => {
+    const page = fixture(label);
+    expect(page.zh_summary.state).not.toBe("ready");
+    const html = block(renderReport(page), "zh_summary");
+    expect(html).not.toContain(OPEN);
+    expect(html).not.toContain("data-summary-report");
+  });
+
+  it("a reported field shows the gold triangle mark under its content, with the report entry still there", () => {
+    const html = block(renderReport(fixture("reported")), "zh_summary");
+    expect(count(html, TEXT["paper:paper.summary.reported"]!)).toBe(1);
+    expect(html).toContain('data-note="reported"');
+    expect(html).toContain("text-accent-gold");
+    expect(html).toContain(OPEN);
+  });
+
+  it("without the control there is no report entry", () => {
+    expect(render(fixture("normal"))).not.toContain(OPEN);
+    expect(render(fixture("normal"))).not.toContain("data-summary-report");
   });
 });

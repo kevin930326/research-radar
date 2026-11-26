@@ -46,6 +46,9 @@ ALLOWED_BY_RULE: dict[Rule, set[str]] = {
 # FR-7 權限表（寫入列）＋ `ingest_papers`、`run_ai_jobs`，照 PRD 的字面寫一次，和程式裡的表對照。
 EXPECTED_TABLE: dict[Action, Rule] = {
     Action.CORRECT_CLASSIFICATION: Rule.ANY_MEMBER,
+    # FR-14 附則：成員回報中文重點錯誤；Kevin（管理者）用 CLI 處理回報（Story 3.12）。
+    Action.REPORT_SUMMARY: Rule.ANY_MEMBER,
+    Action.RESOLVE_SUMMARY_REPORT: Rule.ADMIN,
     Action.CONFIRM_CONSTRUCT_MERGE: Rule.ANY_MEMBER,
     Action.MERGE_CONSTRUCTS: Rule.ADMIN,
     Action.ADD_LIBRARY_ITEM: Rule.OWNER,

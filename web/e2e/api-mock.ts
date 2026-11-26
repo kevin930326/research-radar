@@ -19,6 +19,9 @@
 // Story 3.11 加上修正分類的兩個端點（GET／POST /api/v1/papers/{id}/classification-fixes）：歷史一開始是假資料每一篇的
 // classificationHistory；送出時兩欄各至少一個、都是顯示名稱裡有的 key、和目前的不同才收（否則 422），寫一筆在最前面
 // （姓名是登入的那一位），之後的論文頁照修正後的分類回。寫入同樣要帶預期成員（沒帶記進 writesWithoutExpectedMember）。
+// Story 3.12 加上回報錯誤的端點（POST /api/v1/papers/{id}/summary-reports）：中文重點是 ready、欄位是四欄之一、說明去掉前後空白
+// 後有字而且最多 100 個 code point 才收（否則 422）；收下後那一篇的 reported_fields 多這一欄（照四欄的順序），回中文重點區塊，
+// 之後的論文頁也照這個回。寫入同樣要帶預期成員。
 // 其他 /api/ 路徑不處理（交給後面的 route 或預設行為）。
 import type { Page, Route } from "@playwright/test";
 
@@ -39,6 +42,7 @@ import type {
   PaperPageResponse,
   PaperRow,
   SnapshotRef,
+  ZhSummaryBlock,
 } from "../src/generated/model";
 import cubeFixture from "./fixtures/cube.json" with { type: "json" };
 import listFixtures from "./fixtures/paper-list.json" with { type: "json" };
@@ -270,6 +274,12 @@ export interface ApiMockState {
   fixHistories: Record<string, ClassificationFixEntryResponse[]>;
   /** 修正過的論文的分類區塊（論文 ID → 修正後的）。 */
   fixedBlocks: Record<string, ClassificationBlock>;
+  /** 回報錯誤的送出：成功／伺服器錯誤（500）／登入過期（401）。 */
+  summaryReport: "ok" | "failed" | "expired";
+  /** 回報錯誤的送出：設了就等它 resolve 才回（看「送出中…」）。 */
+  summaryReportGate: Promise<void> | null;
+  /** 收到回報的論文的中文重點區塊（論文 ID → 回報後的）。 */
+  reportedBlocks: Record<string, ZhSummaryBlock>;
   /** 收到的請求（依序）。 */
   requests: ApiRequest[];
   /** 沒帶 X-Radar-Expected-Member 的加入、移出、復原、修正分類（fixtures.ts 在測試結束時要求是空的；ADR-0055）。 */
@@ -346,6 +356,9 @@ export function createApiState(): ApiMockState {
     classificationFixGate: null,
     fixHistories: {},
     fixedBlocks: {},
+    summaryReport: "ok",
+    summaryReportGate: null,
+    reportedBlocks: {},
     requests: [],
     writesWithoutExpectedMember: [],
   };
@@ -424,6 +437,21 @@ function applyFix(state: ApiMockState, id: string, body: unknown, member: Member
   state.fixHistories[id] = history;
   state.fixedBlocks[id] = classification;
   return { classification, history };
+}
+
+const SUMMARY_FIELDS = ["research_question", "method", "theory", "findings"];
+
+/** 送出一次回報（規則見檔頭）；不收回 null。 */
+function applyReport(state: ApiMockState, id: string, body: unknown): ZhSummaryBlock | null {
+  const block = state.reportedBlocks[id] ?? PAPER_FIXTURES.papers[id]?.page.zh_summary;
+  if (block === undefined || block.state !== "ready" || block.value == null) return null;
+  const sent = (body ?? {}) as { field?: unknown; note?: unknown };
+  const note = typeof sent.note === "string" ? sent.note.trim() : "";
+  if (typeof sent.field !== "string" || !SUMMARY_FIELDS.includes(sent.field) || note === "" || [...note].length > 100) return null;
+  const fields = new Set<string>([...block.value.reported_fields, sent.field]);
+  const reported = { ...block, value: { ...block.value, reported_fields: SUMMARY_FIELDS.filter((field) => fields.has(field)) } } as ZhSummaryBlock;
+  state.reportedBlocks[id] = reported;
+  return reported;
 }
 
 export async function installApiMock(page: Page, state: ApiMockState): Promise<void> {
@@ -582,6 +610,22 @@ export async function installApiMock(page: Page, state: ApiMockState): Promise<v
       const fixed = applyFix(state, id, body, asker);
       return fixed === null ? problem(route, 422, "request_invalid") : json(route, fixed);
     }
+    const reportMatch = /^\/api\/v1\/papers\/([^/]+)\/summary-reports$/.exec(path);
+    if (reportMatch !== null && method === "POST") {
+      state.requests.push({ method, path, body });
+      const asker = state.member;
+      const expected = (await request.allHeaders())[EXPECTED_MEMBER_HEADER];
+      const id = decodeURIComponent(reportMatch[1]!);
+      if (expected === undefined) state.writesWithoutExpectedMember.push({ method, path, body });
+      await state.summaryReportGate;
+      if (asker === null || state.summaryReport === "expired") return problem(route, 401, "not_authenticated");
+      const mismatch = expectedMemberProblem(expected, asker);
+      if (mismatch !== null) return problem(route, ...mismatch);
+      if (state.summaryReport === "failed") return problem(route, 500, "internal_error");
+      if (PAPER_FIXTURES.papers[id] === undefined) return problem(route, 404, "not_found");
+      const reported = applyReport(state, id, body);
+      return reported === null ? problem(route, 422, "request_invalid") : json(route, { zh_summary: reported });
+    }
     if (method === "GET" && path.startsWith("/api/v1/papers/")) {
       state.requests.push({ method, path, body });
       // 接到請求時就記下是誰、這時的文獻庫（審查 G2）。
@@ -597,6 +641,7 @@ export async function installApiMock(page: Page, state: ApiMockState): Promise<v
       const mine = (page: PaperPageResponse) => ({
         ...page,
         classification: state.fixedBlocks[page.paper.id] ?? page.classification,
+        zh_summary: state.reportedBlocks[page.paper.id] ?? page.zh_summary,
         in_my_library: library.some((record) => record.id === page.paper.id),
       });
       let id = decodeURIComponent(path.slice("/api/v1/papers/".length));

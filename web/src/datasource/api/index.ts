@@ -14,6 +14,7 @@ import {
   me as getMe,
   paper as getPaper,
   removeLibraryItem,
+  reportSummary as postSummaryReport,
   restoreLibraryItem,
 } from "../../generated/api";
 import {
@@ -28,6 +29,8 @@ import type {
   ClassificationFixBody,
   ClassificationFixesResult,
   ClassificationFixResult,
+  SummaryReportBody,
+  SummaryReportResult,
   ClientConfigResult,
   CubeResult,
   DataSource,
@@ -186,6 +189,17 @@ const papers: PaperSource = {
     if (response.status === 404) return { kind: "notFound" };
     if (response.status === 401) return { kind: "signedOut" };
     throw new Error(`POST ${API_BASE}/papers/{id}/classification-fixes: HTTP ${response.status}`);
+  },
+
+  // 回報中文重點錯誤（Story 3.12）：同修正分類，標頭只在這裡加（expecting）；422 是後端不收，什麼都沒寫。
+  async reportSummary(paperId: string, body: SummaryReportBody, expectedMemberId?: string): Promise<SummaryReportResult> {
+    const response = await postSummaryReport(encodeURIComponent(paperId), body, expecting(expectedMemberId));
+    if (response.status === 200) return { kind: "done", zhSummary: response.data.zh_summary };
+    if (memberChanged(response)) return { kind: "memberChanged" };
+    if (response.status === 422) return { kind: "rejected" };
+    if (response.status === 404) return { kind: "notFound" };
+    if (response.status === 401) return { kind: "signedOut" };
+    throw new Error(`POST ${API_BASE}/papers/{id}/summary-reports: HTTP ${response.status}`);
   },
 
   async list(filters: PaperListFilters, limit: number, previous?: PaperList | null, expectedMemberId?: string): Promise<PaperListResult> {

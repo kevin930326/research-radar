@@ -107,6 +107,8 @@ class FakeFixes:
             paper_visible=self.visible,
             load_classification_fixes=self.load,
             fix_classification=self.fix,
+            # 回報中文重點錯誤（Story 3.12）：這個檔不測（見 test_api_summary_reports.py）。
+            report_summary=lambda _viewer, _paper_id, _body: None,
         )
         install_paper_routes(app, routes, FakeAuth().routes())
         return TestClient(app, base_url=ORIGIN)

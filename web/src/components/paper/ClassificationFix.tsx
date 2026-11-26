@@ -1,10 +1,11 @@
-import { useEffect, useId, useRef, useState, type ReactNode, type RefObject } from "react";
+import { useEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { ClassificationFixBody, ClassificationFixEntryResponse, DisplayNames } from "../../generated/model";
 import { taipeiDate } from "../taipei-date";
 import { inTaxonomyOrder, type ClassificationRowParts } from "./PaperBiblio";
-import { InfoGlyph, MONO_LABEL_CLASS } from "./parts";
+import { FailedLine, LINK_CLASS, OneLineField, PickGroup, SendActions } from "./member-form";
+import { InfoGlyph } from "./parts";
 
 // 修正分類（Story 3.11；EXPERIENCE.md 畫面 8 第 2 點、決定第 95～98 項；設計稿 paper.html 的「修正分類」六個狀態）。
 // 成員版才有：只有 pages/PaperPage.tsx（成員版）import 這個檔，示範站的建置不會帶到（e2e/build-output.spec.ts 檢查
@@ -20,27 +21,8 @@ import { InfoGlyph, MONO_LABEL_CLASS } from "./parts";
 // 小的可點的東西（人數、「修正分類」、標籤）看起來照設計稿的高度；按鈕本身至少 44×44，用負外距讓那一行看起來一樣高（ADR-0037）。
 // 鍵盤：打開表單時焦點移到第一個選中的標籤（「修正分類」在表單開著時不顯示）；表單收起（取消或送出成功）時焦點回到「修正分類」。
 
-/** 理由的上限（後端 REASON_MAX_LENGTH；決定第 98 項）。算 code point（表情符號算一個字），和後端一樣。 */
-export const REASON_MAX_LENGTH = 100;
-
-/**
- * 理由最多 REASON_MAX_LENGTH 個 code point（輸入框的 maxLength 算的是 UTF-16 單位，表情符號會算兩個，所以自己截）。
- * 超過時只截這一次新打進來（或貼上）的那一段，原本的字不動（和瀏覽器的 maxLength 一樣；不能從尾巴截，
- * 否則滿 100 字時在中間插字會吃掉原本的句尾）。`previous` 是改之前的值。
- */
-export function clampReason(value: string, previous = ""): string {
-  const next = [...value];
-  if (next.length <= REASON_MAX_LENGTH) return value;
-  const before = [...previous];
-  let head = 0;
-  while (head < before.length && head < next.length && before[head] === next[head]) head += 1;
-  let tail = 0;
-  while (tail < before.length - head && tail < next.length - head && before[before.length - 1 - tail] === next[next.length - 1 - tail]) tail += 1;
-  const inserted = next.slice(head, next.length - tail);
-  const room = Math.max(0, REASON_MAX_LENGTH - (next.length - inserted.length));
-  const kept = [...next.slice(0, head), ...inserted.slice(0, room), ...next.slice(next.length - tail)];
-  return kept.slice(0, REASON_MAX_LENGTH).join("");
-}
+/** 理由的上限與字數的截法（和回報錯誤的說明共用，見 member-form.tsx；決定第 98 項）。 */
+export { ONE_LINE_MAX_LENGTH as REASON_MAX_LENGTH, clampOneLine as clampReason } from "./member-form";
 
 /** 修正分類要的資料與動作：由成員版的路由（routes/classification-fix.ts）給。 */
 export interface ClassificationFixControl {
@@ -53,67 +35,13 @@ export interface ClassificationFixControl {
   history: readonly ClassificationFixEntryResponse[] | null;
 }
 
-/**
- * 設計稿 button.lk（「有 N 位成員修正過」「修正分類」）：看起來 28px 高。按鈕本身 44×44（ADR-0037），上下各 -8px 的外距
- * 讓這一行看起來和設計稿一樣高。
- */
-const LINK_CLASS =
-  "-my-2 inline-flex min-h-tap-target min-w-tap-target cursor-pointer items-center gap-[7px] bg-transparent p-[0px] text-s13 tracking-004 whitespace-nowrap text-accent-gold decoration-1 underline-offset-4 hover:underline";
+const LINK = `${LINK_CLASS} text-s13`;
 
 function Caret() {
   return (
     <svg width="9" height="6" viewBox="0 0 9 6" fill="none" aria-hidden="true" className="transition-transform duration-200">
       <path d="M1 1l3.5 3.5L8 1" stroke="currentColor" strokeWidth="1" />
     </svg>
-  );
-}
-
-/** 一組可複選的標籤（設計稿 button.pk：看起來 32px 高；按鈕本身 44px，上下各 -6px 的外距，兩排之間的 12px 剛好分給上下兩排）。 */
-function PickGroup({
-  label,
-  options,
-  picked,
-  locked,
-  onToggle,
-  field,
-}: {
-  label: string;
-  options: DisplayNames["topics"];
-  picked: readonly string[];
-  locked: boolean;
-  onToggle: (key: string) => void;
-  field: "topic" | "method";
-}) {
-  return (
-    <div role="group" aria-label={label} data-fix-group={field}>
-      <div className={MONO_LABEL_CLASS}>{label}</div>
-      <div className="mt-3 flex flex-wrap gap-x-2 gap-y-3">
-        {options.map((option) => {
-          const on = picked.includes(option.key);
-          return (
-            <button
-              key={option.key}
-              type="button"
-              aria-pressed={on}
-              disabled={locked}
-              data-fix-pick={option.key}
-              onClick={() => onToggle(option.key)}
-              className="group -my-[6px] inline-flex h-tap-target min-w-tap-target cursor-pointer items-center bg-transparent p-[0px] disabled:cursor-default"
-            >
-              <span
-                className={`inline-flex h-[32px] w-full items-center justify-center rounded-full border px-[14px] font-body text-s13 tracking-004 whitespace-nowrap transition-[border-color,color,background-color] duration-200 ${
-                  on
-                    ? "border-text-primary bg-text-primary text-on-button"
-                    : "border-border bg-transparent text-text-reading group-enabled:group-hover:border-text-primary"
-                }`}
-              >
-                {option.name}
-              </span>
-            </button>
-          );
-        })}
-      </div>
-    </div>
   );
 }
 
@@ -147,7 +75,6 @@ function FixForm({
   formRef: RefObject<HTMLDivElement | null>;
 }) {
   const { t } = useTranslation("paper");
-  const reasonId = useId();
   const busy = form.status === "sending";
   const unchanged = sameKeys(form.topic, current.topic) && sameKeys(form.method, current.method);
   const canSend = !busy && form.topic.length > 0 && form.method.length > 0 && !unchanged;
@@ -158,65 +85,51 @@ function FixForm({
   return (
     <div ref={formRef} data-fix-form={form.status} className="mt-6 border-t border-hairline pt-6">
       <PickGroup
+        kind="fix"
         label={t("paper.classification.topic")}
         options={names.topics}
         picked={form.topic}
         locked={busy}
-        onToggle={(key) => toggle("topic", key)}
-        field="topic"
+        onPick={(key) => toggle("topic", key)}
+        multiple
+        name="topic"
       />
       <div className="mt-6">
         <PickGroup
+          kind="fix"
           label={t("paper.classification.method")}
           options={names.methods}
           picked={form.method}
           locked={busy}
-          onToggle={(key) => toggle("method", key)}
-          field="method"
+          onPick={(key) => toggle("method", key)}
+          multiple
+          name="method"
         />
       </div>
       <div className="mt-6">
-        <label htmlFor={reasonId} className={`block ${MONO_LABEL_CLASS}`}>
-          {t("paper.fix.reason")}
-          <span className="text-text-tertiary">{t("paper.fix.optional")}</span>
-        </label>
-        <input
-          id={reasonId}
-          type="text"
-          autoComplete="off"
-          readOnly={busy}
+        <OneLineField
+          kind="fix"
+          label={
+            <>
+              {t("paper.fix.reason")}
+              <span className="text-text-tertiary">{t("paper.fix.optional")}</span>
+            </>
+          }
           value={form.reason}
-          onChange={(event) => onChange({ ...form, reason: clampReason(event.target.value, form.reason) })}
-          className="block h-tap-target w-full rounded-none border-0 border-b border-border bg-transparent p-[0px] font-body text-s16 tracking-001 text-text-primary transition-[border-color] duration-250 read-only:text-text-secondary focus:border-accent-gold"
+          locked={busy}
+          onChange={(reason) => onChange({ ...form, reason })}
         />
       </div>
-      {form.status === "failed" ? (
-        <div role="alert" data-fix-failed="" className="mt-4 flex items-start gap-[9px] text-s14 leading-160 text-danger">
-          <InfoGlyph className="mt-[5px] shrink-0" />
-          <span>{t("paper.fix.failed")}</span>
-        </div>
-      ) : null}
-      <div className="mt-6 flex items-center gap-6">
-        <button
-          type="button"
-          data-fix-send=""
-          disabled={!canSend}
-          onClick={onSend}
-          className="inline-flex h-tap-target min-w-[120px] cursor-pointer items-center justify-center rounded-full bg-text-primary px-[28px] font-body text-button text-s14 tracking-006 text-on-button transition-transform duration-250 enabled:hover:-translate-y-px disabled:cursor-default disabled:opacity-55"
-        >
-          {busy ? t("paper.fix.sending") : t("paper.fix.send")}
-        </button>
-        {busy ? null : (
-          <button
-            type="button"
-            data-fix-cancel=""
-            onClick={onCancel}
-            className="inline-flex min-h-tap-target min-w-tap-target cursor-pointer items-center bg-transparent p-[0px] text-nav text-text-secondary transition-[color] duration-250 hover:text-text-primary"
-          >
-            {t("paper.fix.cancel")}
-          </button>
-        )}
-      </div>
+      {form.status === "failed" ? <FailedLine kind="fix">{t("paper.fix.failed")}</FailedLine> : null}
+      <SendActions
+        kind="fix"
+        busy={busy}
+        canSend={canSend}
+        sendText={busy ? t("paper.fix.sending") : t("paper.fix.send")}
+        cancelText={t("paper.fix.cancel")}
+        onSend={onSend}
+        onCancel={onCancel}
+      />
       <div className="mt-4 flex items-start gap-[9px] text-s13 leading-160 text-text-tertiary">
         <InfoGlyph className="mt-[3px] shrink-0" />
         <span>{t("paper.fix.hint")}</span>
@@ -317,7 +230,7 @@ export function ClassificationFixArea({ parts, control }: { parts: Classificatio
           data-fix-count=""
           aria-expanded={control.historyOpen}
           onClick={control.onToggleHistory}
-          className={`${LINK_CLASS} [&[aria-expanded=true]_svg]:rotate-180`}
+          className={`${LINK} [&[aria-expanded=true]_svg]:rotate-180`}
         >
           {parts.countLabel}
           <Caret />
@@ -338,7 +251,7 @@ export function ClassificationFixArea({ parts, control }: { parts: Classificatio
               setForm({ ...current, reason: "", status: "idle" });
               moveFocus("form");
             }}
-            className={LINK_CLASS}
+            className={LINK}
           >
             {t("paper.fix.open")}
           </button>

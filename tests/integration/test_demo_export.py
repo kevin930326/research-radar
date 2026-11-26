@@ -61,7 +61,7 @@ from radar.services.demo_export import (
     queue_demo_export,
     run_demo_export,
 )
-from radar.services.judgments import fix_classification
+from radar.services.judgments import fix_classification, report_summary
 from radar.services.members import allow_member
 from tests.database import ROOT, TestDatabase, migrate
 from tests.demo_export_support import (
@@ -790,6 +790,49 @@ def test_classification_fixes_reach_the_demo_only_as_keys_and_verified(
         "method": {"keys": ["experiment"], "human_verified": True},
     }
     assert classification["provenance"]["human_verified"] is True
+
+
+def test_summary_reports_never_reach_the_demo(
+    db: TestDatabase, database: Database, tmp_path: Path
+) -> None:
+    # Story 3.12：成員經正式的回報（services）回報一篇完整內容論文的中文重點兩欄，說明與姓名帶
+    # 金絲雀；示範站的匯出只有中文重點的四欄內容，沒有回報的欄位、說明、回報的人、zh_summary 的 ID
+    # （白名單）。
+    snapshots = publish_snapshots(db)
+    ids = seed_papers(
+        db, database, [PaperSpec("reported", 1, zh_summary=True)], snapshots=snapshots
+    )
+    member = allow_member(
+        SystemViewer(), database, email="reporter@example.org", display_name=f"回報者 {CANARY}"
+    ).member_id
+    for field in ("method", "findings"):
+        block = report_summary(
+            MemberViewer(member_id=member, is_admin=False),
+            database,
+            paper_page_setup(),
+            ids["reported"],
+            field=field,
+            note=f"說明 {CANARY}",
+            now=datetime(2026, 11, 26, tzinfo=UTC),
+        )
+        assert block is not None
+    assert block.value.reported_fields  # type: ignore[union-attr]
+
+    _export(database, tmp_path, demo_setup(canaries=[CANARY]))
+
+    text = _all_text(tmp_path).casefold()
+    for forbidden in (CANARY, "reporter@example.org", "回報者", "說明 "):
+        assert forbidden.casefold() not in text
+    for key in ("reported_fields", "zh_summary_id", "note", "reason", "member_name"):
+        assert f'"{key}"' not in text
+    [paper] = _papers(tmp_path).values()
+    assert paper["full"] is not None
+    assert set(paper["full"]["zh_summary"]["value"]) == {
+        "research_question",
+        "method",
+        "theory",
+        "findings",
+    }
 
 
 # --- 寫到一半失敗、並行、接手 ------------------------------------------------------------------

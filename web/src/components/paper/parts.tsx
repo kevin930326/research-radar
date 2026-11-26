@@ -39,8 +39,11 @@ export function BlockLine({
   );
 }
 
-/** 區塊標題列：中文標題（section-title-zh：24px、行高 1.4、字距 0.04em、字重 300）＋旁邊的標章或來源。 */
-export function SectionHeading({ id, title, children }: { id: string; title: string; children?: ReactNode }) {
+/**
+ * 區塊標題列：中文標題（section-title-zh：24px、行高 1.4、字距 0.04em、字重 300）＋旁邊的標章或來源；
+ * `action` 放在那一列的右邊（中文重點的「回報錯誤」，Story 3.12；設計稿外層 justify-content: space-between）。
+ */
+export function SectionHeading({ id, title, children, action }: { id: string; title: string; children?: ReactNode; action?: ReactNode }) {
   return (
     <div className="flex flex-wrap items-baseline justify-between gap-4">
       <div className="flex flex-wrap items-baseline gap-4">
@@ -49,6 +52,7 @@ export function SectionHeading({ id, title, children }: { id: string; title: str
         </h2>
         {children}
       </div>
+      {action}
     </div>
   );
 }

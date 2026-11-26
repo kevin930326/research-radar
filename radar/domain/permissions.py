@@ -25,6 +25,8 @@ class Action(StrEnum):
     """會改資料的動作。名稱是「動詞_名詞」。"""
 
     CORRECT_CLASSIFICATION = "correct_classification"
+    REPORT_SUMMARY = "report_summary"
+    RESOLVE_SUMMARY_REPORT = "resolve_summary_report"
     CONFIRM_CONSTRUCT_MERGE = "confirm_construct_merge"
     MERGE_CONSTRUCTS = "merge_constructs"
     ADD_LIBRARY_ITEM = "add_library_item"
@@ -42,6 +44,10 @@ PERMISSIONS: Mapping[Action, Rule] = MappingProxyType(
     {
         # 修正分類：任何成員（修正事件只新增、不刪除）。
         Action.CORRECT_CLASSIFICATION: Rule.ANY_MEMBER,
+        # 回報中文重點錯誤：任何成員（回報只新增、不改內容，Story 3.12）；處理回報（已確認無誤、
+        # 重新產生）只有管理者（ADR-0015，經管理指令）。
+        Action.REPORT_SUMMARY: Rule.ANY_MEMBER,
+        Action.RESOLVE_SUMMARY_REPORT: Rule.ADMIN,
         # 構面合併：成員可以在證據簡報流程中確認（待管理者複核，FR-21）；正式合併與推翻只有管理者。
         Action.CONFIRM_CONSTRUCT_MERGE: Rule.ANY_MEMBER,
         Action.MERGE_CONSTRUCTS: Rule.ADMIN,

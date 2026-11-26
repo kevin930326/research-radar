@@ -1,0 +1,69 @@
+# ADR-0064：回報中文重點錯誤的端點、說明的規則、標記與管理指令
+
+- 狀態：提議（Story 3.12，等 Kevin 確認）
+- 日期：2026-11-26
+- 對應：Story 3.12；FR-4、FR-14 附則；AD-10（人工判斷只新增）、AD-26（同一個交易寫稽核）；ADR-0015（有效值 view）、ADR-0055（預期成員標頭）、ADR-0063（修正分類：錯誤的先後、鎖與時間）；EXPERIENCE.md 畫面 8 第 3 點、決定第 95、97、98 項
+- 補 Story 2.7（`judgment_event` 的 `summary_report`／`summary_report_resolution`、`effective_zh_summary.reported_fields`）沒寫到的：成員從哪裡寫、說明怎麼驗、標記給誰看、管理者怎麼處理。
+
+## 背景
+
+Story 2.7 已經有回報與處理結果的事件形狀（`domain/judgments.summary_report`、`summary_report_resolution`）和有效值 view：
+`effective_zh_summary.reported_fields` 只算「指向目前有效的那一筆中文重點、還沒有處理結果」的回報。論文頁也已經會畫那一行標記。
+缺的是：成員版的寫入端點、後端驗證、管理者列出與處理回報的方法、示範站不帶標記的保證，以及「重新產生」怎麼接。
+
+## 考慮過的選項
+
+### 一、端點的形狀
+
+| | 做法 | 選了會怎樣 |
+|---|---|---|
+| A | `POST /api/v1/papers/{id}/summary-reports`（一欄＋說明）回回報後的中文重點區塊（同論文頁的形狀） | 前端送出後直接換上回應；論文頁原本的回應形狀不用動 |
+| B | 回 204，前端再讀一次論文頁 | 多一次請求；兩次之間別人的回報或重新產生會讓畫面和剛送出的對不上 |
+
+### 二、說明的規則
+
+| | 做法 | 選了會怎樣 |
+|---|---|---|
+| A | 必填、一行、去掉前後空白、最多 100 個 code point；不收控制字元（Cc）、落單的代理字元（Cs）、U+2028、U+2029、格式字元（Cf，零寬連接 U+200D 例外）與存不進資料庫的字 | 看不見的字（零寬空白、BOM、雙向覆寫）進不了管理指令與日後的畫面；組合 emoji 照常能寫 |
+| B | 和修正分類的理由共用同一個檢查（不擋 Cf） | 規則只有一份；但雙向覆寫等字會進資料庫（Gemini 審 #135 時提的） |
+| C | 共用一個檢查並一起擋 Cf | 會改到 #135 已經審過的理由規則；這個 Story 不改 #135 |
+
+### 三、處理回報（管理者）
+
+| | 做法 | 選了會怎樣 |
+|---|---|---|
+| A | 管理指令 `radar summary-reports list`、`radar summary-reports confirm-ok REPORT_ID --admin EMAIL`（寫 `confirmed_ok` 處理結果＋稽核） | 不用做沒有設計稿的管理畫面；標記照 view 自動消失 |
+| B | 做管理畫面 | 沒有設計稿（AGENTS.md：沒有設計稿先問 Kevin） |
+
+### 四、「重新產生」怎麼接
+
+| | 做法 | 選了會怎樣 |
+|---|---|---|
+| A | 這次不接；管理指令只有「已確認無誤」。列給 Kevin | 不動 LLM 閘門的規則；被回報的欄位要等摘要換了（新的一筆中文重點）標記才會自己消失 |
+| B | 管理指令直接把同一個 key 的工作重排 | LLM 閘門（`run_llm_job`）看到同一個 key 已經有 `active` 結果就跳過，要重排得改閘門的規則（ADR-0015／AD-8 的決定），不在這個 Story 的範圍 |
+| C | 換一個 key（例如帶回報 ID）讓閘門當成新工作 | 同一篇會有兩筆「目前有效」的候選，要改 view 的挑法，同樣動到 ADR-0015 |
+
+## 決定
+
+一 A、二 A、三 A、四 A。
+
+1. **端點**：`POST /api/v1/papers/{paper_id}/summary-reports`，本文 `{"field": "...", "note": "..."}`（形狀由 Pydantic 擋：都是字串、欄位最長 64、說明最長 1000、不收多的欄位）。要登入、本站的 `Origin`、比對 `X-Radar-Expected-Member`（ADR-0055）。回應 `no-store`，200 回 `{"zh_summary": 中文重點區塊}`，`reported_fields` 只有欄位名稱。
+   **錯誤的先後**同 ADR-0063：`Origin` 不對 403 → 沒登入 401 → 預期成員不同 409／格式不對 400 → 論文看不到、不存在、壞 ID 404 → 本文不對 422。看不到的論文在路由的相依項（`visible_paper`）裡先查，所以看不到的論文帶壞本文也是 404。
+2. **規則**（`domain/summary_reports.check_summary_report`）：欄位是四欄之一（`research_question`、`method`、`theory`、`findings`；大小寫不同也不收）；說明照選項二 A。中文重點不是 `ready`（還在產生、沒有產生成功、四欄都沒有、沒有摘要、手填書目）時不收（`NO_SUMMARY`）。不收一律 422 `request_invalid`，不回顯說明，日誌只記原因代號。同一位成員可以對同一欄回報很多次（每次都是一筆事件；標記只看「有沒有」）。
+3. **寫入**：`services/judgments.report_summary` 在一個交易裡：讀論文（看不到就不去排隊等鎖）→ 拿這一篇的交易級鎖（`summary_report:<id>`）→ 拿到鎖後再讀一次論文 → 取一次 `clock_timestamp()` → 讀目前的中文重點 → 驗 → 寫一筆 `summary_report` 事件（指向當時有效的那一筆 `zh_summary_id`；角色是 admin 或 member）→ 寫一筆稽核（`report_summary`，detail 是事件 ID、論文 ID、欄位，沒有說明）→ 重讀中文重點區塊回傳。事件與稽核共用同一個時間；任何一步失敗整個交易退回（稽核失敗時回報也退回，有整合測試）。
+4. **標記給誰看**：論文頁的標記來自 `effective_zh_summary.reported_fields`。`repo/visibility.visible_summary_report_marks` 決定讀不讀得到：成員與系統是 `TRUE`，公開身分（示範站匯出）是 `FALSE`，讀成空的。示範站的白名單（`DemoZhSummaryContent`）本來就不帶這一欄；示範站畫面也有明確的測試。誰回報、說明只經管理指令讀（`repo/judgments.list_open_summary_reports`，用 `visible_member_judgments`，公開身分直接丟錯）。
+5. **管理指令**：`radar summary-reports list` 列出還沒處理的回報：回報 ID、論文 ID 與標題、欄位、成員姓名、台北時間、說明（印到終端機前轉義控制字元），被回報的那一筆已經不是目前的會註明「論文頁不顯示標記」。`confirm-ok` 寫一筆 `confirmed_ok` 處理結果與稽核（`resolve_summary_report`），`--admin` 要是名單上的管理者；已經處理過或不存在的回報不寫。誰能跑同 ADR-0063 第 5 點（拿得到執行環境的維運者）。
+6. **前端**：中文重點標題列右邊「回報錯誤」，按了在標題列下面原地展開表單。共用的中文重點區塊不 import 回報錯誤，成員版用 render 函式（`SummaryReportRender`）排進去，示範站的建置不帶（`e2e/build-output.spec.ts`）。送出的步驟和修正分類共用（`routes/paper-write.ts`：預期成員、409、401、送出之後換了人不改快取）。說明的字數前端同樣算 code point；前端不檢查字元，後端不收時顯示「沒有送出成功」。
+
+## 理由
+
+- 回報要指向「當時有效的那一筆」，在鎖裡讀目前的中文重點再寫，才不會兩個人同時回報、或回報時剛好重新產生而指錯。
+- 說明會被管理者在終端機讀到，看不見的格式字元（尤其雙向覆寫）會讓人讀錯；零寬連接是組合 emoji 的一部分，不改變文字方向，放行。
+- 「重新產生」牽動 LLM 閘門與有效值 view 的決定，不該夾在回報的 Story 裡改。
+
+## 取捨
+
+- 理由（修正分類）與說明（回報）的字元規則不一樣：說明多擋 Cf。理由要不要跟著擋，留給 Kevin 決定（改的話是 #135 那一邊的事）。
+- 前端不檢查字元：貼進零寬空白之類的字時，畫面只會說「沒有送出成功」，成員不知道為什麼。要不要加一行說明沒有設計稿，列給 Kevin。
+- 「重新產生」沒有接：被回報的欄位只能由管理者標「已確認無誤」，或等摘要換了才消失。
+- 「剩 N 字」沒有做（設計稿沒有，README 要求先問 Kevin），只擋 100 字。

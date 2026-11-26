@@ -19,6 +19,7 @@ from typing import NoReturn
 
 from fastapi import FastAPI
 
+from radar.domain.ai_blocks import AiBlock
 from radar.domain.auth import AuthenticatedMember, FakeLoginRequest, MemberSummary, NewSession
 from radar.domain.auth_settings import FakeLoginMode
 from radar.domain.contracts import CubeResponse, DisplayNames, build_client_config
@@ -31,7 +32,7 @@ from radar.entrypoints.api.auth import AuthRoutes, FakeLoginRoutes
 from radar.entrypoints.api.library import LibraryRoutes
 from radar.entrypoints.api.main import install_api_routes
 from radar.entrypoints.api.paper_list import PaperListRoutes
-from radar.entrypoints.api.papers import ClassificationFixBody, PaperRoutes
+from radar.entrypoints.api.papers import ClassificationFixBody, PaperRoutes, SummaryReportBody
 from radar.services.judgments import ClassificationFixes
 
 
@@ -72,6 +73,12 @@ def _load_classification_fixes(
 def _fix_classification(
     _viewer: MemberViewer, _paper_id: uuid.UUID, _body: ClassificationFixBody
 ) -> ClassificationFixes | None:
+    _not_for_requests()
+
+
+def _report_summary(
+    _viewer: MemberViewer, _paper_id: uuid.UUID, _body: SummaryReportBody
+) -> AiBlock | None:
     _not_for_requests()
 
 
@@ -126,6 +133,7 @@ def build_schema_app() -> FastAPI:
             paper_visible=_paper_visible,
             load_classification_fixes=_load_classification_fixes,
             fix_classification=_fix_classification,
+            report_summary=_report_summary,
         ),
         library_routes=LibraryRoutes(
             list_page=_list_library,

@@ -103,3 +103,15 @@ test("demo build has no classification fix", ({ browserName }) => {
     expect(demo.includes(marker), `demo has ${marker}`).toBe(false);
   }
 });
+
+// Story 3.12：回報錯誤（中文重點標題列的「回報錯誤」、表單；回報的端點）只在成員版。回報的標記（「有成員回報此欄可能有誤」）
+// 畫在兩站共用的中文重點區塊裡，示範站的資料沒有回報（e2e/summary-report.spec.ts、datasource/demo-paper-summary-report.test.tsx）。
+test("demo build has no summary report", ({ browserName }) => {
+  test.skip(browserName !== "chromium", "build output is checked once");
+  const member = jsText("dist");
+  const demo = jsText("dist-demo");
+  for (const marker of ["data-summary-report", "data-report-open", "summary-reports"]) {
+    expect(member.includes(marker), `member has ${marker}`).toBe(true);
+    expect(demo.includes(marker), `demo has ${marker}`).toBe(false);
+  }
+});

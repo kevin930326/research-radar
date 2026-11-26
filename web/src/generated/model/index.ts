@@ -49,6 +49,8 @@ export * from './researchModelBlock.ts';
 export * from './researchModelContent.ts';
 export * from './snapshotRef.ts';
 export * from './summaryField.ts';
+export * from './summaryReportBody.ts';
+export * from './summaryReportResponse.ts';
 export * from './supportLevel.ts';
 export * from './trendParams.ts';
 export * from './zhSummaryBlock.ts';
