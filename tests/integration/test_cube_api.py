@@ -11,6 +11,7 @@
 """
 
 import json
+import uuid
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -169,10 +170,37 @@ def test_someone_who_is_not_a_member_is_rejected(database: Database) -> None:
     _assert_rejected_without_reading(_cube(client, stranger), reads)
 
 
-def test_the_member_read_is_recorded_as_that_member(database: Database) -> None:
-    # 對照：同一個組法下，有效的 session 真的會讀一次計數（上面兩條的「沒讀」才算數）。
+def test_the_member_read_is_recorded_as_that_member(db: TestDatabase, database: Database) -> None:
+    # 對照：同一個組法下，有效的 session 真的會讀一次計數（上面兩條的「沒讀」才算數），而且讀的
+    # 身分就是登入的那位成員（不是別人、也不是管理者）。
     reads: list[MemberViewer] = []
     client, token = _client(database, reads)
+    rows = execute(
+        db, "SELECT member_id FROM allowed_email WHERE email = %s", "cube.member@example.org"
+    )
 
     assert _cube(client, token).status_code == 200
-    assert len(reads) == 1
+    assert reads == [MemberViewer(member_id=rows[0][0], is_admin=False)]
+
+
+def test_someone_outside_the_allowlist_gets_no_session_and_no_counts(
+    db: TestDatabase, database: Database
+) -> None:
+    # 不是成員的真實身分：不在允許名單的人走同一個登入端點（照 test_sessions 測名單外的寫法），
+    # 拿不到 session；帶著登入回應留下的任何 cookie 去讀計數，也是 401、一次都沒讀。
+    reads: list[MemberViewer] = []
+    client, _token = _client(database, reads)
+    sessions_before = execute(db, "SELECT count(*) FROM session")
+    client.cookies.clear()
+
+    login = client.post(
+        "/api/v1/auth/fake-login",
+        json={"member_id": str(uuid.uuid4())},
+        headers={"Origin": DEV_ORIGIN},
+    )
+
+    assert login.status_code == 403
+    assert login.json()["code"] == "login_rejected"
+    assert "set-cookie" not in login.headers
+    assert execute(db, "SELECT count(*) FROM session") == sessions_before
+    _assert_rejected_without_reading(client.get("/api/v1/cube"), reads)

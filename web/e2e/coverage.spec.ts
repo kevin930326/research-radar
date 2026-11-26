@@ -74,6 +74,70 @@ function tabKey(browserName: string): string {
   return browserName === "webkit" ? "Alt+Tab" : "Tab";
 }
 
+// 焦點外框（styles.css 的 :focus-visible，ADR-0037）：金色 1px、往外 4px。
+const OUTLINE_GOLD = [227, 180, 102] as const;
+const MARGIN = 8;
+
+/**
+ * 用鍵盤把焦點放到一格（Shift+Tab 再 Tab，讓 :focus-visible 成立），截那一格外面 8px 的圖，回傳四邊外框的
+ * 金色像素比例（0～1）。外框被固定的期刊欄蓋住或被捲動框切掉，那一邊就幾乎是 0。
+ */
+async function outlineCoverage(page: Page, target: ReturnType<typeof cell>, browserName: string): Promise<Record<"top" | "right" | "bottom" | "left", number>> {
+  await target.focus();
+  await page.keyboard.press(`Shift+${tabKey(browserName)}`);
+  await page.keyboard.press(tabKey(browserName));
+  await expect(target).toBeFocused();
+  const box = (await target.boundingBox())!;
+  const clip = { x: Math.floor(box.x) - MARGIN, y: Math.floor(box.y) - MARGIN, width: Math.ceil(box.width) + 2 * MARGIN, height: Math.ceil(box.height) + 2 * MARGIN };
+  const shot = await page.screenshot({ clip, animations: "disabled" });
+  const offset = { x: box.x - clip.x, y: box.y - clip.y };
+  // 在沒有任何內容安全政策的空白頁解 PNG（不加套件）。
+  const probe = await page.context().newPage();
+  try {
+    return await probe.evaluate(
+      async ({ data, size, offset, gold }) => {
+        const image = new Image();
+        image.src = `data:image/png;base64,${data}`;
+        await image.decode();
+        const canvas = document.createElement("canvas");
+        canvas.width = image.width;
+        canvas.height = image.height;
+        const context = canvas.getContext("2d")!;
+        context.drawImage(image, 0, 0);
+        const pixels = context.getImageData(0, 0, image.width, image.height).data;
+        const isGold = (x: number, y: number) => {
+          const at = (y * image.width + x) * 4;
+          return Math.abs(pixels[at]! - gold[0]) + Math.abs(pixels[at + 1]! - gold[1]) + Math.abs(pixels[at + 2]! - gold[2]) < 90;
+        };
+        // 外框落在格子邊往外 4～5px；每一邊在 3～6px 的帶子裡找，沿著那一邊逐點看有沒有金色。
+        const left = offset.x, top = offset.y, right = offset.x + size.width, bottom = offset.y + size.height;
+        const band = (outside: (depth: number) => [number, number], length: number, along: (step: number) => [number, number]) => {
+          let hit = 0;
+          for (let step = 0; step < length; step += 1) {
+            const found = [3, 4, 5, 6].some((depth) => {
+              const [dx, dy] = outside(depth);
+              const [ax, ay] = along(step);
+              return isGold(Math.round(ax + dx), Math.round(ay + dy));
+            });
+            if (found) hit += 1;
+          }
+          return hit / length;
+        };
+        const width = Math.floor(right - left), height = Math.floor(bottom - top);
+        return {
+          top: band((depth) => [0, top - depth], width, (step) => [left + step, 0]),
+          bottom: band((depth) => [0, bottom + depth - 1], width, (step) => [left + step, 0]),
+          left: band((depth) => [left - depth, 0], height, (step) => [0, top + step]),
+          right: band((depth) => [right + depth - 1, 0], height, (step) => [0, top + step]),
+        };
+      },
+      { data: shot.toString("base64"), size: { width: box.width, height: box.height }, offset, gold: OUTLINE_GOLD },
+    );
+  } finally {
+    await probe.close();
+  }
+}
+
 test.describe("member coverage page", () => {
   test("shows the intro, three readings, the table, the Elsevier note and the terms", async ({ page }) => {
     await open(page, member.baseURL);
@@ -122,6 +186,7 @@ test.describe("member coverage page", () => {
     await expect(cell(page, "dss", 2016).locator("span[aria-hidden]")).not.toHaveClass(/\bbg-text-reading\b/);
     await expect(cell(page, "dss", 2016)).toHaveClass(/\btext-accent-gold\b/);
     await expect(cell(page, "io", 2026)).toHaveClass(/\btext-text-tertiary\b/);
+    await expect(cell(page, "io", 2026).locator(".rounded-full")).toHaveCount(0);
     // 指到一格，右上顯示篇數；指到空格顯示「這一年沒有論文」。
     await cell(page, "misq", 2024).hover();
     await expect(page.locator("[data-coverage-pick]")).toHaveText(
@@ -150,6 +215,23 @@ test.describe("member coverage page", () => {
     await expect(page.locator("[data-coverage-announce]")).toHaveText(`${where} ${counts}`);
     await expect(page.locator("[data-coverage-announce]")).toHaveAttribute("role", "status");
   });
+
+  for (const viewport of [DESKTOP, PHONE]) {
+    test(`keyboard at ${viewport.width}px: the focus outline of a cell shows on all four sides`, async ({ page, browserName }) => {
+      await open(page, member.baseURL, viewport);
+      await expect(page.locator("table")).toBeVisible();
+      const lastJournal = (await page.locator("tbody tr").last().getAttribute("data-journal"))!;
+      // 第一欄（緊貼固定的期刊欄）、中間一格、最後一列最後一欄（貼著捲動框的右邊與下邊）；手機最後再從捲到最右邊
+      // 的狀態回到第二欄（捲回來時不停在固定欄底下）。
+      const targets = [cell(page, "misq", 2016), cell(page, "misq", 2021), cell(page, lastJournal, 2026), cell(page, "misq", 2017)];
+      for (const target of targets) {
+        const sides = await outlineCoverage(page, target, browserName);
+        for (const side of ["top", "right", "bottom", "left"] as const) {
+          expect(sides[side], `${await target.getAttribute("data-year")} ${side}`).toBeGreaterThan(0.9);
+        }
+      }
+    });
+  }
 
   test("broken counts (more abstracts than papers) show load failed instead of crashing", async ({ page, apiMock }) => {
     const rows = apiMock.cubeBody.rows.map((row) =>

@@ -77,11 +77,12 @@ class CubeRow(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     journal: str = Field(pattern=r"^[a-z][a-z0-9_]*$", max_length=64)
-    year: int
+    # 嚴格整數：JSON 的 true／false 不會被當成 1／0（示範站 cube.json 也用這個模型檢查）。
+    year: int = Field(strict=True)
     dim: CubeDim
     key_a: _Key | None = None
     key_b: _Key | None = None
-    n: int = Field(ge=0)
+    n: int = Field(ge=0, strict=True)
 
     @model_validator(mode="after")
     def _check_keys(self) -> Self:

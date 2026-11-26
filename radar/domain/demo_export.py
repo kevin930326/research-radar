@@ -738,6 +738,7 @@ class DemoTaxonomy(BaseModel):
 
 # 示範站的計數方塊只有這兩種列（Story 1.10 的定義；ADR-0062）。
 _DEMO_CUBE_DIMS: Final = (CubeDim.TOTAL, CubeDim.WITH_ABSTRACT)
+_DEMO_CUBE_DIM_VALUES: Final = frozenset(dim.value for dim in _DEMO_CUBE_DIMS)
 
 
 class DemoCube(BaseModel):
@@ -1143,14 +1144,17 @@ def check_demo_files(
        另外算的），而且不在 `excluded_paper_ids`；不是布林也算失敗。直接看 JSON，不經過模型。
     4. （計數方塊的部分，Story 3.15）`cube.json` 的每一格用 `papers-index.json` 重算：每個（期刊,
        年份）的 `total` 等於索引裡那一格的篇數、`with_abstract` 等於其中 `has_abstract` 為真的篇數，
-       索引有的格子 `cube.json` 都有、反過來也是；兩個檔的快照編號與匯出編號相同。直接看 JSON，
-       不經過模型（`_cube_problems`）。失敗原因裡的期刊只印 `journal_keys`（設定檔的期刊代號）
-       裡有的，其他的只印第幾格，不回顯檔裡的值。
+       索引有的格子 `cube.json` 都有、反過來也是（`cube.json` 多一格也失敗，就算那格是 0 篇）；
+       每一格剛好一列 `total`、一列 `with_abstract`，重複的列、其他種類的列、不是整數（含布林）或
+       負的篇數都失敗；兩個檔的快照編號與匯出編號相同。直接看 JSON，不經過模型（`_cube_problems`）。
+       失敗原因裡的期刊只印 `journal_keys`（設定檔的期刊代號）裡有的，其他的只印第幾格，不回顯檔裡
+       的值。
     8. `manifest.json` 列的檔和實際要寫的檔（`manifest.json` 以外）剛好是同一批：列了卻沒有、認得的
        資料檔有了卻沒列都失敗（manifest 的模型只檢查它列得齊不齊，不知道實際有哪些檔）。
     9. `manifest.json` 的 `summary` 的 `paper_count`、`with_abstract_count`、`full_content_count`
-       用同一次匯出的 `papers-index.json` 重算（ADR-0007 第 4 項「可點的讀數」）。8、9 直接看 JSON，
-       不經過模型（`_manifest_problems`）。
+       用同一次匯出的 `papers-index.json` 重算（ADR-0007 第 4 項「可點的讀數」），讀數要是 JSON 的
+       整數（`60.0`、布林都失敗）。8、9 直接看 JSON，不經過模型（`_manifest_problems`）；沒有
+       `manifest.json` 也失敗。
     """
     allowed = frozenset(full_paper_ids)
     eligible = frozenset(eligible_paper_ids)
@@ -1215,21 +1219,32 @@ def _cube_problems(files: Mapping[str, bytes], journal_keys: frozenset[str]) -> 
                 problems.append(f"{cube_path}：{key} 和 {PAPERS_INDEX_FILE} 不同")
         expected = _index_cells(index)
         found = _cube_cells(cube)
-        if expected is None or found is None:
-            problems.append(f"{cube_path}：無法和 {PAPERS_INDEX_FILE} 對照重算（欄位的形狀不對）")
+        if expected is None or isinstance(found, str):
+            reason = "欄位的形狀不對" if expected is None else found
+            problems.append(f"{cube_path}：無法和 {PAPERS_INDEX_FILE} 對照重算（{reason}）")
             continue
+        # 雙向核對：只有一邊有的格子也算不同（就算那格是 0 篇），不拿 0 補缺的那一邊。
         for position, cell in enumerate(sorted(set(expected) | set(found)), start=1):
-            want = expected.get(cell, (0, 0))
-            got = found.get(cell, (0, 0))
-            if want != got:
-                journal, year = cell
-                where = (
-                    journal if journal in journal_keys else f"第 {position} 格（期刊不在設定檔）"
+            want = expected.get(cell)
+            got = found.get(cell)
+            if want == got:
+                continue
+            journal, year = cell
+            where = journal if journal in journal_keys else f"第 {position} 格（期刊不在設定檔）"
+            want_total, want_abstract = want or (0, 0)
+            got_total, got_abstract = got or (0, 0)
+            if got is None:
+                detail = f"cube.json 沒有這一格，{PAPERS_INDEX_FILE} 有 {want_total} 篇"
+            elif want is None:
+                detail = f"{PAPERS_INDEX_FILE} 沒有這一格，cube.json 列了 total {got_total}"
+            else:
+                detail = (
+                    f"total {got_total}／{want_total}，"
+                    f"with_abstract {got_abstract}／{want_abstract}"
                 )
-                problems.append(
-                    f"{cube_path}：{where} {year} 的計數和 {PAPERS_INDEX_FILE} 重算的不同"
-                    f"（total {got[0]}／{want[0]}，with_abstract {got[1]}／{want[1]}）"
-                )
+            problems.append(
+                f"{cube_path}：{where} {year} 的計數和 {PAPERS_INDEX_FILE} 重算的不同（{detail}）"
+            )
         index_ids = index.get("id")
         total = sum(count for count, _ in found.values())
         if isinstance(index_ids, list) and total != len(index_ids):
@@ -1251,11 +1266,11 @@ def _manifest_problems(files: Mapping[str, bytes]) -> list[str]:
     """第 8、9 項：manifest 列的檔和實際的檔是同一批；summary 的三個讀數用索引重算。
 
     失敗原因只寫程式自己組的檔名、summary 的欄位名稱與整數；manifest 裡看不懂的路徑或值不回顯
-    （寫「第幾個」或「?」）。沒有 `manifest.json` 時不檢查；manifest 不是合法 JSON 或形狀不對時只報
-    一句（白名單模型那一項另外會報細節）。
+    （寫「第幾個」或「?」）。沒有 `manifest.json` 就失敗（沒有它就核對不了「實際有卻沒列」）；
+    manifest 不是合法 JSON 或形狀不對時只報一句（白名單模型那一項另外會報細節）。
     """
     if MANIFEST_FILE not in files:
-        return []
+        return [f"{MANIFEST_FILE}：沒有這個檔，無法核對列的檔與讀數"]
     manifest = _json_object(files[MANIFEST_FILE])
     entries = None if manifest is None else manifest.get("files")
     if manifest is None or not isinstance(entries, list):
@@ -1292,8 +1307,17 @@ def _summary_problems(manifest: Mapping[str, Any], files: Mapping[str, bytes]) -
     expected: dict[str, int | None] = {"paper_count": len(ids) if isinstance(ids, list) else None}
     for field_name, column in _SUMMARY_FROM_INDEX:
         values = index.get(column)
+        # 欄要是長度和 `id` 一樣、全部是布林的陣列；有一個不是布林就算形狀不對（不默默當成沒有）。
+        well_formed = (
+            isinstance(values, list)
+            and isinstance(ids, list)
+            and len(values) == len(ids)
+            and all(isinstance(value, bool) for value in values)
+        )
         expected[field_name] = (
-            sum(1 for value in values if value is True) if isinstance(values, list) else None
+            sum(1 for value in values if value is True)
+            if well_formed and isinstance(values, list)
+            else None
         )
     problems: list[str] = []
     for field_name, want in expected.items():
@@ -1302,8 +1326,9 @@ def _summary_problems(manifest: Mapping[str, Any], files: Mapping[str, bytes]) -
             problems.append(
                 f"{MANIFEST_FILE}：{PAPERS_INDEX_FILE} 的形狀不對，無法重算 {field_name}"
             )
-        elif got != want or isinstance(got, bool):
-            shown = got if isinstance(got, int) and not isinstance(got, bool) else "?"
+        elif type(got) is not int or got != want:
+            # 只收 JSON 的整數：`60.0` 和 60 相等、布林是 int 的子類別，都要擋。
+            shown = got if type(got) is int else "?"
             problems.append(
                 f"{MANIFEST_FILE}：summary.{field_name}（{shown}）和 {PAPERS_INDEX_FILE} 重算的"
                 f"（{want}）不同"
@@ -1320,7 +1345,11 @@ def _json_object(content: bytes) -> dict[str, Any] | None:
 
 
 def _index_cells(index: Mapping[str, Any]) -> dict[_Cell, tuple[int, int]] | None:
-    """索引的（期刊, 年份）→（篇數, 有摘要的篇數）；沒有期刊或年份的論文不算進任何一格。"""
+    """索引的（期刊, 年份）→（篇數, 有摘要的篇數）；沒有期刊或年份（null）的論文不算進任何一格。
+
+    期刊不是字串也不是 null、年份不是整數（布林不算）也不是 null、`has_abstract` 不是布林時，整份
+    算形狀不對（回傳 None），不默默略過。
+    """
     journals, years, abstracts = index.get("journal"), index.get("year"), index.get("has_abstract")
     if not (isinstance(journals, list) and isinstance(years, list) and isinstance(abstracts, list)):
         return None
@@ -1328,31 +1357,48 @@ def _index_cells(index: Mapping[str, Any]) -> dict[_Cell, tuple[int, int]] | Non
         return None
     cells: dict[_Cell, tuple[int, int]] = {}
     for journal, year, has_abstract in zip(journals, years, abstracts, strict=True):
-        if not isinstance(journal, str) or not isinstance(year, int) or isinstance(year, bool):
+        if not isinstance(has_abstract, bool):
+            return None
+        if journal is not None and not isinstance(journal, str):
+            return None
+        if year is not None and type(year) is not int:
+            return None
+        if journal is None or year is None:
             continue
         total, with_abstract = cells.get((journal, year), (0, 0))
         cells[(journal, year)] = (total + 1, with_abstract + (1 if has_abstract is True else 0))
     return cells
 
 
-def _cube_cells(cube: Mapping[str, Any]) -> dict[_Cell, tuple[int, int]] | None:
-    """`cube.json` 的（期刊, 年份）→（`total`, `with_abstract`）；其他種類的列不算（模型那一項
-    會報）。"""
+def _cube_cells(cube: Mapping[str, Any]) -> dict[_Cell, tuple[int, int]] | str:
+    """`cube.json` 的（期刊, 年份）→（`total`, `with_abstract`）；形狀不對時回傳原因（不含檔裡的
+    值）。
+
+    和 `DemoCube` 的規則各自檢查一次（這裡不經過模型）：每一格剛好一列 `total`、一列
+    `with_abstract`；其他種類的列、重複的列、缺其中一種列、年份或篇數不是整數（布林不算）、篇數是
+    負的，都算形狀不對。
+    """
     rows = cube.get("rows")
     if not isinstance(rows, list):
-        return None
-    cells: dict[_Cell, tuple[int, int]] = {}
+        return "rows 不是陣列"
+    seen: dict[_Cell, dict[str, int]] = {}
     for row in rows:
         if not isinstance(row, dict):
-            return None
+            return "有一列不是物件"
         journal, year, dim, n = row.get("journal"), row.get("year"), row.get("dim"), row.get("n")
-        if not isinstance(journal, str) or not isinstance(year, int) or not isinstance(n, int):
-            return None
-        total, with_abstract = cells.get((journal, year), (0, 0))
-        if dim == CubeDim.TOTAL.value:
-            cells[(journal, year)] = (total + n, with_abstract)
-        elif dim == CubeDim.WITH_ABSTRACT.value:
-            cells[(journal, year)] = (total, with_abstract + n)
+        if not isinstance(journal, str) or type(year) is not int or type(n) is not int or n < 0:
+            return "有一列的期刊、年份或篇數形狀不對"
+        if dim not in _DEMO_CUBE_DIM_VALUES:
+            return "有 total、with_abstract 以外的列"
+        cell = seen.setdefault((journal, year), {})
+        if dim in cell:
+            return "同一格的同一種列重複"
+        cell[dim] = n
+    cells: dict[_Cell, tuple[int, int]] = {}
+    for key, cell in seen.items():
+        if set(cell) != set(_DEMO_CUBE_DIM_VALUES):
+            return "有一格缺 total 或 with_abstract 的列"
+        cells[key] = (cell[CubeDim.TOTAL.value], cell[CubeDim.WITH_ABSTRACT.value])
     return cells
 
 

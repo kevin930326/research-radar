@@ -253,7 +253,11 @@ function CoverageGrid({ table, names, params }: { table: CoverageTable; names: D
           {announced === null ? "" : describe(announced)}
         </span>
       </div>
-      <div data-coverage-scroll className="mt-[20px] overflow-x-auto border-b border-hairline split:mt-[24px]">
+      {/* 焦點外框（styles.css 的 :focus-visible：往外 4px、1px 寬）要整圈露出來：捲動框右邊與下邊各多留 5px，
+          用負的外距抵掉（表格的位置、寬度不變），底線畫在外面這一層。表格會橫向捲動的窄寬度，底線跟著捲動框
+          往右多 5px（和每列的線一樣長）；寬的時候表格不捲動，底線照舊和表格一樣寬。 */}
+      <div className="mt-[20px] -mr-[5px] border-b border-hairline split:mt-[24px] split:mr-[0px]">
+      <div data-coverage-scroll className="-mb-[5px] overflow-x-auto pr-[5px] pb-[5px] split:-mr-[5px]">
         <table className="w-[866px] table-fixed border-collapse split:w-full split:min-w-[900px]">
           <colgroup>
             <col className="w-[96px] split:w-auto" />
@@ -314,7 +318,7 @@ function CoverageGrid({ table, names, params }: { table: CoverageTable; names: D
                         onMouseEnter={() => choose({ journal: row.journal, cell }, false)}
                         onClick={() => choose({ journal: row.journal, cell }, true)}
                         onFocus={() => choose({ journal: row.journal, cell }, true)}
-                        className={`h-[44px] border-t border-hairline py-[10px] pl-[14px] text-left font-mono text-s13 whitespace-nowrap transition-[background-color] duration-150 split:h-[46px] split:py-[0px] split:pl-[12px] split:text-s14 ${
+                        className={`h-[44px] scroll-ml-[101px] border-t border-hairline py-[10px] focus-visible:relative focus-visible:z-[2] split:scroll-ml-[135px] pl-[14px] text-left font-mono text-s13 whitespace-nowrap transition-[background-color] duration-150 split:h-[46px] split:py-[0px] split:pl-[12px] split:text-s14 ${
                           cell.ratio === null ? "text-text-tertiary" : cell.low ? "text-accent-gold" : "text-text-reading"
                         } ${on ? "bg-menu-item-hover" : ""}`}
                       >
@@ -328,6 +332,7 @@ function CoverageGrid({ table, names, params }: { table: CoverageTable; names: D
             })}
           </tbody>
         </table>
+      </div>
       </div>
       <div data-coverage-legend className="mt-[14px] flex flex-wrap gap-x-[28px] gap-y-[6px] text-s13 leading-170 tracking-004 text-text-secondary">
         <span className="inline-flex items-center gap-[8px] whitespace-nowrap">

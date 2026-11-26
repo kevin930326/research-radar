@@ -256,9 +256,10 @@ def test_an_unknown_journal_value_is_never_echoed() -> None:
     secret = "Secret Member Note"
 
     def plant(data: dict[str, Any]) -> None:
-        first = data["rows"][0]
+        # 先記下第一格的鍵再改（直接拿第一列比，改了第一列之後同一格的 with_abstract 就比不到）。
+        cell = (data["rows"][0]["journal"], data["rows"][0]["year"])
         for row in data["rows"]:
-            if (row["journal"], row["year"]) == (first["journal"], first["year"]):
+            if (row["journal"], row["year"]) == cell:
                 row["journal"] = secret
 
     problems = _all_problems(_edit(_files(), CUBE, plant))
@@ -310,3 +311,195 @@ def test_an_odd_listed_path_is_not_echoed() -> None:
 
     assert f"{MANIFEST_FILE}：列了 第 1 個檔，實際沒有這個檔" in problems
     assert all(secret not in problem for problem in problems)
+
+
+# --- 第 2 輪：獨立重算不靠模型也擋得下（布林、結構、manifest 缺檔、summary 型別）---
+
+
+def _first_cell_rows(data: dict[str, Any]) -> list[dict[str, Any]]:
+    cell = (data["rows"][0]["journal"], data["rows"][0]["year"])
+    return [row for row in data["rows"] if (row["journal"], row["year"]) == cell]
+
+
+def _cube_check_only(files: dict[str, bytes]) -> list[str]:
+    # 只看重算那一項（排除白名單模型那一句），證明這一項自己就擋得下。
+    return [problem for problem in _cube_problems(files) if "白名單模型" not in problem]
+
+
+def _set_one_total_to_true(data: dict[str, Any]) -> None:
+    row = next(row for row in data["rows"] if row["dim"] == "total" and row["n"] == 1)
+    row["n"] = True
+
+
+def _with_a_zero_abstract_cell() -> dict[str, bytes]:
+    """範例裡沒有「有摘要 0 篇」的格子：把只有 1 篇的那一格（索引與 cube.json 一起）改成那篇沒有
+    摘要，得到一份兩邊仍然對得上的檔。"""
+    files = _files()
+    cell = next(
+        (row["journal"], row["year"])
+        for row in _rows(files)
+        if row["dim"] == "total" and row["n"] == 1
+    )
+
+    def no_abstract_in_index(data: dict[str, Any]) -> None:
+        for position, key in enumerate(zip(data["journal"], data["year"], strict=True)):
+            if key == cell:
+                data["has_abstract"][position] = False
+
+    def no_abstract_in_cube(data: dict[str, Any]) -> None:
+        for row in data["rows"]:
+            if (row["journal"], row["year"]) == cell and row["dim"] == "with_abstract":
+                row["n"] = 0
+
+    return _edit(_edit(files, INDEX, no_abstract_in_index), CUBE, no_abstract_in_cube)
+
+
+def _set_one_abstract_to_false(data: dict[str, Any]) -> None:
+    row = next(row for row in data["rows"] if row["dim"] == "with_abstract" and row["n"] == 0)
+    row["n"] = False
+
+
+def test_the_bool_tests_start_from_matching_files() -> None:
+    # 前提：有 1 篇的格子、改出來的「有摘要 0 篇」那份兩邊仍然對得上（不然下面改不到東西）。
+    assert any(row["dim"] == "total" and row["n"] == 1 for row in _rows(_files()))
+    files = _with_a_zero_abstract_cell()
+    assert any(row["dim"] == "with_abstract" and row["n"] == 0 for row in _rows(files))
+    assert _cube_problems(files) == []
+
+
+@pytest.mark.parametrize(
+    "change",
+    [_set_one_total_to_true, _set_one_abstract_to_false],
+    ids=["n 是 true（剛好等於 1）", "n 是 false（剛好等於 0）"],
+)
+def test_a_boolean_count_fails_both_the_model_and_the_recount(
+    change: Callable[[Any], None],
+) -> None:
+    broken = _edit(_with_a_zero_abstract_cell(), CUBE, change)
+
+    assert any("不符合白名單模型 DemoCube" in problem for problem in _cube_problems(broken))
+    assert _cube_check_only(broken) == [
+        f"{CUBE}：無法和 papers-index.json 對照重算（有一列的期刊、年份或篇數形狀不對）"
+    ]
+
+
+def test_a_boolean_year_fails_the_recount() -> None:
+    def year_true(data: dict[str, Any]) -> None:
+        data["rows"][0]["year"] = True
+
+    broken = _edit(_files(), CUBE, year_true)
+
+    assert _cube_check_only(broken) == [
+        f"{CUBE}：無法和 papers-index.json 對照重算（有一列的期刊、年份或篇數形狀不對）"
+    ]
+
+
+@pytest.mark.parametrize("field_name", ["year", "n"])
+def test_cube_row_rejects_booleans(field_name: str) -> None:
+    row = {**_row("total", 1), field_name: True}
+
+    with pytest.raises(ValidationError):
+        CubeRow.model_validate(row)
+    with pytest.raises(ValidationError):
+        CubeRow.model_validate_json(json.dumps(row))
+
+
+def _add_an_empty_cell(data: dict[str, Any]) -> None:
+    # 索引沒有的格子、兩列都是 0 篇：以前會和「沒有」的預設值 (0, 0) 相等而漏掉。
+    data["rows"] += [
+        {"journal": "jit", "year": 2016, "dim": dim, "key_a": None, "key_b": None, "n": 0}
+        for dim in ("total", "with_abstract")
+    ]
+
+
+def test_an_extra_empty_cell_fails_the_recount() -> None:
+    broken = _edit(_files(), CUBE, _add_an_empty_cell)
+
+    assert _cube_check_only(broken) == [
+        f"{CUBE}：jit 2016 的計數和 papers-index.json 重算的不同"
+        "（papers-index.json 沒有這一格，cube.json 列了 total 0）"
+    ]
+
+
+def _split_a_total_into_two_rows(data: dict[str, Any]) -> None:
+    # 重複的 total 列、加起來剛好等於原本的篇數。
+    row = next(row for row in data["rows"] if row["dim"] == "total" and row["n"] >= 2)
+    row["n"] -= 1
+    data["rows"].append({**row, "n": 1})
+
+
+def _drop_a_zero_abstract_row(data: dict[str, Any]) -> None:
+    # 有摘要 0 篇的那一列漏掉：以前補成 0 而對得上。
+    position = next(
+        position
+        for position, row in enumerate(data["rows"])
+        if row["dim"] == "with_abstract" and row["n"] == 0
+    )
+    del data["rows"][position]
+
+
+def _add_an_other_kind_of_row(data: dict[str, Any]) -> None:
+    first = data["rows"][0]
+    data["rows"].append({**first, "dim": "topic", "key_a": "ai", "n": 1})
+
+
+@pytest.mark.parametrize(
+    ("change", "reason"),
+    [
+        (_split_a_total_into_two_rows, "同一格的同一種列重複"),
+        (_drop_a_zero_abstract_row, "有一格缺 total 或 with_abstract 的列"),
+        (_add_an_other_kind_of_row, "有 total、with_abstract 以外的列"),
+    ],
+    ids=["重複的列加起來剛好", "漏了 0 篇的 with_abstract", "其他種類的列"],
+)
+def test_structural_gaps_fail_the_recount(change: Callable[[Any], None], reason: str) -> None:
+    broken = _edit(_with_a_zero_abstract_cell(), CUBE, change)
+
+    assert _cube_check_only(broken) == [f"{CUBE}：無法和 papers-index.json 對照重算（{reason}）"]
+
+
+def test_a_non_boolean_has_abstract_in_the_index_fails() -> None:
+    # 索引的 has_abstract 混進不是布林的值：不默默當成沒有摘要。
+    def plant(data: dict[str, Any]) -> None:
+        data["has_abstract"][data["has_abstract"].index(False)] = 0
+
+    problems = _all_problems(_edit(_files(), INDEX, plant))
+
+    assert f"{CUBE}：無法和 papers-index.json 對照重算（欄位的形狀不對）" in problems
+    assert (
+        f"{MANIFEST_FILE}：papers-index.json 的形狀不對，無法重算 with_abstract_count" in problems
+    )
+
+
+def test_a_missing_manifest_fails() -> None:
+    files = {path: content for path, content in _files().items() if path != MANIFEST_FILE}
+
+    assert _manifest_problems(files) == [f"{MANIFEST_FILE}：沒有這個檔，無法核對列的檔與讀數"]
+
+
+@pytest.mark.parametrize(
+    "value",
+    [60.0, True, "60"],
+    ids=["60.0", "true", "字串"],
+)
+def test_summary_count_must_be_a_json_integer(value: object) -> None:
+    files = _files()
+    assert json.loads(files[MANIFEST_FILE])["summary"]["paper_count"] == 60
+
+    def plant(data: dict[str, Any]) -> None:
+        data["summary"]["paper_count"] = value
+
+    problems = _manifest_problems(_edit(files, MANIFEST_FILE, plant))
+
+    assert f"{MANIFEST_FILE}：summary.paper_count（?）和 papers-index.json 重算的（60）不同" in (
+        problems
+    )
+
+
+def test_a_non_boolean_full_content_flag_in_the_index_fails_the_summary() -> None:
+    def plant(data: dict[str, Any]) -> None:
+        data["has_full_content"][0] = "yes"
+
+    problems = _manifest_problems(_edit(_files(), INDEX, plant))
+
+    assert f"{MANIFEST_FILE}：papers-index.json 的形狀不對，無法重算 full_content_count" in problems
