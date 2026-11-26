@@ -26,7 +26,50 @@ if (MODE === "perrule") {
   }
 }
 
-for (const site of MODE === "perrule" ? [] : SITES) {
+// element：用會當的規則（PROBE_ONLY），開頁後先照 PROBE_PREP 改頁面，再用 PROBE_INCLUDE／PROBE_EXCLUDE 限制範圍。
+const PREP = process.env.PROBE_PREP ?? "";
+const INCLUDE = process.env.PROBE_INCLUDE ?? "";
+const EXCLUDE = process.env.PROBE_EXCLUDE ?? "";
+if (MODE === "element") {
+  for (const site of SITES) {
+    for (const path of site.pages.filter((page) => /^\/papers\/[0-9a-f]/.test(page))) {
+      test(`element ${PREP || "-"} ${site.name} ${path}`, async ({ page }) => {
+        await page.goto(`${site.baseURL}${path}`);
+        await expect(page.locator("main")).toBeVisible();
+        const changed = await page.evaluate((prep) => {
+          const all = (selector: string) => [...document.querySelectorAll(selector)];
+          if (prep === "aside-to-div") {
+            for (const aside of all("aside")) {
+              const div = document.createElement("div");
+              for (const attribute of [...aside.attributes]) div.setAttribute(attribute.name, attribute.value);
+              div.append(...aside.childNodes);
+              aside.replaceWith(div);
+            }
+            return all("aside").length === 0;
+          }
+          if (prep === "no-h1-lang") { for (const e of all("h1[lang]")) e.removeAttribute("lang"); return true; }
+          if (prep === "no-br") { for (const e of all("br")) e.remove(); return true; }
+          if (prep === "no-sticky") {
+            for (const e of all("*")) if (getComputedStyle(e).position === "sticky") (e as HTMLElement).style.setProperty("position", "static", "important");
+            return all("*").every((e) => getComputedStyle(e).position !== "sticky");
+          }
+          if (prep === "no-balance") {
+            for (const e of all("*")) (e as HTMLElement).style.setProperty("text-wrap", "wrap", "important");
+            return all("*").every((e) => getComputedStyle(e).getPropertyValue("text-wrap-style") !== "balance");
+          }
+          return true;
+        }, PREP);
+        expect(changed).toBe(true);
+        let builder = new AxeBuilder({ page }).withRules(ONLY);
+        if (INCLUDE !== "") builder = builder.include(INCLUDE);
+        if (EXCLUDE !== "") builder = builder.exclude(EXCLUDE);
+        await builder.analyze();
+      });
+    }
+  }
+}
+
+for (const site of MODE === "perrule" || MODE === "element" ? [] : SITES) {
   for (const path of [...site.pages, MISSING_PATH]) {
     test(`${site.name} ${path}: no axe violations`, async ({ page }) => {
       await page.goto(`${site.baseURL}${path}`);

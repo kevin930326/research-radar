@@ -20,20 +20,23 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { name: R1, rules: "area-alt,aria-input-field-name,aria-roles,avoid-inline-spacing,duplicate-id-aria,image-alt,listitem,role-img-alt,td-headers-attr" }
-          - { name: R2, rules: "aria-allowed-attr,aria-meter-name,aria-tab-name,blink,form-field-multiple-labels,input-button-name,marquee,scrollable-region-focusable,th-has-data-cells" }
-          - { name: R3, rules: "aria-braille-equivalent,aria-progressbar-name,aria-toggle-field-name,button-name,frame-focusable-content,input-image-alt,meta-refresh,select-name,valid-lang" }
-          - { name: R4, rules: "aria-command-name,aria-prohibited-attr,aria-tooltip-name,bypass,frame-title-unique,label-content-name-mismatch,meta-viewport,server-side-image-map,video-caption" }
-          - { name: R5, rules: "aria-conditional-attr,aria-required-attr,aria-valid-attr-value,css-orientation-lock,frame-title,label,nested-interactive,summary-name" }
-          - { name: R6, rules: "aria-deprecated-role,aria-required-children,aria-valid-attr,definition-list,html-has-lang,link-in-text-block,no-autoplay-audio,svg-img-alt" }
-          - { name: R7, rules: "aria-hidden-body,aria-required-parent,audio-caption,dlitem,html-lang-valid,link-name,object-alt,table-fake-caption" }
-          - { name: R8, rules: "aria-hidden-focus,aria-roledescription,autocomplete-valid,document-title,html-xml-lang-mismatch,list,p-as-heading,td-has-header" }
+          - { name: P0-base, prep: "", include: "", exclude: "" }
+          - { name: P1-exclude-aside, prep: "", include: "", exclude: "aside" }
+          - { name: P2-only-aside, prep: "", include: "aside", exclude: "" }
+          - { name: P3-aside-to-div, prep: "aside-to-div", include: "", exclude: "" }
+          - { name: P4-no-sticky, prep: "no-sticky", include: "", exclude: "" }
+          - { name: P5-no-h1-lang, prep: "no-h1-lang", include: "", exclude: "" }
+          - { name: P6-no-br, prep: "no-br", include: "", exclude: "" }
+          - { name: P7-no-balance, prep: "no-balance", include: "", exclude: "" }
     defaults:
       run:
         working-directory: web
     env:
-      PROBE_MODE: perrule
-      PROBE_ONLY: ${{ matrix.rules }}
+      PROBE_MODE: element
+      PROBE_ONLY: aria-allowed-attr,aria-prohibited-attr,aria-conditional-attr,nested-interactive,label-content-name-mismatch
+      PROBE_PREP: ${{ matrix.prep }}
+      PROBE_INCLUDE: ${{ matrix.include }}
+      PROBE_EXCLUDE: ${{ matrix.exclude }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -78,7 +81,7 @@ jobs:
           mkdir -p probe
           ( while true; do echo "== $(date +%T)"; free -m | sed -n 2p; ps -eo rss,comm --sort=-rss | head -6 | tail -5; sleep 2; done ) > probe/mem.log 2>&1 &
           sampler=$!
-          args=(--project=firefox --retries=0 --repeat-each=3 --workers="${WORKERS}" --reporter=list e2e/a11y.spec.ts)
+          args=(--project=firefox --retries=0 --repeat-each=15 --workers="${WORKERS}" --reporter=list e2e/a11y.spec.ts)
           if [ -n "${GREP}" ]; then args+=(--grep "${GREP}"); fi
           if [ -n "${INVERT}" ]; then args+=(--grep-invert "${INVERT}"); fi
           npx playwright test "${args[@]}" > probe/list.log 2> probe/pw-debug.log
@@ -87,7 +90,7 @@ jobs:
           echo "exit=${code}"
           tail -8 probe/list.log
           echo "--- 每頁當掉次數"
-          grep -E '✘' probe/list.log | sed -E 's/.*› rule ([^ ]+) .*/\1/' | sort | uniq -c || true
+          grep -E '✘' probe/list.log | sed -E 's/.*› element ([^ ]+) (member|demo) ([^ ]+).*/\2 \3/' | sort | uniq -c || true
           echo "--- 錯誤種類"
           grep -oE 'Error: .{0,80}' probe/list.log | sort | uniq -c | sort -rn | head -10 || true
           echo "--- firefox stderr 可疑行"
