@@ -23,10 +23,23 @@ import { InfoGlyph, MONO_LABEL_CLASS } from "./parts";
 /** 理由的上限（後端 REASON_MAX_LENGTH；決定第 98 項）。算 code point（表情符號算一個字），和後端一樣。 */
 export const REASON_MAX_LENGTH = 100;
 
-/** 理由最多 REASON_MAX_LENGTH 個 code point（輸入框的 maxLength 算的是 UTF-16 單位，表情符號會算兩個，所以自己截）。 */
-export function clampReason(value: string): string {
-  const points = [...value];
-  return points.length > REASON_MAX_LENGTH ? points.slice(0, REASON_MAX_LENGTH).join("") : value;
+/**
+ * 理由最多 REASON_MAX_LENGTH 個 code point（輸入框的 maxLength 算的是 UTF-16 單位，表情符號會算兩個，所以自己截）。
+ * 超過時只截這一次新打進來（或貼上）的那一段，原本的字不動（和瀏覽器的 maxLength 一樣；不能從尾巴截，
+ * 否則滿 100 字時在中間插字會吃掉原本的句尾）。`previous` 是改之前的值。
+ */
+export function clampReason(value: string, previous = ""): string {
+  const next = [...value];
+  if (next.length <= REASON_MAX_LENGTH) return value;
+  const before = [...previous];
+  let head = 0;
+  while (head < before.length && head < next.length && before[head] === next[head]) head += 1;
+  let tail = 0;
+  while (tail < before.length - head && tail < next.length - head && before[before.length - 1 - tail] === next[next.length - 1 - tail]) tail += 1;
+  const inserted = next.slice(head, next.length - tail);
+  const room = Math.max(0, REASON_MAX_LENGTH - (next.length - inserted.length));
+  const kept = [...next.slice(0, head), ...inserted.slice(0, room), ...next.slice(next.length - tail)];
+  return kept.slice(0, REASON_MAX_LENGTH).join("");
 }
 
 /** 修正分類要的資料與動作：由成員版的路由（routes/classification-fix.ts）給。 */
@@ -173,7 +186,7 @@ function FixForm({
           autoComplete="off"
           readOnly={busy}
           value={form.reason}
-          onChange={(event) => onChange({ ...form, reason: clampReason(event.target.value) })}
+          onChange={(event) => onChange({ ...form, reason: clampReason(event.target.value, form.reason) })}
           className="block h-tap-target w-full rounded-none border-0 border-b border-border bg-transparent p-[0px] font-body text-s16 tracking-001 text-text-primary transition-[border-color] duration-250 read-only:text-text-secondary focus:border-accent-gold"
         />
       </div>
@@ -288,8 +301,10 @@ export function ClassificationFixArea({ parts, control }: { parts: Classificatio
       .send({ topic: draft.topic, method: draft.method, ...(reason === "" ? {} : { reason }) })
       .then((done) => {
         sending.current = false;
+        // 等回應時使用者可能已經按 Tab 走到別處：焦點還在表單裡（或掉到 body）才移回「修正分類」。
+        const focusInForm = formRef.current?.contains(document.activeElement) === true || document.activeElement === document.body;
         setForm(done ? null : { ...draft, status: "failed" });
-        if (done) moveFocus("open");
+        if (done && focusInForm) moveFocus("open");
       });
   };
   let row: ReactNode = parts.tags;
