@@ -14,6 +14,7 @@ import shutil
 import threading
 import uuid
 from collections.abc import Iterator
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -42,7 +43,7 @@ from radar.domain.judgments import ActorRole, classification_fix
 from radar.domain.papers import AbstractSource
 from radar.domain.settings import Settings
 from radar.domain.taxonomy import TaxonomyField
-from radar.domain.viewer import PublicViewer, SystemViewer
+from radar.domain.viewer import MemberViewer, PublicViewer, SystemViewer
 from radar.entrypoints.bootstrap import build_worker
 from radar.repo.db import Database
 from radar.repo.demo_exports import update_demo_export_finished, update_demo_export_if_owned
@@ -60,6 +61,7 @@ from radar.services.demo_export import (
     queue_demo_export,
     run_demo_export,
 )
+from radar.services.judgments import fix_classification
 from radar.services.members import allow_member
 from tests.database import ROOT, TestDatabase, migrate
 from tests.demo_export_support import (
@@ -73,7 +75,7 @@ from tests.demo_export_support import (
     seed_papers,
 )
 from tests.integration.test_effective_views import create_event
-from tests.llm_support import execute
+from tests.llm_support import execute, paper_page_setup
 from tests.permissions.framework import CANARY
 
 MEMBER_EMAIL = "demo.export.member@example.org"
@@ -744,6 +746,50 @@ def test_member_only_data_with_a_canary_never_reaches_the_files(
         "keys": ["health_it"],
         "human_verified": True,
     }
+
+
+def test_classification_fixes_reach_the_demo_only_as_keys_and_verified(
+    db: TestDatabase, database: Database, tmp_path: Path
+) -> None:
+    # Story 3.11：兩位成員經正式的修正分類（services）修正同一篇、意見不同、都寫了理由；示範站的匯出
+    # 只有有效的 key 與「已核對」（白名單），沒有修正歷史、修正人數、意見不同、姓名、理由
+    # （EXPERIENCE.md：示範站只顯示 AI 標章，含「已核對」）。
+    snapshots = publish_snapshots(db)
+    ids = seed_papers(db, database, [PaperSpec("fixed twice", 1)], snapshots=snapshots)
+    picks = (
+        ("first.fixer@example.org", f"成員甲 {CANARY}", ["e_commerce"], f"理由甲 {CANARY}"),
+        ("second.fixer@example.org", f"成員乙 {CANARY}", ["digital_platforms"], f"理由乙 {CANARY}"),
+    )
+    for email, name, topic, reason in picks:
+        member = allow_member(SystemViewer(), database, email=email, display_name=name).member_id
+        fixes = fix_classification(
+            MemberViewer(member_id=member, is_admin=False),
+            database,
+            paper_page_setup(),
+            ids["fixed twice"],
+            topic=topic,
+            method=["experiment"],
+            reason=reason,
+            now=datetime(2026, 11, 21, tzinfo=UTC),
+        )
+        assert fixes is not None
+    assert fixes.classification.value.topic.members_disagree  # type: ignore[union-attr]
+
+    _export(database, tmp_path, demo_setup(canaries=[CANARY]))
+
+    text = _all_text(tmp_path).casefold()
+    for forbidden in (CANARY, "fixer@example.org", "理由", "成員甲", "成員乙"):
+        assert forbidden.casefold() not in text
+    for key in ("fix_member_count", "members_disagree", "history", "member_name", "reason"):
+        assert f'"{key}"' not in text
+    [paper] = _papers(tmp_path).values()
+    classification = paper["biblio"]["classification"]
+    assert set(classification) == {"state", "value", "provenance"}
+    assert classification["value"] == {
+        "topic": {"keys": ["digital_platforms"], "human_verified": True},
+        "method": {"keys": ["experiment"], "human_verified": True},
+    }
+    assert classification["provenance"]["human_verified"] is True
 
 
 # --- 寫到一半失敗、並行、接手 ------------------------------------------------------------------

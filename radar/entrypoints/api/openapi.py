@@ -31,7 +31,8 @@ from radar.entrypoints.api.auth import AuthRoutes, FakeLoginRoutes
 from radar.entrypoints.api.library import LibraryRoutes
 from radar.entrypoints.api.main import install_api_routes
 from radar.entrypoints.api.paper_list import PaperListRoutes
-from radar.entrypoints.api.papers import PaperRoutes
+from radar.entrypoints.api.papers import ClassificationFixBody, PaperRoutes
+from radar.services.judgments import ClassificationFixes
 
 
 def _not_for_requests(*_args: object) -> NoReturn:
@@ -55,6 +56,18 @@ def _log_in(_request: FakeLoginRequest) -> NewSession:
 
 
 def _not_ready() -> bool:
+    _not_for_requests()
+
+
+def _load_classification_fixes(
+    _viewer: MemberViewer, _paper_id: uuid.UUID
+) -> ClassificationFixes | None:
+    _not_for_requests()
+
+
+def _fix_classification(
+    _viewer: MemberViewer, _paper_id: uuid.UUID, _body: ClassificationFixBody
+) -> ClassificationFixes | None:
     _not_for_requests()
 
 
@@ -106,6 +119,8 @@ def build_schema_app() -> FastAPI:
             load_paper=_load_paper,
             display_names=DisplayNames(journals=(), topics=(), methods=()),
             client_config=build_client_config(),
+            load_classification_fixes=_load_classification_fixes,
+            fix_classification=_fix_classification,
         ),
         library_routes=LibraryRoutes(
             list_page=_list_library,

@@ -18,6 +18,18 @@
       "fixed": "有 {{members}} 位成員修正過",
       "disagree": "有 {{members}} 位成員修正過，意見不同"
     },
+    "fix": {
+      "open": "修正分類",
+      "send": "送出修正",
+      "cancel": "取消",
+      "reason": "理由",
+      "optional": "　選填",
+      "hint": "送出後不能撤回，改錯了再修正一次",
+      "sending": "送出中…",
+      "failed": "沒有送出成功。你選的還在，再試一次",
+      "current": "目前採用",
+      "remaining": "剩 {{n}} 字"
+    },
     "summary": {
       "heading": "中文重點",
       "researchQuestion": "研究問題",

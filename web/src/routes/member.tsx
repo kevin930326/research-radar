@@ -5,6 +5,7 @@ import { flushSync } from "react-dom";
 
 import { SiteFooter } from "../components/SiteFooter";
 import { SiteHeader } from "../components/SiteHeader";
+import type { ClassificationFixControl } from "../components/paper/ClassificationFix";
 import type { LibraryControl } from "../components/paper/LibraryBlock";
 import { LoadFailed } from "../components/states/LoadFailed";
 import { Offline } from "../components/states/Offline";
@@ -20,6 +21,7 @@ import { SearchPage } from "../pages/SearchPage";
 import { isPaperId } from "../pages/paper-format";
 import { validateSearchParams, type SearchParams } from "../pages/search-filters";
 import type { ReadAs } from "../datasource/types";
+import { classificationFixesQuery, useSendClassificationFix } from "./classification-fix";
 import { libraryShown, useFollowMemberChange, useLibraryChange } from "./library-change";
 import { displayNamesQuery, hasHeldRows, paperKey, paperSource } from "./paper-queries";
 import { PAGE_FRAME_CLASS, PlainMain, rootRoute } from "./root";
@@ -398,12 +400,14 @@ function PaperWithNames({ page, readAs }: { page: PaperPageData; readAs: ReadAs 
     })();
   }, [signedOut, queryClient, navigate, href]);
   const library = usePaperLibrary(page, readAs);
+  const fix = useClassificationFix(page, readAs);
   if (signedOut) {
     return null;
   }
   return (
     <PaperPage
-      page={page}
+      page={fix.page}
+      classificationFix={fix.control}
       names={names.data?.kind === "found" ? names.data.names : null}
       onRetryNames={() => void names.refetch({ cancelRefetch: false })}
       library={library}
@@ -445,6 +449,48 @@ function usePaperLibrary(page: PaperPageData, readAs: ReadAs): LibraryControl {
     focusToken,
     onAdd: () => run("add"),
     onRemove: () => run("remove"),
+  };
+}
+
+/**
+ * 論文頁的修正分類（Story 3.11）：送出帶 `readAs`（同 usePaperLibrary，ADR-0055）。成功之後這一份論文頁資料的分類區塊
+ * 換成 API 回的（「◆ 已核對」＋人數，中文重點的標章因此改寫全文）；同 usePaperLibrary，只對按的時候那一份資料有效。
+ * 歷史按「有 N 位成員修正過」才讀；讀到 401 照登入過期處理，409 照「發現換人」處理，其他沒讀到就不顯示（沒有設計稿，列給 Kevin）。
+ */
+function useClassificationFix(page: PaperPageData, readAs: ReadAs): { page: PaperPageData; control: ClassificationFixControl } {
+  const sendFix = useSendClassificationFix(readAs);
+  const follow = useFollowMemberChange();
+  const queryClient = useQueryClient();
+  const navigate = useNavigate();
+  const href = useLocation({ select: (location) => location.href });
+  const [changed, setChanged] = useState<{ page: PaperPageData; classification: PaperPageData["classification"] } | null>(null);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const history = useQuery({ ...classificationFixesQuery(page.paper.id, readAs), enabled: historyOpen && readAs !== undefined });
+  const kind = history.data?.kind;
+  useEffect(() => {
+    if (kind === "memberChanged") {
+      void follow();
+    } else if (kind === "signedOut") {
+      void (async () => {
+        await clearMemberQueries(queryClient);
+        await navigate({ to: "/login", search: { next: href, expired: true as const }, replace: true });
+      })();
+    }
+  }, [kind, follow, queryClient, navigate, href]);
+  const shown = changed !== null && changed.page === page ? { ...page, classification: changed.classification } : page;
+  return {
+    page: shown,
+    control: {
+      send: async (body) => {
+        const fixes = await sendFix(page.paper.id, body);
+        if (fixes === null) return false;
+        setChanged({ page, classification: fixes.classification });
+        return true;
+      },
+      historyOpen,
+      onToggleHistory: () => setHistoryOpen((open) => !open),
+      history: history.data?.kind === "found" ? history.data.fixes.history : null,
+    },
   };
 }
 

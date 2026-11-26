@@ -1,5 +1,5 @@
 {
-  "_comment": "論文頁（Story 3.8）的假資料：e2e/api-mock.ts 與 scripts/mock-api.mjs 共用。全部是自己編的（example.com、10.5555 DOI），不是真實論文。",
+  "_comment": "論文頁（Story 3.8）的假資料：e2e/api-mock.ts 與 scripts/mock-api.mjs 共用。全部是自己編的（example.com、10.5555 DOI），不是真實論文。 Story 3.11：fixed、reported 兩篇多了 classificationHistory（修正歷史，新的在前；姓名是設計稿 paper.html 的示意名字），只有替身用（API 的論文頁沒有這一欄）。",
   "displayNames": {
     "journals": [
       {
@@ -1462,7 +1462,32 @@
           "as_of": "2026-11-11T17:30:00Z"
         },
         "in_my_library": false
-      }
+      },
+      "classificationHistory": [
+        {
+          "fixed_at": "2026-11-19T02:30:00Z",
+          "member_name": "陳柏翰",
+          "topic": [
+            "platforms",
+            "trust"
+          ],
+          "method": [
+            "experiment"
+          ],
+          "reason": "研究的是跨平台的評分"
+        },
+        {
+          "fixed_at": "2026-11-14T02:30:00Z",
+          "member_name": "林怡君",
+          "topic": [
+            "trust"
+          ],
+          "method": [
+            "experiment"
+          ],
+          "reason": null
+        }
+      ]
     },
     "38000000-0000-4000-8000-000000000013": {
       "label": "fixed",
@@ -1637,7 +1662,21 @@
           "as_of": "2026-11-11T17:30:00Z"
         },
         "in_my_library": false
-      }
+      },
+      "classificationHistory": [
+        {
+          "fixed_at": "2026-11-19T02:30:00Z",
+          "member_name": "陳柏翰",
+          "topic": [
+            "platforms",
+            "trust"
+          ],
+          "method": [
+            "experiment"
+          ],
+          "reason": "研究的是跨平台的評分"
+        }
+      ]
     },
     "38000000-0000-4000-8000-000000000014": {
       "label": "support-variants",

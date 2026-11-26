@@ -124,6 +124,7 @@ from radar.entrypoints.bootstrap import (
     code_version,
 )
 from radar.entrypoints.cli.backup import backup, restore
+from radar.entrypoints.cli.classification import classification_app
 from radar.entrypoints.cli.demo_export import export_demo
 from radar.entrypoints.cli.export_schema import export_demo_schema, export_schema
 from radar.entrypoints.cli.members import members_app
@@ -189,6 +190,7 @@ log = structlog.get_logger(__name__)
 weekly_run_app = typer.Typer(help="每週更新（weekly_run）。", no_args_is_help=True)
 app.add_typer(weekly_run_app, name="weekly-run")
 app.add_typer(members_app, name="members")
+app.add_typer(classification_app, name="classification")
 app.command("export-schema")(export_schema)
 # 示範站匯出（Story 3.7、ADR-0061）。
 app.command("export-demo-schema")(export_demo_schema)

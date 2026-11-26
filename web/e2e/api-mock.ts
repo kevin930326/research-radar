@@ -16,10 +16,15 @@
 // 但記進 state.writesWithoutExpectedMember，fixtures.ts 在每個測試結束時要求它是空的：新增一種寫入卻沒帶標頭，測試就失敗。
 // epic-3h2 PR 1 fix1（ADR-0055）：成員專屬的讀取（論文頁、找論文清單、文獻庫清單）也一樣比對：帶的預期成員和接到請求時登入的人
 // 不同 → 409 member_changed、值不是成員 ID → 400，都不回資料；沒帶照常（和後端一樣）。
+// Story 3.11 加上修正分類的兩個端點（GET／POST /api/v1/papers/{id}/classification-fixes）：歷史一開始是假資料每一篇的
+// classificationHistory；送出時兩欄各至少一個、都是顯示名稱裡有的 key、和目前的不同才收（否則 422），寫一筆在最前面
+// （姓名是登入的那一位），之後的論文頁照修正後的分類回。寫入同樣要帶預期成員（沒帶記進 writesWithoutExpectedMember）。
 // 其他 /api/ 路徑不處理（交給後面的 route 或預設行為）。
 import type { Page, Route } from "@playwright/test";
 
 import type {
+  ClassificationBlock,
+  ClassificationFixEntryResponse,
   DisplayNames,
   ClientConfig,
   FakeLoginBody,
@@ -43,7 +48,7 @@ interface PaperFixtures {
   displayNames: DisplayNames;
   errors: Record<string, { label: string; status: number; note: string }>;
   slow: Record<string, { label: string; of: string; delayMs: number; note: string }>;
-  papers: Record<string, { label: string; note: string; page: PaperPageResponse }>;
+  papers: Record<string, { label: string; note: string; page: PaperPageResponse; classificationHistory?: ClassificationFixEntryResponse[] }>;
 }
 
 export const PAPER_FIXTURES = fixtures as unknown as PaperFixtures;
@@ -257,9 +262,17 @@ export interface ApiMockState {
   cubeGate: Promise<void> | null;
   /** 計數方塊回的內容（預設 fixtures/cube.json；測試可以換，例如沒有快照）。 */
   cubeBody: CubeResponse;
+  /** 修正分類的送出：成功／伺服器錯誤（500）／登入過期（401）。 */
+  classificationFix: "ok" | "failed" | "expired";
+  /** 修正分類的送出：設了就等它 resolve 才回（看「送出中…」）。 */
+  classificationFixGate: Promise<void> | null;
+  /** 每一篇的修正歷史（論文 ID → 新的在前；沒有的照假資料的 classificationHistory）。 */
+  fixHistories: Record<string, ClassificationFixEntryResponse[]>;
+  /** 修正過的論文的分類區塊（論文 ID → 修正後的）。 */
+  fixedBlocks: Record<string, ClassificationBlock>;
   /** 收到的請求（依序）。 */
   requests: ApiRequest[];
-  /** 沒帶 X-Radar-Expected-Member 的加入、移出、復原（fixtures.ts 在測試結束時要求是空的；ADR-0055）。 */
+  /** 沒帶 X-Radar-Expected-Member 的加入、移出、復原、修正分類（fixtures.ts 在測試結束時要求是空的；ADR-0055）。 */
   writesWithoutExpectedMember: ApiRequest[];
 }
 
@@ -329,6 +342,10 @@ export function createApiState(): ApiMockState {
     cube: "ok",
     cubeGate: null,
     cubeBody: CUBE_FIXTURE,
+    classificationFix: "ok",
+    classificationFixGate: null,
+    fixHistories: {},
+    fixedBlocks: {},
     requests: [],
     writesWithoutExpectedMember: [],
   };
@@ -364,6 +381,49 @@ async function problem(route: Route, status: number, code: string): Promise<void
 
 async function json(route: Route, value: unknown): Promise<void> {
   await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(value) });
+}
+
+/** 一欄送來的 key：字串的清單、不重複、都在顯示名稱裡；不合格是 null。排好順序。 */
+function fixKeys(value: unknown, entries: readonly { key: string }[]): string[] | null {
+  if (!Array.isArray(value) || value.length === 0 || value.some((key) => typeof key !== "string")) return null;
+  const keys = value as string[];
+  if (new Set(keys).size !== keys.length || keys.some((key) => !entries.some((entry) => entry.key === key))) return null;
+  return [...keys].sort();
+}
+
+/** 這一篇現在的修正歷史與分類區塊（修正過就是修正後的）。 */
+function fixHistoryOf(state: ApiMockState, id: string): ClassificationFixEntryResponse[] {
+  return state.fixHistories[id] ?? PAPER_FIXTURES.papers[id]?.classificationHistory ?? [];
+}
+
+/** 送出一次修正（規則見檔頭）；不收回 null。 */
+function applyFix(state: ApiMockState, id: string, body: unknown, member: MemberResponse): { classification: ClassificationBlock; history: ClassificationFixEntryResponse[] } | null {
+  const block = state.fixedBlocks[id] ?? PAPER_FIXTURES.papers[id]?.page.classification;
+  if (block === undefined) return null;
+  const sent = (body ?? {}) as { topic?: unknown; method?: unknown; reason?: unknown };
+  const topic = fixKeys(sent.topic, PAPER_FIXTURES.displayNames.topics);
+  const method = fixKeys(sent.method, PAPER_FIXTURES.displayNames.methods);
+  const reason = typeof sent.reason === "string" && sent.reason.trim() !== "" ? sent.reason.trim() : null;
+  const current = block.state === "ready" ? block.value : null;
+  const same = (keys: string[] | null, field: { keys: string[] } | null | undefined) =>
+    keys !== null && field != null && keys.join("|") === [...field.keys].sort().join("|");
+  if (topic === null || method === null || (same(topic, current?.topic) && same(method, current?.method))) return null;
+  if (reason !== null && [...reason].length > 100) return null;
+  const history = [{ fixed_at: "2026-11-21T02:00:00Z", member_name: member.display_name, topic, method, reason }, ...fixHistoryOf(state, id)];
+  const latest = new Map<string, ClassificationFixEntryResponse>();
+  for (const entry of history) if (!latest.has(entry.member_name)) latest.set(entry.member_name, entry);
+  const picks = [...latest.values()];
+  const signature = (entry: ClassificationFixEntryResponse) => `${String(entry.topic)}/${String(entry.method)}`;
+  const disagree = picks.some((entry) => signature(entry) !== signature(picks[0]!));
+  const field = (keys: string[]) => ({ keys, human_verified: true, fix_member_count: picks.length, members_disagree: disagree });
+  const classification = {
+    state: "ready",
+    value: { topic: field(topic), method: field(method), fix_member_count: picks.length },
+    provenance: { ...(block.provenance ?? { model: null, generated_at: "2026-11-21T02:00:00Z", input_kind: null }), human_verified: true },
+  } as ClassificationBlock;
+  state.fixHistories[id] = history;
+  state.fixedBlocks[id] = classification;
+  return { classification, history };
 }
 
 export async function installApiMock(page: Page, state: ApiMockState): Promise<void> {
@@ -498,6 +558,30 @@ export async function installApiMock(page: Page, state: ApiMockState): Promise<v
       library.items = insertRecord(library.items, record);
       return respond(record);
     }
+    const fixMatch = /^\/api\/v1\/papers\/([^/]+)\/classification-fixes$/.exec(path);
+    if (fixMatch !== null && (method === "GET" || method === "POST")) {
+      state.requests.push({ method, path, body });
+      const asker = state.member;
+      const expected = (await request.allHeaders())[EXPECTED_MEMBER_HEADER];
+      const id = decodeURIComponent(fixMatch[1]!);
+      if (method === "GET") {
+        if (asker === null) return problem(route, 401, "not_authenticated");
+        const mismatch = expectedMemberProblem(expected, asker);
+        if (mismatch !== null) return problem(route, ...mismatch);
+        const entry = PAPER_FIXTURES.papers[id];
+        if (entry === undefined) return problem(route, 404, "not_found");
+        return json(route, { classification: state.fixedBlocks[id] ?? entry.page.classification, history: fixHistoryOf(state, id) });
+      }
+      if (expected === undefined) state.writesWithoutExpectedMember.push({ method, path, body });
+      await state.classificationFixGate;
+      if (asker === null || state.classificationFix === "expired") return problem(route, 401, "not_authenticated");
+      const mismatch = expectedMemberProblem(expected, asker);
+      if (mismatch !== null) return problem(route, ...mismatch);
+      if (state.classificationFix === "failed") return problem(route, 500, "internal_error");
+      if (PAPER_FIXTURES.papers[id] === undefined) return problem(route, 404, "not_found");
+      const fixed = applyFix(state, id, body, asker);
+      return fixed === null ? problem(route, 422, "request_invalid") : json(route, fixed);
+    }
     if (method === "GET" && path.startsWith("/api/v1/papers/")) {
       state.requests.push({ method, path, body });
       // 接到請求時就記下是誰、這時的文獻庫（審查 G2）。
@@ -510,7 +594,11 @@ export async function installApiMock(page: Page, state: ApiMockState): Promise<v
       if (mismatch !== null) return problem(route, ...mismatch);
       const own = state.paperByMember[asker.member_id];
       if (own !== undefined) return json(route, own);
-      const mine = (page: PaperPageResponse) => ({ ...page, in_my_library: library.some((record) => record.id === page.paper.id) });
+      const mine = (page: PaperPageResponse) => ({
+        ...page,
+        classification: state.fixedBlocks[page.paper.id] ?? page.classification,
+        in_my_library: library.some((record) => record.id === page.paper.id),
+      });
       let id = decodeURIComponent(path.slice("/api/v1/papers/".length));
       const error = PAPER_FIXTURES.errors[id];
       if (error !== undefined) return problem(route, error.status, ERROR_CODES[error.status] ?? "internal_error");

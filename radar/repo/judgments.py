@@ -9,11 +9,15 @@ ADR-0035、Story 2.7）。
   寫入前觸發器（遷移 0014）再擋一次，防直接寫 SQL。
 - 有效值不在這裡讀：讀 `effective_*` view（`repo/ai_blocks.py`）。權限檢查與同一個交易寫稽核在
   `services/judgments.py`（3.11、3.12、Epic 10）。
+- 讀取：分類修正的歷史（`list_classification_fix_events`，Story 3.11）接 `visible_papers`，看不到的
+  論文一筆都不回；成員只讀顯示名稱（`member.display_name`），不讀 email。
 - 寫入一律用 `text()` SQL；函式收呼叫端開好的交易連線，不 commit。
 """
 
 import json
 import uuid
+from collections.abc import Iterable
+from datetime import datetime
 from typing import Final
 
 from sqlalchemy import (
@@ -31,8 +35,12 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.postgresql import JSONB
 
+from radar.domain.classification_fixes import ClassificationFixEvent
 from radar.domain.judgments import ActorRole, JudgmentKind, JudgmentTarget, NewJudgmentEvent
+from radar.domain.taxonomy import TaxonomyField
+from radar.domain.viewer import Viewer
 from radar.repo.models import Base
+from radar.repo.visibility import visible_papers
 
 # --- 表的定義（`alembic check` 拿來和資料庫比對；遷移 0014 建表） -----------------------------
 
@@ -198,3 +206,53 @@ def create_judgment_event(connection: Connection, event: NewJudgmentEvent) -> uu
     sql = _INSERT_RESOLUTION if kind is JudgmentKind.SUMMARY_REPORT_RESOLUTION else _INSERT
     value = connection.execute(sql, params).scalar_one_or_none()
     return None if value is None else uuid.UUID(str(value))
+
+
+# --- 讀取 ---------------------------------------------------------------------------------
+
+
+def list_classification_fix_events(
+    viewer: Viewer, connection: Connection, paper_ids: Iterable[uuid.UUID]
+) -> list[ClassificationFixEvent]:
+    """這些論文（`viewer` 看得到的）的分類修正事件，新的在前（`created_at DESC, id DESC`）。看不到、
+    不存在的論文沒有任何一筆。每筆帶修正的成員的顯示名稱（不帶 email）；`new_value` 照 view 的做法
+    去重、排序（"C" 定序）。"""
+    wanted = sorted(set(paper_ids))
+    if not wanted:
+        return []
+    visible = visible_papers(viewer, alias="paper")
+    rows = connection.execute(
+        text(
+            "SELECT j.id, j.target_id, j.member_id, m.display_name, j.created_at, j.field,"
+            " j.reason,"
+            " ARRAY(SELECT k.key FROM jsonb_array_elements_text(j.new_value) AS k(key)"
+            ' GROUP BY k.key ORDER BY k.key COLLATE "C") AS keys'
+            " FROM judgment_event AS j"
+            " JOIN paper ON paper.id = j.target_id"
+            " JOIN member AS m ON m.id = j.member_id"
+            f" WHERE {visible} AND j.kind = :kind AND j.target_type = :target"
+            " AND j.target_id = ANY(CAST(:ids AS uuid[]))"
+            " ORDER BY j.created_at DESC, j.id DESC"
+        ),
+        {
+            "kind": JudgmentKind.CLASSIFICATION_FIX.value,
+            "target": JudgmentTarget.PAPER.value,
+            "ids": wanted,
+        },
+    )
+    events: list[ClassificationFixEvent] = []
+    for event_id, paper_id, member_id, name, created_at, field, reason, keys in rows:
+        fixed_at: datetime = created_at
+        events.append(
+            ClassificationFixEvent(
+                event_id=uuid.UUID(str(event_id)),
+                paper_id=uuid.UUID(str(paper_id)),
+                member_id=uuid.UUID(str(member_id)),
+                member_name=str(name),
+                fixed_at=fixed_at,
+                field=TaxonomyField(field),
+                keys=tuple(keys),
+                reason=reason,
+            )
+        )
+    return events

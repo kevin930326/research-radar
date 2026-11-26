@@ -91,3 +91,15 @@ test("demo build has the demo paper page but not the member paper page's library
     expect(demo.includes(marker), `demo has ${marker}`).toBe(false);
   }
 });
+
+// Story 3.11：修正分類（分類那一行的「修正分類」、人數按鈕、歷史、表單；修正歷史的端點）只在成員版。
+// 介面文字在兩站共用的 i18n 裡，所以看的是元件的記號與端點路徑，不是字。
+test("demo build has no classification fix", ({ browserName }) => {
+  test.skip(browserName !== "chromium", "build output is checked once");
+  const member = jsText("dist");
+  const demo = jsText("dist-demo");
+  for (const marker of ["data-classification-fix", "data-fix-form", "classification-fixes"]) {
+    expect(member.includes(marker), `member has ${marker}`).toBe(true);
+    expect(demo.includes(marker), `demo has ${marker}`).toBe(false);
+  }
+});

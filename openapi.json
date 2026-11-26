@@ -232,6 +232,94 @@
         }
       }
     },
+    "/api/v1/papers/{paper_id}/classification-fixes": {
+      "get": {
+        "summary": "Classification Fixes",
+        "description": "一篇論文的分類區塊與修正歷史（新的在前；只有姓名）；看不到、不存在、ID 不是 UUID 都回\n同一個 404，沒登入 401；`X-Radar-Expected-Member` 和登入的成員不同 409 `member_changed`、\n格式不對 400 `expected_member_invalid`。",
+        "operationId": "classification_fixes",
+        "parameters": [
+          {
+            "name": "paper_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Paper Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ClassificationFixesResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "錯誤（RFC 9457）",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "summary": "Fix Classification",
+        "description": "修正一篇看得到的論文的分類：主題與方法一次送（各至少一個、都是分類表的 key、兩欄不能都和\n目前一樣）、理由選填（100 字以內），立即生效、不能撤回；回修正後的分類區塊與歷史。看不到、\n不存在、ID 不是 UUID 都回同一個 404；送來的值不收 422 `request_invalid`（什麼都不寫）；\n沒登入 401；`Origin` 缺少或不是本站 403 `origin_rejected`；`X-Radar-Expected-Member` 和\n登入的成員不同 409 `member_changed`、格式不對 400 `expected_member_invalid`。",
+        "operationId": "fix_classification",
+        "parameters": [
+          {
+            "name": "paper_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Paper Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ClassificationFixBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ClassificationFixesResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "錯誤（RFC 9457）",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/display-names": {
       "get": {
         "summary": "Display Names",
@@ -759,6 +847,131 @@
         ],
         "title": "ClassificationField",
         "description": "分類的一欄（主題或方法）。\n\n- `keys`：排序過、不重複的 `key`（可能是 `unclassified`）。\n- `human_verified`：這一欄是人工值（「已核對」）。\n- `fix_member_count`：修正過這一欄的成員人數。\n- `members_disagree`：兩位以上成員各自最新的修正不一樣（「意見不同」）。"
+      },
+      "ClassificationFixBody": {
+        "properties": {
+          "topic": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "maxItems": 64,
+            "title": "Topic"
+          },
+          "method": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "maxItems": 64,
+            "title": "Method"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 1000
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "topic",
+          "method"
+        ],
+        "title": "ClassificationFixBody",
+        "description": "修正分類送來的內容：新的主題與方法（都是分類表的 `key`，各至少一個）、選填的理由（100 字\n以內）。\n\n這裡只擋形狀（字串的清單、字串或 null、多餘欄位）與過大的請求；分類表、至少一個、和目前不同、\n理由的字數與字元由 `domain/classification_fixes.check_classification_fix` 驗。"
+      },
+      "ClassificationFixEntryResponse": {
+        "properties": {
+          "fixed_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Fixed At"
+          },
+          "member_name": {
+            "type": "string",
+            "title": "Member Name"
+          },
+          "topic": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Topic"
+          },
+          "method": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Method"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "fixed_at",
+          "member_name",
+          "topic",
+          "method",
+          "reason"
+        ],
+        "title": "ClassificationFixEntryResponse",
+        "description": "修正歷史的一筆：時間（UTC）、成員姓名（只有姓名，不帶 email 或成員 ID）、選的主題與方法\n（分類表的 `key`；那一次沒送的欄位是 null）、理由（沒寫是 null）。"
+      },
+      "ClassificationFixesResponse": {
+        "properties": {
+          "classification": {
+            "$ref": "#/components/schemas/ClassificationBlock"
+          },
+          "history": {
+            "items": {
+              "$ref": "#/components/schemas/ClassificationFixEntryResponse"
+            },
+            "type": "array",
+            "title": "History"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "classification",
+          "history"
+        ],
+        "title": "ClassificationFixesResponse",
+        "description": "一篇論文的分類區塊（照目前的有效值，和論文頁的 `classification` 同一個形狀）與修正歷史（新的\n在前）。"
       },
       "ClientConfig": {
         "properties": {
