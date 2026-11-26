@@ -109,9 +109,14 @@ async function paperLangProblems(page: Page): Promise<string[]> {
   });
 }
 
-/** 這一頁的內容出現了：一般頁面等 h1，「找不到這一頁」等訊息條。 */
+/**
+ * 這一頁的內容出現了：一般頁面等 h1，「找不到這一頁」等訊息條；再等載入中的骨架（[data-state='loading']）都換掉。
+ * h1 比資料先出來：只等 h1 時，焦點走訪會在骨架還在的時候先標號，資料列晚幾十毫秒才補上，
+ * 走到沒有編號的元素就對不起來；44×44 與 200% 放大也會量到比較少的元素（epic-3j 查到的）。
+ */
 async function waitForPage(page: Page, missing: boolean): Promise<void> {
   await expect(page.locator(missing ? "main [role='status']" : "main h1").first()).toBeVisible();
+  await expect(page.locator("[data-state='loading']")).toHaveCount(0);
 }
 
 for (const site of A11Y_SITES) {

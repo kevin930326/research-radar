@@ -286,6 +286,28 @@ test.describe("demo paper list", () => {
     expect(later).toEqual([]);
   });
 
+  test("Esc on one menu and opening the next right away: the new menu stays open with the focus in it", async ({ page }) => {
+    // 上一個選單的關閉動畫（0.2 秒）結束時才還焦點；那時已經開了下一個，焦點不能被拉回上一個標籤，
+    // 不然剛開的選單會關掉、或焦點停在錯的標籤上（epic-3j 查到的，FilterMenus.tsx 的 finalFocus）。
+    await open(page);
+    await expectCount(page, TOTAL);
+    const chip = (label: string) => page.locator("[data-filter-chip]").filter({ hasText: label });
+    const firstTopic = page.getByRole("checkbox", { name: NAMES.topics[0]!.name, exact: true });
+    const firstMethod = page.getByRole("checkbox", { name: NAMES.methods[0]!.name, exact: true });
+    await chip(text("search:search.filter.topic")).click();
+    await firstTopic.check();
+    await expect(page).toHaveURL(new RegExp(`[?&]topic=${NAMES.topics[0]!.key}(&|$)`));
+    await page.keyboard.press("Escape");
+    await chip(text("paper:paper.classification.method")).click();
+    // 等上一個選單拆掉（還焦點就在這一刻），剛開的選單還在、焦點在它裡面。
+    await expect(firstTopic).toHaveCount(0);
+    await expect(firstMethod).toBeVisible();
+    await expect
+      .poll(() => page.evaluate(() => document.activeElement?.closest("[role='dialog']")?.contains(document.activeElement) === true))
+      .toBe(true);
+    await expect(page.locator("[role='dialog']")).toHaveCount(1);
+  });
+
   test("the brand and the nav link go to the paper list", async ({ page }) => {
     await open(page, "?abstract=true");
     await expect(rows(page).first()).toBeVisible();

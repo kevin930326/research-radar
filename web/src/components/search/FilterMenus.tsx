@@ -95,9 +95,15 @@ export function FilterMenu({ label, value, width, clear, children }: MenuProps) 
             ref={popupRef}
             aria-labelledby={labelId}
             finalFocus={() => {
-              if (!closedByBreakpoint.current) return true;
-              closedByBreakpoint.current = false;
-              return document.querySelector<HTMLElement>("[data-mobile-filter]");
+              if (closedByBreakpoint.current) {
+                closedByBreakpoint.current = false;
+                return document.querySelector<HTMLElement>("[data-mobile-filter]");
+              }
+              // 關閉動畫（0.2 秒）結束時才還焦點。這段時間裡已經點了別的標籤、開了別的選單、或點進標題輸入框，
+              // 焦點就留在那裡，不拉回這個標籤：拉回來會把剛開的選單關掉，或讓打的字不見（epic-3j 查到的）。
+              // 焦點還在這個選單裡（或隨選單拆掉落到 body）才照常回到標籤。
+              const active = document.activeElement;
+              return active === null || active === document.body || popupRef.current?.contains(active) === true;
             }}
             className={`box-border max-w-[calc(100vw-40px)] border border-border bg-popover-surface leading-normal tracking-0 text-text-primary transition-[opacity,transform] duration-200 data-[ending-style]:-translate-y-1 data-[ending-style]:opacity-0 data-[starting-style]:-translate-y-1 data-[starting-style]:opacity-0 ${
               width === "wide" ? "w-[490px]" : "w-[260px]"
