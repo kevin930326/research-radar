@@ -20,17 +20,18 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { name: Z0-base, mode: element, prefs: "{}", repeat: "15" }
-          - { name: T1-trace, mode: trace, prefs: "{}", repeat: "15" }
-          - { name: T2-trace, mode: trace, prefs: "{}", repeat: "15" }
-          - { name: S1-steps, mode: steps, prefs: "{}", repeat: "15" }
-          - { name: S2-steps, mode: steps, prefs: "{}", repeat: "15" }
+          - { name: V0-base, mode: element, prefs: "{}", trace: "", repeat: "15" }
+          - { name: V1-trace-off, mode: element, prefs: "{}", trace: "off", repeat: "15" }
+          - { name: V2-reflect-only, mode: reflect, prefs: "{}", trace: "", repeat: "15" }
+          - { name: V3-full-reflection-off, mode: full, prefs: "{\"accessibility.ARIAElementReflection.enabled\":false}", trace: "", repeat: "5" }
+          - { name: V4-full-trace-off, mode: full, prefs: "{}", trace: "off", repeat: "5" }
     defaults:
       run:
         working-directory: web
     env:
       PROBE_MODE: ${{ matrix.mode }}
       PROBE_PREFS: ${{ matrix.prefs }}
+      PROBE_TRACE: ${{ matrix.trace }}
       PROBE_ONLY: aria-allowed-attr,aria-prohibited-attr,aria-conditional-attr,nested-interactive,label-content-name-mismatch
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -89,6 +90,8 @@ jobs:
           grep -E '✘' probe/list.log | sed -E 's/.*› //; s/: no axe.*//' | sort | uniq -c || true
           echo "--- 當掉時的元素"
           grep -ohE 'STEP-CRASH [^ ]+' probe/list.log | sort | uniq -c || true
+          echo "--- 反射屬性在不在"
+          grep -ohE 'REFLECTION (true|false)' probe/list.log | sort | uniq -c || true
           grep -ohE 'LAST .*' probe/list.log | sort | uniq -c | sort -rn | head -30 || true
           grep -ohE 'CRASH-AT .*' probe/list.log | sed -E 's/#([0-9]+)\/[0-9]+//' | sort | uniq -c | sort -rn | head -40 || true
           echo "--- 錯誤種類"

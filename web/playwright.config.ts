@@ -33,7 +33,8 @@ export default defineConfig({
   workers: isCI ? 2 : undefined,
   reporter: isCI ? [["list"], ["html", { open: "never" }]] : "list",
   use: {
-    trace: "retain-on-failure",
+    // 【探測分支專用】PROBE_TRACE=off 關掉 trace。
+    trace: process.env.PROBE_TRACE === "off" ? "off" : "retain-on-failure",
   },
   projects: browsers,
   webServer: [

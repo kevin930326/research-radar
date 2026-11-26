@@ -228,7 +228,24 @@ if (MODE === "steps") {
   }
 }
 
-for (const site of MODE === "perrule" || MODE === "element" || MODE.startsWith("walk") || MODE === "trace" || MODE === "steps" ? [] : SITES) {
+// reflect：不跑 axe，只在頁面世界讀每個有 aria-labelledby／aria-describedby 的元素的反射屬性。
+if (MODE === "reflect") {
+  for (const site of SITES) {
+    for (const path of site.pages.filter((page) => /^\/papers\/[0-9a-f]/.test(page))) {
+      test(`reflect ${site.name} ${path}`, async ({ page }) => {
+        await page.goto(`${site.baseURL}${path}`);
+        await expect(page.locator("main")).toBeVisible();
+        const read = await page.evaluate(() => {
+          const elements = [...document.querySelectorAll("[aria-labelledby], [aria-describedby]")] as (Element & { ariaLabelledByElements?: unknown; ariaDescribedByElements?: unknown })[];
+          return elements.map((element) => [element.ariaLabelledByElements, element.ariaDescribedByElements].map((value) => (Array.isArray(value) ? value.length : String(value))).join("/"));
+        });
+        console.log(`REFLECT-READ ${read.length}`);
+      });
+    }
+  }
+}
+
+for (const site of MODE === "perrule" || MODE === "element" || MODE.startsWith("walk") || MODE === "trace" || MODE === "steps" || MODE === "reflect" ? [] : SITES) {
   for (const path of [...site.pages, MISSING_PATH]) {
     test(`${site.name} ${path}: no axe violations`, async ({ page }) => {
       await page.goto(`${site.baseURL}${path}`);
@@ -238,6 +255,7 @@ for (const site of MODE === "perrule" || MODE === "element" || MODE.startsWith("
         await page.evaluate(() => document.querySelectorAll("*").length);
         return;
       }
+      console.log(`REFLECTION ${String(await page.evaluate(() => "ariaLabelledByElements" in Element.prototype))}`);
       let builder = new AxeBuilder({ page });
       builder = MODE === "full" ? builder.withTags(TAGS) : builder.withRules(ONLY);
       if (DISABLE.length > 0) builder = builder.disableRules(DISABLE);
