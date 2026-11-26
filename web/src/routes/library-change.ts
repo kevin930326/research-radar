@@ -92,7 +92,7 @@ const following = new WeakMap<QueryClient, Promise<void>>();
  * 不用再跑一次（審查 fix3 G2a）。三個任一個不知道（沒帶預期成員、快取沒有「我是誰」、拿不到路由的成員）都不算，照常跑。
  * 這不會漏掉真的又換了人：畫面上那一位的下一次讀取或寫入帶的是他自己，後端不符一樣回 409，那一筆就不是舊回應。
  */
-function alreadyFollowed(queryClient: QueryClient, expected: string | undefined, routeMember: string | undefined): boolean {
+export function alreadyFollowed(queryClient: QueryClient, expected: string | undefined, routeMember: string | undefined): boolean {
   if (expected === undefined || routeMember === undefined || following.has(queryClient)) return false;
   const cached = queryClient.getQueryData(meQuery.queryKey)?.member_id;
   return cached !== undefined && cached !== expected && routeMember !== expected;

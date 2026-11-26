@@ -14,10 +14,14 @@
 
 import uuid
 
+from radar.domain.judgments import ActorRole, classification_fix
 from radar.domain.library import AddedVia
+from radar.domain.taxonomy import TaxonomyField
 from radar.domain.viewer import MemberViewer, SystemViewer
+from radar.repo.judgments import create_judgment_event
 from radar.repo.library import create_library_item
 from radar.services.library import remove_library_item
+from tests.integration.test_effective_views import insert_classification
 from tests.llm_support import create_hidden_paper, execute
 from tests.permissions.framework import (
     CANARY,
@@ -122,6 +126,42 @@ def _paper(ctx: PermissionContext) -> EndpointRequest:
     # Story 3.16 接上文獻庫後不再豁免：A 的私人論文在 A 的文獻庫，A 看得到、B 和不存在一樣 404。
     paper_id = _private_paper_in_owner_library(ctx)
     return EndpointRequest(path_params={"paper_id": str(paper_id)})
+
+
+# --- 修正分類（Story 3.11）---------------------------------------------------------------------
+
+
+@REGISTRY.case("GET", "/api/v1/papers/{paper_id}/classification-fixes")
+def _classification_fixes(ctx: PermissionContext) -> EndpointRequest:
+    # A 的私人論文在 A 的文獻庫，A 修正過一次（理由有金絲雀）：A 讀得到歷史；B 看不到這篇，和不存在
+    # 一樣 404（歷史、理由、姓名都不回）。
+    paper_id = _private_paper_in_owner_library(ctx)
+    with ctx.extras["database"].transaction() as connection:
+        for field, keys in ((TaxonomyField.TOPIC, ("e_commerce",)), (TaxonomyField.METHOD, ())):
+            create_judgment_event(
+                connection,
+                classification_fix(
+                    member_id=uuid.UUID(ctx.owner.member_id),
+                    actor_role=ActorRole.MEMBER,
+                    paper_id=paper_id,
+                    field=field,
+                    keys=keys,
+                    reason=f"修正理由 {CANARY}",
+                ),
+            )
+    return EndpointRequest(path_params={"paper_id": str(paper_id)})
+
+
+@REGISTRY.case("POST", "/api/v1/papers/{paper_id}/classification-fixes")
+def _fix_classification(ctx: PermissionContext) -> EndpointRequest:
+    # B 修正 A 的私人論文（B 看不到）：和不存在一樣 404，什麼都不寫；A 修正自己看得到的這篇：200。
+    # 這篇要有成功的 AI 分類（沒有時先不收修正，ADR-0063），方法和送出的不同（相同會被當成沒有改）。
+    paper_id = _private_paper_in_owner_library(ctx)
+    insert_classification(ctx.extras["test_database"], paper_id, ["e_commerce"], ["survey_sem"])
+    return EndpointRequest(
+        path_params={"paper_id": str(paper_id)},
+        body={"topic": ["e_commerce"], "method": ["experiment"], "reason": None},
+    )
 
 
 @REGISTRY.case(

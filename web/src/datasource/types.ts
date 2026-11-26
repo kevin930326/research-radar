@@ -2,6 +2,8 @@
 // 頁面與元件只能 import 入口（datasource/index.ts）與這個檔。
 import type {
   AiBlockState,
+  ClassificationFixBody,
+  ClassificationFixesResponse,
   ClientConfig,
   CubeResponse,
   DisplayNames,
@@ -45,6 +47,7 @@ export interface MemberSession {
 
 /** 論文頁的資料（`GET /api/v1/papers/{id}`）：書目、目前的摘要、三個 AI 區塊、全文連結、快照。 */
 export type PaperPage = PaperPageResponse;
+export type { ClassificationFixBody };
 
 /** 期刊、主題、方法的顯示名稱（`GET /api/v1/display-names`）。 */
 export type { DisplayNames };
@@ -130,7 +133,41 @@ export interface PaperSource {
   list(filters: PaperListFilters, limit: number, previous?: PaperList | null, expectedMemberId?: string): Promise<PaperListResult>;
   /** 計數方塊（資料涵蓋範圍，Story 3.15）；401 回 `signedOut`，其他沒有成功時丟出例外。 */
   cube(): Promise<CubeResult>;
+  /** 一篇論文的分類區塊與修正歷史（Story 3.11）。給了 `expectedMemberId` 就帶上預期成員的標頭（ADR-0055）。 */
+  classificationFixes(paperId: string, expectedMemberId?: string): Promise<ClassificationFixesResult>;
+  /**
+   * 修正一篇論文的分類（Story 3.11）：主題與方法一次送、理由選填。`expectedMemberId` 是畫面上那份論文頁資料的 `readAs`
+   * （ADR-0055），畫面一律經 useClassificationFix 送，一定會帶。
+   */
+  fixClassification(paperId: string, body: ClassificationFixBody, expectedMemberId?: string): Promise<ClassificationFixResult>;
 }
+
+/** 一篇論文的分類區塊（照目前的有效值）與修正歷史（新的在前，只有姓名；Story 3.11）。 */
+export type ClassificationFixes = ClassificationFixesResponse;
+
+/**
+ * 讀修正歷史的結果：`found`（`readAs` 見 ReadAs）／`notFound`（看不到、不存在）／`signedOut`（401）／
+ * `memberChanged`（409 `member_changed`，ADR-0055）。其他錯誤丟出例外。
+ */
+export type ClassificationFixesResult =
+  | { kind: "found"; fixes: ClassificationFixes; readAs?: ReadAs }
+  | { kind: "notFound" }
+  | { kind: "signedOut" }
+  | { kind: "memberChanged" };
+
+/**
+ * 送出修正的結果：
+ * - `done`：寫好了，`fixes` 是修正後的分類區塊與歷史。
+ * - `rejected`：後端不收（422：不是分類表的 key、和目前一樣、理由太長等），什麼都沒寫。
+ * - `notFound`／`signedOut`／`memberChanged`：同讀取（409 時後端什麼都沒寫）。
+ * 其他錯誤（網路、伺服器錯誤）丟出例外。
+ */
+export type ClassificationFixResult =
+  | { kind: "done"; fixes: ClassificationFixes }
+  | { kind: "rejected" }
+  | { kind: "notFound" }
+  | { kind: "signedOut" }
+  | { kind: "memberChanged" };
 
 /**
  * 我的文獻庫的清單（`GET /api/v1/library`，Story 3.16）：API 的回應形狀（這一頁的筆、下一頁的 cursor、總篇數），

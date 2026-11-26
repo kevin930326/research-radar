@@ -1,5 +1,6 @@
 """AI 區塊的判定：全專案只有 `find_ai_block` 一個函式（AD-30、ADR-0015、ADR-0035、Story 2.7）。
-另有 `list_effective_topic_keys`：標註抽樣讀有效主題（Story 2.13）；讀有效值 view 的 SQL 只准放在
+另有 `list_effective_topic_keys`：標註抽樣讀有效主題（Story 2.13）；`list_disagreeing_paper_ids`：
+管理指令列出成員意見不同的論文（Story 3.11）。讀有效值 view 的 SQL 只准放在
 這個模組（`tests/arch/test_ai_table_reads.py` 的 `VIEW_READERS`）。
 
 判定順序固定（前面的條件成立就不往下看）：
@@ -207,6 +208,22 @@ def list_effective_topic_keys(
         {"field": TaxonomyField.TOPIC.value, "ids": wanted},
     )
     return {uuid.UUID(str(paper_id)): tuple(keys) for paper_id, keys in rows}
+
+
+def list_disagreeing_paper_ids(viewer: Viewer, connection: Connection) -> list[uuid.UUID]:
+    """`viewer` 看得到、分類有一欄「成員意見不同」的論文 ID（view 的 `members_disagree`：每位成員
+    各取最新一筆，兩人以上、整組 key 不同），照 ID 排序。管理指令
+    `radar classification disagreements` 用（Story 3.11）；意見不同只由 view 判定，這裡不另外算。"""
+    visible = visible_papers(viewer, alias="paper")
+    rows = connection.execute(
+        text(
+            "SELECT DISTINCT e.paper_id"
+            " FROM effective_classification AS e JOIN paper ON paper.id = e.paper_id"
+            f" WHERE {visible} AND e.members_disagree"
+            " ORDER BY e.paper_id"
+        )
+    )
+    return [uuid.UUID(str(paper_id)) for (paper_id,) in rows]
 
 
 # --- 列 → 區塊 -------------------------------------------------------------------------------

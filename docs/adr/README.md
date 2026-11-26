@@ -64,6 +64,7 @@
 | [0060](0060-license-mit.md) | 這個 repo 用 MIT 授權；BMAD、各 skill、字體、設計稿裡的 CC BY 摘要、OpenAlex 書目照各自的授權（編號跳到 0060，避開兩條線保留的 0039～0059） | 已接受 | AR-48 |
 | [0061](0061-demo-export-files.md) | 示範站匯出：每次一個新目錄 `preview/<匯出編號>/`、manifest 最後換；欄式索引＋標題＋每 200 篇一個分片；每個檔一個 `extra="forbid"` 模型、組合會員站共用模型，`demo-openapi.json` 由模型產生；所有讀取在同一個唯讀交易；寫出前自我檢查沒過就不寫 | 提議 | AD-20 |
 | [0062](0062-coverage-cube-endpoint-and-trend-params.md) | 計數方塊端點 `GET /api/v1/cube`（要登入、`no-store`，回 `rows`＋`params`＋`snapshot`，這次只有 `total`、`with_abstract`；沒有已發佈快照時 null 與空列）；規則設定值新檔 `config/trend.yaml`＋`journals.yaml` 的起始年組成 `TrendParams`；示範站 `cube.json`（`DemoCube` 白名單模型、自我檢查第 4 項用 `papers-index.json` 逐格重算）、格式版本改 2；比例只在 `web/src/stats/` 算 | 提議 | AD-19、AD-20 |
+| [0063](0063-classification-fix-endpoints.md) | 修正分類兩個端點 `GET`／`POST /api/v1/papers/{id}/classification-fixes`（要登入、比對預期成員、`POST` 要本站 Origin、看不到一律 404、`no-store`）；主題與方法一次送、理由選填；規則在 `domain/classification_fixes`（現在分類表的 key、各至少一個、不重複、和目前的有效值不同、理由 100 字），同一把鎖裡比、不收一律 422 不回顯；兩筆 `judgment_event`＋稽核同一個交易；歷史只有時間、姓名、主題、方法、理由；管理指令 `radar classification disagreements`；示範站不帶歷史與人數 | 提議 | AD-10、AD-26、AD-27 |
 
 「提議」表示還沒經過 Kevin 確認；PR 合併後改成「已接受」。
 

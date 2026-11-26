@@ -5,6 +5,8 @@
  * OpenAPI spec version: 0.1.0
  */
 import type {
+  ClassificationFixBody,
+  ClassificationFixesResponse,
   ClientConfig,
   CubeResponse,
   DisplayNames,
@@ -400,6 +402,130 @@ export const paper = async (paperId: string, options?: RequestInit): Promise<pap
 
   const data: paperResponse['data'] = body ? JSON.parse(body) : {}
   return { data, status: res.status, headers: res.headers } as paperResponse
+}
+
+
+
+export type classificationFixesResponse200 = {
+  data: ClassificationFixesResponse
+  status: 200
+}
+
+export type classificationFixesResponseDefault = {
+  data: ProblemDetails
+  status: Exclude<HTTPStatusCodes, 200>
+}
+
+export type classificationFixesResponseSuccess = (classificationFixesResponse200) & {
+  headers: Headers;
+};
+export type classificationFixesResponseError = (classificationFixesResponseDefault) & {
+  headers: Headers;
+};
+
+export type classificationFixesResponse = (classificationFixesResponseSuccess | classificationFixesResponseError)
+
+export const getClassificationFixesUrl = (paperId: string,) => {
+
+
+
+
+  return `/api/v1/papers/${paperId}/classification-fixes`
+}
+
+/**
+ * 一篇論文的分類區塊與修正歷史（新的在前；只有姓名）；看不到、不存在、ID 不是 UUID 都回
+ * 同一個 404，沒登入 401；`X-Radar-Expected-Member` 和登入的成員不同 409 `member_changed`、
+ * 格式不對 400 `expected_member_invalid`。
+ * @summary Classification Fixes
+ */
+export const classificationFixes = async (paperId: string, options?: RequestInit): Promise<classificationFixesResponse> => {
+
+  const res = await fetch(getClassificationFixesUrl(paperId),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: classificationFixesResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as classificationFixesResponse
+}
+
+
+
+export type fixClassificationResponse200 = {
+  data: ClassificationFixesResponse
+  status: 200
+}
+
+export type fixClassificationResponseDefault = {
+  data: ProblemDetails
+  status: Exclude<HTTPStatusCodes, 200>
+}
+
+export type fixClassificationResponseSuccess = (fixClassificationResponse200) & {
+  headers: Headers;
+};
+export type fixClassificationResponseError = (fixClassificationResponseDefault) & {
+  headers: Headers;
+};
+
+export type fixClassificationResponse = (fixClassificationResponseSuccess | fixClassificationResponseError)
+
+export const getFixClassificationUrl = (paperId: string,) => {
+
+
+
+
+  return `/api/v1/papers/${paperId}/classification-fixes`
+}
+
+/**
+ * 修正一篇看得到的論文的分類：主題與方法一次送（各至少一個、都是分類表的 key、兩欄不能都和
+ * 目前一樣）、理由選填（100 字以內），立即生效、不能撤回；回修正後的分類區塊與歷史。看不到、
+ * 不存在、ID 不是 UUID 都回同一個 404；送來的值不收 422 `request_invalid`（什麼都不寫）；
+ * 沒登入 401；`Origin` 缺少或不是本站 403 `origin_rejected`；`X-Radar-Expected-Member` 和
+ * 登入的成員不同 409 `member_changed`、格式不對 400 `expected_member_invalid`。看不到的論文
+ * 帶壞本文也是 404（先查論文、再驗本文）。
+ * @summary Fix Classification
+ */
+export const fixClassification = async (paperId: string,
+    classificationFixBody: ClassificationFixBody, options?: RequestInit): Promise<fixClassificationResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Symbol.iterator in h) {
+      return Object.fromEntries(
+        Array.from(h as Iterable<Iterable<string>>, (entry) => Array.from(entry) as [string, string]),
+      );
+    }
+    const headers: Record<string, string | readonly string[]> = {};
+    for (const [name, value] of Object.entries<string | readonly string[] | undefined>(h)) {
+      if (value !== undefined) headers[name] = value;
+    }
+    return headers;
+  };
+const res = await fetch(getFixClassificationUrl(paperId),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(classificationFixBody)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: fixClassificationResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as fixClassificationResponse
 }
 
 

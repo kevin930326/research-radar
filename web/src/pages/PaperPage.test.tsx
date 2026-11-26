@@ -150,7 +150,7 @@ describe("paper page: three AI blocks with content", () => {
       .split(/<[^>]+>/)
       .map((segment) => segment.replace(/\s+/g, ""))
       .filter((segment) => segment !== "");
-    expect(LATER_STORIES.length).toBeGreaterThan(8);
+    expect(LATER_STORIES.length).toBeGreaterThan(7);
     for (const text of LATER_STORIES) {
       expect(segments).not.toContain(text);
     }
@@ -684,5 +684,94 @@ describe("citation export on the paper page (Story 3.10)", () => {
   it("State Patterns 8, no DOI: citation export is still there", () => {
     const html = render(fixture("no-doi"));
     for (const key of CITE) expect(count(html, `>${TEXT[key]!}<`), key).toBe(2);
+  });
+});
+
+// 修正分類（Story 3.11；EXPERIENCE.md 畫面 8 第 2 點；設計稿 paper.html 的「修正分類」）。表單的互動（展開、選、送出中、
+// 沒有成功、送出後）在 e2e/classification-fix.spec.ts。
+describe("classification fix on the paper page", () => {
+  const library = { inLibrary: false, busy: false, focusToken: 0, onAdd: () => {}, onRemove: () => {} };
+  const HISTORY = [
+    { fixed_at: "2026-11-19T02:30:00Z", member_name: "Test Member A", topic: ["platforms", "trust"], method: ["experiment"], reason: "cross-platform ratings" },
+    { fixed_at: "2026-11-14T02:30:00Z", member_name: "Test Member B", topic: ["trust"], method: ["experiment"], reason: null },
+  ];
+
+  function renderFix(page: PaperPageResponse, control: Partial<Parameters<typeof PaperPage>[0]["classificationFix"]> = {}): string {
+    return renderToStaticMarkup(
+      <RouterContextProvider router={router}>
+        <PaperPage
+          page={page}
+          names={NAMES}
+          library={library}
+          classificationFix={{ send: async () => true, historyOpen: false, onToggleHistory: () => {}, history: null, ...control }}
+        />
+      </RouterContextProvider>,
+    );
+  }
+
+  it("a classification with tags has the fix entry after the badge; no fixers, no count button", () => {
+    const html = block(renderFix(fixture("normal")), "classification");
+    expect(html).toContain("data-classification-fix");
+    expect(html).toMatch(new RegExp(`<button type="button" data-fix-open=""[^>]*>${TEXT["paper:paper.fix.open"]}</button>`));
+    expect(html.indexOf("data-ai-badge")).toBeLessThan(html.indexOf("data-fix-open"));
+    expect(html).not.toContain("data-fix-count");
+    // 表單一開始收著。
+    expect(html).not.toContain("data-fix-form");
+  });
+
+  it("fixed by members: the count is a button that opens the history (inside the row, not a note line)", () => {
+    const html = block(renderFix(fixture("reported")), "classification");
+    const label = TEXT["paper:paper.classification.disagree"]!.replace("{{members}}", "2");
+    expect(html).toMatch(new RegExp(`<button type="button" data-fix-count="" aria-expanded="false"[^>]*>${label}<svg`));
+    expect(html).not.toContain('data-note="disagree"');
+    expect(html).toContain(TEXT["ai:ai.badge.verified"]);
+    expect(html).not.toContain("data-fix-history");
+  });
+
+  it("history open: newest first, the first of two or more is marked as the current one, reasons on their own line", () => {
+    const html = block(renderFix(fixture("reported"), { historyOpen: true, history: HISTORY }), "classification");
+    expect(html).toContain('aria-expanded="true"');
+    const entries = html.split("data-fix-entry").slice(1);
+    expect(entries).toHaveLength(2);
+    expect(entries[0]).toContain("2026-11-19");
+    expect(entries[0]).toContain("Test Member A");
+    expect(entries[0]).toContain(TEXT["paper:paper.fix.current"]);
+    expect(entries[0]).toContain("cross-platform ratings");
+    expect(entries[1]).not.toContain(TEXT["paper:paper.fix.current"]);
+    // 顯示名稱（不是 key），照送來的順序用「、」接起來。
+    const names = new Map(NAMES.topics.map((entry) => [entry.key, entry.name]));
+    expect(entries[0]).toContain(`${names.get("platforms")}${TEXT["paper:paper.biblio.authorSeparator"] ?? ""}${names.get("trust")}`);
+    expect(html).not.toContain("@");
+  });
+
+  it("one entry: no 'current' mark", () => {
+    const html = block(renderFix(fixture("fixed"), { historyOpen: true, history: HISTORY.slice(0, 1) }), "classification");
+    expect(html).not.toContain(TEXT["paper:paper.fix.current"]);
+  });
+
+  it.each(["all-failed", "pending", "budget"])("%s: no fix entry (only a ready classification with tags can be fixed)", (label) => {
+    const html = renderFix(fixture(label));
+    expect(html).not.toContain("data-classification-fix");
+    expect(html).not.toContain(TEXT["paper:paper.fix.open"]);
+  });
+
+  it("human values are shown in taxonomy order (the database sorts them by key); AI values keep their order", () => {
+    const page = fixture("fixed");
+    page.classification.value!.topic!.keys = ["trust", "platforms"];
+    const tags = (html: string) => [...block(html, "classification").matchAll(/data-topic-link[^>]*href="\/search\?topic=(\w+)"/g)].map((m) => m[1]);
+    expect(tags(renderFix(page))).toEqual(["platforms", "trust"]);
+    page.classification.value!.topic!.human_verified = false;
+    expect(tags(renderFix(page))).toEqual(["trust", "platforms"]);
+    // 歷史也照分類表的順序。
+    const history = [{ ...HISTORY[0]!, topic: ["trust", "platforms"] }];
+    const names = new Map(NAMES.topics.map((entry) => [entry.key, entry.name]));
+    expect(block(renderFix(fixture("fixed"), { historyOpen: true, history }), "classification")).toContain(
+      `${names.get("platforms")}${TEXT["paper:paper.biblio.authorSeparator"] ?? ""}${names.get("trust")}`,
+    );
+  });
+
+  // 示範站沒有修正分類：由 datasource/demo-paper-classification-fix.test.tsx 與 e2e/build-output.spec.ts 保證（這裡渲染的是成員版的 PaperPage）。
+  it("without the control there is no fix entry", () => {
+    expect(render(fixture("normal"))).not.toContain("data-classification-fix");
   });
 });

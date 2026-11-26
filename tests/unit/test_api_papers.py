@@ -74,6 +74,10 @@ class FakePapers:
             load_paper=self.load_paper,
             display_names=DISPLAY_NAMES,
             client_config=build_client_config(),
+            # 修正分類（Story 3.11）：這個檔不測（見 test_api_classification_fixes.py）。
+            paper_visible=lambda _viewer, _paper_id: False,
+            load_classification_fixes=lambda _viewer, _paper_id: None,
+            fix_classification=lambda _viewer, _paper_id, _body: None,
         )
 
 
@@ -157,6 +161,9 @@ def test_paper_without_abstract_or_snapshot_has_nulls() -> None:
         load_paper=lambda _viewer, _paper_id: page,
         display_names=DISPLAY_NAMES,
         client_config=build_client_config(),
+        paper_visible=lambda _viewer, _paper_id: False,
+        load_classification_fixes=lambda _viewer, _paper_id: None,
+        fix_classification=lambda _viewer, _paper_id, _body: None,
     )
     app = create_app(readiness_check=lambda: True)
     install_paper_routes(app, routes, FakeAuth().routes())

@@ -5,7 +5,7 @@ import { AbstractSection, NoAbstractSection } from "./AbstractSection";
 import { citationSource, citationWaiting } from "./citation";
 import { CiteBlock } from "./CiteBlock";
 import { FullTextBar, FullTextMobile, FullTextRail } from "./FullText";
-import { PaperBiblio, classificationHasTags } from "./PaperBiblio";
+import { PaperBiblio, classificationHasTags, type ClassificationFixRender } from "./PaperBiblio";
 import { ResearchModelSection } from "./ResearchModelSection";
 import { ZhSummarySection } from "./ZhSummarySection";
 import type { DisplayNames, FullTextLinks, PaperPageResponse, Provenance } from "../../generated/model";
@@ -65,11 +65,13 @@ export function paperLinks(page: PaperPageResponse): FullTextLinks {
   };
 }
 
-/** 成員版才有的區塊（我的文獻庫，Story 3.17）：手機版書目下方、底部固定列、輔助欄。 */
+/** 成員版才有的區塊（我的文獻庫 Story 3.17、修正分類 Story 3.11）：手機版書目下方、底部固定列、輔助欄。 */
 export interface MemberSlots {
   mobile: ReactNode;
   bar: ReactNode;
   rail: ReactNode;
+  /** 修正分類（Story 3.11）：分類那一塊交給它畫（見 ClassificationRowParts）；沒給就照原本的樣子。 */
+  classificationFix?: ClassificationFixRender;
 }
 
 /** 示範站沒有完整內容的論文（Story 3.9）。 */
@@ -110,6 +112,7 @@ export function PaperLayout({ page, names, onRetryNames, member, limited }: Pape
           onRetryNames={onRetryNames}
           firstBadge={first === "classification"}
           abstractMark={limited?.abstractMark}
+          classificationFix={member?.classificationFix}
         />
         {limited === undefined ? (
           <>

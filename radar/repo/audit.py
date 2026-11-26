@@ -8,6 +8,7 @@
 """
 
 import uuid
+from datetime import datetime
 
 from sqlalchemy import (
     CheckConstraint,
@@ -54,21 +55,28 @@ audit_event_table = Table(
 # --- 寫入 ---------------------------------------------------------------------------------
 
 
-def create_audit_event(connection: Connection, event: NewAuditEvent) -> uuid.UUID:
+def create_audit_event(
+    connection: Connection, event: NewAuditEvent, *, created_at: datetime | None = None
+) -> uuid.UUID:
     """新增一筆稽核事件，回它的 id。在呼叫端開好的交易裡做，不 commit（和它記錄的那件事同一個
-    交易：那件事退回，稽核也不留）。
+    交易：那件事退回，稽核也不留）。`created_at` 沒給是資料庫的 `now()`（交易開始的時間）；修正
+    分類給它和兩筆人工判斷同一個時間。
 
     Raises:
         TypeError: `event` 不是 `NewAuditEvent`（形狀在它建構時已經驗過）。
+        ValueError: `created_at` 沒有時區。
     """
     if not isinstance(event, NewAuditEvent):
         raise TypeError("event 要是 NewAuditEvent")
+    if created_at is not None and (created_at.tzinfo is None or created_at.utcoffset() is None):
+        raise ValueError("created_at 要是帶時區的時間")
     value = connection.execute(
         text(
             "INSERT INTO audit_event"
-            " (actor_member_id, actor_role, action, target_type, target_id, detail)"
+            " (actor_member_id, actor_role, action, target_type, target_id, detail, created_at)"
             " VALUES (:actor_member_id, :actor_role, :action, :target_type, :target_id,"
-            " CAST(:detail AS jsonb)) RETURNING id"
+            " CAST(:detail AS jsonb), COALESCE(CAST(:created_at AS timestamptz), now()))"
+            " RETURNING id"
         ),
         {
             "actor_member_id": event.actor_member_id,
@@ -77,6 +85,7 @@ def create_audit_event(connection: Connection, event: NewAuditEvent) -> uuid.UUI
             "target_type": event.target_type,
             "target_id": event.target_id,
             "detail": event.detail_json(),
+            "created_at": created_at,
         },
     ).scalar_one()
     return uuid.UUID(str(value))

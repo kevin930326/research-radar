@@ -163,6 +163,19 @@ def visible_to_system_only(viewer: Viewer) -> str:
     return "TRUE"
 
 
+def visible_member_judgments(viewer: Viewer) -> str:
+    """成員的人工判斷紀錄（修正分類的歷史：誰、什麼時候、選了什麼、理由，Story 3.11）的 SQL 條件：
+    成員與系統工作（管理指令）讀得到，都回 `TRUE`（論文本身看不看得到另外接 `visible_papers`）。
+    示範站產生器（`PublicViewer`）不組查詢、直接丟錯：示範站不帶修正歷史、姓名與理由（ADR-0063）。
+
+    Raises:
+        TypeError: `viewer` 不是 `MemberViewer` 或 `SystemViewer`。
+    """
+    if not isinstance(viewer, MemberViewer | SystemViewer):
+        raise TypeError(f"修正歷史只給成員或 SystemViewer（現在是 {type(viewer).__name__}）")
+    return "TRUE"
+
+
 def visible_snapshot_facts(viewer: Viewer) -> str:
     """快照編號與截止時間（`snapshot` 表）的 SQL 條件：系統工作與示範站匯出（`PublicViewer`，
     Story 3.7）讀得到，都回 `TRUE`。已發佈的快照編號與截止時間本來就印在示範站與每個統計回應上，

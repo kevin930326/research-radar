@@ -72,6 +72,17 @@
 //   http://127.0.0.1:4180/__mock?libraryHang=1           文獻庫清單的請求在瀏覽器裡一直不回、也不送出（看載入中的骨架；
 //                                                        libraryDelay 會讓比對工具等不到「網路安靜」）
 //   select、openPicked、removeRow、blockPopups、libraryHang 是在頁面殼裡多載入一支 /__mock/inject.js（只有這支替身會送，正式建置沒有）。
+//   http://127.0.0.1:4180/__mock?classificationFix=failed  修正分類的送出：ok／failed（伺服器錯誤：「沒有送出成功」）／
+//                                                        expired（401：回登入頁）
+//   http://127.0.0.1:4180/__mock?classificationFixDelay=600000  修正分類要等幾毫秒才回（看「送出中…」）
+//   http://127.0.0.1:4180/__mock?fixReason=研究的是跨平台的評分  打開修正分類的表單時自動填這段理由（比對工具只能點文字、
+//                                                        不能打字；空字串是不填）
+//   http://127.0.0.1:4180/__mock?classificationReset=1   每一篇的修正分類回到假資料一開始的樣子
+//   fixReason 也是在頁面殼裡多載入 /__mock/inject.js。
+// Story 3.11 加上修正分類的兩個端點（GET／POST /api/v1/papers/{id}/classification-fixes）：歷史一開始是論文頁假資料每一篇的
+// classificationHistory（沒有就是空的）；送出時檢查兩欄各至少一個、都是顯示名稱裡有的 key、和目前的不同（否則 422），
+// 寫一筆在最前面（姓名是登入的那一位），論文頁的分類換成新的（已核對、人數照歷史裡不同的姓名算）。
+// 論文頁：http://127.0.0.1:4180/__mock/classification 列出修正分類每一種狀態怎麼看（啟動時也印出來）。
 // 參數可以一起給；回傳目前的情境（JSON）。
 /* global process, URL, setTimeout, Buffer */
 import { randomUUID } from "node:crypto";
@@ -160,8 +171,23 @@ const scenario = {
   openPicked: 0,
   blockPopups: 0,
   libraryHang: 0,
+  classificationFix: "ok",
+  classificationFixDelay: 0,
+  fixReason: "",
   alwaysSignedIn: args.signedIn,
 };
+/** 每一篇的修正歷史（新的在前）與修正後的分類區塊（論文 ID → 那一篇的）。 */
+let fixHistories = new Map();
+let fixedBlocks = new Map();
+function resetClassificationFixes() {
+  fixHistories = new Map(Object.entries(PAPERS.papers).map(([id, entry]) => [id, [...(entry.classificationHistory ?? [])]]));
+  fixedBlocks = new Map();
+}
+resetClassificationFixes();
+/** 這一篇現在的分類區塊（修正過就是修正後的）。 */
+function classificationOf(id) {
+  return fixedBlocks.get(id) ?? PAPERS.papers[id]?.page.classification;
+}
 /** 第一位假成員一開始在文獻庫裡的（清單裡 personal 的那幾列）。 */
 const INITIAL_LIBRARY = LIST.rows.filter((entry) => entry.personal).map((entry) => entry.row.id);
 const INITIAL_ADDED_AT = Date.parse("2026-11-01T00:00:00.000Z");
@@ -313,6 +339,10 @@ async function api(req, res, path, query) {
     if (scenario.cube === "failed") return problem(res, 500, "internal_error");
     return json(res, 200, { rows: CUBE.rows, params: CUBE.params, snapshot: CUBE.snapshot });
   }
+  const fixMatch = /^\/api\/v1\/papers\/([^/]+)\/classification-fixes$/.exec(path);
+  if (fixMatch !== null) {
+    return classificationFix(req, res, decodeURIComponent(fixMatch[1]));
+  }
   if (req.method === "GET" && path.startsWith("/api/v1/papers/")) {
     const member = currentMember(req);
     if (member === null) return problem(res, 401, "not_authenticated");
@@ -355,7 +385,63 @@ async function paper(res, id, member) {
   const entry = PAPERS.papers[id];
   return entry === undefined
     ? problem(res, 404, "not_found")
-    : json(res, 200, { ...entry.page, in_my_library: libraryIdsOf(member).includes(entry.page.paper.id) });
+    : json(res, 200, { ...entry.page, classification: classificationOf(id), in_my_library: libraryIdsOf(member).includes(entry.page.paper.id) });
+}
+
+/** 一個欄位送來的 key：字串的清單、不重複、都在顯示名稱裡；不合格是 null。 */
+function fixKeys(value, entries) {
+  if (!Array.isArray(value) || value.length === 0 || value.some((key) => typeof key !== "string")) return null;
+  if (new Set(value).size !== value.length || value.some((key) => !(entries ?? []).some((entry) => entry.key === key))) return null;
+  return [...value].sort();
+}
+
+function sameKeys(a, b) {
+  return a !== null && b !== null && a.join("|") === b.join("|");
+}
+
+/** 修正分類：GET 讀分類區塊與歷史、POST 送出（規則見檔頭）。是誰送的、結果是什麼在收到時就決定。 */
+async function classificationFix(req, res, id) {
+  const member = currentMember(req);
+  if (req.method === "GET") {
+    if (member === null) return problem(res, 401, "not_authenticated");
+    if (rejectExpectedMember(req, res, member)) return undefined;
+    if (PAPERS.papers[id] === undefined) return problem(res, 404, "not_found");
+    return json(res, 200, { classification: classificationOf(id), history: fixHistories.get(id) ?? [] });
+  }
+  if (req.method !== "POST") return problem(res, 404, "not_found");
+  const body = await readJson(req);
+  const outcome = scenario.classificationFix;
+  await sleep(scenario.classificationFixDelay);
+  if (res.destroyed || req.socket.destroyed) return undefined;
+  if (member === null || outcome === "expired") return problem(res, 401, "not_authenticated");
+  if (rejectExpectedMember(req, res, member)) return undefined;
+  if (outcome === "failed") return problem(res, 500, "internal_error");
+  const block = classificationOf(id);
+  if (block === undefined) return problem(res, 404, "not_found");
+  const topic = fixKeys(body.topic, PAPERS.displayNames.topics);
+  const method = fixKeys(body.method, PAPERS.displayNames.methods);
+  const reason = typeof body.reason === "string" && body.reason.trim() !== "" ? body.reason.trim() : null;
+  const current = block.state === "ready" ? block.value : null;
+  const unchanged = sameKeys(topic, current?.topic ? [...current.topic.keys].sort() : null) && sameKeys(method, current?.method ? [...current.method.keys].sort() : null);
+  if (topic === null || method === null || unchanged || (reason !== null && [...reason].length > 100)) {
+    return problem(res, 422, "request_invalid");
+  }
+  const history = [{ fixed_at: new Date().toISOString(), member_name: member.display_name, topic, method, reason }, ...(fixHistories.get(id) ?? [])];
+  fixHistories.set(id, history);
+  // 每位成員最新的一次（依姓名；替身沒有成員 ID 可以分）：人數與意見不同照這個算。
+  const latest = new Map();
+  for (const entry of history) if (!latest.has(entry.member_name)) latest.set(entry.member_name, entry);
+  const picks = [...latest.values()];
+  const disagree = picks.some((entry) => `${entry.topic}/${entry.method}` !== `${picks[0].topic}/${picks[0].method}`);
+  const count = picks.length;
+  const field = (keys) => ({ keys, human_verified: true, fix_member_count: count, members_disagree: disagree });
+  const updated = {
+    state: "ready",
+    value: { topic: field(topic), method: field(method), fix_member_count: count },
+    provenance: { ...(block.provenance ?? { model: null, generated_at: new Date().toISOString(), input_kind: null }), human_verified: true },
+  };
+  fixedBlocks.set(id, updated);
+  return json(res, 200, { classification: updated, history });
 }
 
 /** 文獻庫的一筆：先找清單，再找論文頁假資料；都沒有是 undefined（404）。 */
@@ -560,7 +646,7 @@ function libraryIndex() {
   ];
 }
 
-/** 頁面殼多載入的一支（select、openPicked、removeRow、blockPopups）：自動勾幾列（再按「開啟全文」）、按一列的「移出」、讓 window.open 回 null。只有這支替身會送。 */
+/** 頁面殼多載入的一支（select、openPicked、removeRow、blockPopups、fixReason）：修正分類的表單自動填理由、自動勾幾列（再按「開啟全文」）、按一列的「移出」、讓 window.open 回 null。只有這支替身會送。 */
 function injectScript() {
   const picks = String(scenario.select)
     .split(",")
@@ -575,6 +661,18 @@ function injectScript() {
     const send = window.fetch.bind(window);
     window.fetch = (input, init) =>
       String(input instanceof Request ? input.url : input).includes("/api/v1/library") ? new Promise(() => {}) : send(input, init);
+  }
+  const fixReason = ${JSON.stringify(String(scenario.fixReason))};
+  if (fixReason !== "") {
+    // 修正分類的表單一打開就填好理由（照 React 的寫法：用原生的 setter 再送 input 事件）。
+    const filled = new WeakSet();
+    new MutationObserver(() => {
+      const input = document.querySelector("[data-fix-form] input[type=text]");
+      if (input === null || filled.has(input)) return;
+      filled.add(input);
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set.call(input, fixReason);
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    }).observe(document.documentElement, { childList: true, subtree: true });
   }
   const picks = ${JSON.stringify(picks)};
   const removeRow = ${Number(scenario.removeRow)};
@@ -596,6 +694,25 @@ function injectScript() {
 `;
 }
 
+/** 修正分類每一種狀態怎麼看（給人看的清單）。 */
+function classificationIndex() {
+  const base = `http://127.0.0.1:${args.port}`;
+  const ids = Object.entries(PAPERS.papers);
+  const labelled = (label) => ids.find(([, entry]) => entry.label === label)?.[0];
+  const normal = labelled("normal") ?? ids[0]?.[0];
+  const fixed = labelled("fixed");
+  const reported = labelled("reported");
+  return [
+    { label: "form", url: `${base}/papers/${normal}`, note: "按「修正分類」：表單在分類那一行下面展開（目前的分類先選好）" },
+    { label: "sending", url: `${base}/__mock?classificationFixDelay=600000`, note: "先打開這個，再改選一個標籤、按「送出修正」：送出中…（0 是不等）" },
+    { label: "failed", url: `${base}/__mock?classificationFix=failed`, note: "先打開這個，再送出：沒有送出成功，選的與寫的都留著（ok 是回來）" },
+    { label: "draft", url: `${base}/__mock?fixReason=研究的是跨平台的評分`, note: "先打開這個，表單一打開就填好理由（空字串是不填）" },
+    { label: "done", url: `${base}/papers/${fixed ?? normal}`, note: "有 1 位成員修正過（◆ 已核對）；按人數展開歷史" },
+    { label: "differ", url: `${base}/papers/${reported ?? normal}`, note: "有 2 位成員修正過，意見不同；按人數展開歷史（第一筆標「目前採用」）" },
+    { label: "reset", url: `${base}/__mock?classificationFix=ok&classificationFixDelay=0&fixReason=&classificationReset=1`, note: "修正分類每個情境都回到預設" },
+  ];
+}
+
 /** 每一種狀態的網址（給人看的清單）。 */
 function paperIndex() {
   const base = `http://127.0.0.1:${args.port}/papers/`;
@@ -609,10 +726,10 @@ function paperIndex() {
 }
 
 function control(res, query) {
-  for (const key of ["login", "logout", "names", "list", "cube", "library", "libraryChange", "select"]) {
+  for (const key of ["login", "logout", "names", "list", "cube", "library", "libraryChange", "select", "classificationFix", "fixReason"]) {
     if (query.has(key)) scenario[key] = query.get(key);
   }
-  for (const key of ["loginDelay", "logoutDelay", "listDelay", "listDelayAfter", "listTotal", "listFailAfter", "cubeDelay", "libraryDelay", "libraryTotal", "libraryChangeDelay", "removeRow", "openPicked", "blockPopups", "libraryHang"]) {
+  for (const key of ["loginDelay", "logoutDelay", "listDelay", "listDelayAfter", "listTotal", "listFailAfter", "cubeDelay", "libraryDelay", "libraryTotal", "libraryChangeDelay", "removeRow", "openPicked", "blockPopups", "libraryHang", "classificationFixDelay"]) {
     if (query.has(key)) scenario[key] = Number(query.get(key));
   }
   if (query.has("listDelayAfter") || query.has("listFailAfter")) listRequests = 0;
@@ -622,6 +739,7 @@ function control(res, query) {
   }
   // libraryEmpty 和 libraryAll 同時給時，libraryAll 後套用、以它為準。
   if (query.has("libraryAll")) resetLibraries(query.get("libraryAll") === "1" ? "all" : "initial");
+  if (query.get("classificationReset") === "1") resetClassificationFixes();
   if (query.has("signedIn")) scenario.alwaysSignedIn = query.get("signedIn") === "true";
   if (query.has("expire")) {
     sessions.clear();
@@ -651,7 +769,7 @@ function staticFile(res, path) {
   const type = TYPES[extname(target)] ?? "application/octet-stream";
   let body = readFileSync(target);
   // select、blockPopups：頁面殼多載入 /__mock/inject.js（同源的檔案，安全標頭的 CSP 照樣放行），放在最前面。
-  if (target.endsWith("index.html") && (scenario.select !== "" || scenario.removeRow >= 0 || scenario.openPicked > 0 || scenario.blockPopups > 0 || scenario.libraryHang > 0)) {
+  if (target.endsWith("index.html") && (scenario.select !== "" || scenario.removeRow >= 0 || scenario.openPicked > 0 || scenario.blockPopups > 0 || scenario.libraryHang > 0 || scenario.fixReason !== "")) {
     body = Buffer.from(String(body).replace("<head>", '<head><script src="/__mock/inject.js"></script>'));
   }
   send(res, 200, body, { ...SECURITY_HEADERS, "Content-Type": type });
@@ -664,6 +782,7 @@ createServer((req, res) => {
   if (url.pathname === "/__mock/search") return json(res, 200, searchIndex());
   if (url.pathname === "/__mock/library") return json(res, 200, libraryIndex());
   if (url.pathname === "/__mock/coverage") return json(res, 200, coverageIndex());
+  if (url.pathname === "/__mock/classification") return json(res, 200, classificationIndex());
   if (url.pathname === "/__mock/inject.js") return send(res, 200, injectScript(), { ...SECURITY_HEADERS, "Content-Type": TYPES[".js"] });
   if (url.pathname.startsWith("/api/")) {
     api(req, res, url.pathname, url.searchParams).catch((error) => {
@@ -679,4 +798,5 @@ createServer((req, res) => {
   for (const row of searchIndex()) process.stdout.write(`  search ${row.label.padEnd(11)} ${row.url}\n`);
   for (const row of libraryIndex()) process.stdout.write(`  library ${row.label.padEnd(13)} ${row.url}\n`);
   for (const row of coverageIndex()) process.stdout.write(`  coverage ${row.label.padEnd(12)} ${row.url}\n`);
+  for (const row of classificationIndex()) process.stdout.write(`  classification ${row.label.padEnd(8)} ${row.url}\n`);
 });

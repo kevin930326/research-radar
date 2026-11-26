@@ -1,10 +1,12 @@
 // 成員版的資料來源：呼叫同網域的後端 API（呼叫函式由 orval 從 openapi.json 產生，Story 3.4）。
 import {
   addLibraryItem,
+  classificationFixes as getClassificationFixes,
   clientConfig as getClientConfig,
   cube as getCube,
   displayNames as getDisplayNames,
   fakeLogin,
+  fixClassification as postClassificationFix,
   fakeLoginOptions,
   listLibrary,
   listPapers,
@@ -23,6 +25,9 @@ import {
   type PaperRow,
 } from "../../generated/model";
 import type {
+  ClassificationFixBody,
+  ClassificationFixesResult,
+  ClassificationFixResult,
   ClientConfigResult,
   CubeResult,
   DataSource,
@@ -159,6 +164,28 @@ const papers: PaperSource = {
       return { kind: "signedOut" };
     }
     throw new Error(`GET ${API_BASE}/cube: HTTP ${response.status}`);
+  },
+
+  async classificationFixes(paperId: string, expectedMemberId?: string): Promise<ClassificationFixesResult> {
+    const response = await getClassificationFixes(encodeURIComponent(paperId), expecting(expectedMemberId));
+    if (response.status === 200) {
+      return { kind: "found", fixes: response.data, ...readAs(expectedMemberId) };
+    }
+    if (memberChanged(response)) return { kind: "memberChanged" };
+    if (response.status === 404) return { kind: "notFound" };
+    if (response.status === 401) return { kind: "signedOut" };
+    throw new Error(`GET ${API_BASE}/papers/{id}/classification-fixes: HTTP ${response.status}`);
+  },
+
+  // 修正分類（Story 3.11）：寫入的標頭同樣只在這裡加（expecting）；422 是後端不收，什麼都沒寫。
+  async fixClassification(paperId: string, body: ClassificationFixBody, expectedMemberId?: string): Promise<ClassificationFixResult> {
+    const response = await postClassificationFix(encodeURIComponent(paperId), body, expecting(expectedMemberId));
+    if (response.status === 200) return { kind: "done", fixes: response.data };
+    if (memberChanged(response)) return { kind: "memberChanged" };
+    if (response.status === 422) return { kind: "rejected" };
+    if (response.status === 404) return { kind: "notFound" };
+    if (response.status === 401) return { kind: "signedOut" };
+    throw new Error(`POST ${API_BASE}/papers/{id}/classification-fixes: HTTP ${response.status}`);
   },
 
   async list(filters: PaperListFilters, limit: number, previous?: PaperList | null, expectedMemberId?: string): Promise<PaperListResult> {

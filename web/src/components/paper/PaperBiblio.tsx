@@ -121,6 +121,18 @@ export function UnclassifiedTag({ size = "paper" }: { size?: "paper" | "row" } =
 
 const UNCLASSIFIED = "unclassified";
 
+/**
+ * 照分類表的順序排 key（`names` 是顯示名稱，順序就是分類表的順序）；不認得的照原本的順序放最後。
+ * 人工值（修正分類，Story 3.11）在資料庫裡是照 key 的字母排的，畫面照分類表的順序（設計稿 paper.html「已核對」）。
+ */
+export function inTaxonomyOrder(keys: readonly string[], names: Map<string, string>): string[] {
+  const order = new Map([...names.keys()].map((key, index) => [key, index]));
+  return keys
+    .map((key, index) => ({ key, index }))
+    .sort((a, b) => (order.get(a.key) ?? names.size + a.index) - (order.get(b.key) ?? names.size + b.index))
+    .map(({ key }) => key);
+}
+
 function TagGroup({
   label,
   field,
@@ -135,10 +147,12 @@ function TagGroup({
 }) {
   // 成員版到找論文、示範站到論文清單（EXPERIENCE.md 畫面 8 第 2 點；Story 3.9）。
   const to = usePaperSite() === "demo" ? "/papers" : "/search";
+  // AI 的值照 AI 給的順序；人工值照分類表的順序（見 inTaxonomyOrder）。
+  const keys = field.human_verified ? inTaxonomyOrder(field.keys, names) : field.keys;
   return (
     <div className="flex flex-wrap items-center gap-[10px]">
       <span className={MONO_LABEL_CLASS}>{label}</span>
-      {field.keys.map((key, index) => {
+      {keys.map((key, index) => {
         if (key === UNCLASSIFIED) return <UnclassifiedTag key={index} />;
         return (
           <ClassificationTagLink key={index} field={kind} value={key} to={to}>
@@ -191,16 +205,42 @@ export function classificationHasTags(block: ClassificationBlock): boolean {
   );
 }
 
+/**
+ * 分類那一行交給成員版的修正分類（Story 3.11）畫的材料。這個檔不 import 修正分類（示範站的建置才不會帶到），
+ * 成員版用 `fix`（ClassificationFixRender）把這些排進去：那一行（標籤、標章、「有 N 位成員修正過」、「修正分類」）、
+ * 下面的「只根據標題分類」、歷史與表單。
+ */
+export interface ClassificationRowParts {
+  /** 那一行的外框類別（和沒有修正分類時同一個）。 */
+  rowClassName: string;
+  /** 主題、方法的標籤與 AI 標章。 */
+  tags: ReactNode;
+  /** 「只根據標題分類」那一行；沒有是 null。 */
+  titleOnly: ReactNode;
+  /** 「有 N 位成員修正過[，意見不同]」；沒有人修正過是 null。 */
+  countLabel: string | null;
+  block: ClassificationBlock;
+  /** 主題、方法的顯示名稱（照分類表的順序）。 */
+  names: DisplayNames;
+}
+
+/** 成員版的修正分類：拿到 ClassificationRowParts，畫出分類那一塊的內容。 */
+export type ClassificationFixRender = (parts: ClassificationRowParts) => ReactNode;
+
+const CLASSIFICATION_ROW_CLASS = "mt-[22px] flex flex-wrap items-center gap-x-[28px] gap-y-[10px]";
+
 interface ClassificationProps {
   block: ClassificationBlock;
   /** 顯示名稱；沒有讀到（null）時，要畫標籤的那一行不顯示（換成訊息條，見 PaperBiblio）。 */
   names: DisplayNames | null;
   /** 這一頁第一個未核對的標章在這裡（寫全文）。 */
   firstBadge: boolean;
+  /** 成員版的修正分類（Story 3.11）；示範站與沒給的時候照原本的樣子（「有 N 位成員修正過」是下面的一行說明）。 */
+  fix?: ClassificationFixRender;
 }
 
 /** 分類：書目的最後一行（EXPERIENCE.md 畫面 8 第 2 點）。 */
-export function ClassificationLine({ block, names, firstBadge }: ClassificationProps) {
+export function ClassificationLine({ block, names, firstBadge, fix }: ClassificationProps) {
   const { t } = useTranslation("paper");
   const failedText = useFailedText();
   // 有內容卻沒有來歷：不顯示內容（ADR-0010 第 8 點、ADR-0015），顯示「沒有產生成功」那一行（Codex 審查 3.8 中 1；
@@ -238,29 +278,47 @@ export function ClassificationLine({ block, names, firstBadge }: ClassificationP
   // 修正過的人數：整篇去重（A 修主題、B 修方法是 2 位；API 的 fix_member_count，Codex 審查 3.8 中 5）。
   const fixers = value.fix_member_count;
   const disagree = fields.some((field) => field.members_disagree);
+  const countLabel =
+    fixers > 0
+      ? disagree
+        ? t("paper.classification.disagree", { members: fixers })
+        : t("paper.classification.fixed", { members: fixers })
+      : null;
+  const tags = (
+    <>
+      {value.topic === null || value.topic.keys.length === 0 ? null : (
+        <TagGroup label={t("paper.classification.topic")} field={value.topic} names={topics} kind="topic" />
+      )}
+      {value.method === null || value.method.keys.length === 0 ? null : (
+        <TagGroup label={t("paper.classification.method")} field={value.method} names={methods} kind="method" />
+      )}
+      {/* 標章的按鈕 44px（ADR-0037）。成員版（有修正分類）用 −13px 讓它只佔標章本身的 18px：表單開著時 390 寬那一行只剩標章，
+          −9px（佔 26px）會讓那一行比設計稿高 8px（審查 3.11 T12）；其他時候那一行由 28px 的小按鈕撐，列高不變。示範站照原本。 */}
+      <AiBadge provenance={badgeProvenance(provenance)} first={firstBadge} triggerClassName={fix === undefined ? "-my-[9px]" : "-my-[13px]"} />
+    </>
+  );
+  const titleOnly =
+    provenance?.input_kind === "title" ? (
+      <NoteLine note="title-only" className="mt-2">
+        {t("paper.classification.titleOnly")}
+      </NoteLine>
+    ) : null;
+  if (fix !== undefined) {
+    return (
+      <div data-block="classification" data-block-state="ready">
+        {fix({ rowClassName: CLASSIFICATION_ROW_CLASS, tags, titleOnly, countLabel, block, names })}
+      </div>
+    );
+  }
   return (
     <div data-block="classification" data-block-state="ready">
-      <div className="mt-[22px] flex flex-wrap items-center gap-x-[28px] gap-y-[10px]">
-        {value.topic === null || value.topic.keys.length === 0 ? null : (
-          <TagGroup label={t("paper.classification.topic")} field={value.topic} names={topics} kind="topic" />
-        )}
-        {value.method === null || value.method.keys.length === 0 ? null : (
-          <TagGroup label={t("paper.classification.method")} field={value.method} names={methods} kind="method" />
-        )}
-        <AiBadge provenance={badgeProvenance(provenance)} first={firstBadge} triggerClassName="-my-[9px]" />
-      </div>
-      {provenance?.input_kind === "title" ? (
-        <NoteLine note="title-only" className="mt-2">
-          {t("paper.classification.titleOnly")}
-        </NoteLine>
-      ) : null}
-      {fixers > 0 ? (
+      <div className={CLASSIFICATION_ROW_CLASS}>{tags}</div>
+      {titleOnly}
+      {countLabel === null ? null : (
         <NoteLine note={disagree ? "disagree" : "fixed"} className="mt-2">
-          {disagree
-            ? t("paper.classification.disagree", { members: fixers })
-            : t("paper.classification.fixed", { members: fixers })}
+          {countLabel}
         </NoteLine>
-      ) : null}
+      )}
     </div>
   );
 }
@@ -294,9 +352,11 @@ interface PaperBiblioProps {
    * 其他沒有完整內容的論文照索引的 has_abstract（摘要不公開也可能是有摘要的）。
    */
   abstractMark?: boolean | null;
+  /** 成員版的修正分類（Story 3.11）；示範站不給。 */
+  classificationFix?: ClassificationFixRender;
 }
 
-export function PaperBiblio({ page, names, onRetryNames, firstBadge, abstractMark }: PaperBiblioProps) {
+export function PaperBiblio({ page, names, onRetryNames, firstBadge, abstractMark, classificationFix }: PaperBiblioProps) {
   const { t } = useTranslation("paper");
   const { paper } = page;
   const journal = journalName(paper.journal, names);
@@ -370,7 +430,7 @@ export function PaperBiblio({ page, names, onRetryNames, firstBadge, abstractMar
         {paper.cited_by_count === null ? null : <Citations citations={paper.cited_by_count} perYear={perYear} />}
         {abstractMark === null ? null : <AbstractMark has={abstractMark ?? page.abstract !== null} />}
       </div>
-      <ClassificationLine block={page.classification} names={names} firstBadge={firstBadge} />
+      <ClassificationLine block={page.classification} names={names} firstBadge={firstBadge} fix={classificationFix} />
       {namesFailed ? <NamesFailed onRetry={onRetryNames ?? (() => {})} /> : null}
     </div>
   );
