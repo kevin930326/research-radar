@@ -121,7 +121,9 @@ describe("style lint rules", () => {
     expect(await lint("src/hooks/use-reduced-motion.ts")).toEqual([]);
   });
 
-  it("does not block anything in src/", async () => {
+  // 對整個 src/ 跑 eslint，檔案越多越久：CI 上已經到 5～7 秒，超過預設的 5 秒上限
+  // （Kevin 2026-11-26 准許調長到 20 秒）。
+  it("does not block anything in src/", { timeout: 20_000 }, async () => {
     const eslint = new ESLint({ cwd: WEB_ROOT });
     const results = await eslint.lintFiles(["src"]);
     const errors = results.flatMap((result) =>
