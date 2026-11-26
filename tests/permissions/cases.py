@@ -170,9 +170,9 @@ def _fix_classification(ctx: PermissionContext) -> EndpointRequest:
 @REGISTRY.case("POST", "/api/v1/papers/{paper_id}/summary-reports")
 def _report_summary(ctx: PermissionContext) -> EndpointRequest:
     # B 回報 A 的私人論文（B 看不到）：和不存在一樣 404，什麼都不寫；A 回報自己看得到的這篇：200。
-    # 這篇要有有效的中文重點（沒有時回報不收）。
+    # 這篇要有有效的中文重點（沒有時回報不收）；本文帶畫面上看到的那一筆（ADR-0064）。
     paper_id = _private_paper_in_owner_library(ctx)
-    insert_header(
+    summary_id = insert_header(
         ctx.extras["test_database"],
         paper_id,
         "zh_summary",
@@ -185,7 +185,11 @@ def _report_summary(ctx: PermissionContext) -> EndpointRequest:
     )
     return EndpointRequest(
         path_params={"paper_id": str(paper_id)},
-        body={"field": "research_question", "note": "（假資料）說明"},
+        body={
+            "zh_summary_id": str(summary_id),
+            "field": "research_question",
+            "note": "（假資料）說明",
+        },
     )
 
 

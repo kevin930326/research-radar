@@ -40,6 +40,7 @@ PROBLEM_STATUS: Final[Mapping[ErrorCode, HTTPStatus]] = MappingProxyType(
         ErrorCode.EXPECTED_MEMBER_INVALID: HTTPStatus.BAD_REQUEST,
         ErrorCode.NOT_FOUND: HTTPStatus.NOT_FOUND,
         ErrorCode.MEMBER_CHANGED: HTTPStatus.CONFLICT,
+        ErrorCode.SUMMARY_CHANGED: HTTPStatus.CONFLICT,
         ErrorCode.METHOD_NOT_ALLOWED: HTTPStatus.METHOD_NOT_ALLOWED,
         ErrorCode.INTERNAL_ERROR: HTTPStatus.INTERNAL_SERVER_ERROR,
     }
@@ -71,6 +72,7 @@ ProblemCode = Literal[
     "origin_rejected",
     "request_invalid",
     "request_rejected",
+    "summary_changed",
 ]
 
 log = structlog.get_logger(__name__)

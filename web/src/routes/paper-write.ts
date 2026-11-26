@@ -4,6 +4,8 @@
 //   不重試、回 null（表單照「沒有送出成功」留著選的與寫的），照「發現換人」處理（followMemberChange）。
 // - 401：清快取、回登入頁，回 null。清快取前後都比對世代號（換人就加 1），中間換了人就不回登入頁。
 // - 422（後端不收）、404（看不到）、網路或伺服器錯誤：回 null，畫面顯示「沒有送出成功」。
+// - 畫面上的資料已經舊了（回報錯誤的 409 `summary_changed`：送出前中文重點重新產生了，ADR-0064）：同樣回 null（「沒有
+//   送出成功」），另外呼叫 `refresh` 重讀這一篇的資料。
 // - 成功：`apply` 改快取（在比對過世代號之後、同一個步驟裡），回它的結果。回應回來時世代號不同（送出之後換了人）
 //   就回 null，不改快取。
 import { useQueryClient, type QueryClient } from "@tanstack/react-query";
@@ -18,6 +20,7 @@ import { clearMemberQueries, memberGeneration, pendingMemberCheck } from "./sess
 export type PaperWriteResult<T> =
   | ({ kind: "done" } & T)
   | { kind: "rejected" }
+  | { kind: "stale" }
   | { kind: "notFound" }
   | { kind: "signedOut" }
   | { kind: "memberChanged" };
@@ -29,16 +32,20 @@ export interface PaperWriteMember {
   onMemberChanged: () => Promise<void> | void;
 }
 
-/** 一次寫入：`write` 帶預期成員呼叫 datasource；`apply` 在成功時改快取並回畫面要的結果。 */
+/**
+ * 一次寫入：`write` 帶預期成員呼叫 datasource；`apply` 在成功時改快取並回畫面要的結果；`refresh` 在畫面上的資料已經舊了
+ * （`stale`）時重讀。
+ */
 export interface PaperWrite<T, R> {
   write: (expectedMemberId: string) => Promise<PaperWriteResult<T>>;
   apply: (done: T, expectedMemberId: string) => R;
+  refresh?: () => Promise<void> | void;
 }
 
 /** 送出一次寫入，照檔頭的規則處理結果。不丟例外；成功回 `apply` 的結果，其他回 null。 */
 export async function sendPaperWrite<T, R>(
   queryClient: QueryClient,
-  { write, apply }: PaperWrite<T, R>,
+  { write, apply, refresh }: PaperWrite<T, R>,
   onSignedOut: () => Promise<void> | void,
   member: PaperWriteMember,
 ): Promise<R | null> {
@@ -68,6 +75,9 @@ export async function sendPaperWrite<T, R>(
       if (memberGeneration(queryClient) === generation + 1) {
         await onSignedOut();
       }
+      return null;
+    case "stale":
+      void refresh?.();
       return null;
     case "rejected":
     case "notFound":

@@ -1,7 +1,8 @@
 // 回報錯誤（Story 3.12；EXPERIENCE.md 畫面 8 第 3 點；設計稿 paper.html 的「回報錯誤」四個狀態）：表單在中文重點標題下面原地展開、
 // 「哪一欄」只能選一個（radio）、選了欄位也寫了說明才能送；送出中、沒有成功（選的與寫的都留著）、送出後那一欄內容下面多一行
 // 金色空心三角＋「有成員回報此欄可能有誤」；說明最多 100 個 code point、沒有「剩 N 字」；鍵盤打開與收起表單時焦點的去處、
-// 「哪一欄」的方向鍵；寫入帶預期成員，另一個分頁換了人時什麼都不寫、整頁換成現在的人（ADR-0055）；登入過期回登入頁；
+// 「哪一欄」的方向鍵；連點兩下只送一次；寫入帶預期成員與畫面上那一筆中文重點的 ID，另一個分頁換了人時什麼都不寫、整頁換成
+// 現在的人（ADR-0055）；送出前中文重點換了（409 summary_changed）照「沒有成功」留著、重讀論文頁（ADR-0064）；登入過期回登入頁；
 // 中文重點沒有產生成功時沒有「回報錯誤」；可點範圍至少 44px；示範站沒有「回報錯誤」與回報的標記；
 // 1440／1000／500 三種寬度、四個狀態的整頁截圖（只在 chromium；截圖存檔供人工看，自動比對由 design-compare 負責 1280／390）。
 // 資料是 fixtures/papers.json 的假論文（替身 e2e/api-mock.ts）。
@@ -9,7 +10,7 @@ import { fileURLToPath } from "node:url";
 
 import type { Page } from "@playwright/test";
 
-import { EXPECTED_MEMBER_HEADER, MEMBERS, gate, paperId, paperPage, type ApiMockState } from "./api-mock.ts";
+import { EXPECTED_MEMBER_HEADER, MEMBERS, REGENERATED_FINDINGS, gate, paperId, paperPage, type ApiMockState } from "./api-mock.ts";
 import { TEXT } from "./expected.ts";
 import { expect, test } from "./fixtures.ts";
 import { DEMO_PAPER_PAGES, SITES } from "./pages.ts";
@@ -166,7 +167,11 @@ test("sending: the button says sending, fields and note are locked, cancel is hi
   await expect(note(page)).toHaveAttribute("readonly", "");
   await expect(form(page).locator("[data-report-cancel]")).toHaveCount(0);
   release();
-  expect(await write).toEqual({ expected: MEMBERS[0]!.member_id, body: { field: "findings", note: NOTE }, status: 200 });
+  expect(await write).toEqual({
+    expected: MEMBERS[0]!.member_id,
+    body: { field: "findings", note: NOTE, zh_summary_id: paperPage("normal").zh_summary.value!.zh_summary_id },
+    status: 200,
+  });
   await expect(form(page)).toHaveCount(0);
   await expect(open(page)).toBeVisible();
   // 那一欄內容下面一行：金色空心三角＋「有成員回報此欄可能有誤」；內容不變、其他欄沒有。
@@ -197,6 +202,54 @@ test("failed: the message shows above the buttons and the field and note stay", 
   state.summaryReport = "ok";
   await send(page).click();
   await expect(form(page)).toHaveCount(0);
+  await expect(mark(page, "findings")).toBeVisible();
+});
+
+test("double-clicking 'send report' sends only one report", async ({ page, apiMock: state }) => {
+  // 第二下還看不到「送出中」的那一次畫面，靠 ref 擋（Opus 審查 3.12 低）。
+  const [hold, release] = gate();
+  state.summaryReportGate = hold;
+  await openForm(page);
+  await pick(page, "findings").click();
+  await note(page).fill(NOTE);
+  await send(page).dblclick();
+  await expect(send(page)).toHaveText(text("paper:paper.report.sending"));
+  release();
+  await expect(mark(page, "findings")).toBeVisible();
+  const posts = state.requests.filter((request) => request.method === "POST" && request.path.endsWith("/summary-reports"));
+  expect(posts).toHaveLength(1);
+});
+
+test("the summary changed before sending: kept as 'not sent', nothing written, the paper is read again (ADR-0064)", async ({ page, apiMock: state }) => {
+  const before = paperPage("normal").zh_summary.value!;
+  await openForm(page);
+  await pick(page, "findings").click();
+  await note(page).fill(NOTE);
+  state.summaryReport = "changed";
+  const write = nextReport(page);
+  const reread = page.waitForResponse(
+    (response) => response.request().method() === "GET" && new URL(response.url()).pathname === `/api/v1/papers/${paperId("normal")}`,
+  );
+  await send(page).click();
+  const sent = await write;
+  expect(sent.status).toBe(409);
+  expect(sent.body).toEqual({ field: "findings", note: NOTE, zh_summary_id: before.zh_summary_id });
+  await reread;
+  // 和其他沒有成功一樣：訊息在按鈕上方，選的與寫的都留著；沒有照換人處理（還在這一篇、沒有回登入頁）。
+  await expect(form(page).getByRole("alert")).toHaveText(text("paper:paper.report.failed"));
+  await expect(pick(page, "findings")).toHaveAttribute("aria-checked", "true");
+  await expect(note(page)).toHaveValue(NOTE);
+  await expect(page).toHaveURL(url("normal"));
+  // 畫面換上新的一筆，沒有標記。
+  await expect(page.locator("main [data-summary-field='findings']")).toContainText(REGENERATED_FINDINGS);
+  await expect(page.locator("main [data-summary-field] [data-note='reported']")).toHaveCount(0);
+  // 再送一次就送新的那一筆。
+  state.summaryReport = "ok";
+  const again = nextReport(page);
+  await send(page).click();
+  const resent = await again;
+  expect(resent.status).toBe(200);
+  expect(resent.body).toEqual({ field: "findings", note: NOTE, zh_summary_id: `${before.zh_summary_id}-regenerated` });
   await expect(mark(page, "findings")).toBeVisible();
 });
 

@@ -499,17 +499,22 @@ function useClassificationFix(page: PaperPageData, readAs: ReadAs): { page: Pape
 }
 
 /**
- * 論文頁的回報錯誤（Story 3.12）：送出帶 `readAs`（同 useClassificationFix，ADR-0055）。成功之後這一份論文頁資料的
- * 中文重點區塊換成 API 回的（那一欄多了「有成員回報此欄可能有誤」）；同 usePaperLibrary，只對按的時候那一份資料有效。
+ * 論文頁的回報錯誤（Story 3.12）：送出帶 `readAs`（同 useClassificationFix，ADR-0055）與畫面上那一筆中文重點的
+ * `zh_summary_id`（ADR-0064）。成功之後這一份論文頁資料的中文重點區塊換成 API 回的（那一欄多了「有成員回報此欄可能有誤」）；
+ * 同 usePaperLibrary，只對按的時候那一份資料有效。
  */
 function useSummaryReport(page: PaperPageData, readAs: ReadAs): { zhSummary: PaperPageData["zh_summary"]; control: SummaryReportControl } {
   const sendReport = useSendSummaryReport(readAs);
   const [changed, setChanged] = useState<{ page: PaperPageData; zhSummary: PaperPageData["zh_summary"] } | null>(null);
+  const shown = changed !== null && changed.page === page ? changed.zhSummary : page.zh_summary;
   return {
-    zhSummary: changed !== null && changed.page === page ? changed.zhSummary : page.zh_summary,
+    zhSummary: shown,
     control: {
       send: async (body) => {
-        const zhSummary = await sendReport(page.paper.id, body);
+        // 表單只在 ready 時出現；保險起見，畫面上沒有那一筆就不送。
+        const seen = shown.state === "ready" ? shown.value?.zh_summary_id : undefined;
+        if (seen === undefined) return false;
+        const zhSummary = await sendReport(page.paper.id, { ...body, zh_summary_id: seen });
         if (zhSummary === null) return false;
         setChanged({ page, zhSummary });
         return true;

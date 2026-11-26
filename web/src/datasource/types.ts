@@ -143,7 +143,7 @@ export interface PaperSource {
    */
   fixClassification(paperId: string, body: ClassificationFixBody, expectedMemberId?: string): Promise<ClassificationFixResult>;
   /**
-   * 回報一篇論文的中文重點錯誤（Story 3.12）：哪一欄＋說明。`expectedMemberId` 同 fixClassification（畫面一律經
+   * 回報一篇論文的中文重點錯誤（Story 3.12）：畫面上看到的那一筆中文重點（`zh_summary_id`）＋哪一欄＋說明。`expectedMemberId` 同 fixClassification（畫面一律經
    * useSummaryReport 送，一定會帶）。
    */
   reportSummary(paperId: string, body: SummaryReportBody, expectedMemberId?: string): Promise<SummaryReportResult>;
@@ -180,12 +180,15 @@ export type ClassificationFixResult =
  * 送出回報的結果：
  * - `done`：寫好了，`zhSummary` 是回報後的中文重點區塊（`reported_fields` 多了這一欄）。
  * - `rejected`：後端不收（422：不是四欄之一、說明沒寫或太長、有不收的字元、中文重點不是 ready 等），什麼都沒寫。
+ * - `summaryChanged`：送出的 `zh_summary_id` 已經不是現在有效的那一筆（409 `summary_changed`，送出前重新產生了；
+ *   ADR-0064），什麼都沒寫。和換了人的 `memberChanged` 不同。
  * - `notFound`／`signedOut`／`memberChanged`：同修正分類（409 時後端什麼都沒寫）。
  * 其他錯誤（網路、伺服器錯誤）丟出例外。
  */
 export type SummaryReportResult =
   | { kind: "done"; zhSummary: ZhSummaryBlock }
   | { kind: "rejected" }
+  | { kind: "summaryChanged" }
   | { kind: "notFound" }
   | { kind: "signedOut" }
   | { kind: "memberChanged" };

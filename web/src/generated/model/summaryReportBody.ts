@@ -6,13 +6,15 @@
  */
 
 /**
- * 回報中文重點錯誤送來的內容：哪一欄（`research_question`、`method`、`theory`、
+ * 回報中文重點錯誤送來的內容：畫面上看到的那一筆中文重點（`zh_summary_id`，論文頁
+ * `zh_summary.value.zh_summary_id`）、哪一欄（`research_question`、`method`、`theory`、
  * `findings` 之一）、說明（必填，100 字以內）。
  *
  * 這裡只擋形狀（字串、多餘欄位）與過大的請求；四欄之一、必填、字數與字元由
  * `domain/summary_reports.check_summary_report` 驗。
  */
 export interface SummaryReportBody {
+  zh_summary_id: string;
   /** @maxLength 64 */
   field: string;
   /** @maxLength 1000 */

@@ -6,7 +6,8 @@ ADR-0015、ADR-0064）。
   摘要換了之後論文頁已經不顯示標記）。不印 email 與成員 ID。說明是成員寫的字：印之前照終端機的規則
   清掉控制字元（`domain/admin_runs.terminal_text`）。
 - `confirm-ok`：以 `--admin` 這位管理者（允許名單上、`is_admin`）的名義寫一筆
-  `summary_report_resolution`＝`confirmed_ok`＋稽核（同一個交易）；之後論文頁那一欄不再顯示標記。
+  `summary_report_resolution`＝`confirmed_ok`＋稽核（同一個交易）。論文頁那一欄的標記要等這一欄
+  最後一筆沒處理的回報結案時才不顯示（同一欄有兩位成員回報、只處理一筆，標記還在）。
 - 「重新產生」還沒接上：閘門（AD-8）現在不會重跑已經有 `active` 的同一份輸入，
   要 Kevin 決定怎麼開這條
   路（ADR-0064）。
@@ -101,7 +102,8 @@ def confirm_ok(
     report_id: str = typer.Argument(..., help="回報 ID（`list` 印的）"),
     admin: str = typer.Option(..., "--admin", help="做這個處理的管理者的 email（允許名單上）"),
 ) -> None:
-    """把一筆回報標成「已確認無誤」：論文頁那一欄不再顯示「有成員回報此欄可能有誤」。
+    """把一筆回報標成「已確認無誤」。論文頁那一欄的「有成員回報此欄可能有誤」，要等這一欄最後一筆
+    沒處理的回報結案時才不顯示。
 
     回報 ID 不對、不存在或已經處理過：退出碼 1。`--admin` 不是管理者：退出碼 1。
     """

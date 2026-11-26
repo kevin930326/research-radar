@@ -179,3 +179,7 @@ class ErrorCode(StrEnum):
     # 文獻庫的寫入帶了「這個分頁以為的成員」（epic-3h PR 3、ADR-0055）：api 回應的代碼
     MEMBER_CHANGED = "member_changed"  # 和 session 的成員不同（另一個分頁換了人），不寫（409）
     EXPECTED_MEMBER_INVALID = "expected_member_invalid"  # 值不是成員 ID 或重複出現，不寫（400）
+
+    # 回報中文重點錯誤帶了畫面上看到的那一筆中文重點（Story 3.12、ADR-0064）：api 回應的代碼
+    # 送出前中文重點已經換成新的一筆（重新產生），不寫（409）；和換了人的 `member_changed` 分開
+    SUMMARY_CHANGED = "summary_changed"

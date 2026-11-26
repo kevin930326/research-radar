@@ -811,8 +811,12 @@ describe("summary report on the paper page", () => {
   it("a reported field shows the gold triangle mark under its content, with the report entry still there", () => {
     const html = block(renderReport(fixture("reported")), "zh_summary");
     expect(count(html, TEXT["paper:paper.summary.reported"]!)).toBe(1);
-    expect(html).toContain('data-note="reported"');
-    expect(html).toContain("text-accent-gold");
+    // 只看標記那一段：「回報錯誤」按鈕本身也是金色，看整塊的話標記不是金色也會過（Opus 審查 3.12 中）。
+    const marks = html.split('data-note="reported"').slice(1);
+    expect(marks).toHaveLength(1);
+    const markHtml = marks[0]!.slice(0, marks[0]!.indexOf("</div>"));
+    expect(markHtml).toMatch(/<svg[^>]*class="[^"]*\btext-accent-gold\b[^"]*"/);
+    expect(markHtml).toContain(TEXT["paper:paper.summary.reported"]!);
     expect(html).toContain(OPEN);
   });
 

@@ -90,7 +90,7 @@
 //                                                        不能打字；空字串是不填；也是在頁面殼裡多載入 /__mock/inject.js）
 //   http://127.0.0.1:4180/__mock?summaryReportReset=1    每一篇的回報回到假資料一開始的樣子
 // Story 3.12 加上回報錯誤的端點（POST /api/v1/papers/{id}/summary-reports）：中文重點是 ready 才收；欄位是四欄之一、
-// 說明去掉前後空白後有字而且最多 100 個 code point（否則 422）；收下後那一篇的 reported_fields 多這一欄（照四欄的順序），
+// 說明去掉前後空白後有字而且最多 100 個 code point（否則 422）；送來的 zh_summary_id 不是現在那一筆 409 summary_changed；收下後那一篇的 reported_fields 多這一欄（照四欄的順序），
 // 回中文重點區塊。論文頁：http://127.0.0.1:4180/__mock/summary-report 列出回報錯誤每一種狀態怎麼看（啟動時也印出來）。
 // 參數可以一起給；回傳目前的情境（JSON）。
 /* global process, URL, setTimeout, Buffer */
@@ -487,9 +487,10 @@ async function summaryReport(req, res, id) {
   const block = zhSummaryOf(id);
   if (block === undefined) return problem(res, 404, "not_found");
   const note = typeof body.note === "string" ? body.note.trim() : "";
-  if (block.state !== "ready" || !SUMMARY_FIELDS.includes(body.field) || note === "" || [...note].length > 100) {
+  if (block.state !== "ready" || typeof body.zh_summary_id !== "string" || !SUMMARY_FIELDS.includes(body.field) || note === "" || [...note].length > 100) {
     return problem(res, 422, "request_invalid");
   }
+  if (body.zh_summary_id !== block.value.zh_summary_id) return problem(res, 409, "summary_changed");
   reportedFields.set(id, new Set([...(reportedFields.get(id) ?? []), body.field]));
   return json(res, 200, { zh_summary: zhSummaryOf(id) });
 }

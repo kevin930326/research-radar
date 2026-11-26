@@ -3,7 +3,9 @@
 - 四欄選一欄：不是四欄之一（含大小寫不同、不是字串）不收。
 - 說明必填：沒寫、只有空白不收；去掉前後空白；最多 100 個 code point（表情符號算一個）；控制字元、
   U+2028、U+2029、落單的代理字元、格式字元（Cf）不收；只有零寬連接 U+200D 放行（組合 emoji）。
-- 只有 `ready` 的中文重點可以回報（`reportable_summary`）。
+- 只有 `ready` 的中文重點可以回報（`reportable_summary`），而且要是成員看到的那一筆（不同丟
+  `SummaryChangedError`）。
+- 只有空白與零寬連接 U+200D 的說明算沒寫。
 - 錯誤只帶原因代號，不帶說明。
 資料全是測試自己編的。
 """
@@ -18,6 +20,7 @@ from radar.domain.ai_outputs import InputKind
 from radar.domain.judgments import SummaryField
 from radar.domain.summary_reports import (
     NOTE_MAX_LENGTH,
+    SummaryChangedError,
     SummaryReport,
     SummaryReportEvent,
     SummaryReportInvalidError,
@@ -26,6 +29,8 @@ from radar.domain.summary_reports import (
     reportable_summary,
     summary_report_lock_key,
 )
+from radar.domain.viewer import MemberViewer, PublicViewer, SystemViewer
+from radar.repo.visibility import visible_member_judgments, visible_summary_report_marks
 
 SUMMARY_ID = uuid.UUID("00000000-0000-7000-8000-0000000000a1")
 PROVENANCE = Provenance(
@@ -65,6 +70,17 @@ def test_anything_but_the_four_fields_is_rejected(field: object) -> None:
 @pytest.mark.parametrize("note", [None, "", "   ", "　"])
 def test_the_note_is_required(note: object) -> None:
     assert _problem(note=note) is SummaryReportProblem.NOTE_MISSING
+
+
+@pytest.mark.parametrize("note", ["\u200d", "\u200d\u200d", " \u200d ", "　\u200d　\u200d"])
+def test_a_note_of_only_zero_width_joiners_and_spaces_is_missing(note: str) -> None:
+    # 零寬連接看不見：只有它（加空白）的說明在終端機與畫面上都是空的（Codex 審查 3.12 中）。
+    assert _problem(note=note) is SummaryReportProblem.NOTE_MISSING
+
+
+def test_a_zero_width_joiner_inside_an_emoji_is_still_kept() -> None:
+    family = "👨\u200d👩\u200d👧"
+    assert check_summary_report(field="findings", note=family).note == family
 
 
 def test_the_note_is_trimmed() -> None:
@@ -108,7 +124,16 @@ def test_errors_never_carry_the_note() -> None:
 def test_only_a_ready_summary_can_be_reported() -> None:
     ready = AiBlock(AiProduct.ZH_SUMMARY, AiBlockState.READY, VALUE, PROVENANCE)
 
-    assert reportable_summary(ready) == VALUE
+    assert reportable_summary(ready, SUMMARY_ID) == VALUE
+
+
+def test_a_summary_other_than_the_one_seen_cannot_be_reported() -> None:
+    # 成員看著舊的一筆填表、送出前重新產生了：不收（api 回 409 summary_changed，ADR-0064）。
+    ready = AiBlock(AiProduct.ZH_SUMMARY, AiBlockState.READY, VALUE, PROVENANCE)
+
+    with pytest.raises(SummaryChangedError) as caught:
+        reportable_summary(ready, uuid.UUID(int=99))
+    assert str(SUMMARY_ID) not in str(caught.value)
 
 
 @pytest.mark.parametrize(
@@ -125,13 +150,13 @@ def test_only_a_ready_summary_can_be_reported() -> None:
 )
 def test_a_summary_that_is_not_ready_cannot_be_reported(block: AiBlock) -> None:
     with pytest.raises(SummaryReportInvalidError) as caught:
-        reportable_summary(block)
+        reportable_summary(block, SUMMARY_ID)
     assert caught.value.problem is SummaryReportProblem.NO_SUMMARY
 
 
 def test_reportable_summary_needs_a_summary_block() -> None:
     with pytest.raises(ValueError, match="中文重點"):
-        reportable_summary(AiBlock(AiProduct.CLASSIFICATION, AiBlockState.FAILED))
+        reportable_summary(AiBlock(AiProduct.CLASSIFICATION, AiBlockState.FAILED), SUMMARY_ID)
 
 
 def test_the_lock_key_is_per_paper_and_apart_from_other_locks() -> None:
@@ -188,3 +213,26 @@ def test_the_zero_width_joiner_is_kept_for_emoji() -> None:
 def test_the_zero_width_joiner_counts_as_one_code_point() -> None:
     assert _problem(note="長" * 100 + "\u200d") is SummaryReportProblem.NOTE_TOO_LONG
     assert len(check_summary_report(field="theory", note="長" * 99 + "\u200d").note) == 100
+
+
+# --- 誰讀得到標記（和修正歷史共用身分判斷，Codex 審查 3.12 中）------------------------------
+
+
+@pytest.mark.parametrize(
+    "viewer", [MemberViewer(member_id=uuid.UUID(int=5), is_admin=False), SystemViewer()]
+)
+def test_members_and_the_system_read_the_marks(viewer: MemberViewer | SystemViewer) -> None:
+    assert visible_summary_report_marks(viewer) == "TRUE"
+    # 同一個身分判斷：修正歷史也讀得到。
+    assert visible_member_judgments(viewer) == "TRUE"
+
+
+def test_the_public_viewer_reads_the_marks_as_empty_but_never_the_history() -> None:
+    assert visible_summary_report_marks(PublicViewer()) == "FALSE"
+    with pytest.raises(TypeError, match="成員"):
+        visible_member_judgments(PublicViewer())
+
+
+def test_anything_else_is_not_a_viewer_for_the_marks() -> None:
+    with pytest.raises(TypeError, match="讀者身分"):
+        visible_summary_report_marks(object())  # type: ignore[arg-type]

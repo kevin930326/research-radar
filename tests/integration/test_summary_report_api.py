@@ -5,8 +5,12 @@ AD-10、ADR-0015、ADR-0055、ADR-0064）。
   （同一個交易、同一個時間）；回應與論文頁的 `reported_fields` 多了那一欄，只有欄位名稱。
 - 不收：不是四欄之一、說明沒寫或只有空白、超過 100 字、有換行或行分隔符、段落分隔符；中文重點沒有
   產生成功（`failed`）、四欄都沒有（`empty`）、還在產生、沒有摘要——一律 422，什麼都不寫。
+- 送出帶畫面上看到的那一筆 `zh_summary_id`；送出前重新產生了（在鎖裡比對）→ 409 `summary_changed`，
+  什麼都不寫（ADR-0064）。
 - 標記只看「有回報、還沒處理結果、而且是現在這一筆」：重新產生後消失（回報還在、指著舊的那一筆）、
   管理指令標「已確認無誤」後消失。
+- 兩位成員同時回報同一欄（兩條資料庫連線）：兩筆回報各有稽核，那一欄只有一個標記；只處理其中一筆，
+  標記還在。
 - 看不到的論文（別人的私人論文、被排除、追蹤範圍外）、不存在、壞 ID：完全相同的 404，什麼都不寫；
   看不到的論文帶壞本文也是 404。換人後寫入（預期成員不符）409。
 - 公開身分（示範站產生器）：論文讀得到，回報的標記讀成空的；回報清單與寫入都直接丟錯。
@@ -35,6 +39,7 @@ from radar.domain.ai_blocks import AiProduct
 from radar.domain.auth_settings import AuthSettings, Environment
 from radar.domain.judgments import SummaryField
 from radar.domain.library import AddedVia
+from radar.domain.summary_reports import SummaryChangedError
 from radar.domain.viewer import MemberViewer, PublicViewer, SystemViewer
 from radar.entrypoints.api.app import REQUEST_ID_HEADER, create_app
 from radar.entrypoints.api.auth import EXPECTED_MEMBER_HEADER, SESSION_COOKIE, build_auth_routes
@@ -131,15 +136,26 @@ class Api:
     def report(
         self, paper_id: object, token: str, body: Any = None, *, expected: str | None = None
     ) -> Response:
+        """送出回報。本文是 dict 而且沒有 `zh_summary_id` 時，照前端的做法補上這位成員現在論文頁上
+        看到的那一筆（讀不到論文頁或沒有內容時補一個不存在的 ID）。"""
+        payload = BODY if body is None else body
+        if isinstance(payload, dict) and "zh_summary_id" not in payload:
+            payload = {**payload, "zh_summary_id": self.seen_summary_id(paper_id, token)}
         self.client.cookies.clear()
         headers = {"Cookie": f"{SESSION_COOKIE}={token}", "Origin": DEV_ORIGIN}
         if expected is not None:
             headers[EXPECTED_MEMBER_HEADER] = expected
         return self.client.post(
-            f"/api/v1/papers/{paper_id}/summary-reports",
-            headers=headers,
-            json=BODY if body is None else body,
+            f"/api/v1/papers/{paper_id}/summary-reports", headers=headers, json=payload
         )
+
+    def seen_summary_id(self, paper_id: object, token: str) -> str:
+        self.client.cookies.clear()
+        response = self.client.get(
+            f"/api/v1/papers/{paper_id}", headers={"Cookie": f"{SESSION_COOKIE}={token}"}
+        )
+        value = response.json()["zh_summary"]["value"] if response.status_code == 200 else None
+        return str(uuid.uuid4()) if value is None else str(value["zh_summary_id"])
 
     def paper(self, paper_id: object, token: str) -> dict[str, Any]:
         self.client.cookies.clear()
@@ -377,6 +393,7 @@ def test_a_failure_writing_the_audit_rolls_back_the_report(
             database,
             paper_page_setup(),
             paper_id,
+            zh_summary_id=summary_id,
             field="findings",
             note=NOTE,
             now=NOW,
@@ -408,11 +425,57 @@ def test_the_mark_disappears_after_the_summary_is_regenerated(
 def test_a_report_points_at_the_summary_current_when_it_was_sent(
     api: Api, db: TestDatabase, paper_id: uuid.UUID, summary_id: uuid.UUID
 ) -> None:
+    # 成員打開論文頁時已經是新的一筆：回報指向新的那一筆（成員看到的就是它）。
     new_id = insert_header(db, paper_id, "zh_summary", ZH)
 
     assert api.report(paper_id, api.owner_token).status_code == 200
 
     assert [e[4] for e in _events(db)] == [new_id]
+
+
+def test_a_summary_regenerated_before_sending_is_409_and_writes_nothing(
+    api: Api, db: TestDatabase, paper_id: uuid.UUID, summary_id: uuid.UUID
+) -> None:
+    # 成員看著舊的一筆填表、送出前重新產生了：回報不貼到成員沒看過的新一筆（Codex 審查 3.12 中）。
+    new_id = insert_header(db, paper_id, "zh_summary", ZH)
+
+    response = api.report(paper_id, api.owner_token, {**BODY, "zh_summary_id": str(summary_id)})
+
+    assert response.status_code == 409
+    assert response.headers["cache-control"] == "no-store"
+    assert response.json() == {
+        "type": "about:blank",
+        "title": "Conflict",
+        "status": 409,
+        "code": "summary_changed",
+    }
+    assert NOTE not in response.text
+    assert _events(db) == []
+    assert _audits(db) == []
+    zh = _zh(api, paper_id, api.owner_token)
+    assert zh["value"]["zh_summary_id"] == str(new_id)
+    assert zh["value"]["reported_fields"] == []
+    # 帶不存在的 ID 也一樣（不透露任何 ID）。
+    other = api.report(paper_id, api.owner_token, {**BODY, "zh_summary_id": str(uuid.uuid4())})
+    assert other.status_code == 409
+    assert other.content == response.content
+
+
+def test_a_body_problem_is_still_422_before_comparing_the_summary(
+    api: Api, db: TestDatabase, paper_id: uuid.UUID, summary_id: uuid.UUID
+) -> None:
+    # 錯誤的先後：本文不對（說明沒寫）先回 422，才比對看到的那一筆（ADR-0064 決定第 1 點）。
+    insert_header(db, paper_id, "zh_summary", ZH)
+
+    response = api.report(
+        paper_id,
+        api.owner_token,
+        {"field": "findings", "note": " ", "zh_summary_id": str(summary_id)},
+    )
+
+    assert response.status_code == 422
+    assert response.json() == REQUEST_INVALID
+    assert _events(db) == []
 
 
 def test_the_mark_disappears_once_an_admin_confirms_it(
@@ -468,6 +531,117 @@ def test_only_an_admin_on_the_allowlist_can_confirm(
     assert len(_events(db)) == 1
     assert _audits(db, "resolve_summary_report") == []
     assert _zh(api, paper_id, api.owner_token)["value"]["reported_fields"] == ["findings"]
+
+
+# --- 同時回報、鎖裡比對（兩條資料庫連線）-------------------------------------------------------
+
+QUEUE_POOL = 3
+
+
+def _member_report(
+    database: Database, member_id: uuid.UUID, paper_id: uuid.UUID, seen_id: uuid.UUID, note: str
+) -> Any:
+    return report_summary(
+        MemberViewer(member_id=member_id, is_admin=False),
+        database,
+        paper_page_setup(),
+        paper_id,
+        zh_summary_id=seen_id,
+        field="findings",
+        note=note,
+        now=NOW,
+    )
+
+
+def _before_the_first_lock(monkeypatch: pytest.MonkeyPatch, step: Any) -> list[Any]:
+    """第一次拿回報的鎖之前，先在另一條連線上做完 `step` 並提交：甲的交易已經開始（查過看得到
+    這篇），`step` 比甲先做完。回 `step` 的結果。"""
+    real_lock = Database.transaction_lock
+    done: list[Any] = []
+
+    def lock_after_step(connection: Any, key: int) -> None:
+        if not done:
+            done.append(None)  # step 自己拿鎖時走真的鎖
+            done[0] = step()
+        real_lock(connection, key)
+
+    monkeypatch.setattr(Database, "transaction_lock", staticmethod(lock_after_step))
+    return done
+
+
+def test_two_members_reporting_the_same_field_at_once_show_one_mark(
+    db: TestDatabase, paper_id: uuid.UUID, summary_id: uuid.UUID, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 甲先開交易、乙在另一條連線先回報同一欄並提交、甲再拿到鎖：兩筆回報各有稽核，那一欄只有一個
+    # 標記（Codex 審查 3.12 中）。
+    database = Database(db.app_url, connect_timeout=5, pool_size=QUEUE_POOL)
+    owner = allow_member(SystemViewer(), database, email=OWNER_EMAIL, display_name="測試甲")
+    other = allow_member(SystemViewer(), database, email=OTHER_EMAIL, display_name="測試乙")
+    admin = allow_member(SystemViewer(), database, email=ADMIN_EMAIL, display_name="測試管理者")
+    set_member_admin(SystemViewer(), database, email=ADMIN_EMAIL)
+    first = _before_the_first_lock(
+        monkeypatch,
+        lambda: _member_report(database, other.member_id, paper_id, summary_id, "乙的說明"),
+    )
+
+    block = _member_report(database, owner.member_id, paper_id, summary_id, NOTE)
+
+    assert first[0] is not None
+    assert block is not None
+    assert block.value.reported_fields == (SummaryField.FINDINGS,)
+    events = _events(db)
+    assert [(e[0], e[1], e[4], e[5]) for e in events] == [
+        ("summary_report", other.member_id, summary_id, "findings"),
+        ("summary_report", owner.member_id, summary_id, "findings"),
+    ]
+    audits = _audits(db)
+    assert [a[0] for a in audits] == [other.member_id, owner.member_id]
+    assert [a[6] for a in audits] == [e[9] for e in events]
+    # 甲的時間是拿到鎖之後取的，比乙的晚。
+    assert events[1][9] > events[0][9]
+
+    # 只處理其中一筆：同一欄還有一筆沒處理，標記還在；兩筆都處理了才消失。
+    report_ids = [
+        row[0]
+        for row in execute(
+            db, "SELECT id FROM judgment_event WHERE kind = 'summary_report' ORDER BY created_at"
+        )
+    ]
+    monkeypatch.undo()
+    confirm_summary_report(SystemViewer(), database, report_ids[0], admin_email=ADMIN_EMAIL)
+    setup = paper_page_setup()
+    settings = demo_ai_block_settings(setup.models, setup.taxonomy, setup.context_values)[
+        AiProduct.ZH_SUMMARY
+    ]
+    viewer = MemberViewer(member_id=admin.member_id, is_admin=True)
+    with database.transaction() as connection:
+        still = find_ai_block(viewer, connection, paper_id, AiProduct.ZH_SUMMARY, settings)
+    assert still is not None
+    assert still.value.reported_fields == (SummaryField.FINDINGS,)  # type: ignore[union-attr]
+    confirm_summary_report(SystemViewer(), database, report_ids[1], admin_email=ADMIN_EMAIL)
+    with database.transaction() as connection:
+        gone = find_ai_block(viewer, connection, paper_id, AiProduct.ZH_SUMMARY, settings)
+    assert gone is not None
+    assert gone.value.reported_fields == ()  # type: ignore[union-attr]
+
+
+def test_a_regeneration_while_waiting_for_the_lock_is_caught_inside_it(
+    db: TestDatabase, paper_id: uuid.UUID, summary_id: uuid.UUID, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 甲的交易已經開始、還沒拿到鎖時，另一條連線重新產生了中文重點：甲拿到鎖後讀到新的一筆，和
+    # 看到的不同，不寫（ADR-0064）。
+    database = Database(db.app_url, connect_timeout=5, pool_size=QUEUE_POOL)
+    owner = allow_member(SystemViewer(), database, email=OWNER_EMAIL, display_name="測試甲")
+    regenerated = _before_the_first_lock(
+        monkeypatch, lambda: insert_header(db, paper_id, "zh_summary", ZH)
+    )
+
+    with pytest.raises(SummaryChangedError):
+        _member_report(database, owner.member_id, paper_id, summary_id, NOTE)
+
+    assert regenerated[0] is not None
+    assert _events(db) == []
+    assert _audits(db) == []
 
 
 # --- 看不到、換人、公開身分 ----------------------------------------------------------------------
@@ -579,6 +753,7 @@ def test_the_public_viewer_reads_the_summary_but_never_the_reports(
             database,
             setup,
             paper_id,
+            zh_summary_id=summary_id,
             field="findings",
             note=NOTE,
             now=NOW,

@@ -20,7 +20,8 @@
 - `report_summary`：一個交易做完——看得到這篇（同修正分類；看不到不排隊）→ 拿這一篇回報的鎖
   （`summary_report_lock_key`）→ 拿到鎖後再看一次 → 取一次 `clock_timestamp()` → 讀目前的中文重點
   （`find_ai_block`）→ 驗（`domain/summary_reports`：四欄之一、說明必填 100 字以內；中文重點不是
-  `ready` 不收）→ 寫一筆 `summary_report`（指向這一刻有效的那一筆 `zh_summary`）→ 同一個交易寫稽核
+  `ready` 不收；現在有效的那一筆不是成員畫面上看到的 `zh_summary_id` 丟 `SummaryChangedError`）
+  → 寫一筆 `summary_report`（指向成員看到、也是這一刻有效的那一筆 `zh_summary`）→ 同一個交易寫稽核
   → 重讀中文重點區塊回傳（`reported_fields` 只有欄位名稱，不帶誰回報、說明）。只收成員身分。
 - `list_open_summary_reports`、`confirm_summary_report`：管理指令（系統身分）列出還沒處理的回報、
   以管理者的名義標「已確認無誤」（`summary_report_resolution`＋稽核，同一個交易）。「重新產生」
@@ -285,18 +286,20 @@ def report_summary(
     setup: PaperPageSetup,
     paper_id: uuid.UUID,
     *,
+    zh_summary_id: uuid.UUID,
     field: object,
     note: object,
     now: datetime,
 ) -> AiBlock | None:
     """`actor` 回報一篇看得到的論文的中文重點某一欄可能有誤（見模組說明），回寫入後的中文重點區塊
-    （`reported_fields` 多了這一欄）。看不到、不存在、被排除的論文回 None，什麼都不寫。`now` 給預算
-    算台北月份用。
+    （`reported_fields` 多了這一欄）。看不到、不存在、被排除的論文回 None，什麼都不寫。
+    `zh_summary_id` 是成員畫面上看到的那一筆中文重點。`now` 給預算算台北月份用。
 
     Raises:
         TypeError: `actor` 不是成員身分。
         PermissionDeniedError: `actor` 不能回報（權限表）。
         SummaryReportInvalidError: 送來的值不收，或這篇現在沒有可以回報的中文重點（什麼都不寫）。
+        SummaryChangedError: 現在有效的中文重點不是 `zh_summary_id` 那一筆（什麼都不寫）。
         ValueError: `now` 沒有時區。
         PromptIntegrityError: 有工作沒有登記目前的 prompt 版本。
     """
@@ -316,7 +319,7 @@ def report_summary(
         if block is None:
             return None
         report = check_summary_report(field=field, note=note)
-        summary = reportable_summary(block)
+        summary = reportable_summary(block, zh_summary_id)
         role = ActorRole.ADMIN if actor.is_admin else ActorRole.MEMBER
         event_id = create_judgment_event(
             connection,

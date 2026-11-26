@@ -1,12 +1,12 @@
 // 回報中文重點錯誤（Story 3.12）的資料來源：路徑與方法、論文 ID 有編碼、本文照送、預期成員的標頭（ADR-0055）、
-// 200／422／404／401／409 的結果，其他錯誤丟出去。資料全是假的。
+// 200／422／404／401／409（member_changed、summary_changed 分開）的結果，其他錯誤丟出去。資料全是假的。
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { datasource } from "./api";
 
 const MEMBER = "00000000-0000-4000-8000-00000000000a";
 const ZH = { state: "ready", value: { zh_summary_id: "s1", research_question: "q", method: null, theory: null, findings: "f", reported_fields: ["findings"] }, provenance: null };
-const BODY = { field: "findings", note: "fake note" };
+const BODY = { zh_summary_id: "s1", field: "findings", note: "fake note" };
 
 function respond(status: number, body: unknown) {
   return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
@@ -39,6 +39,7 @@ describe("summary reports", () => {
     [problem(404, "not_found"), { kind: "notFound" }],
     [problem(401, "not_authenticated"), { kind: "signedOut" }],
     [problem(409, "member_changed"), { kind: "memberChanged" }],
+    [problem(409, "summary_changed"), { kind: "summaryChanged" }],
   ])("POST answer %# maps to a result", async (response, expected) => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValueOnce(response));
     expect(await papers.reportSummary("x", BODY, MEMBER)).toEqual(expected);

@@ -323,7 +323,7 @@
     "/api/v1/papers/{paper_id}/summary-reports": {
       "post": {
         "summary": "Report Summary",
-        "description": "回報一篇看得到的論文的中文重點某一欄可能有誤：哪一欄（四欄之一）、說明（必填，\n100 字以內）；不改內容，回寫入後的中文重點區塊（`reported_fields` 只有欄位名稱）。\n看不到、不存在、ID 不是 UUID 都回同一個 404；送來的值不收、這篇現在沒有可以回報的中文重點\n422 `request_invalid`（什麼都不寫）；沒登入 401；`Origin` 缺少或不是本站 403\n`origin_rejected`；\n`X-Radar-Expected-Member` 和登入的成員不同 409 `member_changed`、格式不對 400\n`expected_member_invalid`。看不到的論文帶壞本文也是 404（先查論文、再驗本文）。",
+        "description": "回報一篇看得到的論文的中文重點某一欄可能有誤：哪一欄（四欄之一）、說明（必填，\n100 字以內）；不改內容，回寫入後的中文重點區塊（`reported_fields` 只有欄位名稱）。\n看不到、不存在、ID 不是 UUID 都回同一個 404；送來的值不收、這篇現在沒有可以回報的中文重點\n422 `request_invalid`（什麼都不寫）；沒登入 401；`Origin` 缺少或不是本站 403\n`origin_rejected`；\n`X-Radar-Expected-Member` 和登入的成員不同 409 `member_changed`、格式不對 400\n`expected_member_invalid`。`zh_summary_id` 不是現在有效的那一筆（送出前重新產生了）409\n`summary_changed`（什麼都不寫，重讀論文頁）。看不到的論文帶壞本文也是 404（先查論文、\n再驗本文）。",
         "operationId": "report_summary",
         "parameters": [
           {
@@ -2120,7 +2120,8 @@
               "not_found",
               "origin_rejected",
               "request_invalid",
-              "request_rejected"
+              "request_rejected",
+              "summary_changed"
             ],
             "title": "Code"
           }
@@ -2380,6 +2381,11 @@
       },
       "SummaryReportBody": {
         "properties": {
+          "zh_summary_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Zh Summary Id"
+          },
           "field": {
             "type": "string",
             "maxLength": 64,
@@ -2394,11 +2400,12 @@
         "additionalProperties": false,
         "type": "object",
         "required": [
+          "zh_summary_id",
           "field",
           "note"
         ],
         "title": "SummaryReportBody",
-        "description": "回報中文重點錯誤送來的內容：哪一欄（`research_question`、`method`、`theory`、\n`findings` 之一）、說明（必填，100 字以內）。\n\n這裡只擋形狀（字串、多餘欄位）與過大的請求；四欄之一、必填、字數與字元由\n`domain/summary_reports.check_summary_report` 驗。"
+        "description": "回報中文重點錯誤送來的內容：畫面上看到的那一筆中文重點（`zh_summary_id`，論文頁\n`zh_summary.value.zh_summary_id`）、哪一欄（`research_question`、`method`、`theory`、\n`findings` 之一）、說明（必填，100 字以內）。\n\n這裡只擋形狀（字串、多餘欄位）與過大的請求；四欄之一、必填、字數與字元由\n`domain/summary_reports.check_summary_report` 驗。"
       },
       "SummaryReportResponse": {
         "properties": {

@@ -17,7 +17,8 @@ import { BlockLine, NoteLine, SECTION_CLASS, SectionHeading, badgeProvenance, us
 // - 沒有產生成功／還在產生／額度用完：標題下一行狀態（paper-ai-failed.html），沒有標章與固定一行。
 // - 「回報錯誤」（Story 3.12）：成員版才有，由外層用 `report`（SummaryReportRender）把標題列右邊的「回報錯誤」與原地展開的
 //   表單排進去（components/paper/SummaryReport.tsx；這個檔不 import 它，示範站的建置才不會帶到）。只有 ready 而且有來歷
-//   （畫得出四欄）時才交給它；沒有產生成功、還在產生、額度用完、四欄都沒有都沒有「回報錯誤」（後端也不收）。
+//   （畫得出四欄）時才交給它；沒有產生成功、還在產生、額度用完、`empty`（四欄都是「摘要未提及」）都沒有「回報錯誤」
+//   （後端也不收）。
 // 900px 以上：欄名 96px 寬、和內容隔 24px、欄名往下 8px；899px 以下欄名在上、內容在下，隔 6px。
 
 const FIELDS: { field: SummaryField; label: string }[] = [
@@ -112,39 +113,39 @@ export function ZhSummarySection({ block, firstBadge, report }: ZhSummarySection
       </SectionHeading>
     ),
     list: (
-        <div className="mt-[20px] border-t border-b border-hairline">
-          {FIELDS.map(({ field, label }, index) => {
-            // 空字串或只有空白（AI 的輸出當使用者輸入看）也當作摘要沒提到。
-            const raw = value?.[field] ?? null;
-            const text = raw === null || raw.trim() === "" ? null : raw;
-            return (
-              <div
-                key={field}
-                data-summary-field={field}
-                className={`flex flex-col gap-[6px] py-[18px] split:flex-row split:gap-6 ${index > 0 ? "border-t border-hairline" : ""}`}
-              >
-                <div className="w-24 shrink-0 font-mono text-s13 tracking-008 text-text-secondary split:pt-2">
-                  {t(label as FieldLabelKey)}
-                </div>
-                <div className="min-w-[0px] flex-1">
-                  {text === null ? (
-                    <div data-not-mentioned className="text-s17 leading-190 text-text-tertiary">
-                      {t("paper.summary.notMentioned")}
-                    </div>
-                  ) : (
-                    <AiText text={text} className="text-s17 leading-190 text-text-reading" />
-                  )}
-                  {reported.has(field) ? <ReportedMark /> : null}
-                </div>
+      <div className="mt-[20px] border-t border-b border-hairline">
+        {FIELDS.map(({ field, label }, index) => {
+          // 空字串或只有空白（AI 的輸出當使用者輸入看）也當作摘要沒提到。
+          const raw = value?.[field] ?? null;
+          const text = raw === null || raw.trim() === "" ? null : raw;
+          return (
+            <div
+              key={field}
+              data-summary-field={field}
+              className={`flex flex-col gap-[6px] py-[18px] split:flex-row split:gap-6 ${index > 0 ? "border-t border-hairline" : ""}`}
+            >
+              <div className="w-24 shrink-0 font-mono text-s13 tracking-008 text-text-secondary split:pt-2">
+                {t(label as FieldLabelKey)}
               </div>
-            );
-          })}
-        </div>
+              <div className="min-w-[0px] flex-1">
+                {text === null ? (
+                  <div data-not-mentioned className="text-s17 leading-190 text-text-tertiary">
+                    {t("paper.summary.notMentioned")}
+                  </div>
+                ) : (
+                  <AiText text={text} className="text-s17 leading-190 text-text-reading" />
+                )}
+                {reported.has(field) ? <ReportedMark /> : null}
+              </div>
+            </div>
+          );
+        })}
+      </div>
     ),
     note: (
-        <NoteLine note="screening-only" className="mt-[20px]">
-          {t("paper.summary.screeningOnly")}
-        </NoteLine>
+      <NoteLine note="screening-only" className="mt-[20px]">
+        {t("paper.summary.screeningOnly")}
+      </NoteLine>
     ),
   };
   return (

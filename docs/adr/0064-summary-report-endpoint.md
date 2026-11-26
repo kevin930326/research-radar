@@ -47,17 +47,23 @@ Story 2.7 已經有回報與處理結果的事件形狀（`domain/judgments.summ
 
 一 A、二 A、三 A、四 A。
 
-1. **端點**：`POST /api/v1/papers/{paper_id}/summary-reports`，本文 `{"field": "...", "note": "..."}`（形狀由 Pydantic 擋：都是字串、欄位最長 64、說明最長 1000、不收多的欄位）。要登入、本站的 `Origin`、比對 `X-Radar-Expected-Member`（ADR-0055）。回應 `no-store`，200 回 `{"zh_summary": 中文重點區塊}`，`reported_fields` 只有欄位名稱。
-   **錯誤的先後**同 ADR-0063：`Origin` 不對 403 → 沒登入 401 → 預期成員不同 409／格式不對 400 → 論文看不到、不存在、壞 ID 404 → 本文不對 422。看不到的論文在路由的相依項（`visible_paper`）裡先查，所以看不到的論文帶壞本文也是 404。
-2. **規則**（`domain/summary_reports.check_summary_report`）：欄位是四欄之一（`research_question`、`method`、`theory`、`findings`；大小寫不同也不收）；說明照選項二 A。中文重點不是 `ready`（還在產生、沒有產生成功、四欄都沒有、沒有摘要、手填書目）時不收（`NO_SUMMARY`）。不收一律 422 `request_invalid`，不回顯說明，日誌只記原因代號。同一位成員可以對同一欄回報很多次（每次都是一筆事件；標記只看「有沒有」）。
-3. **寫入**：`services/judgments.report_summary` 在一個交易裡：讀論文（看不到就不去排隊等鎖）→ 拿這一篇的交易級鎖（`summary_report:<id>`）→ 拿到鎖後再讀一次論文 → 取一次 `clock_timestamp()` → 讀目前的中文重點 → 驗 → 寫一筆 `summary_report` 事件（指向當時有效的那一筆 `zh_summary_id`；角色是 admin 或 member）→ 寫一筆稽核（`report_summary`，detail 是事件 ID、論文 ID、欄位，沒有說明）→ 重讀中文重點區塊回傳。事件與稽核共用同一個時間；任何一步失敗整個交易退回（稽核失敗時回報也退回，有整合測試）。
-4. **標記給誰看**：論文頁的標記來自 `effective_zh_summary.reported_fields`。`repo/visibility.visible_summary_report_marks` 決定讀不讀得到：成員與系統是 `TRUE`，公開身分（示範站匯出）是 `FALSE`，讀成空的。示範站的白名單（`DemoZhSummaryContent`）本來就不帶這一欄；示範站畫面也有明確的測試。誰回報、說明只經管理指令讀（`repo/judgments.list_open_summary_reports`，用 `visible_member_judgments`，公開身分直接丟錯）。
+1. **端點**：`POST /api/v1/papers/{paper_id}/summary-reports`，本文 `{"zh_summary_id": "...", "field": "...", "note": "..."}`（形狀由 Pydantic 擋：`zh_summary_id` 是 UUID、另外兩個是字串、欄位最長 64、說明最長 1000、不收多的欄位）。`zh_summary_id` 是成員畫面上看到的那一筆（論文頁 `zh_summary.value.zh_summary_id`）。要登入、本站的 `Origin`、比對 `X-Radar-Expected-Member`（ADR-0055）。回應 `no-store`，200 回 `{"zh_summary": 中文重點區塊}`，`reported_fields` 只有欄位名稱。
+   **錯誤的先後**同 ADR-0063：`Origin` 不對 403 → 沒登入 401 → 預期成員不同 409／格式不對 400 → 論文看不到、不存在、壞 ID 404 → 本文不對 422 → 看到的那一筆已經不是現在有效的 409 `summary_changed`。看不到的論文在路由的相依項（`visible_paper`）裡先查，所以看不到的論文帶壞本文也是 404。
+   **例外：本文不是合法的 JSON**（語法錯，例如少一個括號）時，框架在相依項之前就解析本文，先回 422，不會先查論文（Codex 審查 3.12 中，和 ADR-0063 寫的修正分類 T3 同一件事）。這個 422 對看得到、看不到、不存在的論文都一樣，分辨不出論文存不存在，所以不改，只寫在這裡。
+   **`summary_changed`（Codex 審查 3.12 中）**：成員看著舊的一筆填表、送出前中文重點重新產生了，回報不能貼到成員沒看過的新一筆。後端在鎖裡讀到現在有效的那一筆，和本文的 `zh_summary_id` 不同就丟 `SummaryChangedError`，回 409 `summary_changed`，什麼都不寫。錯誤碼和換了人的 `member_changed` 分開：前端收到 `member_changed` 要照「發現換人」整頁換人，收到 `summary_changed` 只要用既有的「沒有送出成功」狀態（選的、寫的都留著），並重新讀這篇的論文頁資料，讓畫面換上新的一筆。不新增畫面上的字或樣子。
+   比對放在驗完欄位與說明、確認中文重點是 `ready` 之後：本文不對或現在沒有可以回報的中文重點，照舊是 422。
+2. **規則**（`domain/summary_reports.check_summary_report`）：欄位是四欄之一（`research_question`、`method`、`theory`、`findings`；大小寫不同也不收）；說明照選項二 A，去掉空白與零寬連接 U+200D 之後沒有字也算沒寫（Codex 審查 3.12 中：只有 U+200D 的說明看起來是空的）。中文重點不是 `ready`（還在產生、沒有產生成功、四欄都沒有、沒有摘要、手填書目）時不收（`NO_SUMMARY`）。不收一律 422 `request_invalid`，不回顯說明，日誌只記原因代號。同一位成員可以對同一欄回報很多次（每次都是一筆事件；標記只看「有沒有」）。
+3. **寫入**：`services/judgments.report_summary` 在一個交易裡：讀論文（看不到就不去排隊等鎖）→ 拿這一篇的交易級鎖（`summary_report:<id>`）→ 拿到鎖後再讀一次論文 → 取一次 `clock_timestamp()` → 讀目前的中文重點 → 驗（含和成員看到的 `zh_summary_id` 比對）→ 寫一筆 `summary_report` 事件（指向成員看到、也是當時有效的那一筆 `zh_summary_id`；角色是 admin 或 member）→ 寫一筆稽核（`report_summary`，detail 是事件 ID、論文 ID、欄位，沒有說明）→ 重讀中文重點區塊回傳。事件與稽核共用同一個時間；任何一步失敗整個交易退回（稽核失敗時回報也退回，有整合測試）。
+   產生中文重點的流程不拿這把鎖：鎖只讓同一篇的回報排隊。讀到有效的那一筆之後、寫入之前，新的一筆仍可能生效；這時回報指向的仍是成員看到的那一筆（已經和本文比對過），標記照 AD-10 跟著舊的一筆消失，回應重讀到的是新的一筆、沒有標記。回報不會貼到成員沒看過的一筆。
+   兩位成員同時回報同一欄：兩筆回報、兩筆稽核，論文頁那一欄只有一個標記；只處理其中一筆，標記還在（兩條資料庫連線的整合測試）。
+4. **標記給誰看**：論文頁的標記來自 `effective_zh_summary.reported_fields`。`repo/visibility.visible_summary_report_marks` 決定讀不讀得到：成員與系統是 `TRUE`，公開身分（示範站匯出）是 `FALSE`，讀成空的。示範站的白名單（`DemoZhSummaryContent`）本來就不帶這一欄；示範站畫面也有明確的測試。誰回報、說明只經管理指令讀（`repo/judgments.list_open_summary_reports`，用 `visible_member_judgments`，公開身分直接丟錯）。兩個函式共用同一個身分判斷（`_reads_member_judgments`：成員與系統讀得到），差別只在公開身分一個讀成空的、一個拒絕查詢（Codex 審查 3.12 中）。
 5. **管理指令**：`radar summary-reports list` 列出還沒處理的回報：回報 ID、論文 ID 與標題、欄位、成員姓名、台北時間、說明（印到終端機前轉義控制字元），被回報的那一筆已經不是目前的會註明「論文頁不顯示標記」。`confirm-ok` 寫一筆 `confirmed_ok` 處理結果與稽核（`resolve_summary_report`），`--admin` 要是名單上的管理者；已經處理過或不存在的回報不寫。誰能跑同 ADR-0063 第 5 點（拿得到執行環境的維運者）。
-6. **前端**：中文重點標題列右邊「回報錯誤」，按了在標題列下面原地展開表單。共用的中文重點區塊不 import 回報錯誤，成員版用 render 函式（`SummaryReportRender`）排進去，示範站的建置不帶（`e2e/build-output.spec.ts`）。送出的步驟和修正分類共用（`routes/paper-write.ts`：預期成員、409、401、送出之後換了人不改快取）。說明的字數前端同樣算 code point；前端不檢查字元，後端不收時顯示「沒有送出成功」。
+   **`--admin` 只證明那個 email 是管理者，不證明是他本人下的指令**（Codex 審查 3.12 高）：能進主機、拿得到可寫資料庫設定的人，可以填別人的 email，用那個人的名義寫處理結果與稽核。成員網站沒有這個端點。domain 規定處理結果一定要記一位管理者（`actor_role=admin` 與 member_id），repo 也沒有 CLI 的身分驗證機制。考慮過的做法：(a) 接受：只有 Kevin 能進主機，寫在這裡；(b) 另開一件，給 CLI 加管理者登入權杖；(c) 改記成「主機操作者」、不記成員身分（要改資料表與遷移）。這次照主對話的建議選 (a)，不改程式；之後主機有第二個人能登入，就要回頭做 (b) 或 (c)。
+6. **前端**：中文重點標題列右邊「回報錯誤」，按了在標題列下面原地展開表單。共用的中文重點區塊不 import 回報錯誤，成員版用 render 函式（`SummaryReportRender`）排進去，示範站的建置不帶（`e2e/build-output.spec.ts`）。送出的步驟和修正分類共用（`routes/paper-write.ts`：預期成員、409、401、送出之後換了人不改快取）。送出時帶畫面上那一筆的 `zh_summary_id`；收到 409 `summary_changed` 時表單照「沒有送出成功」留著，同時重讀這篇的論文頁資料。說明的字數前端同樣算 code point；前端不檢查字元，後端不收時顯示「沒有送出成功」。
 
 ## 理由
 
-- 回報要指向「當時有效的那一筆」，在鎖裡讀目前的中文重點再寫，才不會兩個人同時回報、或回報時剛好重新產生而指錯。
+- 回報要指向「成員看到的、也是當時有效的那一筆」：前端送出看到的那一筆，後端在鎖裡讀目前的中文重點比對再寫，才不會兩個人同時回報、或回報時剛好重新產生而指錯。
 - 說明會被管理者在終端機讀到，看不見的格式字元（尤其雙向覆寫）會讓人讀錯；零寬連接是組合 emoji 的一部分，不改變文字方向，放行。
 - 「重新產生」牽動 LLM 閘門與有效值 view 的決定，不該夾在回報的 Story 裡改。
 
@@ -67,3 +73,6 @@ Story 2.7 已經有回報與處理結果的事件形狀（`domain/judgments.summ
 - 前端不檢查字元：貼進零寬空白之類的字時，畫面只會說「沒有送出成功」，成員不知道為什麼。要不要加一行說明沒有設計稿，列給 Kevin。
 - 「重新產生」沒有接：被回報的欄位只能由管理者標「已確認無誤」，或等摘要換了才消失。
 - 「剩 N 字」沒有做（設計稿沒有，README 要求先問 Kevin），只擋 100 字。
+- `summary_changed` 時畫面只說「沒有送出成功」，不說是因為中文重點換了：要不要加一行說明沒有設計稿，不自己加。重讀之後新的一筆會出現在畫面上，成員再按一次「送出回報」就會送新的那一筆。
+- `--admin` 可以填別人的 email（見決定第 5 點），靠「只有 Kevin 能進主機」擋。
+- 語法錯的 JSON 先回 422，不照「404 在 422 之前」（見決定第 1 點）。

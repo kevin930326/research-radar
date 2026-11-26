@@ -805,12 +805,18 @@ def test_summary_reports_never_reach_the_demo(
     member = allow_member(
         SystemViewer(), database, email="reporter@example.org", display_name=f"回報者 {CANARY}"
     ).member_id
+    [(seen_id,)] = execute(
+        db,
+        "SELECT id FROM zh_summary WHERE paper_id = %s AND status = 'active'",
+        ids["reported"],
+    )
     for field in ("method", "findings"):
         block = report_summary(
             MemberViewer(member_id=member, is_admin=False),
             database,
             paper_page_setup(),
             ids["reported"],
+            zh_summary_id=seen_id,
             field=field,
             note=f"說明 {CANARY}",
             now=datetime(2026, 11, 26, tzinfo=UTC),

@@ -9,6 +9,8 @@
 - 送來的值不收（services 丟 `SummaryReportInvalidError`）→ 422 `request_invalid`，
   本文剛好是 RFC 9457
   的四個欄位，不回顯說明；本文形狀不對（多欄位、不是字串、少欄位）也是 422，不呼叫寫入。
+- 成員看到的那一筆已經不是現在有效的（services 丟 `SummaryChangedError`）→ 409 `summary_changed`，
+  和換了人的 `member_changed` 分開（ADR-0064）。
 - 200 回中文重點區塊（同論文頁的形狀）；`reported_fields` 只有欄位名稱，回應裡沒有說明、
   成員姓名或 ID。
 資料全是測試自己編的（假成員、假論文）。
@@ -27,7 +29,11 @@ from httpx2 import Response
 from radar.domain.ai_blocks import AiBlock, ZhSummaryValue
 from radar.domain.contracts import build_client_config
 from radar.domain.judgments import SummaryField
-from radar.domain.summary_reports import SummaryReportInvalidError, SummaryReportProblem
+from radar.domain.summary_reports import (
+    SummaryChangedError,
+    SummaryReportInvalidError,
+    SummaryReportProblem,
+)
 from radar.domain.viewer import MemberViewer
 from radar.entrypoints.api.app import create_app
 from radar.entrypoints.api.auth import EXPECTED_MEMBER_HEADER, SESSION_COOKIE
@@ -38,7 +44,8 @@ from tests.unit.test_api_papers import DISPLAY_NAMES, PAGE, VISIBLE_ID
 PATH = "/api/v1/papers/{id}/summary-reports"
 OTHER_MEMBER_ID = uuid.UUID("00000000-0000-7000-8000-00000000000b")
 NOTE = "摘要沒有寫「明顯」"
-BODY = {"field": "findings", "note": NOTE}
+SEEN_ID = uuid.UUID("00000000-0000-7000-8000-0000000000a1")
+BODY = {"zh_summary_id": str(SEEN_ID), "field": "findings", "note": NOTE}
 PROBLEM_KEYS = {"type", "title", "status", "code"}
 
 
@@ -56,6 +63,7 @@ class FakeReports:
     """記下每一次呼叫；只有 `VISIBLE_ID` 看得到。`reject` 有值時寫入丟這個原因。"""
 
     reject: SummaryReportProblem | None = None
+    changed: bool = False
     checks: list[tuple[MemberViewer, uuid.UUID]] = field(default_factory=list)
     writes: list[tuple[MemberViewer, uuid.UUID, SummaryReportBody]] = field(default_factory=list)
 
@@ -69,6 +77,8 @@ class FakeReports:
         self.writes.append((viewer, paper_id, body))
         if self.reject is not None:
             raise SummaryReportInvalidError(self.reject)
+        if self.changed:
+            raise SummaryChangedError
         return _reported_block() if paper_id == VISIBLE_ID else None
 
     def client(self) -> TestClient:
@@ -169,7 +179,9 @@ def test_the_session_member_expected_goes_through(expected: str) -> None:
 
     assert response.status_code == 200
     assert [call[:2] for call in fake.writes] == [(MEMBER.viewer, VISIBLE_ID)]
-    assert fake.writes[0][2] == SummaryReportBody(field="findings", note=NOTE)
+    assert fake.writes[0][2] == SummaryReportBody(
+        zh_summary_id=SEEN_ID, field="findings", note=NOTE
+    )
 
 
 def test_hidden_and_malformed_ids_get_the_same_404() -> None:
@@ -213,13 +225,16 @@ def test_a_hidden_paper_with_a_bad_body_is_still_404(paper_id: object, body: Any
 @pytest.mark.parametrize(
     "body",
     [
-        {"field": "findings"},
-        {"note": NOTE},
+        {"zh_summary_id": str(SEEN_ID), "field": "findings"},
+        {"zh_summary_id": str(SEEN_ID), "note": NOTE},
         {**BODY, "extra": 1},
-        {"field": ["findings"], "note": NOTE},
-        {"field": "findings", "note": None},
-        {"field": "findings", "note": 3},
-        {"field": "findings", "note": "長" * 1001},
+        {**BODY, "field": ["findings"]},
+        {**BODY, "note": None},
+        {**BODY, "note": 3},
+        {**BODY, "note": "長" * 1001},
+        {"field": "findings", "note": NOTE},
+        {**BODY, "zh_summary_id": "not-a-uuid"},
+        {**BODY, "zh_summary_id": None},
     ],
 )
 def test_a_visible_paper_with_a_bad_body_is_422_without_writing(body: Any) -> None:
@@ -267,3 +282,21 @@ def test_the_answer_is_the_summary_block_with_field_names_only() -> None:
     assert NOTE not in text
     assert str(MEMBER_ID) not in text
     assert MEMBER.display_name not in text
+
+
+def test_a_summary_that_changed_before_sending_is_409_summary_changed() -> None:
+    # 送出前中文重點重新產生了：409，代碼和換了人的 member_changed 不同；本文是 RFC 9457 的
+    # 四個欄位。
+    fake = FakeReports(changed=True)
+
+    response = _send(fake.client(), expected=[str(MEMBER_ID)])
+
+    assert response.status_code == 409
+    assert response.headers["cache-control"] == "no-store"
+    assert response.json() == {
+        "type": "about:blank",
+        "title": "Conflict",
+        "status": 409,
+        "code": "summary_changed",
+    }
+    assert NOTE not in response.text

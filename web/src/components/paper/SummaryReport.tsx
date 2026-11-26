@@ -16,10 +16,13 @@ import type { ZhSummaryParts } from "./ZhSummarySection";
 //   選的與寫的都留著。成功：表單收起來，外層換上 API 回的中文重點區塊（那一欄內容下面多一行「有成員回報此欄可能有誤」）。
 // 鍵盤：打開表單時焦點移到第一個標籤；表單收起（取消或送出成功）時焦點回到「回報錯誤」。
 
+/** 表單送出的內容（哪一欄、說明）；畫面上那一筆中文重點的 `zh_summary_id` 由外層補上。 */
+export type SummaryReportDraft = Omit<SummaryReportBody, "zh_summary_id">;
+
 /** 回報錯誤要的動作：由成員版的路由（routes/summary-report.ts）給。 */
 export interface SummaryReportControl {
   /** 送出：成功回 true（外層已經換上新的中文重點區塊），沒有成功回 false。不丟例外。 */
-  send: (body: SummaryReportBody) => Promise<boolean>;
+  send: (body: SummaryReportDraft) => Promise<boolean>;
 }
 
 type FormState = { field: string | null; note: string; status: "idle" | "sending" | "failed" };

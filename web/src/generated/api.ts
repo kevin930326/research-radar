@@ -566,7 +566,9 @@ export const getReportSummaryUrl = (paperId: string,) => {
  * 422 `request_invalid`（什麼都不寫）；沒登入 401；`Origin` 缺少或不是本站 403
  * `origin_rejected`；
  * `X-Radar-Expected-Member` 和登入的成員不同 409 `member_changed`、格式不對 400
- * `expected_member_invalid`。看不到的論文帶壞本文也是 404（先查論文、再驗本文）。
+ * `expected_member_invalid`。`zh_summary_id` 不是現在有效的那一筆（送出前重新產生了）409
+ * `summary_changed`（什麼都不寫，重讀論文頁）。看不到的論文帶壞本文也是 404（先查論文、
+ * 再驗本文）。
  * @summary Report Summary
  */
 export const reportSummary = async (paperId: string,
