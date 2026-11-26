@@ -77,7 +77,7 @@ export function NoticePage() {
 
 /**
  * 第 4 段最後一句（「…在資料涵蓋範圍。」）：句子裡的「資料涵蓋範圍」是連到那一頁的文字連結（Story 3.15；設計稿
- * login-account.html 是金色的連結）。行內的連結上下各加 12px 內距，可點範圍至少 44px 高（ADR-0037）；行內元素的上下內距不影響排版。句子和頁名都是 i18n 的字，不另外拆成三段；找不到頁名時整句照原樣。
+ * login-account.html 是金色的連結）。行內的連結上下各加 14px 內距，可點範圍至少 44px 高（ADR-0037；字的高度跟著字體變，Linux 只有 17px，12px 不夠）；行內元素的上下內距不影響排版。句子和頁名都是 i18n 的字，不另外拆成三段；找不到頁名時整句照原樣。
  */
 function CoverageSentence({ sentence, linkText }: { sentence: string; linkText: string }) {
   const at = sentence.indexOf(linkText);
@@ -85,7 +85,7 @@ function CoverageSentence({ sentence, linkText }: { sentence: string; linkText: 
   return (
     <>
       {sentence.slice(0, at)}
-      <Link to="/coverage" data-coverage-link className="py-[12px] text-accent-gold no-underline decoration-1 underline-offset-4 hover:underline">
+      <Link to="/coverage" data-coverage-link className="py-[14px] text-accent-gold no-underline decoration-1 underline-offset-4 hover:underline">
         {linkText}
       </Link>
       {sentence.slice(at + linkText.length)}
