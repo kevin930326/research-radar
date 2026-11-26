@@ -10,7 +10,23 @@ const MODE = process.env.PROBE_MODE ?? "full";
 const ONLY = (process.env.PROBE_ONLY ?? "").split(",").filter((rule) => rule !== "");
 const DISABLE = (process.env.PROBE_DISABLE ?? "").split(",").filter((rule) => rule !== "");
 
-for (const site of SITES) {
+// perrule：PROBE_ONLY 裡每一條規則單獨跑一次，另外整組一起跑一次，只跑論文頁。
+if (MODE === "perrule") {
+  for (const site of SITES) {
+    for (const path of site.pages.filter((page) => /^\/papers\/[0-9a-f]/.test(page))) {
+      for (const rules of [...ONLY.map((rule) => [rule]), ONLY]) {
+        const label = rules.length === 1 ? rules[0] : "GROUP";
+        test(`rule ${label} ${site.name} ${path}`, async ({ page }) => {
+          await page.goto(`${site.baseURL}${path}`);
+          await expect(page.locator("main")).toBeVisible();
+          await new AxeBuilder({ page }).withRules(rules).analyze();
+        });
+      }
+    }
+  }
+}
+
+for (const site of MODE === "perrule" ? [] : SITES) {
   for (const path of [...site.pages, MISSING_PATH]) {
     test(`${site.name} ${path}: no axe violations`, async ({ page }) => {
       await page.goto(`${site.baseURL}${path}`);
