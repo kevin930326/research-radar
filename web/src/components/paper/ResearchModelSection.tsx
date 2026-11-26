@@ -12,6 +12,7 @@ import {
   SECTION_CLASS,
   SectionHeading,
   badgeProvenance,
+  useFailedText,
 } from "./parts";
 
 // 研究模型（EXPERIENCE.md 畫面 8 第 4 點；設計稿 paper.html「正常狀態」的第三塊）：
@@ -132,6 +133,7 @@ interface ResearchModelSectionProps {
 
 export function ResearchModelSection({ block, firstBadge }: ResearchModelSectionProps) {
   const { t } = useTranslation("paper");
+  const failedText = useFailedText();
   const heading = <SectionHeading id="paper-research-model" title={t("paper.model.heading")} />;
   const withoutProvenance = (block.state === "ready" || block.state === "empty") && block.provenance === null;
   // 有內容但一個構面都沒有，和 empty 一樣是「摘要裡沒有寫出可以擷取的假設」。
@@ -139,16 +141,16 @@ export function ResearchModelSection({ block, firstBadge }: ResearchModelSection
   let line: string | null;
   switch (block.state) {
     case "ready":
-      line = withoutProvenance ? t("paper.state.failed") : noConstructs ? t("paper.model.empty") : null;
+      line = withoutProvenance ? failedText : noConstructs ? t("paper.model.empty") : null;
       break;
     case "empty":
-      line = withoutProvenance ? t("paper.state.failed") : t("paper.model.empty");
+      line = withoutProvenance ? failedText : t("paper.model.empty");
       break;
     case "no_input":
       line = t("paper.model.noAbstract");
       break;
     case "failed":
-      line = t("paper.state.failed");
+      line = failedText;
       break;
     case "pending_interactive":
     case "pending_batch":

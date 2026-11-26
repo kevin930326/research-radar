@@ -3,7 +3,6 @@ import { useTranslation } from "react-i18next";
 
 import type { FullTextLinks } from "../../generated/model";
 import { ExternalArrow, NEW_TAB_NOTE_ID } from "../ExternalArrow";
-import { LibraryBarButton, type LibraryControl } from "./LibraryBlock";
 import { RAIL_LABEL_CLASS } from "./parts";
 
 // 取得全文（EXPERIENCE.md 畫面 8 第 6 點；設計稿 paper.html 的輔助欄與手機版）：
@@ -109,10 +108,11 @@ export function FullTextMobile({ links }: { links: FullTextLinks }) {
 }
 
 /**
- * 手機版的底部固定列：「開啟全文」＋還沒加入時的「加入我的文獻庫」（Story 3.17；已加入時只剩「開啟全文」）。
+ * 手機版的底部固定列：「開啟全文」＋`extra`（成員版還沒加入時的「加入我的文獻庫」，Story 3.17；已加入時只剩「開啟全文」）。
  * 沒有 DOI 時整列不出現（「加入我的文獻庫」改在書目下面的輔助區，見 LibraryMobile）。
+ * `extra` 由成員版的論文頁（pages/PaperPage.tsx）放進來：這個檔不 import 我的文獻庫的元件，示範站的建置才不會帶到它（Story 3.9）。
  */
-export function FullTextBar({ links, library }: { links: FullTextLinks; library?: LibraryControl }) {
+export function FullTextBar({ links, extra }: { links: FullTextLinks; extra?: ReactNode }) {
   const { t } = useTranslation("paper");
   const doiUrl = links.doi_url;
   if (doiUrl === null) {
@@ -133,7 +133,7 @@ export function FullTextBar({ links, library }: { links: FullTextLinks; library?
         {t("paper.fullText.open")}
         <ExternalArrow />
       </button>
-      {library === undefined ? null : <LibraryBarButton library={library} />}
+      {extra}
     </div>
   );
 }

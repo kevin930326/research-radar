@@ -11,7 +11,7 @@ import { MessageBar } from "../MessageBar";
 import { PaperTitle } from "../PaperText";
 import { TEXT_LINK_CLASS } from "../TextLink";
 import { taipeiDate } from "../taipei-date";
-import { MONO_LABEL_CLASS, NoteLine, badgeProvenance } from "./parts";
+import { MONO_LABEL_CLASS, NoteLine, badgeProvenance, useFailedText, usePaperSite } from "./parts";
 
 // 論文頁的書目（EXPERIENCE.md 畫面 8 第 1、2 點；設計稿 paper.html 的第一塊）：資料日期列、英文標題（h1）、作者、
 // 期刊 · 年份 · 卷期頁碼、DOI 與 OpenAlex 連結、被引用次數與有沒有摘要，最後一行是分類（不是獨立的區塊）。
@@ -69,7 +69,7 @@ const TAG_CLASS =
  * 主題標籤直接選好「主題」篩選（畫面 12 第 6 點，不變成條件標籤）；找論文沒有方法的篩選，方法標籤帶進去是
  * 一個可以移除的條件標籤。站內連結，同一頁打開。滑過時字與框變亮（設計稿 a.tagl）。
  * 看得到的標籤 26px 高，連結本身 44px（ADR-0037），負外距讓這一列看起來一樣高。
- * 預設連到成員版的找論文；示範站（論文清單的每一列，Story 3.14 示範站；之後示範站的論文頁 3.9）給 `to="/papers"`
+ * 預設連到成員版的找論文；示範站（論文清單的每一列，Story 3.14 示範站；示範站的論文頁，Story 3.9）給 `to="/papers"`
  * 連到論文清單（ADR-0010 的 2026-11-20 更新）。
  * `size="row"`：示範站論文清單的列（設計稿 papers-demo.html 的 a.tagl 寫 height 26px＋1px 框線、沒有 border-box，
  * 看起來 28px 高）；論文頁維持 26px（成員版既有做法，不在這次改）。
@@ -132,13 +132,15 @@ function TagGroup({
   /** 主題或方法：連到找論文時帶哪一種條件。 */
   kind: "topic" | "method";
 }) {
+  // 成員版到找論文、示範站到論文清單（EXPERIENCE.md 畫面 8 第 2 點；Story 3.9）。
+  const to = usePaperSite() === "demo" ? "/papers" : "/search";
   return (
     <div className="flex flex-wrap items-center gap-[10px]">
       <span className={MONO_LABEL_CLASS}>{label}</span>
       {field.keys.map((key, index) => {
         if (key === UNCLASSIFIED) return <UnclassifiedTag key={index} />;
         return (
-          <ClassificationTagLink key={index} field={kind} value={key}>
+          <ClassificationTagLink key={index} field={kind} value={key} to={to}>
             {names.get(key) ?? key}
           </ClassificationTagLink>
         );
@@ -199,14 +201,15 @@ interface ClassificationProps {
 /** 分類：書目的最後一行（EXPERIENCE.md 畫面 8 第 2 點）。 */
 export function ClassificationLine({ block, names, firstBadge }: ClassificationProps) {
   const { t } = useTranslation("paper");
+  const failedText = useFailedText();
   // 有內容卻沒有來歷：不顯示內容（ADR-0010 第 8 點、ADR-0015），顯示「沒有產生成功」那一行（Codex 審查 3.8 中 1；
   // 資料壞了不會自己好，所以不寫「還在產生」，Kevin 2026-11-17 決定）。
   if (block.state === "ready" && block.provenance === null) {
-    return <ClassificationStateLine state={block.state} text={t("paper.state.failed")} provenance="missing" />;
+    return <ClassificationStateLine state={block.state} text={failedText} provenance="missing" />;
   }
   switch (block.state) {
     case "failed":
-      return <ClassificationStateLine state={block.state} text={t("paper.state.failed")} />;
+      return <ClassificationStateLine state={block.state} text={failedText} />;
     case "pending_interactive":
     case "pending_batch":
       return <ClassificationStateLine state={block.state} text={t("paper.state.pending")} />;
@@ -284,9 +287,15 @@ interface PaperBiblioProps {
   /** 顯示名稱沒有讀到時，「重試」要做的事。 */
   onRetryNames?: () => void;
   firstBadge: boolean;
+  /**
+   * 「有摘要」「沒有摘要」那一個標記：沒給就看這一頁有沒有原文摘要（成員版）。
+   * 示範站（Story 3.9）由外層給：示範站只有書目的論文不顯示（null，設計稿 paper-demo.html「只有書目」），
+   * 其他沒有完整內容的論文照索引的 has_abstract（摘要不公開也可能是有摘要的）。
+   */
+  abstractMark?: boolean | null;
 }
 
-export function PaperBiblio({ page, names, onRetryNames, firstBadge }: PaperBiblioProps) {
+export function PaperBiblio({ page, names, onRetryNames, firstBadge, abstractMark }: PaperBiblioProps) {
   const { t } = useTranslation("paper");
   const { paper } = page;
   const journal =
@@ -361,7 +370,7 @@ export function PaperBiblio({ page, names, onRetryNames, firstBadge }: PaperBibl
       ) : null}
       <div className="mt-[14px] flex flex-wrap items-center gap-x-[22px] gap-y-[6px] font-mono text-s13 tracking-004 text-text-secondary">
         {paper.cited_by_count === null ? null : <Citations citations={paper.cited_by_count} perYear={perYear} />}
-        <AbstractMark has={page.abstract !== null} />
+        {abstractMark === null ? null : <AbstractMark has={abstractMark ?? page.abstract !== null} />}
       </div>
       <ClassificationLine block={page.classification} names={names} firstBadge={firstBadge} />
       {namesFailed ? <NamesFailed onRetry={onRetryNames ?? (() => {})} /> : null}

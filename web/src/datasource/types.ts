@@ -104,7 +104,7 @@ export interface PaperList extends PaperListResponse {
  */
 export type PaperListResult = { kind: "found"; list: PaperList; readAs?: ReadAs } | { kind: "signedOut" } | { kind: "memberChanged" };
 
-/** 論文頁與找論文用的讀取函式（只有成員版有；示範站的論文頁是 Story 3.9、論文清單在 3.14 的示範站部分）。 */
+/** 論文頁與找論文用的讀取函式（只有成員版有；示範站的論文頁與論文清單在 DemoPaperSource）。 */
 export interface PaperSource {
   /** 讀一篇論文。`paperId` 由呼叫端先確認是 UUID。給了 `expectedMemberId` 就帶上預期成員的標頭（ADR-0055）。 */
   paper(paperId: string, expectedMemberId?: string): Promise<PaperResult>;
@@ -217,22 +217,49 @@ export interface DemoPaperIndex {
   rows: DemoPaperRow[];
 }
 
-/** 示範站的論文清單（只有示範站有；讀 `preview/` 的靜態檔，篩選在瀏覽器裡做）。 */
+/**
+ * 示範站論文頁是哪一種（Story 3.9；EXPERIENCE.md 畫面 8 的三種示範站版本，Kevin 2026-11-25 決定用 `demo_eligible` 分）：
+ * - `full`：有完整內容（分片裡有 `full`）。
+ * - `noAbstract`：示範站可用（`demo_eligible`）但沒有摘要。
+ * - `biblioOnly`：示範站不可用（授權不允許轉載），只有書目與分類。
+ * - `withheld`：示範站可用、有摘要，卻沒有完整內容（摘要來源不允許公開，ADR-0052 第 8 點）。設計稿與 EXPERIENCE.md
+ *   沒有這一種：書目與分類之後什麼都不放（列給 Kevin）。
+ */
+export type DemoPaperKind = "full" | "noAbstract" | "biblioOnly" | "withheld";
+
+/**
+ * 示範站的一篇論文（`preview/<匯出編號>/papers/NNN.json` 裡的一篇，檢查過）。
+ * `page` 是成員版論文頁的形狀，給共用的論文頁元件用：成員版才有的欄位填「沒有」（沒有人修正、沒有人回報、
+ * 不在文獻庫、追蹤範圍內），示範站沒有的區塊照 `kind` 填狀態（見 static/preview.ts 的 demoPaperPage）。
+ */
+export interface DemoPaper {
+  kind: DemoPaperKind;
+  /** 索引的「有沒有摘要」（摘要不公開的論文也可能是 true）。 */
+  hasAbstract: boolean;
+  page: PaperPageResponse;
+}
+
+/** 示範站的論文清單與論文頁（只有示範站有；讀 `preview/` 的靜態檔，篩選在瀏覽器裡做）。 */
 export interface DemoPaperSource {
   /** 讀 manifest（資料截至哪一天先用它顯示）；讀不到或形狀不對就丟出例外。 */
   manifest(): Promise<DemoManifest>;
   /** 讀 manifest 指到的分類表、索引、標題；任何一個讀不到、形狀不對、和 manifest 不是同一次匯出就丟出例外。 */
   index(manifest: DemoManifest): Promise<DemoPaperIndex>;
+  /**
+   * 讀一篇論文（Story 3.9）：在索引裡找到這一篇的位置，讀它所在的分片（每 200 篇一個）。
+   * 索引裡沒有這一篇回 null（找不到這一頁）；分片讀不到、形狀不對、和 manifest 不是同一次匯出就丟出例外。
+   */
+  paper(manifest: DemoManifest, index: DemoPaperIndex, paperId: string): Promise<DemoPaper | null>;
 }
 
 export interface DataSource {
   siteKind(): SiteKind;
   /** 成員版的登入狀態；示範站是 null（示範站的後端功能不存在，State Patterns「全站共用」）。 */
   session: MemberSession | null;
-  /** 論文頁的資料；示範站在 Story 3.9 才有，現在是 null。 */
+  /** 成員版的論文頁與找論文；示範站是 null（示範站的論文頁與清單讀 `demoPapers`）。 */
   papers: PaperSource | null;
   /** 我的文獻庫（Story 3.17）；示範站沒有，是 null。 */
   library: LibrarySource | null;
-  /** 示範站的論文清單（Story 3.14 示範站）；成員版沒有（篇數連結開找論文），是 null。 */
+  /** 示範站的論文清單（Story 3.14 示範站）與論文頁（Story 3.9）；成員版沒有（篇數連結開找論文），是 null。 */
   demoPapers: DemoPaperSource | null;
 }

@@ -22,6 +22,12 @@
     "row": {
       "full": "有完整內容",
       "biblioOnly": "只有書目"
+    },
+    "paper": {
+      "failed": "沒有產生成功",
+      "biblioOnly": "示範站只放授權允許轉載的論文的完整內容。",
+      "biblioOnlyDetail": "這一篇的授權不允許轉載，所以這裡只有書目與分類。",
+      "fullPapers": "看有完整內容的論文"
     }
   }
 }
