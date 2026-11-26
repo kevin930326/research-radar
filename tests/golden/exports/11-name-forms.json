@@ -1,0 +1,40 @@
+{
+  "note": "「姓, 名」寫法且姓裡有空白、只有一個字的名字、名裡有獨立的 and；起始頁等於結束頁（純數字，照頁碼寫）；沒有期",
+  "input": {
+    "title": "Fake Paper Eleven: Name Forms",
+    "authors": ["Van der Fake, Ana", "Fakemono", "Fakeband, Lee and Kim"],
+    "year": 2020,
+    "journal": "Fake Letters",
+    "volume": "3",
+    "issue": null,
+    "first_page": "7",
+    "last_page": "7",
+    "doi": "10.1234/fake.0011"
+  },
+  "apa": "Van der Fake, A., Fakemono, & Fakeband, L. a. K. (2020). Fake Paper Eleven: Name Forms. Fake Letters, 3, 7. https://doi.org/10.1234/fake.0011",
+  "ris": [
+    "TY  - JOUR",
+    "AU  - Van der Fake, Ana",
+    "AU  - Fakemono",
+    "AU  - Fakeband, Lee and Kim",
+    "TI  - Fake Paper Eleven: Name Forms",
+    "T2  - Fake Letters",
+    "PY  - 2020",
+    "VL  - 3",
+    "SP  - 7",
+    "EP  - 7",
+    "DO  - 10.1234/fake.0011",
+    "ER  - "
+  ],
+  "bibtex": [
+    "@article{vanderfake2020fake,",
+    "  author = {{Van der Fake}, Ana and Fakemono and Fakeband, {Lee and Kim}},",
+    "  title = {Fake Paper Eleven: Name Forms},",
+    "  journal = {Fake Letters},",
+    "  year = {2020},",
+    "  volume = {3},",
+    "  pages = {7},",
+    "  doi = {10.1234/fake.0011}",
+    "}"
+  ]
+}

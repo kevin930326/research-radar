@@ -195,3 +195,83 @@ for (const width of [1440, 1000, 500]) {
     });
   }
 }
+
+// ---- 引用匯出（Story 3.10）：和成員版同一份實作（AR-24），示範站也在瀏覽器裡產生、不呼叫任何後端 ----
+// 預期值是照 tests/golden/exports/README.md 的規則、對範例的 Fake Paper 1、3 手寫的。範例的作者「Test Author 1」
+// 照規則最後一個字是姓，所以姓是「1」、名是「Test Author」。
+
+const FAKE_1_APA = "1, T. A., & Author, S. (2025). Fake Paper 1: full content. MIS Quarterly, 1(1), 1–9. https://doi.org/10.9999/demo.1";
+const FAKE_3_BIBTEX = [
+  "@article{32024fake,",
+  "  author = {3, Test Author and Author, Second},",
+  "  title = {Fake Paper 3: biblio only not open},",
+  "  journal = {MIS Quarterly},",
+  "  year = {2024},",
+  "  volume = {1},",
+  "  number = {1},",
+  "  pages = {1--9},",
+  "  doi = {10.9999/demo.3}",
+  "}",
+];
+
+test("demo citation: copy shows copied for 2 seconds; no API or other backend requests", async ({ page }) => {
+  await page.addInitScript(() => {
+    const written: string[] = [];
+    (window as unknown as { __clipboard: string[] }).__clipboard = written;
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText: (value: string) => (written.push(value), Promise.resolve()) },
+    });
+  });
+  const requests: string[] = [];
+  await openPaper(page, 1);
+  page.on("request", (request) => requests.push(new URL(request.url()).pathname));
+  const button = page.locator("[data-cite='rail'] [data-cite='apa']");
+  await expect(button).toHaveText(text("paper:paper.cite.copyApa"));
+  await button.click();
+  await expect(button).toHaveText(text("paper:paper.cite.copied"));
+  await expect(button).toHaveAttribute("aria-disabled", "true");
+  expect(await page.evaluate(() => (window as unknown as { __clipboard: string[] }).__clipboard)).toEqual([FAKE_1_APA]);
+  await expect(button).toHaveText(text("paper:paper.cite.copyApa"), { timeout: 3000 });
+  expect(requests).toEqual([]);
+});
+
+test("demo citation: bibliography only papers download BibTeX in the browser", async ({ page }) => {
+  const requests: string[] = [];
+  await openPaper(page, 3, { width: 500, height: 900 });
+  page.on("request", (request) => requests.push(request.url()));
+  const button = page.locator("[data-cite='mobile'] [data-cite='bibtex']");
+  const [download] = await Promise.all([page.waitForEvent("download"), button.click()]);
+  expect(download.suggestedFilename()).toBe("32024fake.bib");
+  expect(readFileSync((await download.path())!, "utf-8")).toBe(`${FAKE_3_BIBTEX.join("\n")}\n`);
+  await expect(button).toHaveText(text("paper:paper.cite.downloadBibtex"));
+  expect(requests.filter((url) => !url.startsWith("blob:"))).toEqual([]);
+});
+
+// 第 1 輪審查修正（PR #133）：示範站的「下載 RIS」。預期值照 tests/golden/exports/README.md 的規則、對 Fake Paper 1 手寫。
+const FAKE_1_RIS = [
+  "TY  - JOUR",
+  "AU  - 1, Test Author",
+  "AU  - Author, Second",
+  "TI  - Fake Paper 1: full content",
+  "T2  - MIS Quarterly",
+  "PY  - 2025",
+  "VL  - 1",
+  "IS  - 1",
+  "SP  - 1",
+  "EP  - 9",
+  "DO  - 10.9999/demo.1",
+  "ER  - ",
+];
+
+test("demo citation: download RIS makes the file in the browser and the button keeps its text", async ({ page }) => {
+  const requests: string[] = [];
+  await openPaper(page, 1);
+  page.on("request", (request) => requests.push(request.url()));
+  const button = page.locator("[data-cite='rail'] [data-cite='ris']");
+  const [download] = await Promise.all([page.waitForEvent("download"), button.click()]);
+  expect(download.suggestedFilename()).toBe("12025fake.ris");
+  expect(readFileSync((await download.path())!, "utf-8")).toBe(`${FAKE_1_RIS.join("\r\n")}\r\n`);
+  await expect(button).toHaveText(text("paper:paper.cite.downloadRis"));
+  expect(requests.filter((url) => !url.startsWith("blob:"))).toEqual([]);
+});

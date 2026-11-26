@@ -1,0 +1,38 @@
+{
+  "note": "沒有年份（APA：n.d.）",
+  "input": {
+    "title": "Fake Paper Five Has No Year",
+    "authors": ["Erin Placeholder"],
+    "year": null,
+    "journal": "Fake Letters",
+    "volume": "9",
+    "issue": "4",
+    "first_page": "100",
+    "last_page": "110",
+    "doi": "10.1234/fake.0005"
+  },
+  "apa": "Placeholder, E. (n.d.). Fake Paper Five Has No Year. Fake Letters, 9(4), 100–110. https://doi.org/10.1234/fake.0005",
+  "ris": [
+    "TY  - JOUR",
+    "AU  - Placeholder, Erin",
+    "TI  - Fake Paper Five Has No Year",
+    "T2  - Fake Letters",
+    "VL  - 9",
+    "IS  - 4",
+    "SP  - 100",
+    "EP  - 110",
+    "DO  - 10.1234/fake.0005",
+    "ER  - "
+  ],
+  "bibtex": [
+    "@article{placeholderndfake,",
+    "  author = {Placeholder, Erin},",
+    "  title = {Fake Paper Five Has No Year},",
+    "  journal = {Fake Letters},",
+    "  volume = {9},",
+    "  number = {4},",
+    "  pages = {100--110},",
+    "  doi = {10.1234/fake.0005}",
+    "}"
+  ]
+}

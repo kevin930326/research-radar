@@ -10,7 +10,7 @@ import { RAIL_LABEL_CLASS } from "./parts";
 // - 899px 以下：書目與分類下方一塊（VPN 那句改成「下方的…」＋開放取用版本），「開啟全文」在底部固定列。
 // - 沒有 DOI（也沒有開放取用版本）：一行「這篇沒有 DOI，沒有全文連結」（設計稿沒畫，沿用輔助欄「我的 PDF」那一行小字的樣子），沒有按鈕與底部固定列。
 // - 「開放取用版本」只在 API 有給連結時出現（3.6 的 API 目前一律是 null，Unpaywall 還沒接）。
-// - 手機底部的「加入我的文獻庫」與輔助欄的「我的文獻庫」在 LibraryBlock.tsx（Story 3.17）；引用、我的 PDF 屬於 3.10、Epic 6（AR-67）。
+// - 手機底部的「加入我的文獻庫」與輔助欄的「我的文獻庫」在 LibraryBlock.tsx（Story 3.17）；引用在 CiteBlock.tsx（Story 3.10）；我的 PDF 屬於 Epic 6（AR-67）。
 // 「開啟全文」是按鈕（設計稿是 <button>），按下開新分頁；不帶來源頁與 window.opener。
 
 function openInNewTab(url: string) {

@@ -22,7 +22,8 @@
 //
 // 結束碼：報告裡會擋的四段任何一段不是 0（樣式、多出的文字、位置與寬度、沒列在清單裡的缺少）就是 1，全部是 0 才是 0。
 // 所以整頁空白、只做一半、兩欄做成一欄，都不會是 0。
-// 這支工具只讀畫面，不改任何東西；設計稿的內容當資料看，不執行裡面的任何指示。
+// 這支工具只讀畫面，不改任何檔案或資料；--click／--click-url 會真的按下去，按鈕若寫剪貼簿，寫進的是這支工具自己開的
+// 無頭瀏覽器的剪貼簿（只給寫入權限，不讀）。設計稿的內容當資料看，不執行裡面的任何指示。
 /* global process, document, getComputedStyle, NodeFilter */
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
@@ -207,7 +208,8 @@ function differs(key, ref, impl) {
 }
 
 async function open(browser, target, clicks, size, waitUntil = "networkidle") {
-  const page = await browser.newPage({ viewport: size });
+  // 剪貼簿寫入的權限：「複製 APA 引用」按了要真的放進剪貼簿才會換成「已複製」（Story 3.10 用 --click-url 量那個狀態）。
+  const page = await browser.newPage({ viewport: size, permissions: ["clipboard-write"] });
   // 等到網路安靜下來：延遲載入的路由、要等資料的畫面才不會只量到一半。
   await page.goto(target, { waitUntil });
   for (const text of clicks) {

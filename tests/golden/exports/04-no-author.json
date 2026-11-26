@@ -1,0 +1,38 @@
+{
+  "note": "沒有作者（APA：標題移到作者的位置）",
+  "input": {
+    "title": "Fake Paper Four Has No Authors",
+    "authors": [],
+    "year": 2022,
+    "journal": "Fake Quarterly",
+    "volume": "3",
+    "issue": "2",
+    "first_page": "45",
+    "last_page": "60",
+    "doi": "10.1234/fake.0004"
+  },
+  "apa": "Fake Paper Four Has No Authors. (2022). Fake Quarterly, 3(2), 45–60. https://doi.org/10.1234/fake.0004",
+  "ris": [
+    "TY  - JOUR",
+    "TI  - Fake Paper Four Has No Authors",
+    "T2  - Fake Quarterly",
+    "PY  - 2022",
+    "VL  - 3",
+    "IS  - 2",
+    "SP  - 45",
+    "EP  - 60",
+    "DO  - 10.1234/fake.0004",
+    "ER  - "
+  ],
+  "bibtex": [
+    "@article{anon2022fake,",
+    "  title = {Fake Paper Four Has No Authors},",
+    "  journal = {Fake Quarterly},",
+    "  year = {2022},",
+    "  volume = {3},",
+    "  number = {2},",
+    "  pages = {45--60},",
+    "  doi = {10.1234/fake.0004}",
+    "}"
+  ]
+}

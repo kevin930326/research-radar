@@ -1,0 +1,29 @@
+{
+  "note": "標題以問號結尾（APA：不再加句點）；沒有期刊、卷期頁碼與 DOI",
+  "input": {
+    "title": "Does Fake Paper Nine End With a Question?",
+    "authors": ["Hana Q. Asker"],
+    "year": 2019,
+    "journal": null,
+    "volume": null,
+    "issue": null,
+    "first_page": null,
+    "last_page": null,
+    "doi": null
+  },
+  "apa": "Asker, H. Q. (2019). Does Fake Paper Nine End With a Question?",
+  "ris": [
+    "TY  - JOUR",
+    "AU  - Asker, Hana Q.",
+    "TI  - Does Fake Paper Nine End With a Question?",
+    "PY  - 2019",
+    "ER  - "
+  ],
+  "bibtex": [
+    "@article{asker2019does,",
+    "  author = {Asker, Hana Q.},",
+    "  title = {Does Fake Paper Nine End With a Question?},",
+    "  year = {2019}",
+    "}"
+  ]
+}

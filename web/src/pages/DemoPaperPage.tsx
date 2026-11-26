@@ -12,7 +12,7 @@ import type { DisplayNames } from "../generated/model";
 // - noAbstract：書目、分類、「中文重點與原文摘要」那一塊（這篇論文在 OpenAlex 沒有摘要…）、研究模型那一行。
 // - biblioOnly：書目、分類、「示範站只放授權允許轉載的論文的完整內容。…」＋兩個連結；沒有「有摘要」標記（設計稿）。
 // - withheld（示範站可用、有摘要但摘要來源不允許公開）：設計稿與 EXPERIENCE.md 沒有，書目與分類之後什麼都不放（列給 Kevin）。
-// 「引用」三顆按鈕在 Story 3.10 才放（AR-67）。PaperSiteContext 讓共用區塊用示範站的寫法：
+// 「引用」（Story 3.10）和成員版共用同一份（PaperLayout 放）。PaperSiteContext 讓共用區塊用示範站的寫法：
 // 沒有產生成功只寫「沒有產生成功」、分類標籤連到論文清單。
 
 function limitedContent(paper: DemoPaper): LimitedContent | undefined {
