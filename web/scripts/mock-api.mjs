@@ -83,6 +83,15 @@
 // classificationHistory（沒有就是空的）；送出時檢查兩欄各至少一個、都是顯示名稱裡有的 key、和目前的不同（否則 422），
 // 寫一筆在最前面（姓名是登入的那一位），論文頁的分類換成新的（已核對、人數照歷史裡不同的姓名算）。
 // 論文頁：http://127.0.0.1:4180/__mock/classification 列出修正分類每一種狀態怎麼看（啟動時也印出來）。
+//   http://127.0.0.1:4180/__mock?summaryReport=failed     回報錯誤的送出：ok／failed（伺服器錯誤：「沒有送出成功」）／
+//                                                        expired（401：回登入頁）
+//   http://127.0.0.1:4180/__mock?summaryReportDelay=600000  回報錯誤要等幾毫秒才回（看「送出中…」）
+//   http://127.0.0.1:4180/__mock?reportNote=摘要沒有寫「明顯」  打開回報錯誤的表單時自動填這段說明（比對工具只能點文字、
+//                                                        不能打字；空字串是不填；也是在頁面殼裡多載入 /__mock/inject.js）
+//   http://127.0.0.1:4180/__mock?summaryReportReset=1    每一篇的回報回到假資料一開始的樣子
+// Story 3.12 加上回報錯誤的端點（POST /api/v1/papers/{id}/summary-reports）：中文重點是 ready 才收；欄位是四欄之一、
+// 說明去掉前後空白後有字而且最多 100 個 code point（否則 422）；送來的 zh_summary_id 不是現在那一筆 409 summary_changed；收下後那一篇的 reported_fields 多這一欄（照四欄的順序），
+// 回中文重點區塊。論文頁：http://127.0.0.1:4180/__mock/summary-report 列出回報錯誤每一種狀態怎麼看（啟動時也印出來）。
 // 參數可以一起給；回傳目前的情境（JSON）。
 /* global process, URL, setTimeout, Buffer */
 import { randomUUID } from "node:crypto";
@@ -174,6 +183,9 @@ const scenario = {
   classificationFix: "ok",
   classificationFixDelay: 0,
   fixReason: "",
+  summaryReport: "ok",
+  summaryReportDelay: 0,
+  reportNote: "",
   alwaysSignedIn: args.signedIn,
 };
 /** 每一篇的修正歷史（新的在前）與修正後的分類區塊（論文 ID → 那一篇的）。 */
@@ -184,6 +196,20 @@ function resetClassificationFixes() {
   fixedBlocks = new Map();
 }
 resetClassificationFixes();
+/** 每一篇收到的回報欄位（論文 ID → 欄位的集合；一開始是假資料的 reported_fields）。 */
+const SUMMARY_FIELDS = ["research_question", "method", "theory", "findings"];
+let reportedFields = new Map();
+function resetSummaryReports() {
+  reportedFields = new Map();
+}
+/** 這一篇現在的中文重點區塊（有人回報過就多那幾欄）。 */
+function zhSummaryOf(id) {
+  const block = PAPERS.papers[id]?.page.zh_summary;
+  const extra = reportedFields.get(id);
+  if (block === undefined || extra === undefined || block.state !== "ready") return block;
+  const fields = new Set([...(block.value.reported_fields ?? []), ...extra]);
+  return { ...block, value: { ...block.value, reported_fields: SUMMARY_FIELDS.filter((field) => fields.has(field)) } };
+}
 /** 這一篇現在的分類區塊（修正過就是修正後的）。 */
 function classificationOf(id) {
   return fixedBlocks.get(id) ?? PAPERS.papers[id]?.page.classification;
@@ -343,6 +369,10 @@ async function api(req, res, path, query) {
   if (fixMatch !== null) {
     return classificationFix(req, res, decodeURIComponent(fixMatch[1]));
   }
+  const reportMatch = /^\/api\/v1\/papers\/([^/]+)\/summary-reports$/.exec(path);
+  if (reportMatch !== null && req.method === "POST") {
+    return summaryReport(req, res, decodeURIComponent(reportMatch[1]));
+  }
   if (req.method === "GET" && path.startsWith("/api/v1/papers/")) {
     const member = currentMember(req);
     if (member === null) return problem(res, 401, "not_authenticated");
@@ -385,7 +415,7 @@ async function paper(res, id, member) {
   const entry = PAPERS.papers[id];
   return entry === undefined
     ? problem(res, 404, "not_found")
-    : json(res, 200, { ...entry.page, classification: classificationOf(id), in_my_library: libraryIdsOf(member).includes(entry.page.paper.id) });
+    : json(res, 200, { ...entry.page, classification: classificationOf(id), zh_summary: zhSummaryOf(id), in_my_library: libraryIdsOf(member).includes(entry.page.paper.id) });
 }
 
 /** 一個欄位送來的 key：字串的清單、不重複、都在顯示名稱裡；不合格是 null。 */
@@ -442,6 +472,27 @@ async function classificationFix(req, res, id) {
   };
   fixedBlocks.set(id, updated);
   return json(res, 200, { classification: updated, history });
+}
+
+/** 回報錯誤：POST 送出（規則見檔頭）。是誰送的、結果是什麼在收到時就決定。 */
+async function summaryReport(req, res, id) {
+  const member = currentMember(req);
+  const body = await readJson(req);
+  const outcome = scenario.summaryReport;
+  await sleep(scenario.summaryReportDelay);
+  if (res.destroyed || req.socket.destroyed) return undefined;
+  if (member === null || outcome === "expired") return problem(res, 401, "not_authenticated");
+  if (rejectExpectedMember(req, res, member)) return undefined;
+  if (outcome === "failed") return problem(res, 500, "internal_error");
+  const block = zhSummaryOf(id);
+  if (block === undefined) return problem(res, 404, "not_found");
+  const note = typeof body.note === "string" ? body.note.trim() : "";
+  if (block.state !== "ready" || typeof body.zh_summary_id !== "string" || !SUMMARY_FIELDS.includes(body.field) || note === "" || [...note].length > 100) {
+    return problem(res, 422, "request_invalid");
+  }
+  if (body.zh_summary_id !== block.value.zh_summary_id) return problem(res, 409, "summary_changed");
+  reportedFields.set(id, new Set([...(reportedFields.get(id) ?? []), body.field]));
+  return json(res, 200, { zh_summary: zhSummaryOf(id) });
 }
 
 /** 文獻庫的一筆：先找清單，再找論文頁假資料；都沒有是 undefined（404）。 */
@@ -646,7 +697,7 @@ function libraryIndex() {
   ];
 }
 
-/** 頁面殼多載入的一支（select、openPicked、removeRow、blockPopups、fixReason）：修正分類的表單自動填理由、自動勾幾列（再按「開啟全文」）、按一列的「移出」、讓 window.open 回 null。只有這支替身會送。 */
+/** 頁面殼多載入的一支（select、openPicked、removeRow、blockPopups、fixReason、reportNote）：修正分類的表單自動填理由、回報錯誤的表單自動填說明、自動勾幾列（再按「開啟全文」）、按一列的「移出」、讓 window.open 回 null。只有這支替身會送。 */
 function injectScript() {
   const picks = String(scenario.select)
     .split(",")
@@ -662,18 +713,20 @@ function injectScript() {
     window.fetch = (input, init) =>
       String(input instanceof Request ? input.url : input).includes("/api/v1/library") ? new Promise(() => {}) : send(input, init);
   }
-  const fixReason = ${JSON.stringify(String(scenario.fixReason))};
-  if (fixReason !== "") {
-    // 修正分類的表單一打開就填好理由（照 React 的寫法：用原生的 setter 再送 input 事件）。
+  // 修正分類／回報錯誤的表單一打開就填好理由／說明（照 React 的寫法：用原生的 setter 再送 input 事件）。
+  const autofill = (selector, text) => {
+    if (text === "") return;
     const filled = new WeakSet();
     new MutationObserver(() => {
-      const input = document.querySelector("[data-fix-form] input[type=text]");
+      const input = document.querySelector(selector);
       if (input === null || filled.has(input)) return;
       filled.add(input);
-      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set.call(input, fixReason);
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set.call(input, text);
       input.dispatchEvent(new Event("input", { bubbles: true }));
     }).observe(document.documentElement, { childList: true, subtree: true });
-  }
+  };
+  autofill("[data-fix-form] input[type=text]", ${JSON.stringify(String(scenario.fixReason))});
+  autofill("[data-report-form] input[type=text]", ${JSON.stringify(String(scenario.reportNote))});
   const picks = ${JSON.stringify(picks)};
   const removeRow = ${Number(scenario.removeRow)};
   const openPicked = ${Number(scenario.openPicked) > 0};
@@ -713,6 +766,23 @@ function classificationIndex() {
   ];
 }
 
+/** 回報錯誤每一種狀態怎麼看（給人看的清單）。 */
+function summaryReportIndex() {
+  const base = `http://127.0.0.1:${args.port}`;
+  const ids = Object.entries(PAPERS.papers);
+  const labelled = (label) => ids.find(([, entry]) => entry.label === label)?.[0];
+  const normal = labelled("normal") ?? ids[0]?.[0];
+  const reported = labelled("reported");
+  const note = "摘要沒有寫「明顯」";
+  return [
+    { label: "form", url: `${base}/__mock?summaryReport=ok&summaryReportDelay=0&reportNote=`, note: `先打開這個，再開 ${base}/papers/${normal}、按「回報錯誤」：表單在中文重點標題下面展開` },
+    { label: "sending", url: `${base}/__mock?summaryReport=ok&summaryReportDelay=600000&reportNote=${note}`, note: "先打開這個，再按「回報錯誤」、選一欄、按「送出回報」：送出中…（說明自動填好）" },
+    { label: "failed", url: `${base}/__mock?summaryReport=failed&summaryReportDelay=0&reportNote=${note}`, note: "先打開這個，再送出：沒有送出成功，選的與寫的都留著" },
+    { label: "done", url: `${base}/papers/${reported ?? normal}`, note: "「方法」下面有「有成員回報此欄可能有誤」；在 form 送出成功後那一欄也會多這一行" },
+    { label: "reset", url: `${base}/__mock?summaryReport=ok&summaryReportDelay=0&reportNote=&summaryReportReset=1`, note: "回報錯誤每個情境都回到預設（收到的回報清掉）" },
+  ];
+}
+
 /** 每一種狀態的網址（給人看的清單）。 */
 function paperIndex() {
   const base = `http://127.0.0.1:${args.port}/papers/`;
@@ -726,10 +796,10 @@ function paperIndex() {
 }
 
 function control(res, query) {
-  for (const key of ["login", "logout", "names", "list", "cube", "library", "libraryChange", "select", "classificationFix", "fixReason"]) {
+  for (const key of ["login", "logout", "names", "list", "cube", "library", "libraryChange", "select", "classificationFix", "fixReason", "summaryReport", "reportNote"]) {
     if (query.has(key)) scenario[key] = query.get(key);
   }
-  for (const key of ["loginDelay", "logoutDelay", "listDelay", "listDelayAfter", "listTotal", "listFailAfter", "cubeDelay", "libraryDelay", "libraryTotal", "libraryChangeDelay", "removeRow", "openPicked", "blockPopups", "libraryHang", "classificationFixDelay"]) {
+  for (const key of ["loginDelay", "logoutDelay", "listDelay", "listDelayAfter", "listTotal", "listFailAfter", "cubeDelay", "libraryDelay", "libraryTotal", "libraryChangeDelay", "removeRow", "openPicked", "blockPopups", "libraryHang", "classificationFixDelay", "summaryReportDelay"]) {
     if (query.has(key)) scenario[key] = Number(query.get(key));
   }
   if (query.has("listDelayAfter") || query.has("listFailAfter")) listRequests = 0;
@@ -740,6 +810,7 @@ function control(res, query) {
   // libraryEmpty 和 libraryAll 同時給時，libraryAll 後套用、以它為準。
   if (query.has("libraryAll")) resetLibraries(query.get("libraryAll") === "1" ? "all" : "initial");
   if (query.get("classificationReset") === "1") resetClassificationFixes();
+  if (query.get("summaryReportReset") === "1") resetSummaryReports();
   if (query.has("signedIn")) scenario.alwaysSignedIn = query.get("signedIn") === "true";
   if (query.has("expire")) {
     sessions.clear();
@@ -769,7 +840,7 @@ function staticFile(res, path) {
   const type = TYPES[extname(target)] ?? "application/octet-stream";
   let body = readFileSync(target);
   // select、blockPopups：頁面殼多載入 /__mock/inject.js（同源的檔案，安全標頭的 CSP 照樣放行），放在最前面。
-  if (target.endsWith("index.html") && (scenario.select !== "" || scenario.removeRow >= 0 || scenario.openPicked > 0 || scenario.blockPopups > 0 || scenario.libraryHang > 0 || scenario.fixReason !== "")) {
+  if (target.endsWith("index.html") && (scenario.select !== "" || scenario.removeRow >= 0 || scenario.openPicked > 0 || scenario.blockPopups > 0 || scenario.libraryHang > 0 || scenario.fixReason !== "" || scenario.reportNote !== "")) {
     body = Buffer.from(String(body).replace("<head>", '<head><script src="/__mock/inject.js"></script>'));
   }
   send(res, 200, body, { ...SECURITY_HEADERS, "Content-Type": type });
@@ -783,6 +854,7 @@ createServer((req, res) => {
   if (url.pathname === "/__mock/library") return json(res, 200, libraryIndex());
   if (url.pathname === "/__mock/coverage") return json(res, 200, coverageIndex());
   if (url.pathname === "/__mock/classification") return json(res, 200, classificationIndex());
+  if (url.pathname === "/__mock/summary-report") return json(res, 200, summaryReportIndex());
   if (url.pathname === "/__mock/inject.js") return send(res, 200, injectScript(), { ...SECURITY_HEADERS, "Content-Type": TYPES[".js"] });
   if (url.pathname.startsWith("/api/")) {
     api(req, res, url.pathname, url.searchParams).catch((error) => {
@@ -799,4 +871,5 @@ createServer((req, res) => {
   for (const row of libraryIndex()) process.stdout.write(`  library ${row.label.padEnd(13)} ${row.url}\n`);
   for (const row of coverageIndex()) process.stdout.write(`  coverage ${row.label.padEnd(12)} ${row.url}\n`);
   for (const row of classificationIndex()) process.stdout.write(`  classification ${row.label.padEnd(8)} ${row.url}\n`);
+  for (const row of summaryReportIndex()) process.stdout.write(`  summary-report ${row.label.padEnd(8)} ${row.url}\n`);
 });

@@ -20,4 +20,5 @@ export const ProblemDetailsCode = {
   origin_rejected: 'origin_rejected',
   request_invalid: 'request_invalid',
   request_rejected: 'request_rejected',
+  summary_changed: 'summary_changed',
 } as const;

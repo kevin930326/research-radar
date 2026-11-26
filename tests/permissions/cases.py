@@ -21,7 +21,7 @@ from radar.domain.viewer import MemberViewer, SystemViewer
 from radar.repo.judgments import create_judgment_event
 from radar.repo.library import create_library_item
 from radar.services.library import remove_library_item
-from tests.integration.test_effective_views import insert_classification
+from tests.integration.test_effective_views import insert_classification, insert_header
 from tests.llm_support import create_hidden_paper, execute
 from tests.permissions.framework import (
     CANARY,
@@ -161,6 +161,35 @@ def _fix_classification(ctx: PermissionContext) -> EndpointRequest:
     return EndpointRequest(
         path_params={"paper_id": str(paper_id)},
         body={"topic": ["e_commerce"], "method": ["experiment"], "reason": None},
+    )
+
+
+# --- 回報中文重點錯誤（Story 3.12）------------------------------------------------------------
+
+
+@REGISTRY.case("POST", "/api/v1/papers/{paper_id}/summary-reports")
+def _report_summary(ctx: PermissionContext) -> EndpointRequest:
+    # B 回報 A 的私人論文（B 看不到）：和不存在一樣 404，什麼都不寫；A 回報自己看得到的這篇：200。
+    # 這篇要有有效的中文重點（沒有時回報不收）；本文帶畫面上看到的那一筆（ADR-0064）。
+    paper_id = _private_paper_in_owner_library(ctx)
+    summary_id = insert_header(
+        ctx.extras["test_database"],
+        paper_id,
+        "zh_summary",
+        {
+            "research_question": "（假資料）研究問題",
+            "method": None,
+            "theory": None,
+            "findings": None,
+        },
+    )
+    return EndpointRequest(
+        path_params={"paper_id": str(paper_id)},
+        body={
+            "zh_summary_id": str(summary_id),
+            "field": "research_question",
+            "note": "（假資料）說明",
+        },
     )
 
 

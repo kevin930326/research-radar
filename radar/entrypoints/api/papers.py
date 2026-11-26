@@ -19,8 +19,15 @@
   POST 錯誤的先後（ADR-0063）：`Origin` 403 → 沒登入 401 → 預期成員 409／400 → 論文看不到 404 →
   本文不對 422。看不到的論文在相依項裡查（`visible_paper`），相依項比本文的驗證先跑，所以壞本文
   不會蓋過 404。
+- 回報中文重點錯誤（Story 3.12）：`POST /api/v1/papers/{paper_id}/summary-reports`（畫面上看到的
+  那一筆 `zh_summary_id`＋四欄選一欄＋必填的說明，回寫入後的中文重點區塊；`reported_fields` 只有
+  欄位名稱，不帶誰回報、說明）。錯誤的先後同修正分類（相依項 `visible_paper` 先查論文，看不到的
+  論文帶壞本文也是 404）；送來的值不收、這篇現在沒有可以回報的中文重點（還在產生、沒有產生成功、
+  四欄都沒有）一律 422 `request_invalid`；看到的那一筆已經不是現在有效的（送出前重新產生了）409
+  `summary_changed`（和換了人的 `member_changed` 分開）。都什麼都不寫。
+  沒有讀回報的端點：論文頁的 `zh_summary.value.reported_fields` 就是標記。
 - 處理函式的名稱就是 operationId（`paper`、`display_names`、`client_config`、
-  `classification_fixes`、`fix_classification`，全站唯一）。
+  `classification_fixes`、`fix_classification`、`report_summary`，全站唯一）。
 - 一定要在 `mount_web` 之前裝（`install_paper_routes` 會檢查）。
 """
 
@@ -34,6 +41,7 @@ import structlog
 from fastapi import APIRouter, Depends, FastAPI, Request, Response
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictStr
 
+from radar.domain.ai_blocks import AiBlock
 from radar.domain.auth import AuthenticatedMember
 from radar.domain.classification_fixes import ClassificationFixEntry, ClassificationFixInvalidError
 from radar.domain.contracts import (
@@ -50,6 +58,7 @@ from radar.domain.contracts import (
 )
 from radar.domain.errors import ErrorCode
 from radar.domain.paper_page import PaperPage
+from radar.domain.summary_reports import SummaryChangedError, SummaryReportInvalidError
 from radar.domain.viewer import MemberViewer
 from radar.entrypoints.api.auth import (
     API_V1_PREFIX,
@@ -67,6 +76,7 @@ from radar.services.judgments import (
     fix_classification,
     get_classification_fixes,
     paper_is_visible,
+    report_summary,
 )
 from radar.services.paper_page import PaperPageSetup, get_paper_page
 
@@ -88,6 +98,31 @@ class ClassificationFixBody(BaseModel):
     reason: StrictStr | None = Field(default=None, max_length=1000)
 
 
+class SummaryReportBody(BaseModel):
+    """回報中文重點錯誤送來的內容：畫面上看到的那一筆中文重點（`zh_summary_id`，論文頁
+    `zh_summary.value.zh_summary_id`）、哪一欄（`research_question`、`method`、`theory`、
+    `findings` 之一）、說明（必填，100 字以內）。
+
+    這裡只擋形狀（字串、多餘欄位）與過大的請求；四欄之一、必填、字數與字元由
+    `domain/summary_reports.check_summary_report` 驗。
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    zh_summary_id: uuid.UUID
+    field: StrictStr = Field(max_length=64)
+    note: StrictStr = Field(max_length=1000)
+
+
+class SummaryReportResponse(BaseModel):
+    """回報後的中文重點區塊（和論文頁的 `zh_summary` 同一個形狀；`reported_fields` 是還沒處理的
+    欄位）。"""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    zh_summary: ZhSummaryBlock
+
+
 @dataclass(frozen=True)
 class PaperRoutes:
     """論文頁路由要用的函式與資料（`build_paper_routes` 組；測試換成假的函式）。
@@ -97,6 +132,9 @@ class PaperRoutes:
     `load_classification_fixes`：那篇論文的分類區塊與修正歷史；看不到回 None。
     `fix_classification`：成員修正那篇論文的分類；看不到回 None，送來的值不收丟
     `ClassificationFixInvalidError`。
+    `report_summary`：成員回報那篇論文的中文重點某一欄可能有誤，回寫入後的中文重點區塊；看不到回
+    None，送來的值不收或沒有可以回報的中文重點丟 `SummaryReportInvalidError`，成員看到的那一筆
+    已經不是現在有效的丟 `SummaryChangedError`。
     """
 
     load_paper: Callable[[MemberViewer, uuid.UUID], PaperPage | None]
@@ -107,6 +145,7 @@ class PaperRoutes:
     fix_classification: Callable[
         [MemberViewer, uuid.UUID, ClassificationFixBody], ClassificationFixes | None
     ]
+    report_summary: Callable[[MemberViewer, uuid.UUID, SummaryReportBody], AiBlock | None]
 
 
 def build_paper_routes(
@@ -143,6 +182,18 @@ def build_paper_routes(
             now=clock(),
         )
 
+    def report(actor: MemberViewer, paper_id: uuid.UUID, body: SummaryReportBody) -> AiBlock | None:
+        return report_summary(
+            actor,
+            database,
+            setup,
+            paper_id,
+            zh_summary_id=body.zh_summary_id,
+            field=body.field,
+            note=body.note,
+            now=clock(),
+        )
+
     return PaperRoutes(
         load_paper=load_paper,
         display_names=display_names,
@@ -150,6 +201,7 @@ def build_paper_routes(
         paper_visible=paper_visible,
         load_classification_fixes=load_classification_fixes,
         fix_classification=fix,
+        report_summary=report,
     )
 
 
@@ -253,9 +305,9 @@ def install_paper_routes(app: FastAPI, routes: PaperRoutes, auth_routes: AuthRou
     router = APIRouter(prefix=API_V1_PREFIX, dependencies=[Depends(origin_dependency(auth_routes))])
 
     def visible_paper(paper_id: str, request: Request) -> tuple[AuthenticatedMember, uuid.UUID]:
-        # 修正分類的寫入：先認 session（沒登入 401）、比對預期成員（409／400），再解析 ID、查這位
-        # 成員看不看得到（看不到、不存在、壞 ID 都 404）。相依項在本文驗證之前跑，所以沒登入或
-        # 看不到的請求不會先得到 422（ADR-0063 錯誤的先後）。
+        # 修正分類與回報錯誤的寫入：先認 session（沒登入 401）、比對預期成員（409／400），
+        # 再解析 ID、查這位成員看不看得到（看不到、不存在、壞 ID 都 404）。相依項在本文驗證之前跑，
+        # 所以沒登入或看不到的請求不會先得到 422（ADR-0063 錯誤的先後）。
         member = member_as_expected(request, auth_routes)
         parsed = _parse_paper_id(paper_id)
         if not routes.paper_visible(member.viewer, parsed):
@@ -312,6 +364,36 @@ def install_paper_routes(app: FastAPI, routes: PaperRoutes, auth_routes: AuthRou
             raise _not_found()
         response.headers.update(NO_STORE)
         return classification_fixes_response(fixes)
+
+    @router.post("/papers/{paper_id}/summary-reports")
+    def report_summary(
+        target: Annotated[tuple[AuthenticatedMember, uuid.UUID], Depends(visible_paper)],
+        body: SummaryReportBody,
+        response: Response,
+    ) -> SummaryReportResponse:
+        """回報一篇看得到的論文的中文重點某一欄可能有誤：哪一欄（四欄之一）、說明（必填，
+        100 字以內）；不改內容，回寫入後的中文重點區塊（`reported_fields` 只有欄位名稱）。
+        看不到、不存在、ID 不是 UUID 都回同一個 404；送來的值不收、這篇現在沒有可以回報的中文重點
+        422 `request_invalid`（什麼都不寫）；沒登入 401；`Origin` 缺少或不是本站 403
+        `origin_rejected`；
+        `X-Radar-Expected-Member` 和登入的成員不同 409 `member_changed`、格式不對 400
+        `expected_member_invalid`。`zh_summary_id` 不是現在有效的那一筆（送出前重新產生了）409
+        `summary_changed`（什麼都不寫，重讀論文頁）。看不到的論文帶壞本文也是 404（先查論文、
+        再驗本文）。"""
+        member, parsed = target
+        try:
+            block = routes.report_summary(member.viewer, parsed, body)
+        except SummaryReportInvalidError as exc:
+            # 只記原因代號，不記說明。
+            log.info("回報中文重點不收", problem=exc.problem.value)
+            raise ApiProblemError(ErrorCode.REQUEST_INVALID, headers=NO_STORE) from None
+        except SummaryChangedError:
+            log.info("回報中文重點不收", problem=ErrorCode.SUMMARY_CHANGED.value)
+            raise ApiProblemError(ErrorCode.SUMMARY_CHANGED, headers=NO_STORE) from None
+        if block is None:
+            raise _not_found()
+        response.headers.update(NO_STORE)
+        return SummaryReportResponse(zh_summary=ZhSummaryBlock.from_block(block))
 
     @router.get("/display-names")
     def display_names(request: Request, response: Response) -> DisplayNames:

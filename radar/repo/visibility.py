@@ -163,6 +163,13 @@ def visible_to_system_only(viewer: Viewer) -> str:
     return "TRUE"
 
 
+def _reads_member_judgments(viewer: Viewer) -> bool:
+    """成員的人工判斷（修正分類的歷史、回報中文重點的標記）讀不讀得到：成員與系統工作（管理指令）
+    讀得到；示範站產生器（`PublicViewer`）與其他任何東西都讀不到。讀不到時要拒絕查詢還是讀成空的，
+    由各個呼叫的函式決定（`visible_member_judgments`、`visible_summary_report_marks`）。"""
+    return isinstance(viewer, MemberViewer | SystemViewer)
+
+
 def visible_member_judgments(viewer: Viewer) -> str:
     """成員的人工判斷紀錄（修正分類的歷史：誰、什麼時候、選了什麼、理由，Story 3.11）的 SQL 條件：
     成員與系統工作（管理指令）讀得到，都回 `TRUE`（論文本身看不看得到另外接 `visible_papers`）。
@@ -171,9 +178,27 @@ def visible_member_judgments(viewer: Viewer) -> str:
     Raises:
         TypeError: `viewer` 不是 `MemberViewer` 或 `SystemViewer`。
     """
-    if not isinstance(viewer, MemberViewer | SystemViewer):
+    if not _reads_member_judgments(viewer):
         raise TypeError(f"修正歷史只給成員或 SystemViewer（現在是 {type(viewer).__name__}）")
     return "TRUE"
+
+
+def visible_summary_report_marks(viewer: Viewer) -> str:
+    """「這一欄有成員回報可能有誤」的標記（`effective_zh_summary.reported_fields`，
+    Story 3.12）讀不讀得到的 SQL 布林運算式：成員與系統工作是 `TRUE`；示範站產生器
+    （`PublicViewer`）是 `FALSE`——它讀中文重點的內容，但標記一律讀成空的（示範站不帶回報，
+    ADR-0007 白名單也擋）。標記只有欄位名稱；誰回報、說明另經 `visible_member_judgments`，
+    公開身分直接丟錯。誰讀得到和修正歷史共用 `_reads_member_judgments`；差別只在公開身分讀成空的、
+    不丟錯。
+
+    Raises:
+        TypeError: `viewer` 不是三種讀者身分之一。
+    """
+    if _reads_member_judgments(viewer):
+        return "TRUE"
+    if isinstance(viewer, PublicViewer):
+        return "FALSE"
+    raise TypeError(f"不認得的讀者身分：{type(viewer).__name__}")
 
 
 def visible_snapshot_facts(viewer: Viewer) -> str:

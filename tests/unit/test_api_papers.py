@@ -78,6 +78,7 @@ class FakePapers:
             paper_visible=lambda _viewer, _paper_id: False,
             load_classification_fixes=lambda _viewer, _paper_id: None,
             fix_classification=lambda _viewer, _paper_id, _body: None,
+            report_summary=lambda _viewer, _paper_id, _body: None,
         )
 
 
@@ -164,6 +165,7 @@ def test_paper_without_abstract_or_snapshot_has_nulls() -> None:
         paper_visible=lambda _viewer, _paper_id: False,
         load_classification_fixes=lambda _viewer, _paper_id: None,
         fix_classification=lambda _viewer, _paper_id, _body: None,
+        report_summary=lambda _viewer, _paper_id, _body: None,
     )
     app = create_app(readiness_check=lambda: True)
     install_paper_routes(app, routes, FakeAuth().routes())

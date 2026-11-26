@@ -21,7 +21,9 @@ import type {
   MemberResponse,
   PaperListResponse,
   PaperPageResponse,
-  ProblemDetails
+  ProblemDetails,
+  SummaryReportBody,
+  SummaryReportResponse
 } from './model';
 
 export type HTTPStatusCode1xx = 100 | 101 | 102 | 103;
@@ -526,6 +528,80 @@ const res = await fetch(getFixClassificationUrl(paperId),
 
   const data: fixClassificationResponse['data'] = body ? JSON.parse(body) : {}
   return { data, status: res.status, headers: res.headers } as fixClassificationResponse
+}
+
+
+
+export type reportSummaryResponse200 = {
+  data: SummaryReportResponse
+  status: 200
+}
+
+export type reportSummaryResponseDefault = {
+  data: ProblemDetails
+  status: Exclude<HTTPStatusCodes, 200>
+}
+
+export type reportSummaryResponseSuccess = (reportSummaryResponse200) & {
+  headers: Headers;
+};
+export type reportSummaryResponseError = (reportSummaryResponseDefault) & {
+  headers: Headers;
+};
+
+export type reportSummaryResponse = (reportSummaryResponseSuccess | reportSummaryResponseError)
+
+export const getReportSummaryUrl = (paperId: string,) => {
+
+
+
+
+  return `/api/v1/papers/${paperId}/summary-reports`
+}
+
+/**
+ * 回報一篇看得到的論文的中文重點某一欄可能有誤：哪一欄（四欄之一）、說明（必填，
+ * 100 字以內）；不改內容，回寫入後的中文重點區塊（`reported_fields` 只有欄位名稱）。
+ * 看不到、不存在、ID 不是 UUID 都回同一個 404；送來的值不收、這篇現在沒有可以回報的中文重點
+ * 422 `request_invalid`（什麼都不寫）；沒登入 401；`Origin` 缺少或不是本站 403
+ * `origin_rejected`；
+ * `X-Radar-Expected-Member` 和登入的成員不同 409 `member_changed`、格式不對 400
+ * `expected_member_invalid`。`zh_summary_id` 不是現在有效的那一筆（送出前重新產生了）409
+ * `summary_changed`（什麼都不寫，重讀論文頁）。看不到的論文帶壞本文也是 404（先查論文、
+ * 再驗本文）。
+ * @summary Report Summary
+ */
+export const reportSummary = async (paperId: string,
+    summaryReportBody: SummaryReportBody, options?: RequestInit): Promise<reportSummaryResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Symbol.iterator in h) {
+      return Object.fromEntries(
+        Array.from(h as Iterable<Iterable<string>>, (entry) => Array.from(entry) as [string, string]),
+      );
+    }
+    const headers: Record<string, string | readonly string[]> = {};
+    for (const [name, value] of Object.entries<string | readonly string[] | undefined>(h)) {
+      if (value !== undefined) headers[name] = value;
+    }
+    return headers;
+  };
+const res = await fetch(getReportSummaryUrl(paperId),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(summaryReportBody)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: reportSummaryResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as reportSummaryResponse
 }
 
 

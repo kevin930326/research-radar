@@ -615,6 +615,30 @@ def find_latest_ai_result(
     )
 
 
+def find_zh_summary_papers(
+    viewer: Viewer, connection: Connection, zh_summary_ids: Sequence[uuid.UUID]
+) -> dict[uuid.UUID, tuple[uuid.UUID, bool]]:
+    """這些中文重點表頭（`viewer` 看得到的論文的）各是哪一篇論文、現在是不是 `active`：
+    {zh_summary_id: (paper_id, is_active)}。不存在或看不到的不在結果裡。管理指令列出回報時用
+    （Story 3.12：被回報的那一筆重新產生之後就不是 active，論文頁已經不顯示標記）。"""
+    wanted = sorted(set(zh_summary_ids))
+    if not wanted:
+        return {}
+    visible = visible_papers(viewer, alias="paper")
+    rows = connection.execute(
+        text(
+            "SELECT h.id, h.paper_id, h.status = 'active' AS is_active FROM zh_summary AS h"
+            " JOIN paper ON paper.id = h.paper_id"
+            f" WHERE {visible} AND h.id = ANY(CAST(:ids AS uuid[]))"
+        ),
+        {"ids": wanted},
+    )
+    return {
+        uuid.UUID(str(summary_id)): (uuid.UUID(str(paper_id)), bool(is_active))
+        for summary_id, paper_id, is_active in rows
+    }
+
+
 def list_paper_ai_history(
     viewer: SystemViewer, connection: Connection, paper_id: uuid.UUID
 ) -> list[AiHistoryRow]:

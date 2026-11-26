@@ -14,6 +14,7 @@ import {
   me as getMe,
   paper as getPaper,
   removeLibraryItem,
+  reportSummary as postSummaryReport,
   restoreLibraryItem,
 } from "../../generated/api";
 import {
@@ -28,6 +29,8 @@ import type {
   ClassificationFixBody,
   ClassificationFixesResult,
   ClassificationFixResult,
+  SummaryReportBody,
+  SummaryReportResult,
   ClientConfigResult,
   CubeResult,
   DataSource,
@@ -108,6 +111,11 @@ function memberChanged(response: { status: number; data: unknown }): boolean {
   return response.status === 409 && (response.data as { code?: unknown } | null)?.code === "member_changed";
 }
 
+/** 回報錯誤時後端說送出的那一筆中文重點已經不是現在有效的（409 `summary_changed`，ADR-0064）。其他 409 不算。 */
+function summaryChanged(response: { status: number; data: unknown }): boolean {
+  return response.status === 409 && (response.data as { code?: unknown } | null)?.code === "summary_changed";
+}
+
 /** 讀到的資料記下是用誰的身分讀的（沒帶預期成員就不放這個欄位）。 */
 function readAs(expectedMemberId: string | undefined): { readAs?: string } {
   return expectedMemberId === undefined ? {} : { readAs: expectedMemberId };
@@ -186,6 +194,18 @@ const papers: PaperSource = {
     if (response.status === 404) return { kind: "notFound" };
     if (response.status === 401) return { kind: "signedOut" };
     throw new Error(`POST ${API_BASE}/papers/{id}/classification-fixes: HTTP ${response.status}`);
+  },
+
+  // 回報中文重點錯誤（Story 3.12）：同修正分類，標頭只在這裡加（expecting）；422 是後端不收，什麼都沒寫。
+  async reportSummary(paperId: string, body: SummaryReportBody, expectedMemberId?: string): Promise<SummaryReportResult> {
+    const response = await postSummaryReport(encodeURIComponent(paperId), body, expecting(expectedMemberId));
+    if (response.status === 200) return { kind: "done", zhSummary: response.data.zh_summary };
+    if (memberChanged(response)) return { kind: "memberChanged" };
+    if (summaryChanged(response)) return { kind: "summaryChanged" };
+    if (response.status === 422) return { kind: "rejected" };
+    if (response.status === 404) return { kind: "notFound" };
+    if (response.status === 401) return { kind: "signedOut" };
+    throw new Error(`POST ${API_BASE}/papers/{id}/summary-reports: HTTP ${response.status}`);
   },
 
   async list(filters: PaperListFilters, limit: number, previous?: PaperList | null, expectedMemberId?: string): Promise<PaperListResult> {

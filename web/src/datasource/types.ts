@@ -16,6 +16,8 @@ import type {
   PaperRow,
   Provenance,
   SnapshotRef,
+  SummaryReportBody,
+  ZhSummaryBlock,
 } from "../generated/model";
 
 /** 這份建置是哪一個站：成員版或示範站。 */
@@ -47,7 +49,7 @@ export interface MemberSession {
 
 /** 論文頁的資料（`GET /api/v1/papers/{id}`）：書目、目前的摘要、三個 AI 區塊、全文連結、快照。 */
 export type PaperPage = PaperPageResponse;
-export type { ClassificationFixBody };
+export type { ClassificationFixBody, SummaryReportBody };
 
 /** 期刊、主題、方法的顯示名稱（`GET /api/v1/display-names`）。 */
 export type { DisplayNames };
@@ -140,6 +142,11 @@ export interface PaperSource {
    * （ADR-0055），畫面一律經 useClassificationFix 送，一定會帶。
    */
   fixClassification(paperId: string, body: ClassificationFixBody, expectedMemberId?: string): Promise<ClassificationFixResult>;
+  /**
+   * 回報一篇論文的中文重點錯誤（Story 3.12）：畫面上看到的那一筆中文重點（`zh_summary_id`）＋哪一欄＋說明。`expectedMemberId` 同 fixClassification（畫面一律經
+   * useSummaryReport 送，一定會帶）。
+   */
+  reportSummary(paperId: string, body: SummaryReportBody, expectedMemberId?: string): Promise<SummaryReportResult>;
 }
 
 /** 一篇論文的分類區塊（照目前的有效值）與修正歷史（新的在前，只有姓名；Story 3.11）。 */
@@ -165,6 +172,23 @@ export type ClassificationFixesResult =
 export type ClassificationFixResult =
   | { kind: "done"; fixes: ClassificationFixes }
   | { kind: "rejected" }
+  | { kind: "notFound" }
+  | { kind: "signedOut" }
+  | { kind: "memberChanged" };
+
+/**
+ * 送出回報的結果：
+ * - `done`：寫好了，`zhSummary` 是回報後的中文重點區塊（`reported_fields` 多了這一欄）。
+ * - `rejected`：後端不收（422：不是四欄之一、說明沒寫或太長、有不收的字元、中文重點不是 ready 等），什麼都沒寫。
+ * - `summaryChanged`：送出的 `zh_summary_id` 已經不是現在有效的那一筆（409 `summary_changed`，送出前重新產生了；
+ *   ADR-0064），什麼都沒寫。和換了人的 `memberChanged` 不同。
+ * - `notFound`／`signedOut`／`memberChanged`：同修正分類（409 時後端什麼都沒寫）。
+ * 其他錯誤（網路、伺服器錯誤）丟出例外。
+ */
+export type SummaryReportResult =
+  | { kind: "done"; zhSummary: ZhSummaryBlock }
+  | { kind: "rejected" }
+  | { kind: "summaryChanged" }
   | { kind: "notFound" }
   | { kind: "signedOut" }
   | { kind: "memberChanged" };

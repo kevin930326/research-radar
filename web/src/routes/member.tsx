@@ -6,6 +6,7 @@ import { flushSync } from "react-dom";
 import { SiteFooter } from "../components/SiteFooter";
 import { SiteHeader } from "../components/SiteHeader";
 import type { ClassificationFixControl } from "../components/paper/ClassificationFix";
+import type { SummaryReportControl } from "../components/paper/SummaryReport";
 import type { LibraryControl } from "../components/paper/LibraryBlock";
 import { LoadFailed } from "../components/states/LoadFailed";
 import { Offline } from "../components/states/Offline";
@@ -22,6 +23,7 @@ import { isPaperId } from "../pages/paper-format";
 import { validateSearchParams, type SearchParams } from "../pages/search-filters";
 import type { ReadAs } from "../datasource/types";
 import { classificationFixesQuery, useSendClassificationFix } from "./classification-fix";
+import { useSendSummaryReport } from "./summary-report";
 import { libraryShown, useFollowMemberChange, useLibraryChange } from "./library-change";
 import { displayNamesQuery, hasHeldRows, paperKey, paperSource } from "./paper-queries";
 import { PAGE_FRAME_CLASS, PlainMain, rootRoute } from "./root";
@@ -401,13 +403,15 @@ function PaperWithNames({ page, readAs }: { page: PaperPageData; readAs: ReadAs 
   }, [signedOut, queryClient, navigate, href]);
   const library = usePaperLibrary(page, readAs);
   const fix = useClassificationFix(page, readAs);
+  const report = useSummaryReport(page, readAs);
   if (signedOut) {
     return null;
   }
   return (
     <PaperPage
-      page={fix.page}
+      page={{ ...fix.page, zh_summary: report.zhSummary }}
       classificationFix={fix.control}
+      summaryReport={report.control}
       names={names.data?.kind === "found" ? names.data.names : null}
       onRetryNames={() => void names.refetch({ cancelRefetch: false })}
       library={library}
@@ -490,6 +494,31 @@ function useClassificationFix(page: PaperPageData, readAs: ReadAs): { page: Pape
       historyOpen,
       onToggleHistory: () => setHistoryOpen((open) => !open),
       history: history.data?.kind === "found" ? history.data.fixes.history : null,
+    },
+  };
+}
+
+/**
+ * 論文頁的回報錯誤（Story 3.12）：送出帶 `readAs`（同 useClassificationFix，ADR-0055）與畫面上那一筆中文重點的
+ * `zh_summary_id`（ADR-0064）。成功之後這一份論文頁資料的中文重點區塊換成 API 回的（那一欄多了「有成員回報此欄可能有誤」）；
+ * 同 usePaperLibrary，只對按的時候那一份資料有效。
+ */
+function useSummaryReport(page: PaperPageData, readAs: ReadAs): { zhSummary: PaperPageData["zh_summary"]; control: SummaryReportControl } {
+  const sendReport = useSendSummaryReport(readAs);
+  const [changed, setChanged] = useState<{ page: PaperPageData; zhSummary: PaperPageData["zh_summary"] } | null>(null);
+  const shown = changed !== null && changed.page === page ? changed.zhSummary : page.zh_summary;
+  return {
+    zhSummary: shown,
+    control: {
+      send: async (body) => {
+        // 表單只在 ready 時出現；保險起見，畫面上沒有那一筆就不送。
+        const seen = shown.state === "ready" ? shown.value?.zh_summary_id : undefined;
+        if (seen === undefined) return false;
+        const zhSummary = await sendReport(page.paper.id, { ...body, zh_summary_id: seen });
+        if (zhSummary === null) return false;
+        setChanged({ page, zhSummary });
+        return true;
+      },
     },
   };
 }
