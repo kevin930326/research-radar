@@ -21,6 +21,7 @@ from radar.domain.viewer import MemberViewer, SystemViewer
 from radar.repo.judgments import create_judgment_event
 from radar.repo.library import create_library_item
 from radar.services.library import remove_library_item
+from tests.integration.test_effective_views import insert_classification
 from tests.llm_support import create_hidden_paper, execute
 from tests.permissions.framework import (
     CANARY,
@@ -154,7 +155,9 @@ def _classification_fixes(ctx: PermissionContext) -> EndpointRequest:
 @REGISTRY.case("POST", "/api/v1/papers/{paper_id}/classification-fixes")
 def _fix_classification(ctx: PermissionContext) -> EndpointRequest:
     # B 修正 A 的私人論文（B 看不到）：和不存在一樣 404，什麼都不寫；A 修正自己看得到的這篇：200。
+    # 這篇要有成功的 AI 分類（沒有時先不收修正，ADR-0063），方法和送出的不同（相同會被當成沒有改）。
     paper_id = _private_paper_in_owner_library(ctx)
+    insert_classification(ctx.extras["test_database"], paper_id, ["e_commerce"], ["survey_sem"])
     return EndpointRequest(
         path_params={"paper_id": str(paper_id)},
         body={"topic": ["e_commerce"], "method": ["experiment"], "reason": None},
