@@ -594,8 +594,8 @@ _TAKEN_OVER_DIR: Final = {
 class _Progress:
     """這一次匯出做到哪。`run_demo_export` 建，失敗處理看它（中斷也一樣看得到）：
 
-    - `switched`：manifest 已經換成這一次（已發佈）。`_swap_manifest` 換名成功時設；換名之後、設好之前
-      就停下時，由 `_publish` 的清理重讀 manifest 補設。
+    - `switched`：manifest 已經換成這一次（已發佈）。`_swap_manifest` 換名成功時設；換名之後、
+      設好之前就停下時，由 `_publish` 的清理重讀 manifest 補設。
     - `replacing`：已經開始換 manifest 的名（`_swap_manifest` 換名前設）；清理只在這之後才需要重讀
       manifest 看換了沒有。
     - `written`：這次寫的匯出目錄的 (`st_dev`, `st_ino`)（取自改名前的暫存目錄，改名不變）。改名前
@@ -1061,7 +1061,8 @@ def _clean_up_before_switch(out: _Output, run: DemoExportRun, progress: _Progres
     """`_publish` 寫目錄到換 manifest 這一段停下時的清理（還拿著檔案鎖）。已經開始換 manifest 的名
     （`replacing`）時先重讀 manifest：換名已經成功、只是還沒設 `switched` 就停下（例如換名那一下收到
     Ctrl-C）時，manifest 已經指向這一次，補設 `switched`、不刪目錄（已發佈、待補記，ADR-0061）；讀不
-    出 manifest 時不知道讀者看不看得到，目錄留著。確定沒換時才刪這次寫的目錄（`_discard_export_dir`）。"""
+    出 manifest 時不知道讀者看不看得到，目錄留著。確定沒換時才刪這次寫的目錄
+    （`_discard_export_dir`）。"""
     if progress.switched:
         return
     points_here = _manifest_points_here(out, run) if progress.replacing else False
