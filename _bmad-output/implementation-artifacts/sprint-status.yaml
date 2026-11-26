@@ -138,6 +138,11 @@
 # epic-3h 那一筆：示範站判定的後續、F19、論文列行高（PR 118、120、121），不是 Story、沒有估計。換人後寫入的保護沒做完，留到 epic-3h2。
 #   2026-11-21 03:15 開工、06:00 收尾（執行約 2.75 小時），之後等 Kevin 決定與補資料，21:42（台北）PR 121 合併，約 18.5 小時。
 #   Kevin 2026-11-21 回報自己動手約 1 小時。
+# epic-3i 那一筆：3.7、3.14 的示範站論文清單、3.9、3.10、3.15、3.11、3.12（PR 130～135、138，七個 PR 疊在一起），
+#   加上查 CI 上 firefox 當掉的小輪 epic-3i-ci（修正併在 PR 132～138 裡，不是 Story）。
+#   2026-11-25 19:05 開工、2026-11-26 22:52（台北）PR 138 合併，約 27.5 小時；執行端凌晨自己停了約 7 小時。
+#   Kevin 2026-11-26 回報自己動手「大概 2 小時」（含看畫面、回決定、回畫面文字清單）。
+#   estimate_h 是 3.7、3.9、3.10、3.11、3.12、3.15 的加總 15.5 h；3.14 的 3.5 h 已經算在 epic-3f 那一筆，這裡不重複算。
 # 重估的倍率只用 kevin_h_low、kevin_h_high（見上面「怎麼重估」第 1 點），elapsed_h 只留著對照。
 # 這個區塊要留在 generated 上面，重跑 skill 才不會洗掉註解（2026-11-14 測過）。
 actual_hours:
@@ -154,6 +159,7 @@ actual_hours:
   - {round: epic-3h2, stories: "換人後寫入的保護、示範站依期刊排除（PR 123、124，不是 Story）", estimate_h: null, elapsed_h: 3.5, kevin_h_low: 0.5, kevin_h_high: 1, rough: true}
   - {round: epic-3h3, stories: "識別碼分屬兩篇時兩篇都不寫（PR 125，不是 Story）", estimate_h: null, elapsed_h: 1.5, kevin_h_low: 0.5, kevin_h_high: 1, rough: true}
   - {round: epic-3h4, stories: "寫入路徑的收尾、同一種識別碼對不上時略過（PR 127、128，不是 Story）", estimate_h: null, elapsed_h: 2.5, kevin_h_low: 0.5, kevin_h_high: 0.5, rough: true}
+  - {round: "epic-3i＋epic-3i-ci", stories: "3.7、3.9、3.10、3.11、3.12、3.14（示範站論文清單）、3.15", estimate_h: 15.5, elapsed_h: 27.5, kevin_h_low: 2, kevin_h_high: 2, rough: true}
 
 generated: 11-14-2026 03:46
 last_updated: 11-17-2026 03:10
@@ -199,15 +205,15 @@ development_status:
   3-4-權限測試的框架: done
   3-5-導覽列與帳號選單: done
   3-6-論文頁的-api: done  # PR 88 已合併
-  3-7-示範站匯出的骨架: backlog
+  3-7-示範站匯出的骨架: done  # PR 130 已合併
   3-8-論文頁成員版: done  # PR 90 已合併
-  3-9-論文頁示範站版: backlog
-  3-10-引用匯出: backlog
-  3-11-修正分類: backlog
-  3-12-回報中文重點錯誤: backlog
+  3-9-論文頁示範站版: done  # PR 132 已合併
+  3-10-引用匯出: done  # PR 133 已合併
+  3-11-修正分類: done  # PR 135 已合併
+  3-12-回報中文重點錯誤: done  # PR 138 已合併；管理者「重新產生」還沒做
   3-13-找論文清單的-api-篩選: done  # PR 99 已合併
-  3-14-找論文-篩選-與示範站論文清單: in-progress  # 成員版 PR 109 已合併；示範站論文清單還沒做
-  3-15-資料涵蓋範圍: backlog
+  3-14-找論文-篩選-與示範站論文清單: done  # 成員版 PR 109、示範站論文清單 PR 131 已合併
+  3-15-資料涵蓋範圍: done  # PR 134 已合併
   3-16-個人文獻庫的-api: done  # PR 98 已合併
   3-17-加入-移出與我的文獻庫-基本版: done  # PR 110 已合併
   3-18-備份與還原指令: done  # PR 100 已合併
