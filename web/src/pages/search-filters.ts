@@ -1,6 +1,7 @@
 // 找論文（Story 3.14）的篩選條件：網址參數怎麼讀、怎麼寫、怎麼換成 API 的參數（AD-21：篩選與目前顯示幾篇
 // 都寫進網址，cursor 不進網址）。只處理資料，畫面上的字由 i18n 提供。
-// 條件怎麼合（期刊、年份「或」，主題「且」）由後端決定（ADR-0050 第 2 點），前端只把選的值原樣送出去。
+// 條件怎麼合由後端決定（ADR-0050 第 2 點、ADR-0011 的 2026-11-27 更新）：期刊、年份多值「或」；主題、方法多值預設「或」，
+// 網址上有 topic_match=all／method_match=all 時「且」（Story 3.20）。前端把選的值與這兩個設定原樣送出去。
 import type { DisplayNames, ListPapersParams, PaperListScope } from "../generated/model";
 
 /**
@@ -61,6 +62,12 @@ export interface SearchParams {
    * 顯示成可以移除的條件標籤（EXPERIENCE.md 畫面 8 第 2 點）。
    */
   method?: string;
+  /**
+   * 主題、方法選了兩個以上時「同時符合」（Story 3.20）：只有 `all`；省略是「任一個」（預設，和後端一樣）。
+   * 該欄位選的不到兩個時不留（tidyMatch），網址上才不會殘留。
+   */
+  topic_match?: "all";
+  method_match?: "all";
   /** 從「看全部 N 篇」帶進來的條件「本週新增」。 */
   this_week?: true;
   /** 目前顯示幾篇（按過「再載入」才有；省略是一頁）。 */
@@ -96,16 +103,60 @@ export function validateSearchParams(search: Record<string, unknown>, currentYea
   const hasYears =
     from !== undefined && to !== undefined && TRACKING_START_YEAR <= from && from <= to && to <= currentYear;
   const shown = typeof search.shown === "number" && Number.isInteger(search.shown) ? search.shown : undefined;
-  return {
+  return tidyMatch({
     scope: scope === "tracked" ? undefined : scope,
     journal: journal.length > 0 ? journal.join(",") : undefined,
     from: hasYears ? from : undefined,
     to: hasYears ? to : undefined,
     topic: topic.length > 0 ? topic.join(",") : undefined,
     method: method.length > 0 ? method.join(",") : undefined,
+    topic_match: search.topic_match === "all" ? "all" : undefined,
+    method_match: search.method_match === "all" ? "all" : undefined,
     this_week: search.this_week === true || search.this_week === "true" ? true : undefined,
     shown: shown !== undefined && shown > 0 ? shown : undefined,
+  });
+}
+
+/** 有主題、方法與它們的「同時符合」的條件（找論文與示範站論文清單都是這個形狀）。 */
+interface MatchFields {
+  topic?: string;
+  method?: string;
+  topic_match?: "all";
+  method_match?: "all";
+}
+
+/**
+ * 主題、方法選的不到兩個時拿掉它的「同時符合」（Story 3.20：只選一個時兩種一樣，網址上不留；取消勾選剩一個時回到任一個）。
+ * 每一次換條件都經過這裡（路由的檢查、頁面的 update、選單的「清除」），網址上才不會殘留。
+ */
+export function tidyMatch<T extends MatchFields>(params: T): T {
+  return {
+    ...params,
+    topic_match: selectedKeys(params.topic).length >= 2 ? params.topic_match : undefined,
+    method_match: selectedKeys(params.method).length >= 2 ? params.method_match : undefined,
   };
+}
+
+/**
+ * 網址列上有 `*_match`、但整理過的條件沒有（只有一個 key、不認得的拿掉後不到兩個、`ALL` 這種不認得的值）：
+ * 打開頁面時要把網址列換掉（規則 3「不到兩個時網址上不留」；審查 B 的 F2）。`raw` 是路由檢查前的網址參數。
+ */
+export function hasStaleMatch(raw: Record<string, unknown>, effective: MatchFields): boolean {
+  return (
+    (raw.topic_match !== undefined && effective.topic_match === undefined) ||
+    (raw.method_match !== undefined && effective.method_match === undefined)
+  );
+}
+
+/** 主題或方法有沒有正在用「同時符合」（兩個以上、選了同時符合）。 */
+export function hasAllMatch(params: MatchFields): boolean {
+  const tidy = tidyMatch(params);
+  return tidy.topic_match === "all" || tidy.method_match === "all";
+}
+
+/** 主題與方法都改回「任一個」（0 篇時的「改看符合任一個的 N 篇」）；其他條件不動。 */
+export function anyMatch<T extends MatchFields>(params: T): T {
+  return { ...params, topic_match: undefined, method_match: undefined };
 }
 
 /**
@@ -116,14 +167,29 @@ export function knownOnly(params: SearchParams, names: DisplayNames): SearchPara
   const keep = (value: string | undefined, known: Set<string>) =>
     joinKeys(selectedKeys(value).filter((key) => known.has(key)));
   const keys = (entries: readonly { key: string }[]) => new Set(entries.map((entry) => entry.key));
-  return {
+  // 拿掉不認得的之後不到兩個：「同時符合」也拿掉（tidyMatch）。
+  return tidyMatch({
     ...params,
     journal: keep(params.journal, keys(names.journals)),
     topic: keep(params.topic, new Set([...keys(names.topics), UNCLASSIFIED_TOPIC])),
     method: keep(params.method, keys(names.methods)),
-  };
+  });
 }
 
+
+/**
+ * 照「拿掉不認得的代號之後」的個數整理「同時符合」（審查 B 的 F1）：網址上有分類表已經沒有的主題（舊書籤）時，
+ * 網址上的個數比實際用到的多，只看網址會把不該留的 `*_match=all` 留下來。不認得的代號本身照舊留在網址上
+ * （送 API 前由 knownOnly 拿掉）。顯示名稱還沒讀到時（null）只能照網址上的個數（tidyMatch）。
+ */
+export function tidyMatchKnown<T extends MatchFields>(params: T, names: DisplayNames | null): T {
+  if (names === null) return tidyMatch(params);
+  const known = knownOnly(
+    { topic: params.topic, method: params.method, topic_match: params.topic_match, method_match: params.method_match },
+    names,
+  );
+  return { ...params, topic_match: known.topic_match, method_match: known.method_match };
+}
 
 /** 選了哪些期刊、主題（網址上的逗號分隔字串拆開）。 */
 export function selectedKeys(value: string | undefined): string[] {
@@ -166,16 +232,22 @@ export function yearRange(from: number, to: number): number[] {
   return Array.from({ length: to - from + 1 }, (_, index) => from + index);
 }
 
-/** 篩選條件（不含「目前顯示幾篇」）→ API 的參數。cursor 由資料來源層處理。 */
+/**
+ * 篩選條件（不含「目前顯示幾篇」）→ API 的參數。cursor 由資料來源層處理。
+ * 「同時符合」只在那一欄有兩個以上時送 `*_match=all`；任一個不送（後端沒給就是 any，Story 3.20）。
+ */
 export function toApiParams(params: SearchParams): ListPapersParams {
   const api: ListPapersParams = {};
+  const tidy = tidyMatch(params);
   const journals = selectedKeys(params.journal);
   const topics = selectedKeys(params.topic);
   if (journals.length > 0) api.journal = journals;
   if (params.from !== undefined && params.to !== undefined) api.year = yearRange(params.from, params.to);
   if (topics.length > 0) api.topic = topics;
+  if (tidy.topic_match === "all") api.topic_match = "all";
   const methods = selectedKeys(params.method);
   if (methods.length > 0) api.method = methods;
+  if (tidy.method_match === "all") api.method_match = "all";
   if (params.this_week === true) api.this_week = true;
   if (params.scope !== undefined) api.scope = params.scope;
   return api;

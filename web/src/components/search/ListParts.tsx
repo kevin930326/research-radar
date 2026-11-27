@@ -1,8 +1,11 @@
-// 論文清單共用的幾個小零件：從連結帶進來的條件標籤、「再載入」、錯誤列。
+// 論文清單共用的幾個小零件：從連結帶進來的條件標籤、「再載入」、錯誤列、同時符合 0 篇時的「改看符合任一個的 N 篇」。
 // 找論文、我的文獻庫（成員版）與示範站論文清單都用；放在這裡，示範站不必從成員版的頁面模組拿（審查 3.14 P5）。
+import { Link } from "@tanstack/react-router";
 import { useTranslation } from "react-i18next";
 
 import { formatCount } from "../../pages/paper-format";
+import type { ClearTarget } from "./FilterMenus";
+import { focusHeading } from "./filters";
 import { CrossIcon, NoticeIcon } from "./parts";
 
 /** 從連結帶進來的條件（「本週新增」、論文頁的方法）：暖白底的標籤，右邊「×」移除。 */
@@ -85,5 +88,32 @@ export function ErrorBar({ message, action, onRetry }: { message: string; action
         </button>
       </div>
     </div>
+  );
+}
+
+/**
+ * 同時符合查到 0 篇時，「沒有符合的論文」下面、「清除篩選」前面的「改看符合任一個的 N 篇」（Story 3.20；設計稿
+ * filter-match-mode.html 的 .zany）：連到主題與方法都改回任一個、其他條件不變的網址。N 由頁面算好給（找論文向 API
+ * 再查一次、示範站在瀏覽器裡算）；N 是 0 或還不知道時頁面不放這個連結。按了它會不見，焦點移到頁面標題。
+ * 樣子同旁邊的「清除篩選」：看得到的 36px（設計稿），連結本身 44px（ADR-0037），負外距抵掉。
+ */
+export function AnyMatchLink({ count, target }: { count: number; target: ClearTarget }) {
+  const { t } = useTranslation("search");
+  return (
+    <Link
+      to={target.to}
+      search={target.search}
+      replace
+      resetScroll={false}
+      // 按著 Cmd／Ctrl／Shift／Alt 或不是左鍵：瀏覽器開新分頁或新視窗，這一頁不換，焦點不動（審查 B 的低 L）。
+      onClick={(event) => {
+        if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+        focusHeading();
+      }}
+      data-any-match
+      className="-my-1 inline-flex min-h-tap-target items-center text-nav text-accent-gold no-underline decoration-1 underline-offset-4 hover:underline"
+    >
+      {t("search.empty.anyInstead", { count: formatCount(count) })}
+    </Link>
   );
 }

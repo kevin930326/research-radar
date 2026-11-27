@@ -4,12 +4,17 @@ import { describe, expect, it } from "vitest";
 import {
   AIS_CORE_JOURNALS,
   TRACKING_START_YEAR,
+  anyMatch,
   appliedFilterCount,
   checkYears,
   clearConditions,
   currentTaipeiYear,
+  hasAllMatch,
+  hasStaleMatch,
   isStart,
   knownOnly,
+  tidyMatch,
+  tidyMatchKnown,
   toApiParams,
   validateSearchParams,
   yearPreset,
@@ -114,6 +119,103 @@ describe("search conditions", () => {
       knownOnly({ scope: "lab", journal: "misq,old_journal", topic: "erp,unclassified,not_a_topic", method: "gone", from: 2020, to: 2021 }, names),
     ).toEqual({ scope: "lab", journal: "misq", topic: "erp,unclassified", method: undefined, from: 2020, to: 2021 });
     expect(knownOnly({ topic: "not_a_topic" }, names)).toEqual({ journal: undefined, topic: undefined, method: undefined });
+  });
+});
+
+describe("topic and method match mode (Story 3.20)", () => {
+  it("reads topic_match / method_match from the address only as all, with two keys or more", () => {
+    expect(validateSearchParams({ topic: "erp,supply_chain", topic_match: "all" }, 2026)).toEqual({ topic: "erp,supply_chain", topic_match: "all" });
+    expect(validateSearchParams({ method: "experiment,survey_sem", method_match: "all" }, 2026)).toEqual({
+      method: "experiment,survey_sem",
+      method_match: "all",
+    });
+    // 一個 key、沒有 key、不認得的值：不留（網址上不殘留）。
+    expect(validateSearchParams({ topic: "erp", topic_match: "all" }, 2026)).toEqual({ topic: "erp" });
+    expect(validateSearchParams({ topic_match: "all", method_match: "all" }, 2026)).toEqual({});
+    expect(validateSearchParams({ topic: "erp,supply_chain", topic_match: "any" }, 2026)).toEqual({ topic: "erp,supply_chain" });
+    expect(validateSearchParams({ topic: "erp,supply_chain", topic_match: "both" }, 2026)).toEqual({ topic: "erp,supply_chain" });
+    // 重複的 key 去掉之後只剩一個：也不留。
+    expect(validateSearchParams({ topic: "erp,erp", topic_match: "all" }, 2026)).toEqual({ topic: "erp" });
+  });
+
+  it("drops the setting for a field with fewer than two keys, keeps the other field's", () => {
+    expect(tidyMatch({ topic: "erp", topic_match: "all", method: "a,b", method_match: "all" })).toEqual({ topic: "erp", method: "a,b", method_match: "all" });
+    expect(tidyMatch({ topic: undefined, topic_match: "all" })).toEqual({});
+    expect(hasAllMatch({ topic: "erp,supply_chain", topic_match: "all" })).toBe(true);
+    expect(hasAllMatch({ topic: "erp", topic_match: "all" })).toBe(false);
+    expect(hasAllMatch({ topic: "erp,supply_chain" })).toBe(false);
+  });
+
+  it("sends *_match=all to the API only for all; any (the default) is not sent", () => {
+    expect(toApiParams({ topic: "erp,supply_chain", topic_match: "all" })).toEqual({ topic: ["erp", "supply_chain"], topic_match: "all" });
+    expect(toApiParams({ topic: "erp,supply_chain" })).toEqual({ topic: ["erp", "supply_chain"] });
+    expect(toApiParams({ topic: "erp", topic_match: "all" })).toEqual({ topic: ["erp"] });
+    // 找論文沒有方法選單，但從網址帶進來的方法與 method_match=all 照樣送出去。
+    expect(toApiParams({ method: "experiment,survey_sem", method_match: "all" })).toEqual({
+      method: ["experiment", "survey_sem"],
+      method_match: "all",
+    });
+  });
+
+  it("back to any keeps every other condition", () => {
+    const params = { scope: "lab" as const, journal: "misq", topic: "erp,supply_chain", topic_match: "all" as const, method: "a,b", method_match: "all" as const };
+    expect(anyMatch(params)).toEqual({ scope: "lab", journal: "misq", topic: "erp,supply_chain", method: "a,b" });
+  });
+
+  it("unknown keys leaving fewer than two drop the setting before sending", () => {
+    const names = { journals: [], topics: [{ key: "erp", name: "ERP" }], methods: [{ key: "experiment", name: "Experiment" }] };
+    expect(knownOnly({ topic: "erp,not_a_topic", topic_match: "all" }, names).topic_match).toBeUndefined();
+    expect(knownOnly({ topic: "erp,unclassified", topic_match: "all" }, names).topic_match).toBe("all");
+    expect(knownOnly({ method: "experiment,gone", method_match: "all" }, names).method_match).toBeUndefined();
+  });
+
+  it("clearing the filters drops the setting", () => {
+    expect(clearConditions({ topic: "erp,supply_chain", topic_match: "all", scope: "lab" })).toEqual({ scope: "lab" });
+  });
+
+  // 審查 B 的 F1：網址上有分類表已經沒有的主題時，「到不到兩個」數的是認得的。
+  const NAMES = {
+    journals: [],
+    topics: [
+      { key: "erp", name: "ERP" },
+      { key: "supply_chain", name: "Supply chain" },
+    ],
+    methods: [{ key: "experiment", name: "Experiment" }],
+  };
+
+  it("counts only known keys when deciding to keep the setting; the unknown keys stay in the address", () => {
+    // 認得的只剩一個：拿掉 topic_match，代號照舊留著（送 API 前 knownOnly 才拿掉）。
+    expect(tidyMatchKnown({ topic: "erp,gone", topic_match: "all" }, NAMES)).toEqual({ topic: "erp,gone" });
+    // 認得的有兩個：留著。
+    expect(tidyMatchKnown({ topic: "erp,supply_chain,gone", topic_match: "all" }, NAMES)).toEqual({
+      topic: "erp,supply_chain,gone",
+      topic_match: "all",
+    });
+    // 方法各算各的；其他欄位不動。
+    expect(tidyMatchKnown({ journal: "misq", method: "experiment,gone", method_match: "all", shown: 40 }, NAMES)).toEqual({
+      journal: "misq",
+      method: "experiment,gone",
+      shown: 40,
+    });
+    // 顯示名稱還沒讀到：只能照網址上的個數。
+    expect(tidyMatchKnown({ topic: "erp,gone", topic_match: "all" }, null)).toEqual({ topic: "erp,gone", topic_match: "all" });
+  });
+
+  it("a stale all in the address does not carry over to the next pick", () => {
+    // 頁面的 update：換之前、換之後各整理一次。舊書籤 erp,gone + all，再勾 supply_chain：回到任一個。
+    const current = { topic: "erp,gone", topic_match: "all" as const };
+    const next = tidyMatchKnown({ ...tidyMatchKnown(current, NAMES), topic: "erp,gone,supply_chain" }, NAMES);
+    expect(next).toEqual({ topic: "erp,gone,supply_chain" });
+  });
+
+  it("tells when the address bar has a setting the page does not use (to replace the address on open)", () => {
+    expect(hasStaleMatch({ topic: "erp", topic_match: "all" }, validateSearchParams({ topic: "erp", topic_match: "all" }, 2026))).toBe(true);
+    expect(hasStaleMatch({ topic: "erp,supply_chain", topic_match: "ALL" }, validateSearchParams({ topic: "erp,supply_chain", topic_match: "ALL" }, 2026))).toBe(true);
+    expect(hasStaleMatch({ method_match: "all" }, {})).toBe(true);
+    expect(hasStaleMatch({ topic: "erp,gone", topic_match: "all" }, knownOnly({ topic: "erp,gone", topic_match: "all" }, NAMES))).toBe(true);
+    // 用得到、或網址上本來就沒有：不換。
+    expect(hasStaleMatch({ topic: "erp,supply_chain", topic_match: "all" }, { topic: "erp,supply_chain", topic_match: "all" })).toBe(false);
+    expect(hasStaleMatch({ topic: "erp" }, { topic: "erp" })).toBe(false);
   });
 });
 

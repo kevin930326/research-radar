@@ -438,6 +438,195 @@ test.describe("demo paper list", () => {
   });
 });
 
+// Story 3.20：主題、方法多選的「任一個／同時符合」（設計稿 filter-match-mode.html 的示範站）。預期的篇數直接從範例檔數：
+// 「或」＝有任一個 key、「且」＝每個 key 都有，不同欄位之間「且」（和成員版的後端同一個定義）。
+test.describe("demo paper list: any or all (Story 3.20)", () => {
+  const has = (field: "topics" | "methods", at: number, keys: string[], mode: "any" | "all") => {
+    const own = INDEX[field][at];
+    if (own === null || own === undefined) return false;
+    return mode === "all" ? keys.every((key) => own.includes(key)) : keys.some((key) => own.includes(key));
+  };
+  // ERP 和知識管理與協作沒有同一篇：任一個有論文、同時符合 0 篇。方法：問卷／SEM 和實驗也是。
+  const TOPICS = ["erp", "knowledge_collaboration"];
+  const METHODS = ["survey_sem", "experiment"];
+  const topicNames = TOPICS.map((key) => name(NAMES.topics, key));
+  const methodNames = METHODS.map((key) => name(NAMES.methods, key));
+  const chip = (page: Page, label: string) => page.locator("[data-filter-chip]").filter({ hasText: label });
+  const switchOf = (scope: Page | ReturnType<Page["getByRole"]>, field: "topic" | "method") => scope.locator(`[data-match-switch='${field}']`);
+  const modeButton = (scope: Page | ReturnType<Page["getByRole"]>, field: "topic" | "method", mode: "any" | "all") =>
+    switchOf(scope, field).getByRole("button", { name: text(mode === "any" ? "search:search.filter.matchAny" : "search:search.filter.matchAll") });
+  /** 選項（整列是 label，點在 label 上；輸入框上面蓋著選項的字，同找論文的 e2e）。 */
+  const option = (scope: Page | ReturnType<Page["getByRole"]>, label: string) =>
+    scope.getByRole("checkbox", { name: label, exact: true }).locator("xpath=ancestor::label[1]");
+  const joined = (names: string[], mode: "any" | "all") => names.join(text(mode === "any" ? "demo:demo.papers.anyJoin" : "demo:demo.papers.allJoin"));
+
+  test("the sample export has papers for any and none for all", () => {
+    expect(count((at) => has("topics", at, TOPICS, "any"))).toBeGreaterThan(0);
+    expect(count((at) => has("topics", at, TOPICS, "all"))).toBe(0);
+    expect(count((at) => has("methods", at, METHODS, "any"))).toBeGreaterThan(0);
+    expect(count((at) => has("methods", at, METHODS, "all"))).toBe(0);
+  });
+
+  test("desktop: topics are any by default, the switch makes them all, the title joins them with the any or all word, and the zero link goes back", async ({ page }) => {
+    const anyCount = count((at) => has("topics", at, TOPICS, "any"));
+    await open(page, `?topic=${TOPICS[0]}`);
+    await chip(page, text("search:search.filter.topic")).click();
+    await expect(page.locator("[data-match-switch]")).toHaveCount(0);
+    await option(page, topicNames[1]!).click();
+    await expect(page.getByRole("checkbox", { name: topicNames[1]!, exact: true })).toBeChecked();
+    await expect(modeButton(page, "topic", "any")).toHaveAttribute("aria-pressed", "true");
+    await expect(page.locator("h1")).toHaveText(heading([joined(topicNames, "any")], anyCount));
+    await expect(chip(page, text("search:search.filter.topic"))).toContainText(fill(text("search:search.filter.topicCount"), { count: 2 }));
+    // 「或」是第二層字色（設計稿 .cj）。
+    const word = page.locator("h1 span", { hasText: text("demo:demo.papers.anyJoin").trim() }).last();
+    await expect(word).toHaveCSS("color", "rgb(168, 162, 148)");
+    await expect(rows(page)).toHaveCount(Math.min(anyCount, PAGE_SIZE));
+
+    await modeButton(page, "topic", "all").click();
+    await expect(page).toHaveURL(/[?&]topic_match=all(&|$)/);
+    await expect(modeButton(page, "topic", "all")).toBeFocused();
+    await expect(chip(page, text("search:search.filter.topic"))).toContainText(fill(text("search:search.filter.matchAllCount"), { count: 2 }));
+    await expect(page.locator("h1")).toHaveText(heading([joined(topicNames, "all")], 0));
+    await page.keyboard.press("Escape");
+
+    const zero = page.locator("[data-state='zero']");
+    await expect(zero).toBeVisible();
+    const link = zero.getByRole("link", { name: fill(text("search:search.empty.anyInstead"), { count: anyCount }) });
+    expect(await zero.getByRole("link").allTextContents()).toEqual([
+      fill(text("search:search.empty.anyInstead"), { count: anyCount }),
+      text("search:search.filter.clearAll"),
+    ]);
+    expect((await link.boundingBox())!.height).toBeGreaterThanOrEqual(44);
+
+    // 重新整理還是同時符合。
+    await page.reload();
+    await expect(page.locator("h1")).toHaveText(heading([joined(topicNames, "all")], 0));
+    await link.click();
+    await expect(page).not.toHaveURL(/topic_match/);
+    await expectCount(page, anyCount);
+    await expect(page.locator("h1")).toBeFocused();
+  });
+
+  test("desktop: methods have their own switch, independent of the topic one; journals keep the list separator", async ({ page }) => {
+    const methodAny = (at: number) => has("methods", at, METHODS, "any");
+    await open(page, `?method=${METHODS.join(",")}`);
+    await expectCount(page, count(methodAny));
+    await expect(page.locator("h1")).toHaveText(heading([joined(methodNames, "any")], count(methodAny)));
+    await chip(page, text("paper:paper.classification.method")).click();
+    await expect(switchOf(page, "topic")).toHaveCount(0);
+    await modeButton(page, "method", "all").click();
+    await expect(page).toHaveURL(/[?&]method_match=all(&|$)/);
+    await expect(page).not.toHaveURL(/topic_match/);
+    await expect(page.locator("h1")).toHaveText(heading([joined(methodNames, "all")], 0));
+    await expect(chip(page, text("paper:paper.classification.method"))).toContainText(fill(text("search:search.filter.matchAllCount"), { count: 2 }));
+    // 取消一個方法：切換消失、網址上不留 method_match。
+    await option(page, methodNames[1]!).click();
+    await expect(page).not.toHaveURL(/method_match/);
+    await expect(page.locator("[data-match-switch]")).toHaveCount(0);
+    await page.keyboard.press("Escape");
+
+    // 主題同時符合（兩個都有的那一組）、方法任一個：各算各的，欄位之間「且」。
+    const both = ["digital_platforms", "e_commerce"];
+    const expected = count((at) => has("topics", at, both, "all") && has("methods", at, METHODS, "any"));
+    await open(page, `?topic=${both.join(",")}&topic_match=all&method=${METHODS.join(",")}`);
+    await expectCount(page, expected);
+    // 兩本期刊：照舊用頓號。
+    const journals = ["misq", "io"];
+    const inJournals = (at: number) => journals.includes(INDEX.journal[at] ?? "");
+    await open(page, `?journal=${journals.join(",")}`);
+    await expect(page.locator("h1")).toHaveText(
+      heading([journals.map((key) => name(NAMES.journals, key)).join(text("demo:demo.papers.separator"))], count(inJournals)),
+    );
+  });
+
+  test("a leftover all in the address is replaced on open and the list is any", async ({ page }) => {
+    // 規則 3：不到兩個（一個 key、不認得的拿掉後剩一個）或沒有 key 時，網址列上不留 *_match（審查 B 的 F2）。
+    await open(page, "?topic=erp&topic_match=all");
+    await expect(page).toHaveURL(`${demo.baseURL}/papers?topic=erp`);
+    await open(page, `?topic=${TOPICS[0]},gone&topic_match=all`);
+    await expect(page).toHaveURL(new RegExp(`/papers\\?topic=${TOPICS[0]}(%2C|,)gone$`));
+    await expectCount(page, count((at) => has("topics", at, [TOPICS[0]!], "any")));
+    await open(page, "?method_match=all");
+    await expect(page).toHaveURL(`${demo.baseURL}/papers`);
+  });
+
+  test("a topic the taxonomy no longer has does not keep all alive: dropping to one known topic goes back to any", async ({ page }) => {
+    // 舊書籤：兩個認得的＋一個分類表已經沒有的，同時符合（審查 B 的 F1）。
+    await open(page, `?topic=${TOPICS.join(",")},gone&topic_match=all`);
+    await expect(chip(page, text("search:search.filter.topic"))).toContainText(fill(text("search:search.filter.matchAllCount"), { count: 2 }));
+    await chip(page, text("search:search.filter.topic")).click();
+    await option(page, topicNames[1]!).click();
+    await expect(page).not.toHaveURL(/topic_match/);
+    await expect(page).toHaveURL(/[?&]topic=erp(%2C|,)gone(&|$)/);
+    await expect(page.locator("[data-match-switch]")).toHaveCount(0);
+    await option(page, topicNames[1]!).click();
+    await expect(modeButton(page, "topic", "any")).toHaveAttribute("aria-pressed", "true");
+    await expect(page).not.toHaveURL(/topic_match/);
+    await expectCount(page, count((at) => has("topics", at, TOPICS, "any")));
+  });
+
+  test("the switch fades in (0.25s, design .mm) unless reduced motion is on; with one topic the menu's bottom row is the plain one", async ({ page }) => {
+    await open(page, `?topic=${TOPICS[0]}`);
+    await chip(page, text("search:search.filter.topic")).click();
+    // 只選一個：底部列照 papers-demo／search-no-box（上下 10px、只有「清除」；審查 B 的 F8）。
+    const clear = page.getByRole("link", { name: text("search:search.filter.clear"), exact: true });
+    await expect(clear.locator("xpath=..")).toHaveCSS("padding-top", "10px");
+    await option(page, topicNames[1]!).click();
+    const group = switchOf(page, "topic");
+    await expect(group).toHaveCSS("animation-name", "match-fade");
+    await expect(group).toHaveCSS("animation-duration", "0.25s");
+    // 選了兩個：底部列換成 filter-match-mode 的 .mfoot（上下 6px）。
+    await expect(clear.locator("xpath=..")).toHaveCSS("padding-top", "6px");
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    await expect(group).toHaveCSS("animation-name", "none");
+  });
+
+  test("zero for all and zero for any too: no link", async ({ page }) => {
+    // 範例匯出沒有 2016–2017 年的論文：任一個也是 0 篇。
+    expect(count((at) => (INDEX.year[at] ?? 0) <= 2017 && has("topics", at, TOPICS, "any"))).toBe(0);
+    await open(page, `?from=2016&to=2017&topic=${TOPICS.join(",")}&topic_match=all`);
+    await expect(page.locator("[data-state='zero']")).toBeVisible();
+    await expect(page.locator("[data-any-match]")).toHaveCount(0);
+  });
+
+  test("phone: the method switch sits above the apply button only while the method section is open", async ({ page }) => {
+    const methodAny = count((at) => has("methods", at, METHODS, "any"));
+    await open(page, `?method=${METHODS[0]}`, PHONE);
+    await page.locator("[data-mobile-filter]").click();
+    const sheet = page.getByRole("dialog");
+    const section = sheet.locator("[data-filter-section='method'] > button");
+    await section.click();
+    await expect(sheet.locator("[data-match-switch]")).toHaveCount(0);
+    await option(sheet, methodNames[1]!).click();
+    await expect(sheet.getByRole("checkbox", { name: methodNames[1]!, exact: true })).toBeChecked();
+    const apply = sheet.getByRole("button", { name: fill(text("search:search.mobile.apply"), { count: methodAny }) });
+    await expect(apply).toBeVisible();
+    await expect(section).toContainText(fill(text("search:search.filter.topicCount"), { count: 2 }));
+    const [switchBox, applyBox] = await Promise.all([switchOf(sheet, "method").boundingBox(), apply.boundingBox()]);
+    expect(switchBox!.y + switchBox!.height).toBeLessThanOrEqual(applyBox!.y);
+    for (const mode of ["any", "all"] as const) {
+      const box = await modeButton(sheet, "method", mode).boundingBox();
+      expect(box!.width).toBeGreaterThanOrEqual(44);
+      expect(box!.height).toBeGreaterThanOrEqual(44);
+    }
+    // 鍵盤也可以按。
+    await modeButton(sheet, "method", "all").focus();
+    await page.keyboard.press("Enter");
+    await expect(page).toHaveURL(/[?&]method_match=all(&|$)/);
+    await expect(modeButton(sheet, "method", "all")).toBeFocused();
+    await expect(section).toContainText(fill(text("search:search.filter.matchAllCount"), { count: 2 }));
+    await expect(sheet.getByRole("button", { name: fill(text("search:search.mobile.apply"), { count: 0 }) })).toBeVisible();
+    await sheet.locator("[data-filter-section='topic'] > button").click();
+    await expect(sheet.locator("[data-match-switch]")).toHaveCount(0);
+    await sheet.getByRole("button", { name: fill(text("search:search.mobile.apply"), { count: 0 }) }).click();
+    const link = page.locator("[data-state='zero']").getByRole("link", { name: fill(text("search:search.empty.anyInstead"), { count: methodAny }) });
+    await link.click();
+    await expect(page).not.toHaveURL(/method_match/);
+    await expectCount(page, methodAny);
+    await expect(page.locator("h1")).toBeFocused();
+  });
+});
+
 for (const width of [1440, 1000, 500]) {
   test(`demo paper list screenshot at ${width}px`, async ({ page, browserName }) => {
     test.skip(browserName !== "chromium", "screenshots are taken in chromium only");

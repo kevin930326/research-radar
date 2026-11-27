@@ -80,7 +80,7 @@ export const LIST_FIXTURES = listFixtures as unknown as ListFixtures;
 const START_YEAR = 2016;
 
 /**
- * 依網址參數篩選假清單（後端的簡化版，ADR-0050）：期刊、年份多選是「或」，主題、方法是「且」（unclassified 是沒有主題），
+ * 依網址參數篩選假清單（後端的簡化版，ADR-0050）：期刊、年份多選是「或」，主題、方法預設「或」、*_match=all 時「且」（Story 3.20；unclassified 是沒有主題），
  * 範圍 lab／personal 只留標了的列；依年份新到舊。年份早於追蹤範圍、不認得的期刊／主題／方法代號是 null（422，
  * ADR-0050 第 10 點；認得的是論文頁假資料的顯示名稱）。
  */
@@ -94,6 +94,10 @@ export function filterListRows(
   const topics = query.getAll("topic");
   const methods = query.getAll("method");
   const scope = query.get("scope") ?? "tracked";
+  // 主題、方法多值預設「或」，*_match=all 時「且」；其他值 422（Story 3.20，同後端）。
+  const topicMatch = query.get("topic_match") ?? "any";
+  const methodMatch = query.get("method_match") ?? "any";
+  if (![topicMatch, methodMatch].every((mode) => mode === "any" || mode === "all")) return null;
   if (years.some((year) => !Number.isInteger(year) || year < START_YEAR)) return null;
   const names = PAPER_FIXTURES.displayNames;
   const known = (entries: readonly { key: string }[], keys: string[], extra: string[] = []) =>
@@ -106,8 +110,11 @@ export function filterListRows(
       (entry) =>
         (journals.length === 0 || journals.includes(entry.row.journal ?? "")) &&
         (years.length === 0 || years.includes(entry.row.publication_year ?? 0)) &&
-        topics.every((topic) => (topic === "unclassified" ? entry.topics.length === 0 : entry.topics.includes(topic))) &&
-        methods.every((method) => (entry.methods ?? []).includes(method)) &&
+        (topics.length === 0 ||
+          topics[topicMatch === "all" ? "every" : "some"]((topic) =>
+            topic === "unclassified" ? entry.topics.length === 0 : entry.topics.includes(topic),
+          )) &&
+        (methods.length === 0 || methods[methodMatch === "all" ? "every" : "some"]((method) => (entry.methods ?? []).includes(method))) &&
         (query.get("this_week") !== "true" || entry.this_week) &&
         (scope === "tracked" || (scope === "lab" ? entry.lab : (library?.includes(entry.row.id) ?? entry.personal))),
     )

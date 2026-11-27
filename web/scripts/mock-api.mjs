@@ -601,6 +601,10 @@ function filterRows(query, member) {
   const topics = query.getAll("topic");
   const methods = query.getAll("method");
   const scope = query.get("scope") ?? "tracked";
+  // 主題、方法多值預設「或」，*_match=all 時「且」；其他值 422（Story 3.20，同後端）。
+  const topicMatch = query.get("topic_match") ?? "any";
+  const methodMatch = query.get("method_match") ?? "any";
+  if (![topicMatch, methodMatch].every((mode) => mode === "any" || mode === "all")) return null;
   if (years.some((year) => !Number.isInteger(year) || year < START_YEAR)) return null;
   const names = PAPERS.displayNames;
   const known = (entries, keys, extra = []) =>
@@ -613,8 +617,11 @@ function filterRows(query, member) {
       (entry) =>
         (journals.length === 0 || journals.includes(entry.row.journal ?? "")) &&
         (years.length === 0 || years.includes(entry.row.publication_year ?? 0)) &&
-        topics.every((topic) => (topic === "unclassified" ? entry.topics.length === 0 : entry.topics.includes(topic))) &&
-        methods.every((method) => (entry.methods ?? []).includes(method)) &&
+        (topics.length === 0 ||
+          topics[topicMatch === "all" ? "every" : "some"]((topic) =>
+            topic === "unclassified" ? entry.topics.length === 0 : entry.topics.includes(topic),
+          )) &&
+        (methods.length === 0 || methods[methodMatch === "all" ? "every" : "some"]((method) => (entry.methods ?? []).includes(method))) &&
         (query.get("this_week") !== "true" || entry.this_week) &&
         (scope === "tracked" || (scope === "lab" ? entry.lab : libraryIdsOf(member).includes(entry.row.id))),
     )

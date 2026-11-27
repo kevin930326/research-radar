@@ -6,6 +6,8 @@
 // (5) 論文標題與摘要元素自己有 lang，且和內容的語言一致（英文是 en，中文是 zh 開頭）；
 // (6) 開發站另跑 axe（正式建置由 3.1 的 a11y.spec.ts 跑），每個說明框點開後也跑一次。
 // 頁面清單和站內連結檢查同一份（pages.ts），新頁面加進來就自動被檢查。
+// 「任一個／同時符合」切換出現的狀態（Story 3.20，pages.ts 的 MATCH_SWITCH_STATES）另外打開來檢查 (1)、(2)：
+// 用鍵盤走到切換的兩顆按鈕，各自是金色外框；兩顆都至少 44×44。
 // 「找不到這一頁」（MISSING_PATH）也跑 (1)～(4)：Story 3.8 起「找不到這一頁」這句就是 h1（EXPERIENCE.md
 // State Patterns「全站共用」）；(5)、(6) 只跑真的頁面。
 import AxeBuilder from "@axe-core/playwright";
@@ -13,7 +15,8 @@ import type { Page } from "@playwright/test";
 
 import { axeSourceFor } from "./axe-source.ts";
 import { expect, test } from "./fixtures.ts";
-import { A11Y_SITES, MISSING_PATH } from "./pages.ts";
+import { openMatchSwitch } from "./match-switch.ts";
+import { A11Y_SITES, MATCH_SWITCH_STATES, MISSING_PATH, SITES } from "./pages.ts";
 
 const TAGS = ["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"];
 /** accent-gold（#e3b466）的計算值。 */
@@ -252,6 +255,53 @@ for (const site of A11Y_SITES) {
       });
     }
   }
+}
+
+for (const state of MATCH_SWITCH_STATES) {
+  const site = SITES.find((candidate) => candidate.name === state.site)!;
+  const where = `${site.name} ${state.path} (${state.phone ? "phone sheet" : "desktop menu"})`;
+
+  test(`${where}: the any/all buttons show the gold focus ring from the keyboard`, async ({ page, browserName }) => {
+    const group = await openMatchSwitch(page, site.baseURL, state);
+    const buttons = group.getByRole("button");
+    await expect(buttons).toHaveCount(2);
+    // 從選項的最後一個用鍵盤 Tab 進來（程式設的焦點不算鍵盤焦點，外框照規定可以不畫）。
+    const lastOption = page.locator(state.phone ? "[role='dialog'] input" : "[data-side] input").last();
+    await lastOption.focus();
+    const key = browserName === "webkit" ? "Alt+Tab" : "Tab";
+    const problems: string[] = [];
+    for (let at = 0; at < 2; at += 1) {
+      await page.keyboard.press(key);
+      await expect(buttons.nth(at)).toBeFocused();
+      const ring = await buttons.nth(at).evaluate((element) => {
+        const style = getComputedStyle(element);
+        return {
+          id: element.textContent ?? "",
+          focusVisible: element.matches(":focus-visible"),
+          outline: `${style.outlineStyle} ${style.outlineWidth} ${style.outlineColor}`,
+          offset: style.outlineOffset,
+        };
+      });
+      const problem = ringProblem(ring);
+      if (problem !== null) problems.push(problem);
+    }
+    expect(problems).toEqual([]);
+  });
+
+  test(`${where}: the any/all buttons are at least 44×44`, async ({ page }) => {
+    const group = await openMatchSwitch(page, site.baseURL, state);
+    const sizes = await group.getByRole("button").evaluateAll((elements) =>
+      elements.map((element) => {
+        const rect = element.getBoundingClientRect();
+        return { width: rect.width, height: rect.height };
+      }),
+    );
+    expect(sizes).toHaveLength(2);
+    for (const size of sizes) {
+      expect(size.width).toBeGreaterThanOrEqual(TAP_TARGET - EPSILON);
+      expect(size.height).toBeGreaterThanOrEqual(TAP_TARGET - EPSILON);
+    }
+  });
 }
 
 // 反例：證明上面的 Tab 走訪（同一個 walkFocus）真的抓得到沒有金色外框的元素，不是什麼都放過。

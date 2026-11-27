@@ -17,6 +17,10 @@
       "aisCore": "AIS 核心 11 本",
       "journalCount": "{{count}} 本",
       "topicCount": "{{count}} 個",
+      "matchAny": "任一個",
+      "matchAll": "同時符合",
+      "matchAllCount": "同時符合 {{count}} 個",
+      "matchGroup": "{{label}}多選的符合方式",
       "removeCondition": "移除這個條件"
     },
     "year": {
@@ -51,7 +55,8 @@
     "empty": {
       "noMatch": "沒有符合的論文",
       "library": "你的文獻庫還沒有論文",
-      "toTracked": "改找所有追蹤期刊"
+      "toTracked": "改找所有追蹤期刊",
+      "anyInstead": "改看符合任一個的 {{count}} 篇"
     },
     "mobile": {
       "filter": "篩選",

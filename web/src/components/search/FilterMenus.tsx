@@ -6,7 +6,7 @@ import { useTranslation } from "react-i18next";
 import { PHONE_QUERY, useCloseAcrossBreakpoint } from "../../hooks/use-close-across-breakpoint";
 import { TRACKING_START_YEAR } from "../../pages/search-filters";
 import { journalValue, topicValue, yearValue, type FilterState } from "./filters";
-import { JournalOptions, TopicOptions, YearOptions } from "./FilterLists";
+import { JournalOptions, MatchSwitch, TopicOptions, YearOptions, hasMatchSwitch } from "./FilterLists";
 import { Caret } from "./parts";
 
 // 桌機（900px 以上）的三個篩選選單（設計稿 search-no-box.html 的 .chip.f 與 .menu）：期刊、年份、主題。
@@ -42,11 +42,17 @@ interface MenuProps {
    * 年份是 null。
    */
   clear: ClearTarget | null;
+  /**
+   * 主題、方法選單：底部那一列左邊的「任一個／同時符合」（Story 3.20）。只在那一欄選了兩個以上時給（hasMatchSwitch），
+   * 給了就照設計稿 filter-match-mode.html 的 .mfoot 排：上下 6px、內容至少 32px 高、置中，「清除」靠右。
+   * 沒給（期刊選單、只選一個時）照 search-no-box.html 的底部（上下 10px、靠右；README：其餘版面以那兩張為準，審查 B 的 F8）。
+   */
+  footerStart?: ReactNode;
   children: ReactNode;
 }
 
 /** 一個篩選選單（桌機）：標籤＋下拉的選項；找論文與示範站論文清單共用。 */
-export function FilterMenu({ label, value, width, clear, children }: MenuProps) {
+export function FilterMenu({ label, value, width, clear, footerStart, children }: MenuProps) {
   const { t } = useTranslation("search");
   const [open, setOpen] = useState(false);
   const labelId = useId();
@@ -113,14 +119,19 @@ export function FilterMenu({ label, value, width, clear, children }: MenuProps) 
           >
             <div className="py-2">{children}</div>
             {clear !== null && selected ? (
-              <div className="flex justify-end border-t border-hairline px-4 py-[10px] text-s13">
+              <div
+                className={`flex border-t border-hairline px-4 text-s13 ${
+                  footerStart === undefined ? "justify-end py-[10px]" : "min-h-[45px] items-center gap-4 py-[6px]"
+                }`}
+              >
+                {footerStart}
                 <Link
                   to={clear.to}
                   search={clear.search}
                   replace
                   resetScroll={false}
                   onClick={() => popupRef.current?.querySelector<HTMLElement>("input")?.focus()}
-                  className="-my-[13px] inline-flex min-h-tap-target min-w-tap-target items-center justify-end text-accent-gold no-underline decoration-1 underline-offset-4 hover:underline"
+                  className="-my-[13px] ml-auto inline-flex min-h-tap-target min-w-tap-target items-center justify-end text-accent-gold no-underline decoration-1 underline-offset-4 hover:underline"
                 >
                   {t("search.filter.clear")}
                 </Link>
@@ -155,7 +166,10 @@ export function FilterMenus({ state }: { state: FilterState }) {
         label={t("search.filter.topic")}
         value={topicValue(state, t, unclassified)}
         width="narrow"
-        clear={{ to: "/search", search: { ...state.params, topic: undefined, shown: undefined } }}
+        clear={{ to: "/search", search: { ...state.params, topic: undefined, topic_match: undefined, shown: undefined } }}
+        footerStart={
+          hasMatchSwitch(state, "topic") ? <MatchSwitch state={state} field="topic" label={t("search.filter.topic")} size="menu" /> : undefined
+        }
       >
         <TopicOptions state={state} size="menu" />
       </FilterMenu>

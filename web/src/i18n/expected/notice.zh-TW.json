@@ -223,7 +223,13 @@
     "coverage:coverage.terms.snapshot": "快照編號",
     "common:footer.links.coverage": "資料涵蓋範圍",
     "common:footer.links.notice": "使用須知",
-    "common:footer.update.frequency": "每週更新一次"
+    "common:footer.update.frequency": "每週更新一次",
+    "search:search.filter.matchAny": "任一個",
+    "search:search.filter.matchAll": "同時符合",
+    "search:search.filter.matchAllCount": "同時符合 {{count}} 個",
+    "search:search.empty.anyInstead": "改看符合任一個的 {{count}} 篇",
+    "demo:demo.papers.anyJoin": " 或 ",
+    "demo:demo.papers.allJoin": " ＋ "
   },
   "absent": [
     "問答的資料怎麼處理",
@@ -428,6 +434,10 @@
     "coverage:coverage.terms.outsideText": {
       "text": "不在 14 本追蹤期刊或 2016 年以前，不計入趨勢與關係排行表。",
       "source": "docs/ux/reference/screens/coverage.html"
+    },
+    "search:search.filter.matchGroup": {
+      "text": "{{label}}多選的符合方式",
+      "source": "docs/ux/reference/screens/filter-match-mode.html"
     }
   }
 }
