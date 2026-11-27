@@ -4,10 +4,12 @@
   `paper` 出發，加上「沒有被排除」（`excluded_reason IS NULL`），`lab` 用
   `visibility.visible_lab_papers`、`personal` 要在自己的文獻庫
   （`visibility.visible_library_items`）。三種都再接 `visibility.visible_papers(viewer)`。
-- 條件：期刊、年份多值是「或」（`= ANY`）；主題、方法多值是「且」：每個欄位只接一次
+- 條件：期刊、年份多值是「或」（`= ANY`）；主題、方法多值預設是「或」、`MatchMode.ALL` 時是「且」
+  （Story 3.20、ADR-0011 的 2026-11-27 更新）：每個欄位只接一次
   `repo/paper_filters.CLASSIFICATION_KEYS`（和計數方塊的 `topic`、`method` 格同一個片段），
-  `key = ANY(:keys)`，依論文分組、`HAVING count(*) = 給的值的個數`（片段對同一篇同一個 key 只有
-  一列，所以數到的個數就是符合的 key 數），結果包成 `ARRAY(...)`，論文 `id = ANY(那個陣列)`：
+  `key = ANY(:keys)`。「或」取有任一個 key 的論文（`DISTINCT`）；「且」依論文分組、
+  `HAVING count(*) = 給的值的個數`（片段對同一篇同一個 key 只有
+  一列，所以數到的個數就是符合的 key 數）。兩種結果都包成 `ARRAY(...)`，論文 `id = ANY(那個陣列)`：
   子查詢不接外面的論文，PostgreSQL 只算一次（InitPlan），再用主鍵找論文。原本每個值各一個
   `EXISTS`，每多一個值整個有效分類就多算一次（3 個主題＋2 個方法、一萬篇，一個請求約 1.2 秒；
   改寫後約 0.17 秒；審查 S1，ADR-0050）；有摘要＝有 `is_current` 的摘要（和計數方塊的
@@ -24,7 +26,7 @@ from typing import Any, Final
 
 from sqlalchemy import Connection, text
 
-from radar.domain.paper_list import PaperListCursor, PaperListFilters, PaperListScope
+from radar.domain.paper_list import MatchMode, PaperListCursor, PaperListFilters, PaperListScope
 from radar.domain.taxonomy import TaxonomyField
 from radar.domain.viewer import Viewer
 from radar.repo.paper_filters import CLASSIFICATION_KEYS
@@ -35,7 +37,7 @@ _ALIAS: Final = "listed"
 _ORDER: Final = f" ORDER BY {_ALIAS}.publication_year DESC NULLS LAST, {_ALIAS}.id DESC"
 
 
-def _keys_condition(field: TaxonomyField, param: str) -> str:
+def _all_keys_condition(field: TaxonomyField, param: str) -> str:
     """論文的有效分類在 `field` 同時有 `:param`（key 的陣列，不重複）裡的每一個 key（「且」）；
     `:{param}_count` 是陣列的長度。
 
@@ -48,6 +50,17 @@ def _keys_condition(field: TaxonomyField, param: str) -> str:
         f" WHERE classification_key.field = '{TaxonomyField(field).value}'"
         f" AND classification_key.key = ANY(:{param})"
         f" GROUP BY classification_key.paper_id HAVING count(*) = :{param}_count))"
+    )
+
+
+def _any_key_condition(field: TaxonomyField, param: str) -> str:
+    """論文的有效分類在 `field` 有 `:param`（key 的陣列）裡的任一個 key（「或」）。寫法和
+    `_all_keys_condition` 一樣包成 `ARRAY(...)`（只算一次），差在不分組、不數個數。"""
+    return (
+        f"{_ALIAS}.id = ANY(ARRAY(SELECT DISTINCT classification_key.paper_id"
+        f" FROM ({CLASSIFICATION_KEYS}) AS classification_key"
+        f" WHERE classification_key.field = '{TaxonomyField(field).value}'"
+        f" AND classification_key.key = ANY(:{param})))"
     )
 
 
@@ -78,14 +91,18 @@ def _conditions(
     if filters.years:
         parts.append(f"{_ALIAS}.publication_year = ANY(:years)")
         params["years"] = list(filters.years)
-    for field, param, keys in (
-        (TaxonomyField.TOPIC, "topics", filters.topics),
-        (TaxonomyField.METHOD, "methods", filters.methods),
+    for field, param, keys, mode in (
+        (TaxonomyField.TOPIC, "topics", filters.topics, filters.topic_match),
+        (TaxonomyField.METHOD, "methods", filters.methods, filters.method_match),
     ):
-        if keys:  # 已去重（`PaperListFilters`），個數就是要同時符合的 key 數
-            parts.append(_keys_condition(field, param))
-            params[param] = list(keys)
+        if not keys:
+            continue
+        params[param] = list(keys)
+        if mode is MatchMode.ALL:  # 已去重（`PaperListFilters`），個數就是要同時符合的 key 數
+            parts.append(_all_keys_condition(field, param))
             params[f"{param}_count"] = len(keys)
+        else:
+            parts.append(_any_key_condition(field, param))
     if filters.has_abstract is not None:
         current = (
             "EXISTS (SELECT 1 FROM paper_abstract AS listed_abstract"

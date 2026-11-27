@@ -2,8 +2,9 @@
 論文」）。
 
 - 條件（`PaperListFilters`）：不同欄位之間是「且」；期刊、年份給多個值是「或」；主題、方法給多個值
-  是「且」（同時有這幾個）。`has_abstract` 是 None＝不限。`this_week`＝`first_snapshot_id` 是目前
-  已發佈的快照（不用現在的時間算）。
+  預設是「或」（符合任一個），`topic_match`／`method_match` 是 `all` 時是「且」（同時有這幾個；
+  Story 3.20、ADR-0011 的 2026-11-27 更新）。`has_abstract` 是 None＝不限。
+  `this_week`＝`first_snapshot_id` 是目前已發佈的快照（不用現在的時間算）。
 - 範圍（`PaperListScope`）：`tracked` 是算數的論文（view `counted_paper`）；`lab` 是全實驗室看得到的
   論文（含不在 `counted_paper` 的）；`personal` 是自己的文獻庫。三種都不列被排除的文章。
 - `parse_paper_list_filters` 把 API 收到的值換成條件：期刊代號換成 ISSN-L；不認得的期刊、主題、方法
@@ -49,6 +50,13 @@ class PaperListScope(StrEnum):
     PERSONAL = "personal"  # 自己的文獻庫
 
 
+class MatchMode(StrEnum):
+    """主題或方法給多個值時怎麼合（只給一個值時兩種一樣）。"""
+
+    ANY = "any"  # 符合任一個（預設）
+    ALL = "all"  # 同時符合每一個
+
+
 class InvalidPaperListQueryError(ValueError):
     """清單的條件不合法（不認得的代碼、年份超出範圍、值太多）。訊息不含使用者送來的值。"""
 
@@ -64,11 +72,14 @@ class PaperListQuery:
     has_abstract: bool | None = None
     this_week: bool = False
     scope: PaperListScope = PaperListScope.TRACKED
+    topic_match: MatchMode = MatchMode.ANY
+    method_match: MatchMode = MatchMode.ANY
 
 
 @dataclass(frozen=True, slots=True)
 class PaperListFilters:
-    """驗證過的條件：ISSN-L、年份、主題、方法都是排序、去重的 tuple（空的＝不限）。
+    """驗證過的條件：ISSN-L、年份、主題、方法都是排序、去重的 tuple（空的＝不限）；`topic_match`、
+    `method_match` 是主題、方法多個值怎麼合。
 
     Raises:
         ValueError: 多值欄位沒有排序去重，或型別不對。
@@ -81,9 +92,13 @@ class PaperListFilters:
     has_abstract: bool | None = None
     this_week: bool = False
     scope: PaperListScope = PaperListScope.TRACKED
+    topic_match: MatchMode = MatchMode.ANY
+    method_match: MatchMode = MatchMode.ANY
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "scope", PaperListScope(self.scope))
+        for name in ("topic_match", "method_match"):
+            object.__setattr__(self, name, MatchMode(getattr(self, name)))
         for name in ("journal_issn_ls", "topics", "methods"):
             _check_sorted_unique(getattr(self, name), str, name)
         _check_sorted_unique(self.years, int, "years")
@@ -143,6 +158,8 @@ def parse_paper_list_filters(
         has_abstract=query.has_abstract,
         this_week=query.this_week,
         scope=PaperListScope(query.scope),
+        topic_match=MatchMode(query.topic_match),
+        method_match=MatchMode(query.method_match),
     )
 
 

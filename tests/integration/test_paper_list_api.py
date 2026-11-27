@@ -384,13 +384,100 @@ def test_topics_and_methods_are_and(db: TestDatabase, database: Database, api: A
     insert_classification(db, both, ["erp", "health_it"], ["experiment", "survey_sem"])
     insert_classification(db, only_erp, ["erp"], ["survey_sem"])
 
-    assert api.ids([("topic", "erp"), ("topic", "health_it")]) == {both}
+    # Story 3.20：多個值的「且」要明確帶 `*_match=all`（預設改成「或」，見下一個測試）。
+    assert api.ids([("topic", "erp"), ("topic", "health_it"), ("topic_match", "all")]) == {both}
     assert api.ids([("topic", "erp")]) == {both, only_erp}
-    assert api.ids([("method", "survey_sem"), ("method", "experiment")]) == {both}
+    assert api.ids(
+        [("method", "survey_sem"), ("method", "experiment"), ("method_match", "all")]
+    ) == {both}
     assert api.ids([("method", "survey_sem")]) == {both, only_erp}
     assert api.ids([("topic", "erp"), ("method", "experiment")]) == {both}
     # 沒有分類的那一篇不在上面任何一個結果裡，但不篩選時照列。
     assert api.ids() == {both, only_erp, none}
+
+
+def test_topics_and_methods_default_to_any(db: TestDatabase, database: Database, api: Api) -> None:
+    # Story 3.20、ADR-0011 的 2026-11-27 更新：沒帶 `*_match` 時多個值是「或」。
+    published = make_snapshot(db, 1)
+    both = make_paper(database, db, 1, snapshot_id=published)
+    only_erp = make_paper(database, db, 2, snapshot_id=published)
+    only_health = make_paper(database, db, 3, snapshot_id=published)
+    none = make_paper(database, db, 4, snapshot_id=published)
+    insert_classification(db, both, ["erp", "health_it"], ["experiment", "survey_sem"])
+    insert_classification(db, only_erp, ["erp"], ["survey_sem"])
+    insert_classification(db, only_health, ["health_it"], ["experiment"])
+
+    two_topics = [("topic", "erp"), ("topic", "health_it")]
+    two_methods = [("method", "survey_sem"), ("method", "experiment")]
+    assert api.ids(two_topics) == {both, only_erp, only_health}
+    assert api.ids([*two_topics, ("topic_match", "any")]) == {both, only_erp, only_health}
+    assert api.ids([*two_topics, ("topic_match", "all")]) == {both}
+    assert api.ids(two_methods) == {both, only_erp, only_health}
+    assert api.ids([*two_methods, ("method_match", "any")]) == {both, only_erp, only_health}
+    assert api.ids([*two_methods, ("method_match", "all")]) == {both}
+    # `total` 和列出來的一樣（同一個條件組）。
+    assert api.ok(two_topics)["total"] == 3
+    assert api.ok([*two_topics, ("topic_match", "all")])["total"] == 1
+    assert none not in api.ids(two_topics)
+
+
+@pytest.mark.parametrize("match", ["any", "all"])
+def test_one_key_is_the_same_either_way(
+    db: TestDatabase, database: Database, api: Api, match: str
+) -> None:
+    published = make_snapshot(db, 1)
+    both = make_paper(database, db, 1, snapshot_id=published)
+    only_erp = make_paper(database, db, 2, snapshot_id=published)
+    make_paper(database, db, 3, snapshot_id=published)
+    insert_classification(db, both, ["erp", "health_it"], ["experiment", "survey_sem"])
+    insert_classification(db, only_erp, ["erp"], ["survey_sem"])
+
+    assert api.ids([("topic", "erp"), ("topic_match", match)]) == {both, only_erp}
+    assert api.ids([("method", "survey_sem"), ("method_match", match)]) == {both, only_erp}
+    # 沒有給 key 時 `*_match` 不影響結果。
+    assert len(api.ids([("topic_match", match), ("method_match", match)])) == 3
+
+
+def test_topic_and_method_match_are_independent(
+    db: TestDatabase, database: Database, api: Api
+) -> None:
+    published = make_snapshot(db, 1)
+    both = make_paper(database, db, 1, snapshot_id=published)
+    erp_survey = make_paper(database, db, 2, snapshot_id=published)
+    health_experiment = make_paper(database, db, 3, snapshot_id=published)
+    erp_both_methods = make_paper(database, db, 4, snapshot_id=published)
+    insert_classification(db, both, ["erp", "health_it"], ["experiment", "survey_sem"])
+    insert_classification(db, erp_survey, ["erp"], ["survey_sem"])
+    insert_classification(db, health_experiment, ["health_it"], ["experiment"])
+    insert_classification(db, erp_both_methods, ["erp"], ["experiment", "survey_sem"])
+    params = [
+        ("topic", "erp"),
+        ("topic", "health_it"),
+        ("method", "experiment"),
+        ("method", "survey_sem"),
+    ]
+
+    # 主題任一個、方法同時符合：方法兩個都有的才算，主題有一個就好。
+    assert api.ids([*params, ("method_match", "all")]) == {both, erp_both_methods}
+    # 主題同時符合、方法任一個。
+    assert api.ids([*params, ("topic_match", "all")]) == {both}
+    # 兩個都同時符合、兩個都任一個。
+    assert api.ids([*params, ("topic_match", "all"), ("method_match", "all")]) == {both}
+    assert api.ids(params) == {both, erp_survey, health_experiment, erp_both_methods}
+
+
+def test_unclassified_with_another_topic(db: TestDatabase, database: Database, api: Api) -> None:
+    # Kevin 2026-11-27 決定：「未分類」和別的一起給、又是 `all` 時不特別處理（照樣是「且」）。
+    published = make_snapshot(db, 1)
+    erp = make_paper(database, db, 1, snapshot_id=published)
+    unclassified = make_paper(database, db, 2, snapshot_id=published)
+    insert_classification(db, erp, ["erp"])
+    insert_classification(db, unclassified, ["unclassified"])
+    params = [("topic", "erp"), ("topic", "unclassified")]
+
+    assert api.ids(params) == {erp, unclassified}
+    assert api.ids([*params, ("topic_match", "all")]) == set()
+    assert api.ok([*params, ("topic_match", "all")])["total"] == 0
 
 
 def test_human_fix_wins_and_unclassified_is_a_topic(
@@ -555,6 +642,12 @@ def test_scopes(db: TestDatabase, database: Database, api: Api) -> None:
         [("year", "")],
         [("scope", "")],
         [("has_abstract", "maybe")],
+        # Story 3.20：`*_match` 只收 `any`、`all`。
+        [("topic_match", "or")],
+        [("topic_match", "")],
+        [("topic_match", "ALL")],
+        [("method_match", "and")],
+        [("method_match", "")],
     ],
 )
 def test_invalid_values_are_422(api: Api, params: list[tuple[str, str]]) -> None:

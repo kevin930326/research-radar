@@ -5,9 +5,10 @@
   `Cache-Control: no-store`。每一列的 `in_my_library` 與範圍「我的文獻庫」是成員專屬的：認完 session
   再比對 `X-Radar-Expected-Member`（`auth.member_as_expected`，不符 409、格式不對 400、沒帶照常，
   ADR-0055）。
+- `topic_match`、`method_match`：主題、方法給多個值怎麼合（`any` 預設、`all`；Story 3.20）。
 - 不認得的期刊、主題、方法代碼，年份超出範圍，任一個多值參數超過 50 個值，`cursor` 不是上一頁給的
   寫法 → 422 `request_invalid`（`ApiProblemError`，帶 `no-store`）；型別不對（`year=abc`、不認得的
-  `scope`）由框架擋下，一樣是 422 `request_invalid`。
+  `scope`、`topic_match`／`method_match`）由框架擋下，一樣是 422 `request_invalid`。
 - 這裡只做形狀轉換（論文列用 `domain/contracts.PaperRow`），條件的驗證在
   `domain/paper_list.parse_paper_list_filters`，看不看得到在 repo 的查詢裡。
 - `GET /api/v1/cube`：計數方塊（Story 3.15、ADR-0062）：`total` 與 `with_abstract` 的計數、
@@ -29,6 +30,7 @@ from radar.domain.contracts import CubeResponse, PaperRow, SnapshotRef, TrendPar
 from radar.domain.domain_config import JournalsConfig
 from radar.domain.errors import ErrorCode
 from radar.domain.paper_list import (
+    MatchMode,
     PaperListCursor,
     PaperListFilters,
     PaperListPage,
@@ -151,10 +153,13 @@ def install_paper_list_routes(
         has_abstract: bool | None = None,
         this_week: bool = False,
         scope: PaperListScope = PaperListScope.TRACKED,
+        topic_match: MatchMode = MatchMode.ANY,
+        method_match: MatchMode = MatchMode.ANY,
         cursor: str | None = None,
     ) -> PaperListResponse:
-        """依條件列出論文的一頁（一頁的篇數見 `client-config`）。期刊、年份給多個值是「或」，主題、
-        方法給多個值是「且」，不同欄位之間是「且」；`cursor` 是上一頁的 `next_cursor`。條件不合法
+        """依條件列出論文的一頁（一頁的篇數見 `client-config`）。期刊、年份給多個值是「或」；主題、
+        方法給多個值預設是「或」，`topic_match`／`method_match` 是 `all` 時是「且」；不同欄位之間是
+        「且」；`cursor` 是上一頁的 `next_cursor`。條件不合法
         422，沒登入 401；`X-Radar-Expected-Member` 和登入的成員不同 409 `member_changed`、格式
         不對 400 `expected_member_invalid`（每一列含 `in_my_library`，ADR-0055）。"""
         member = member_as_expected(request, auth_routes)
@@ -166,6 +171,8 @@ def install_paper_list_routes(
             has_abstract=has_abstract,
             this_week=this_week,
             scope=scope,
+            topic_match=topic_match,
+            method_match=method_match,
         )
         try:
             filters = routes.parse_filters(query)

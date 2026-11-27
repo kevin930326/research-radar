@@ -27,6 +27,7 @@ from httpx2 import Response
 from radar.domain.domain_config import Journal, JournalsConfig
 from radar.domain.paper_list import (
     InvalidPaperListQueryError,
+    MatchMode,
     PaperListCursor,
     PaperListFilters,
     PaperListPage,
@@ -210,6 +211,52 @@ def test_passes_every_parameter_and_returns_the_page() -> None:
         )
     ]
     assert fake.calls == [(MEMBER.viewer, PARSED, PaperListCursor(year=2025, paper_id=PAPER_ID))]
+
+
+def test_passes_match_modes() -> None:
+    # Story 3.20：`topic_match`、`method_match` 原樣交給條件的解析；沒給時是 `any`（見上面的預設）。
+    fake = FakePaperList()
+
+    response = _get(
+        _client(fake.routes()),
+        [
+            ("topic", "erp"),
+            ("topic_match", "all"),
+            ("method", "survey_sem"),
+            ("method_match", "any"),
+        ],
+    )
+
+    assert response.status_code == 200
+    assert fake.parsed == [
+        PaperListQuery(
+            topics=("erp",),
+            methods=("survey_sem",),
+            topic_match=MatchMode.ALL,
+            method_match=MatchMode.ANY,
+        )
+    ]
+    assert PaperListQuery().topic_match is MatchMode.ANY
+    assert PaperListQuery().method_match is MatchMode.ANY
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        [("topic_match", "or")],
+        [("topic_match", "")],
+        [("topic_match", "ALL")],
+        [("method_match", "and")],
+        [("method_match", "")],
+    ],
+)
+def test_bad_match_modes_are_422_without_reading(params: list[tuple[str, str]]) -> None:
+    fake = FakePaperList()
+
+    response = _get(_client(fake.routes()), params)
+
+    _assert_422(response)
+    assert (fake.parsed, fake.calls) == ([], [])
 
 
 def test_no_snapshot_is_null() -> None:

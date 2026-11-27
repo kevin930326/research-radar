@@ -24,6 +24,7 @@ from radar.domain.paper_list import (
     MAX_FILTER_VALUES,
     PAPER_LIST_PAGE_SIZE,
     InvalidPaperListQueryError,
+    MatchMode,
     PaperListCursor,
     PaperListFilters,
     PaperListPage,
@@ -139,6 +140,27 @@ def test_more_than_fifty_values_are_rejected_even_if_repeated(name: str, value: 
 
     with pytest.raises(InvalidPaperListQueryError):
         _parse(**{name: (value,) * (MAX_FILTER_VALUES + 1)})
+
+
+def test_match_modes_default_to_any_and_pass_through() -> None:
+    # Story 3.20：主題、方法多個值預設是「或」，各自可以切成「且」。
+    assert _parse().topic_match is MatchMode.ANY
+    assert _parse().method_match is MatchMode.ANY
+    filters = _parse(
+        topics=("erp", "health_it"), topic_match=MatchMode.ALL, method_match=MatchMode.ANY
+    )
+    assert (filters.topic_match, filters.method_match) == (MatchMode.ALL, MatchMode.ANY)
+    filters = _parse(methods=("experiment",), method_match=MatchMode.ALL)
+    assert (filters.topic_match, filters.method_match) == (MatchMode.ANY, MatchMode.ALL)
+
+
+@pytest.mark.parametrize("name", ["topic_match", "method_match"])
+def test_filters_only_take_known_match_modes(name: str) -> None:
+    good: dict[str, Any] = {name: "all"}
+    bad: dict[str, Any] = {name: "or"}
+    assert getattr(PaperListFilters(**good), name) is MatchMode.ALL
+    with pytest.raises(ValueError):  # noqa: PT011
+        PaperListFilters(**bad)
 
 
 def test_unclassified_is_only_a_topic() -> None:
