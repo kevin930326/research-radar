@@ -274,7 +274,8 @@ export function PaperRowItem({ row, names }: { row: PaperRow; names: DisplayName
         <RowTitle id={row.id} title={row.title} />
         <Meta row={row} names={names} />
       </div>
-      <div className="mt-[14px] flex items-center gap-[20px] split:mt-[0px] split:w-rail-width split:shrink-0 split:pt-px">
+      {/* 899px 以下兩端對齊：文獻庫的動作靠左、「開啟全文」固定靠右，按「加入」前後不跳（設計稿 2026-11-21 的小修改）。 */}
+      <div className="mt-[14px] flex items-center justify-between gap-[20px] split:mt-[0px] split:w-rail-width split:shrink-0 split:justify-start split:pt-px">
         <LibraryToggle row={row} />
         {doiUrl === null ? null : <OpenFullText href={doiUrl} />}
       </div>

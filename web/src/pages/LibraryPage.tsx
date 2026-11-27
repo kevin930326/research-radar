@@ -545,7 +545,8 @@ interface RowProps {
 
 /**
  * 一篇論文（設計稿第二版 .lrow）：勾選框、標題（連到論文頁）、期刊 · 年份；右側「移出」＋「開啟全文」（沒有 DOI 的只有「移出」）。
- * 900px 以上右側一欄寬 120（.lact：「移出」靠左、「開啟全文」靠右）；899px 以下兩個在書目下面一行（間距 24）。
+ * 900px 以上右側一欄寬 120（.lact：「移出」靠左、「開啟全文」靠右）；899px 以下兩個在書目下面一行（間距 24，兩端對齊：
+ * 「開啟全文」靠右）。
  * 移出後是「已移出」＋標題＋「復原」。
  */
 function LibraryRow({ item, first, names, selected, gone, restorable, busy, onSelect, onRemove, onRestore }: RowProps) {
@@ -612,7 +613,8 @@ function LibraryRow({ item, first, names, selected, gone, restorable, busy, onSe
           <div className="min-w-[0px] flex-1">
             <RowTitle id={paper.id} title={paper.title} />
             <Meta row={paper} names={names} noAbstract={false} />
-            <div className="mt-2 flex items-center gap-6 split:hidden">
+            {/* 兩端對齊：「移出」靠左、「開啟全文」固定靠右（設計稿 2026-11-21 的小修改）。 */}
+            <div className="mt-2 flex items-center justify-between gap-6 split:hidden">
               {remove("-ml-[9px]")}
               {doiUrl === null ? null : <OpenFullText href={doiUrl} size="compact" />}
             </div>
