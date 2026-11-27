@@ -1,0 +1,320 @@
+<!doctype html>
+<html lang="zh-Hant"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>主題、方法多選：任一個／同時符合</title>
+<link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@300;400;500&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet">
+<style>
+/* 2026-11-27：主題、方法多選的「任一個／同時符合」（Kevin 同一天看過定稿）。
+   樣式照 search-no-box.html（2026-11-20b）與 papers-demo.html；新加的只有最下面「新增」那一段。
+   論文是編的示意資料（36 篇），不是真的書目。年份選單的「自訂」這裡沒畫，照 search-no-box.html。 */
+:root{--bg:#050609;--fg:#EFEAE0;--dim:#A8A294;--faint:#8E887B;--gold:#E3B466;--line:rgba(239,234,224,0.16);color-scheme:dark}
+html,body{background:var(--bg);color:var(--fg)}
+body{margin:0;font:14px 'PingFang TC','Noto Sans TC','Microsoft JhengHei',system-ui,sans-serif}
+.pp{box-sizing:border-box;background:#050609;color:#EFEAE0;font-family:'PingFang TC','Noto Sans TC','Microsoft JhengHei',system-ui,sans-serif;-webkit-font-smoothing:antialiased;display:flex;flex-direction:column}
+.pp a{color:#E3B466;text-decoration:none}
+.pp a:hover{text-decoration:underline;text-underline-offset:4px;text-decoration-thickness:1px}
+.pp a.nav{color:#A8A294}
+.pp a.nav:hover{color:#EFEAE0;text-decoration:none}
+.pp a.tagl{color:#D5D0C5;transition:border-color .25s ease,color .25s ease}
+.pp a.tagl:hover{color:#EFEAE0;border-color:#EFEAE0;text-decoration:none}
+.pp a.fl{color:#8E887B}
+.pp button{font-family:inherit;cursor:pointer;transition:transform .25s ease,border-color .25s ease}
+.pp button:focus-visible,.pp a:focus-visible{outline:1px solid #E3B466;outline-offset:4px}
+.pp [hidden]{display:none!important}
+.pp a.ttl{color:#EFEAE0}
+.pp a.ttl:hover{text-decoration:underline;text-underline-offset:5px;text-decoration-thickness:1px}
+.pp button.chip{transition:border-color .2s ease,color .2s ease,background-color .2s ease}
+.pp button.chip:hover{border-color:#EFEAE0}
+.pp button.chip.f{height:32px;padding:0 14px;border-radius:999px;font-size:13px;letter-spacing:.04em;display:inline-flex;align-items:center;gap:8px;white-space:nowrap;background:transparent;color:#D5D0C5;border:1px solid rgba(239,234,224,0.26)}
+.pp button.chip.f.sel{background:#EFEAE0;color:#0A0B0E;border-color:#EFEAE0}
+.pp button.chip.f[aria-expanded="true"]:not(.sel){color:#EFEAE0;border-color:#EFEAE0}
+.pp button.chip.f .car{transition:transform .2s ease}
+.pp button.chip.f[aria-expanded="true"] .car{transform:rotate(180deg)}
+.pp button.chip.f .vl:empty{display:none}
+.pp button.chip.f .vl i{font-style:normal;opacity:.55;padding:0 7px 0 0}
+.pp button.seg{background:none;border:none;padding:0;height:32px;font-size:14px;letter-spacing:.04em;color:#A8A294;display:inline-flex;align-items:center;transition:color .2s ease}
+.pp button.seg span{padding:5px 0;border-bottom:1px solid transparent;transition:border-color .2s ease}
+.pp button.seg:hover{color:#EFEAE0}
+.pp button.seg.on{color:#EFEAE0}
+.pp button.seg.on span{border-bottom-color:#E3B466}
+.pp button.add{height:34px;min-width:146px;justify-content:center;padding:0 14px;border-radius:999px;border:1px solid rgba(239,234,224,0.16);background:transparent;color:#A8A294;font-size:13px;letter-spacing:.04em;display:inline-flex;align-items:center;gap:8px;white-space:nowrap;transition:border-color .25s ease,color .25s ease}
+.pp .prow:focus-within button.add{border-color:rgba(239,234,224,0.26);color:#EFEAE0}
+.pp .prow:focus-within a.open{color:#E3B466}
+@media (hover:hover){.pp .prow:hover button.add{border-color:rgba(239,234,224,0.26);color:#EFEAE0}.pp .prow:hover a.open{color:#E3B466}.pp button.add:hover{border-color:#EFEAE0!important}}
+.pp .hit{position:relative}
+.pp .hit::after{content:"";position:absolute;left:0;right:0;top:50%;height:44px;transform:translateY(-50%)}
+.pp button.txt.hit::after{left:-9px;right:-9px}
+.pp a.open{color:#D5D0C5;transition:color .25s ease;font-size:13px;letter-spacing:.04em;white-space:nowrap;display:inline-flex;align-items:center}
+.pp button.txt{background:none;border:none;padding:0;min-height:28px;font-size:13px;letter-spacing:.04em;color:#8E887B;white-space:nowrap;transition:color .2s ease}
+.pp button.txt:hover{color:#EFEAE0}
+.pp .meta{line-height:1.55;text-wrap:balance}
+.pp .meta .nw{white-space:nowrap}
+.v-desk header,.v-desk main,.v-desk footer{box-sizing:border-box;width:100%;max-width:1280px;margin-left:auto;margin-right:auto}
+.pp .prow:focus-within button.rm{color:#D5D0C5}
+@media (hover:hover){.pp .prow:hover button.rm{color:#D5D0C5}.pp .prow button.rm:hover{color:#EFEAE0}}
+.pp .added.in,.pp button.add.back{animation:rrfade .25s ease}
+@keyframes rrfade{from{opacity:0}to{opacity:1}}
+.pp input.q{font-family:inherit}
+.pp input.q::placeholder{color:#8E887B;opacity:1}
+.pp .qbox:focus-within{border-bottom-color:#E3B466}
+.pp input.q:focus{outline:none}
+.pp button.qx:hover{color:#EFEAE0;background:rgba(239,234,224,0.1)}
+.pp .rows{transition:opacity .15s ease}
+.pp .rows.busy{opacity:.45}
+.pp .menu{box-sizing:border-box;background:rgba(5,6,9,0.92);border:1px solid rgba(239,234,224,0.26);-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px)}
+.pp .menu.fl{position:absolute;top:40px;left:0;z-index:5;opacity:0;visibility:hidden;transform:translateY(-4px);transition:opacity .12s ease-in,transform .12s ease-in,visibility 0s .12s}
+.pp .menu.fl.on{opacity:1;visibility:visible;transform:none;transition:opacity .2s ease-out,transform .2s ease-out}
+.pp .opt{position:relative;display:flex;align-items:center;gap:12px;min-height:36px;padding:0 16px;cursor:pointer;break-inside:avoid}
+.pp .opt:hover{background:rgba(239,234,224,0.06)}
+.pp .opt input{position:absolute;opacity:0;width:1px;height:1px;margin:0}
+.pp .opt:has(input:focus-visible){outline:1px solid #E3B466;outline-offset:-1px}
+.pp .opt .bx,.pp .opt .rd{flex:none;width:15px;height:15px;box-sizing:border-box;border:1px solid #A8A294;display:inline-flex;align-items:center;justify-content:center;transition:background-color .15s ease,border-color .15s ease}
+.pp .opt .rd{border-radius:50%}
+.pp .opt .bx svg{opacity:0}
+.pp .opt .rd::after{content:"";width:7px;height:7px;border-radius:50%;background:#EFEAE0;opacity:0}
+.pp .opt input:checked+.bx{background:#EFEAE0;border-color:#EFEAE0}
+.pp .opt input:checked+.bx svg{opacity:1}
+.pp .opt input:checked+.rd{border-color:#EFEAE0}
+.pp .opt input:checked+.rd::after{opacity:1}
+.pp .opt .mn{font-size:14px;letter-spacing:.02em;color:#D5D0C5}
+.pp .opt input:checked~.mn{color:#EFEAE0}
+.pp .acch{width:100%;height:56px;padding:0 20px;display:flex;align-items:center;gap:12px;background:none;border:none;color:#EFEAE0;font-size:16px;letter-spacing:.04em;text-align:left}
+.pp .acch .accv{margin-left:auto;font-size:13px;color:#D5D0C5;letter-spacing:.04em}
+.pp .acch .car{color:#A8A294;transition:transform .2s ease}
+.pp .acc.open .acch .car{transform:rotate(180deg)}
+.pp .acc .accb{display:none;padding-bottom:10px}
+.pp .acc.open .accb{display:block}
+.pp.msheet .opt{min-height:44px;padding:0 20px}
+.pp button.mfbtn.sel{background:#EFEAE0!important;color:#0A0B0E!important;border-color:#EFEAE0!important}
+.v-mobile .pact{justify-content:space-between}
+@media (prefers-reduced-motion:reduce){.pp *{transition:none!important;animation:none!important}}
+
+/* ── 新增（2026-11-27）：選單裡的「任一個／同時符合」 ── */
+.pp .mfoot{display:flex;align-items:center;gap:16px;padding:6px 16px;min-height:32px;border-top:1px solid rgba(239,234,224,0.16);font-size:13px}
+.pp .mfoot .clr{margin-left:auto}
+.pp .mm{display:inline-flex;gap:20px;animation:rrfade .25s ease}
+.pp .mm button.seg{font-size:13px}
+.pp.msheet .mm{display:flex;gap:28px;padding:2px 20px;border-bottom:1px solid rgba(239,234,224,0.16)}
+.pp.msheet .mm button.seg{height:44px;font-size:14px}
+.pp h1 .cj{color:#A8A294}
+
+.pvbar{display:flex;align-items:center;gap:4px 16px;flex-wrap:wrap;padding:10px max(16px,env(safe-area-inset-right,0px)) 10px max(16px,env(safe-area-inset-left,0px));border-bottom:1px dashed var(--line);font-family:'DM Mono','PingFang TC',monospace;font-size:12px;letter-spacing:.06em;color:var(--faint)}
+.pvbar a{color:var(--dim);text-decoration:none;padding:6px 0}
+.pvbar a[aria-current="true"]{color:var(--gold)}
+.pvbar a:focus-visible{outline:1px solid var(--gold);outline-offset:4px}
+.pvbar .grp{display:inline-flex;gap:14px;align-items:center;flex-wrap:wrap}
+.pvbar .grp+.grp{padding-left:16px;border-left:1px dashed var(--line)}
+.v-mobile{display:none}
+.msw{position:fixed;inset:0;z-index:50;overflow:auto;background:#050609;transform:translateY(100%);transition:transform .25s ease-out}
+.msw.in{transform:none}
+@media (prefers-reduced-motion:reduce){.msw{transition:none}}
+.v-desk .pp{min-height:calc(100vh - 48px)}
+@media (max-width:1231px){.v-desk header,.v-desk main,.v-desk footer{padding-left:48px!important;padding-right:48px!important}}
+.menu{max-width:calc(100vw - 96px)}
+@media (max-width:899px){.v-desk{display:none}.v-mobile{display:block;max-width:430px;margin:0 auto}.v-mobile .pp{width:100%!important}.v-mobile>.pp{min-height:calc(100vh - 48px)}.pvbar .grp+.grp{padding-left:0;border-left:none}.pvbar .deskonly{display:none}}
+</style></head><body>
+<div class="pvbar"><span>預覽用的切換列（不是設計的一部分）</span>
+<span class="grp"><a data-g="site" data-v="member" href="#">成員版：找論文</a><a data-g="site" data-v="demo" href="#">示範站：論文清單</a></span>
+<span class="grp"><a data-g="st" data-v="one" href="#">只選一個</a><a data-g="st" data-v="two" href="#">選了兩個</a><a data-g="st" data-v="all" href="#">同時符合</a><a data-g="st" data-v="zero" href="#">同時符合 0 篇</a></span></div>
+<div class="v-desk"><div class="pp" id="desk" style="width:100%"></div></div>
+<div class="v-mobile"><div class="pp" id="mob" style="width:390px"></div><div class="msw" hidden><div class="pp msheet" id="sheet" style="width:100%;max-width:430px;margin:0 auto;min-height:100%"></div></div></div>
+<script>
+(function(){
+var $=function(s,r){return (r||document).querySelector(s)},$$=function(s,r){return [].slice.call((r||document).querySelectorAll(s))};
+var JN={MISQ:'MIS Quarterly',ISR:'Information Systems Research',JMIS:'Journal of Management Information Systems',JAIS:'Journal of the Association for Information Systems',EJIS:'European Journal of Information Systems',ISJ:'Information Systems Journal',JIT:'Journal of Information Technology',JSIS:'The Journal of Strategic Information Systems',DSS:'Decision Support Systems','I&M':'Information & Management','I&O':'Information and Organization',PMJ:'Project Management Journal',TEM:'IEEE Transactions on Engineering Management',DATABASE:'The DATA BASE for Advances in Information Systems'};
+var JK=Object.keys(JN);
+var T6=['ERP','供應鏈','電子商務','IT 專案管理','資訊經濟','AI／資料分析'];
+var T19=T6.concat(['科技採用與使用','資訊安全與隱私','IT 策略與數位轉型','數位平台與生態系','社群媒體與線上社群','知識管理與協作','人機互動與使用者體驗','醫療資訊','金融科技與區塊鏈','軟體開發與開源','IT 人力與工作','資訊與社會','創新與科技管理']);
+var MS=['問卷／SEM','訪談／個案','實驗','次級資料／計量','機器學習／文字探勘','數學模型／模擬','設計科學','概念／理論','文獻回顧'];
+var YR=[['','不限','2016–2026'],['2026','今年','2026'],['2024–2026','近 3 年','2024–2026'],['2022–2026','近 5 年','2022–2026']];
+/* 示意資料（編的）：標題、期刊、年份、主題、方法、有沒有摘要、有沒有完整內容 */
+var P=[
+['Post-Implementation Workarounds in Enterprise Systems: A Multi-Site Study','MISQ',2026,['ERP'],['訪談／個案'],1,0],
+['Forecast Sharing Under Algorithmic Advice: Evidence From Retail Supply Chains','ISR',2026,['供應鏈','AI／資料分析'],['次級資料／計量'],1,1],
+['When Do Marketplace Sellers Reveal Costs? A Signaling Model','ISR',2026,['電子商務','資訊經濟'],['數學模型／模擬'],1,0],
+['Agile Governance and Schedule Slippage in Public IT Projects','PMJ',2026,['IT 專案管理'],['問卷／SEM'],1,1],
+['Explaining Demand Models to Planners: A Field Experiment','JMIS',2025,['供應鏈','AI／資料分析'],['實驗'],1,1],
+['Why ERP Upgrades Stall: Sunk Costs and Vendor Lock-In','JSIS',2025,['ERP','IT 策略與數位轉型'],['訪談／個案'],0,0],
+['Price Transparency and Seller Entry on Two-Sided Platforms','MISQ',2025,['資訊經濟','數位平台與生態系'],['次級資料／計量'],1,0],
+['Livestream Selling and Impulse Returns','DSS',2025,['電子商務'],['問卷／SEM','實驗'],0,0],
+['Blockchain Traceability and Supplier Opportunism','JAIS',2025,['供應鏈','金融科技與區塊鏈'],['問卷／SEM'],1,1],
+['Machine Learning for Project Risk Triage: A Design Science Approach','EJIS',2025,['IT 專案管理','AI／資料分析'],['設計科學','機器學習／文字探勘'],1,1],
+['User Resistance After ERP Go-Live: A Longitudinal Survey','I&M',2024,['ERP','科技採用與使用'],['問卷／SEM'],0,0],
+['Supply Chain Visibility Platforms and Inventory Performance','JMIS',2024,['供應鏈'],['次級資料／計量'],1,0],
+['Recommendation Diversity and Long-Tail Sales','ISR',2024,['電子商務','AI／資料分析'],['實驗','次級資料／計量'],1,1],
+['Platform Fees and Complementor Exit','MISQ',2024,['數位平台與生態系','資訊經濟'],['次級資料／計量'],1,0],
+['Knowledge Hiding in Cross-Organizational Projects','PMJ',2024,['IT 專案管理','知識管理與協作'],['問卷／SEM'],1,1],
+['Generative AI Assistants and Help-Desk Productivity','ISJ',2024,['AI／資料分析','IT 人力與工作'],['實驗'],1,1],
+['Process Mining for ERP Conformance Checking','DSS',2023,['ERP','AI／資料分析'],['機器學習／文字探勘'],0,0],
+['Disruption Propagation in Multi-Tier Supply Networks: A Simulation','TEM',2023,['供應鏈'],['數學模型／模擬'],1,0],
+['Cross-Border E-Commerce and Return Insurance Pricing','I&M',2023,['電子商務','資訊經濟'],['數學模型／模擬'],0,0],
+['Privacy Labels and App Demand','JMIS',2023,['資訊安全與隱私','資訊經濟'],['次級資料／計量'],1,0],
+['Benefits Realization in Digital Transformation Programs','JIT',2023,['IT 專案管理','IT 策略與數位轉型'],['訪談／個案'],1,1],
+['Predictive Analytics Capability and Supply Chain Resilience','JAIS',2023,['供應鏈','AI／資料分析'],['問卷／SEM'],1,1],
+['ERP Customization and Audit Quality','I&O',2022,['ERP'],['次級資料／計量'],0,0],
+['Review Manipulation Detection With Graph Neural Networks','DSS',2022,['電子商務','AI／資料分析'],['機器學習／文字探勘'],0,0],
+['Open Source Sponsorship and Maintainer Burnout','ISR',2022,['軟體開發與開源'],['次級資料／計量'],1,1],
+['Telehealth Adoption Among Older Adults','EJIS',2022,['醫療資訊','科技採用與使用'],['問卷／SEM'],1,1],
+['A Theory of Algorithmic Accountability','MISQ',2022,['資訊與社會'],['概念／理論'],1,0],
+['Vendor-Managed Inventory Contracts Under Information Asymmetry','TEM',2021,['供應鏈','資訊經濟'],['數學模型／模擬'],1,0],
+['Mobile Payment Continuance: A Meta-Analytic Review','I&M',2021,['電子商務','金融科技與區塊鏈'],['文獻回顧'],0,0],
+['Escalation of Commitment in Troubled IT Projects','JIT',2021,['IT 專案管理'],['實驗','問卷／SEM'],1,0],
+['Cloud ERP Migration in Small Manufacturers','DATABASE',2020,['ERP'],['訪談／個案'],1,1],
+['Crowdsourced Delivery and Last-Mile Costs','JAIS',2020,['電子商務'],['次級資料／計量'],1,1],
+['Social Commerce Trust Transfer','ISJ',2019,['電子商務','社群媒體與線上社群'],['問卷／SEM'],1,0],
+['IT Portfolio Selection for Organizational Agility','JSIS',2018,['IT 專案管理','IT 策略與數位轉型'],['訪談／個案'],0,0],
+['Innovation Contests and Idea Quality','ISR',2017,['創新與科技管理'],['次級資料／計量'],1,0],
+['Editorial Notes on Reviewing Practice','DATABASE',2016,[],[],0,0]];
+
+var CAR='<svg aria-hidden="true" class="car" fill="none" height="6" viewBox="0 0 9 6" width="9"><path d="M1 1l3.5 3.5L8 1" stroke="currentColor" stroke-width="1"></path></svg>';
+var CK='<span class="bx"><svg aria-hidden="true" fill="none" height="8" viewBox="0 0 10 8" width="10"><path d="M1 4l2.8 2.8L9 1.2" stroke="#0A0B0E" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.4"></path></svg></span>';
+var ARW='<svg aria-hidden="true" fill="none" height="10" style="margin-left: 6px; flex: none" viewBox="0 0 10 10" width="10"><path d="M2 8L8 2M3.5 2H8v4.5" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.1"></path></svg>';
+var LOGO='<svg aria-hidden="true" fill="none" height="22" style="color: #E3B466" viewBox="0 0 22 22" width="22"><circle cx="11" cy="11" opacity="0.5" r="10" stroke="currentColor" stroke-width="0.9"></circle><circle cx="11" cy="11" opacity="0.8" r="5" stroke="currentColor" stroke-width="0.9"></circle><path d="M11 11 L18.2 4.2" stroke="currentColor" stroke-linecap="round" stroke-width="1.1"></path><circle cx="11" cy="11" fill="currentColor" r="1.3"></circle></svg>';
+var HR='rgba(239,234,224,0.16)',MONO="font-family: 'DM Mono', 'PingFang TC', monospace";
+/* 示範站標題的用字（Kevin 2026-11-27 決定）：任一個寫「或」、同時符合寫「＋」 */
+var WORD={a:[' 或 ',' ＋ ']};
+var S={site:'member',w:'a',st:'two',j:[],y:'',t:[],m:[],tm:'any',mm:'any',abs:false,full:false,q:''};
+var NAME={j:'期刊',y:'年份',t:'主題',m:'方法'},UNIT={j:'本',t:'個',m:'個'};
+function esc(x){return String(x).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;')}
+function topicsOf(p){var t=S.site==='member'?p[3].filter(function(x){return T6.indexOf(x)>=0}):p[3];return t.length?t:['未分類']}
+function grp(sel,have,mode){if(!sel.length)return true;var f=function(v){return have.indexOf(v)>=0};return mode==='all'?sel.every(f):sel.some(f)}
+function match(p,any){
+ if(S.j.length&&S.j.indexOf(p[1])<0)return false;
+ if(S.y){var r=S.y.split('–'),a=+r[0],b=+(r[1]||r[0]);if(p[2]<a||p[2]>b)return false}
+ if(!grp(S.t,topicsOf(p),any?'any':S.tm))return false;
+ if(S.site==='demo'){
+  if(!grp(S.m,p[4].length?p[4]:['未分類'],any?'any':S.mm))return false;
+  if(S.abs&&!p[5])return false;if(S.full&&!p[6])return false;
+  if(S.q&&p[0].toLowerCase().indexOf(S.q.toLowerCase())<0)return false}
+ return true}
+
+/* ── 畫骨架（換站別時重畫一次） ── */
+function opt(k,v,inner,radio){return '<label class="opt"><input data-k="'+k+'" data-v="'+esc(v)+'" name="'+k+(radio?'-'+radio:'')+'" type="'+(radio?'radio':'checkbox')+'"/>'+(radio?'<span class="rd"></span>':CK)+inner+'</label>'}
+function optsOf(k,where){
+ if(k==='j')return JK.map(function(c){return opt('j',c,'<span class="mn" style="'+MONO+'; font-size: 13px; width: 78px; flex: none">'+esc(c)+'</span><span style="font-size: 13px; color: #A8A294; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap">'+esc(JN[c])+'</span>')}).join('');
+ if(k==='y')return YR.map(function(y){return opt('y',y[0],'<span class="mn">'+y[1]+'</span><span style="'+MONO+'; font-size: 13px; letter-spacing: 0.02em; color: #A8A294">'+y[2]+'</span>',where)}).join('');
+ var list=k==='t'?(S.site==='demo'?T19:T6):MS,two=k==='t'&&S.site==='demo'&&where==='d';
+ return '<div'+(two?' style="columns: 2; column-gap: 0"':'')+'>'+list.map(function(v){return opt(k,v,'<span class="mn">'+v+'</span>')}).join('')+'</div><div style="margin-top: 4px; padding-top: 4px; border-top: 1px solid '+HR+'">'+opt(k,'未分類','<span class="mn">未分類</span>')+'</div>'}
+function modeBtns(k){return '<span class="mm" data-k="'+k+'" role="group" aria-label="'+NAME[k]+'多選的符合方式" hidden><button class="seg hit" data-mode="any" aria-pressed="true"><span>任一個</span></button><button class="seg hit" data-mode="all" aria-pressed="false"><span>同時符合</span></button></span>'}
+function chipMenu(k){var w=k==='j'||(k==='t'&&S.site==='demo')?490:260;
+ return '<div class="fw" style="position: relative"><button aria-expanded="false" aria-haspopup="true" class="chip f" data-chip="'+k+'"><span class="lb">'+NAME[k]+'</span><span class="vl"></span>'+CAR+'</button><div class="menu fl" data-menu="'+k+'" role="group" aria-label="'+NAME[k]+'" style="width: '+w+'px; max-width: calc(100vw - 40px)"><div style="padding: 8px 0">'+optsOf(k,'d')+'</div>'+(k==='y'?'':'<div class="mfoot" hidden>'+(k==='j'?'':modeBtns(k))+'<a class="clr hit" data-k="'+k+'" href="#">清除</a></div>')+'</div></div>'}
+function head(mb){var demo=S.site==='demo',scope='<span style="'+MONO+'; font-size: '+(mb?11:12)+'px; letter-spacing: 0.08em; color: #8E887B; white-space: nowrap; '+(mb?'margin-left: 32px':'margin-left: 8px; padding-top: 5px')+'">示範站 · 靜態快照</span>';
+ var brand='<span style="font-family: \'Instrument Serif\', \'Songti TC\', serif; font-size: '+(mb?21:24)+'px; letter-spacing: 0.01em; color: #EFEAE0">Research <span style="font-style: italic">Radar</span></span>';
+ if(mb)return '<header style="display: flex; align-items: center; justify-content: space-between; padding: 14px 20px 0"><div style="display: flex; flex-direction: column; gap: 2px"><div style="display: flex; align-items: center; gap: 10px">'+LOGO+brand+'</div>'+(demo?scope:'')+'</div><button aria-label="選單" style="width: 44px; height: 44px; margin-right: -10px; border: none; background: transparent; color: #EFEAE0; display: flex; align-items: center; justify-content: center"><svg aria-hidden="true" fill="none" height="14" viewBox="0 0 20 14" width="20"><path d="M0 1h20M0 7h20M0 13h20" stroke="currentColor" stroke-width="1"></path></svg></button></header>';
+ var items=demo?['趨勢','關係排行表','論文','展示問答','架構與評估','成員登入']:['找論文','我的文獻庫','趨勢','關係排行表','問答','帳號'],cur=demo?'論文':'找論文';
+ return '<header style="display: flex; align-items: center; justify-content: space-between; padding: 30px 96px 0"><div style="display: flex; align-items: center; gap: 12px">'+LOGO+brand+(demo?scope:'')+'</div><nav style="display: flex; align-items: center; font-size: 14px; letter-spacing: 0.04em">'+items.map(function(n,i){var last=i===items.length-1;return '<a class="nav" href="#"'+(n===cur?' aria-current="page"':'')+' style="padding: 13px '+(last?'0 13px 16px':'16px')+'; white-space: nowrap'+(n===cur?'; color: #EFEAE0':'')+(n==='帳號'?'; display: inline-flex; align-items: center; gap: 7px':'')+'">'+(n===cur?'<span style="padding-bottom: 6px; border-bottom: 1px solid #E3B466">'+n+'</span>':n)+(n==='帳號'?CAR.replace(' class="car"',''):'')+'</a>'}).join('')+'</nav></header>'}
+function dateLine(){return '<div style="display: flex; align-items: center; gap: 10px; '+MONO+'; font-size: 12px; letter-spacing: 0.08em; color: #A8A294"><span style="width: 5px; height: 5px; border-radius: 50%; background: #E3B466"></span><span>資料截至 2026-11-12</span><span style="color: #8E887B">· #12</span></div>'}
+function h1(mb){return '<h1 class="ttl1" style="margin: '+(mb?14:18)+'px 0 0; font-family: \'Songti TC\', \'Noto Serif TC\', serif; font-weight: 300; font-size: '+(mb?28:40)+'px; line-height: 1.3; letter-spacing: 0.04em; text-wrap: balance; color: #EFEAE0">找論文</h1>'}
+function segs(){return '<div class="segs" style="display: flex; flex-wrap: wrap; gap: 0 24px">'+['所有追蹤期刊','實驗室文獻庫','我的文獻庫'].map(function(n,i){return '<button aria-pressed="'+(i===0)+'" class="seg scope'+(i===0?' on':'')+'"><span>'+n+'</span></button>'}).join('')+'</div>'}
+function qbox(mb){return '<div class="qbox" style="width: '+(mb?'100%':'360px')+'; max-width: 100%; box-sizing: border-box; display: flex; align-items: center; gap: 4px; height: 40px; border-bottom: 1px solid rgba(239,234,224,0.26); transition: border-color .25s ease"><input aria-label="用標題裡的字篩選" class="q" placeholder="用標題裡的字篩選" style="flex: 1; min-width: 0; background: transparent; border: none; color: #EFEAE0; font-size: 16px; letter-spacing: 0.03em; padding: 0" type="text"/></div>'}
+function zeroBox(){return '<div class="zero" hidden style="margin-top: 48px; display: flex; gap: 14px; align-items: flex-start; max-width: 760px"><span style="color: #A8A294; display: flex"><svg aria-hidden="true" fill="none" height="13" style="flex: none; margin-top: 7px" viewBox="0 0 13 13" width="13"><circle cx="6.5" cy="6.5" r="5.6" stroke="currentColor" stroke-width="0.9"></circle><path d="M6.5 5.8v3.4" stroke="currentColor" stroke-linecap="round" stroke-width="1"></path><circle cx="6.5" cy="3.9" fill="currentColor" r="0.65"></circle></svg></span><div><div style="font-size: 17px; line-height: 1.7; color: #EFEAE0">沒有符合的論文</div><div style="margin-top: 8px; display: flex; flex-wrap: wrap; gap: 0 28px"><a class="zany" href="#" hidden style="font-size: 14px; letter-spacing: 0.04em; display: inline-flex; align-items: center; min-height: 36px"></a><a class="clrall2" href="#" style="font-size: 14px; letter-spacing: 0.04em; display: inline-flex; align-items: center; min-height: 36px">清除篩選</a></div></div></div>'}
+function foot(mb){return '<footer style="margin-top: '+(mb?64:96)+'px; padding: 0 '+(mb?20:96)+'px"><div style="border-top: 1px solid '+HR+'; padding: 22px 0 30px; display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap; '+MONO+'; font-size: 11px; letter-spacing: 0.1em; color: #8E887B"><span>資料來源　OpenAlex 開放書目資料</span><span>每週更新一次</span></div></footer>'}
+function countLine(mb){return '<div class="cline" style="margin-top: '+(mb?32:44)+'px; display: flex; justify-content: space-between; align-items: baseline; gap: 24px; font-size: 14px; line-height: 1.7; color: #A8A294"><span style="font-size: 16px; color: #D5D0C5">找到 <span class="rcount" style="'+MONO+'; color: #EFEAE0; letter-spacing: 0.02em"></span> 篇</span>'+(mb?'':'<span style="flex: none; '+MONO+'; font-size: 13px; letter-spacing: 0.06em; color: #A8A294">依年份排序</span>')+'</div>'}
+function build(){var demo=S.site==='demo',ks=demo?['j','y','t','m']:['j','y','t'];
+ var chips='<div style="display: flex; flex-wrap: wrap; gap: 8px; align-items: center">'+ks.map(chipMenu).join('')+(demo?'<span aria-hidden="true" style="width: 1px; height: 18px; background: rgba(239,234,224,0.26); margin: 0 6px"></span><button class="chip f tg" data-tg="abs" aria-pressed="false">只看有摘要的</button><button class="chip f tg" data-tg="full" aria-pressed="false">只看有完整內容的</button>':'')+'<a class="clrall" href="#" hidden style="font-size: 13px; letter-spacing: 0.04em; display: inline-flex; align-items: center; min-height: 32px; margin-left: 8px">清除篩選</a></div>';
+ $('#desk').innerHTML=head(false)+'<main style="flex: 1; padding: 72px 96px 0">'+dateLine()+h1(false)+
+  (demo?'<div style="margin-top: 28px">'+qbox(false)+'</div><div style="margin-top: 20px">'+chips+'</div>'
+       :'<div style="margin-top: 32px; display: flex; flex-wrap: wrap; align-items: center; gap: 12px 28px">'+segs()+'<span aria-hidden="true" style="width: 1px; height: 18px; background: rgba(239,234,224,0.26)"></span>'+chips+'</div>'+countLine(false))+
+  '<div class="rows" style="margin-top: '+(demo?36:14)+'px; border-top: 1px solid '+HR+'; border-bottom: 1px solid '+HR+'"></div>'+zeroBox()+'</main>'+foot(false);
+ var fbtn='<button class="chip mfbtn" style="background: transparent; color: #D5D0C5; border: 1px solid rgba(239,234,224,0.26); height: 36px; padding: 0 16px; border-radius: 999px; font-size: 13px; letter-spacing: 0.04em; display: inline-flex; align-items: center; gap: 9px; font-family: inherit; cursor: pointer"><svg aria-hidden="true" fill="none" height="12" viewBox="0 0 14 12" width="14"><path d="M0 2h14M3 6h8M5.5 10h3" stroke="currentColor" stroke-width="1"></path></svg><span class="mfl">篩選</span></button><a class="clrall" hidden href="#" style="margin-left: 16px; font-size: 13px; letter-spacing: 0.04em">清除篩選</a>';
+ $('#mob').innerHTML=head(true)+'<main style="flex: 1; padding: 40px 20px 0">'+dateLine()+h1(true)+
+  (demo?'<div style="margin-top: 24px">'+qbox(true)+'</div><div style="margin-top: 14px; display: flex; align-items: center">'+fbtn+'</div>'
+       :'<div style="margin-top: 24px">'+segs()+'</div><div style="margin-top: 12px; display: flex; align-items: center">'+fbtn+'</div>'+countLine(true))+
+  '<div class="rows" style="margin-top: '+(demo?28:14)+'px; border-top: 1px solid '+HR+'; border-bottom: 1px solid '+HR+'"></div>'+zeroBox()+'</main>'+foot(true);
+ $('#sheet').innerHTML='<div style="display: flex; align-items: center; justify-content: space-between; padding: 10px 8px 10px 20px; border-bottom: 1px solid '+HR+'"><h2 style="margin: 0; font-family: \'Songti TC\', \'Noto Serif TC\', serif; font-weight: 300; font-size: 22px; letter-spacing: 0.04em; color: #EFEAE0">篩選</h2><button aria-label="關閉" class="mclose" style="width: 44px; height: 44px; border: none; background: transparent; color: #D5D0C5; display: flex; align-items: center; justify-content: center; cursor: pointer"><svg aria-hidden="true" fill="none" height="14" viewBox="0 0 9 9" width="14"><path d="M1 1l7 7M8 1L1 8" stroke="currentColor" stroke-linecap="round" stroke-width="1"></path></svg></button></div>'+
+  ks.map(function(k){return '<div class="acc" data-acc="'+k+'" style="border-bottom: 1px solid '+HR+'"><button aria-expanded="false" class="acch"><span>'+NAME[k]+'</span><span class="accv"></span>'+CAR+'</button><div class="accb">'+optsOf(k,'m')+'</div></div>'}).join('')+
+  (demo?'<div style="padding: 6px 0; border-bottom: 1px solid '+HR+'">'+['abs','full'].map(function(g){return '<label class="opt"><input data-tg="'+g+'" type="checkbox"/>'+CK+'<span class="mn" style="font-size: 16px; letter-spacing: 0.04em">'+(g==='abs'?'只看有摘要的':'只看有完整內容的')+'</span></label>'}).join('')+'</div>':'')+
+  /* 手機：切換放在底部固定列的上面一行，只在那一組打開、而且選了兩個以上時出現（清單再長也看得到，不會把選項往下推） */
+  '<div style="margin-top: auto; position: sticky; bottom: 0; background: #050609; border-top: 1px solid '+HR+'">'+modeBtns('t')+(demo?modeBtns('m'):'')+'<div style="padding: 14px 20px; display: flex; align-items: center; justify-content: space-between; gap: 16px"><a class="clrall" hidden href="#" style="font-size: 14px; letter-spacing: 0.04em; display: inline-flex; align-items: center; min-height: 44px">清除篩選</a><span></span><button class="mgo" style="height: 48px; padding: 0 28px; border-radius: 999px; border: none; background: #EFEAE0; color: #0A0B0E; font-size: 15px; font-weight: 500; letter-spacing: 0.06em; font-family: inherit; cursor: pointer">看 <span class="mn"></span> 篇</button></div></div>'}
+
+/* ── 論文列 ── */
+function tag(n){return '<a class="tagl" href="#" style="display: inline-flex; align-items: center; height: 26px; padding: 0 12px; border: 1px solid rgba(239,234,224,0.26); border-radius: 999px; '+MONO+'; font-size: 13px; letter-spacing: 0.04em; white-space: nowrap">'+n+'</a>'}
+function row(p,i,mb){var top=i?'border-top: 1px solid '+HR+';':'',t=esc(p[0]);
+ var ttl='<a class="ttl" href="#" lang="en" style="display: block; font-family: \'Instrument Serif\', \'Songti TC\', serif; font-size: '+(mb?20:21)+'px; line-height: 1.3; letter-spacing: 0.005em; text-wrap: pretty">'+t+'</a>';
+ var open='<a class="open hit" href="#" aria-label="開啟全文（開新分頁）：'+t+'" style="min-height: 34px">開啟全文'+ARW+'</a>';
+ if(S.site==='member'){
+  var meta='<div class="meta" style="margin-top: 8px; '+MONO+'; font-size: 13px; letter-spacing: 0.04em; color: #A8A294"><span style="color: #D5D0C5">'+esc(JN[p[1]])+'</span> <span class="nw"><span style="color: #8E887B; padding: 0 9px 0 0">·</span><span>'+p[2]+'</span></span></div>';
+  var add='<button class="add hit" aria-label="加入我的文獻庫：'+t+'"><svg aria-hidden="true" fill="none" height="11" viewBox="0 0 11 11" width="11"><path d="M5.5 0.5v10M0.5 5.5h10" stroke="currentColor" stroke-width="1"></path></svg>加入我的文獻庫</button>';
+  return mb?'<div class="prow" style="padding: 22px 0; '+top+'">'+ttl+meta+'<div class="pact" style="margin-top: 14px; display: flex; align-items: center; gap: 20px">'+add+open+'</div></div>'
+   :'<div class="prow" style="display: flex; justify-content: space-between; align-items: flex-start; gap: 48px; padding: 24px 0; '+top+'"><div style="flex: 1 1 0; min-width: 0; max-width: 760px">'+ttl+meta+'</div><div class="pact" style="width: 248px; flex: none; display: flex; align-items: center; gap: 20px; padding-top: 1px">'+add+open+'</div></div>'}
+ var jy='<span style="display: inline-flex; align-items: center; '+MONO+'; font-size: 13px; letter-spacing: 0.04em; color: #A8A294; white-space: nowrap"><span style="color: #D5D0C5">'+esc(p[1])+'</span><span style="color: #8E887B; padding: 0 9px">·</span><span>'+p[2]+'</span></span>';
+ var tags='<span style="display: inline-flex; flex-wrap: wrap; align-items: center; gap: 8px 10px"><span style="display: inline-flex; align-items: center; gap: 7px; '+MONO+'; font-size: 12px; letter-spacing: 0.06em; color: #A8A294; white-space: nowrap"><svg aria-hidden="true" fill="none" height="9" style="flex: none" viewBox="0 0 9 9" width="9"><path d="M4.5 0.8L8.2 4.5 4.5 8.2 0.8 4.5z" stroke="currentColor" stroke-width="0.9"></path></svg>AI 整理</span>'+topicsOf(p).concat(p[4]).map(tag).join('')+'</span>';
+ var st='<span style="height: 34px; min-width: '+(mb?0:108)+'px; box-sizing: border-box; display: inline-flex; align-items: center; gap: 8px; font-size: 13px; letter-spacing: 0.04em; color: '+(p[6]?'#D5D0C5':'#A8A294')+'; white-space: nowrap"><span style="width: 6px; height: 6px; border-radius: 50%; box-sizing: border-box; '+(p[6]?'background: #EFEAE0':'border: 1px solid #A8A294')+'"></span>'+(p[6]?'有完整內容':'只有書目')+'</span>';
+ return mb?'<div class="prow" style="padding: 22px 0; '+top+'">'+ttl+'<div style="margin-top: 8px">'+jy+'</div><div style="margin-top: 10px">'+tags+'</div><div style="margin-top: 10px; display: flex; align-items: center; gap: 20px">'+st+open+'</div></div>'
+  :'<div class="prow" style="display: flex; justify-content: space-between; align-items: flex-start; gap: 48px; padding: 24px 0; '+top+'"><div style="flex: 1 1 0; min-width: 0; max-width: 760px">'+ttl+'<div style="margin-top: 10px; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 20px">'+jy+tags+'</div></div><div style="width: 216px; flex: none; display: flex; align-items: center; justify-content: space-between; gap: 20px; padding-top: 1px">'+st+open+'</div></div>'}
+
+/* ── 依狀態更新（勾選、切換都走這裡） ── */
+function chipText(k){var a=S[k],n=a.length;if(k==='y')return S.y;if(!n)return '';if(n===1)return a[0];return (k!=='j'&&S[k+'m']==='all'?'同時符合 ':'')+n+' '+UNIT[k]}
+function joined(k){var a=S[k];if(a.length<2||k==='j')return a.map(esc).join('、');var c=WORD[S.w][S[k+'m']==='all'?1:0];return a.map(esc).join(c==='、'?'、':'<span class="cj">'+c+'</span>')}
+function titleParts(n){var p=[];if(S.j.length)p.push(joined('j'));if(S.t.length)p.push(joined('t'));if(S.y)p.push(S.y+' 年');if(S.m.length)p.push(joined('m'));if(S.q)p.push('標題有「'+esc(S.q)+'」');if(S.abs)p.push('有摘要');if(S.full)p.push('有完整內容');if(!p.length)p.push('全部論文');p.push(n+' 篇');
+ return p.map(function(x,i){return '<span'+(/cj/.test(x)?'':' style="white-space: nowrap"')+'>'+x+(i<p.length-1?'<span style="color: #8E887B; padding-left: 0.3em"> ·</span>':'')+'</span>'}).join(' ')}
+function update(flash){var demo=S.site==='demo';
+ ['t','m'].forEach(function(k){if(S[k].length<2)S[k+'m']='any'});
+ var list=P.filter(function(p){return match(p)}),n=list.length,anyN=P.filter(function(p){return match(p,true)}).length;
+ var allOn=(S.t.length>1&&S.tm==='all')||(demo&&S.m.length>1&&S.mm==='all');
+ var active=!!(S.j.length||S.y||S.t.length||(demo&&(S.m.length||S.abs||S.full||S.q)));
+ $$('input[data-k]').forEach(function(i){var k=i.dataset.k;i.checked=k==='y'?S.y===i.dataset.v:S[k].indexOf(i.dataset.v)>=0});
+ $$('input[data-tg]').forEach(function(i){i.checked=S[i.dataset.tg]});
+ $$('button[data-tg]').forEach(function(b){b.classList.toggle('sel',S[b.dataset.tg]);b.setAttribute('aria-pressed',String(S[b.dataset.tg]))});
+ $$('[data-chip]').forEach(function(c){var t=chipText(c.dataset.chip),vl=c.querySelector('.vl');vl.innerHTML=t?'<i>·</i>'+esc(t):'';c.classList.toggle('sel',!!t)});
+ $$('[data-menu]').forEach(function(m){var k=m.dataset.menu,f=m.querySelector('.mfoot');if(f)f.hidden=!S[k].length});
+ $$('[data-acc]').forEach(function(a){a.querySelector('.accv').textContent=chipText(a.dataset.acc)});
+ $$('.mm').forEach(function(g){var k=g.dataset.k,sh=g.closest('.msheet');g.hidden=S[k].length<2||!!(sh&&!$('.acc.open[data-acc="'+k+'"]',sh));$$('.seg',g).forEach(function(b){var on=b.dataset.mode===S[k+'m'];b.classList.toggle('on',on);b.setAttribute('aria-pressed',String(on))})});
+ $$('.ttl1').forEach(function(h){h.innerHTML=demo?titleParts(n):'找論文'});
+ $$('.rcount').forEach(function(r){r.textContent=n});$$('.mgo .mn').forEach(function(r){r.textContent=n});
+ $$('.cline').forEach(function(c){c.hidden=!n});
+ $$('.clrall').forEach(function(c){c.hidden=!active});
+ var cnt=[S.j.length,S.y,S.t.length,demo&&S.m.length,demo&&S.abs,demo&&S.full].filter(Boolean).length;
+ $$('.mfbtn').forEach(function(b){b.classList.toggle('sel',!!cnt);b.querySelector('.mfl').textContent=cnt?'篩選 · '+cnt:'篩選'});
+ [['#desk',false],['#mob',true]].forEach(function(v){var r=$(v[0]+' .rows');r.hidden=!n;r.innerHTML=list.map(function(p,i){return row(p,i,v[1])}).join('');
+  if(flash){r.classList.add('busy');setTimeout(function(){r.classList.remove('busy')},300)}
+  $(v[0]+' .zero').hidden=!!n;var z=$(v[0]+' .zany');z.hidden=!(allOn&&anyN>0);z.textContent='改看符合任一個的 '+anyN+' 篇'});
+ $$('.pvbar a').forEach(function(a){a.setAttribute('aria-current',String(S[a.dataset.g]===a.dataset.v))});}
+
+/* ── 切換列的預設狀態 ── */
+function closeMenus(ex){$$('.menu.fl.on').forEach(function(m){if(m!==ex){m.classList.remove('on');m.parentNode.querySelector('.chip.f').setAttribute('aria-expanded','false')}})}
+function openMenu(k){var m=$('#desk [data-menu="'+k+'"]');if(!m)return;closeMenus(m);m.classList.add('on');m.parentNode.querySelector('.chip.f').setAttribute('aria-expanded','true')}
+var msw=$('.msw');
+function openSheet(k){msw.hidden=false;document.documentElement.style.overflow='hidden';if(k)$$('[data-acc]').forEach(function(a){var on=a.dataset.acc===k;a.classList.toggle('open',on);a.querySelector('.acch').setAttribute('aria-expanded',String(on))});update();requestAnimationFrame(function(){requestAnimationFrame(function(){msw.classList.add('in')})})}
+function closeSheet(now){msw.classList.remove('in');document.documentElement.style.overflow='';if(now)msw.hidden=true;else setTimeout(function(){msw.hidden=true},260)}
+function preset(){var st=S.st;S.j=[];S.y='';S.m=[];S.mm='any';S.abs=S.full=false;S.q='';$$('input.q').forEach(function(q){q.value=''});
+ S.t=st==='one'?['供應鏈']:st==='zero'?['ERP','供應鏈']:['供應鏈','AI／資料分析'];S.tm=st==='all'||st==='zero'?'all':'any';
+ update();closeMenus();closeSheet(true);window.scrollTo(0,0);
+ if(st!=='zero'){if(matchMedia('(max-width:899px)').matches)openSheet('t');else openMenu('t')}}
+
+/* ── 操作 ── */
+function swapLib(el,toAdded){var row=el.closest('.prow'),mb=!!el.closest('.v-mobile'),ttl=row.querySelector('a.ttl').textContent,n;
+ if(toAdded){n=document.createElement('span');n.className='added in';n.style.cssText='height:34px;min-width:'+(mb?'0':'146px')+';box-sizing:border-box;padding:'+(mb?'0 4px 0 0':'0 0 0 15px')+';display:inline-flex;align-items:center;gap:8px;font-size:13px;letter-spacing:.04em;color:#A8A294;white-space:nowrap';
+  var d=document.createElement('span');d.style.cssText='width:6px;height:6px;border-radius:50%;background:#EFEAE0';n.appendChild(d);n.appendChild(document.createTextNode('已加入'));
+  var b=document.createElement('button');b.className='txt rm hit';b.style.marginLeft=mb?'12px':'10px';b.textContent='移出';b.setAttribute('aria-label','移出我的文獻庫：'+ttl);n.appendChild(b);el.parentNode.replaceChild(n,el);b.focus({preventScroll:true})}
+ else{n=document.createElement('button');n.className='add hit back';n.setAttribute('aria-label','加入我的文獻庫：'+ttl);n.innerHTML='<svg aria-hidden="true" fill="none" height="11" viewBox="0 0 11 11" width="11"><path d="M5.5 0.5v10M0.5 5.5h10" stroke="currentColor" stroke-width="1"></path></svg>加入我的文獻庫';el.parentNode.replaceChild(n,el);n.focus({preventScroll:true})}}
+function clearAll(){S.j=[];S.y='';S.t=[];S.m=[];S.abs=S.full=false;S.q='';$$('input.q').forEach(function(q){q.value=''});update(true)}
+document.addEventListener('click',function(e){var t=e.target,x;
+ if(x=t.closest('.pvbar a')){e.preventDefault();var g=x.dataset.g;S[g]=x.dataset.v;if(g==='site'){build();preset()}else if(g==='st')preset();else update();return}
+ if(x=t.closest('a[href="#"]'))e.preventDefault();
+ if(x=t.closest('[data-chip]')){var m=x.parentNode.querySelector('.menu.fl'),on=!m.classList.contains('on');closeMenus(m);m.classList.toggle('on',on);x.setAttribute('aria-expanded',String(on));return}
+ if(!t.closest('.fw'))closeMenus();
+ if(x=t.closest('.mm .seg')){S[x.parentNode.dataset.k+'m']=x.dataset.mode;update(true);return}
+ if(x=t.closest('.clr')){var k=x.dataset.k;S[k]=[];update(true);return}
+ if(t.closest('.zany')){S.tm=S.mm='any';update(true);return}
+ if(t.closest('.clrall')||t.closest('.clrall2')){clearAll();return}
+ if(x=t.closest('button[data-tg]')){S[x.dataset.tg]=!S[x.dataset.tg];update(true);return}
+ if(x=t.closest('.seg.scope')){$$('.seg.scope',x.parentNode).forEach(function(b){b.classList.toggle('on',b===x);b.setAttribute('aria-pressed',String(b===x))});return}
+ if(x=t.closest('button.add')){swapLib(x,true);return}
+ if(x=t.closest('.prow button.rm')){swapLib(x.closest('.added'),false);return}
+ if(t.closest('.mfbtn')){openSheet();return}
+ if(t.closest('.mclose')||t.closest('.mgo')){closeSheet();return}
+ if(x=t.closest('.acch')){var a=x.parentNode,o=!a.classList.contains('open');$$('.acc').forEach(function(c){c.classList.remove('open');c.querySelector('.acch').setAttribute('aria-expanded','false')});a.classList.toggle('open',o);x.setAttribute('aria-expanded',String(o));update()}
+});
+document.addEventListener('change',function(e){var t=e.target,k=t.dataset.k;
+ if(t.dataset.tg){S[t.dataset.tg]=t.checked;update(true);return}
+ if(!k)return;
+ if(k==='y')S.y=t.dataset.v;else{var i=S[k].indexOf(t.dataset.v);if(t.checked&&i<0)S[k].push(t.dataset.v);if(!t.checked&&i>=0)S[k].splice(i,1);
+  var order=k==='j'?JK:(k==='t'?T19:MS).concat(['未分類']);S[k].sort(function(a,b){return order.indexOf(a)-order.indexOf(b)})}
+ update(true)});
+document.addEventListener('input',function(e){if(e.target.classList.contains('q')){S.q=e.target.value.trim();$$('input.q').forEach(function(q){if(q!==e.target)q.value=e.target.value});update()}});
+document.addEventListener('keydown',function(e){if(e.key!=='Escape')return;var o=$('.menu.fl.on');if(o){var c=o.parentNode.querySelector('.chip.f');closeMenus();c.focus()}else if(!msw.hidden)closeSheet()});
+var h=location.hash.slice(1).split('.');if(h[0]==='demo'||h[0]==='member')S.site=h[0];if(['one','two','all','zero'].indexOf(h[1])>=0)S.st=h[1];if(WORD[h[2]])S.w=h[2];
+build();preset();
+})();
+</script>
+</body></html>
