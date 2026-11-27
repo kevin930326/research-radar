@@ -14,8 +14,9 @@
   `RetrievalAnchorNotFoundError`）→ 起點沒有這個模型的向量回空結果（不是錯誤）→ 只用向量腿、拿存好的
   向量查、不含起點自己。
 - 向量一律只比 `setup.embedding.model_id`（設定指定的那一個模型）。
-- 範圍：先套 viewer 的可見條件、再套 `scope`；`demo` 只給 `PublicViewer`（overload 讓型別檢查擋，
-  `repo/visibility.visible_demo_papers` 在執行時再擋一次）。`filters` 的期刊、年份、主題、方法、
+- 範圍：先套 viewer 的可見條件、再套 `scope`；`demo` 只給 `PublicViewer`（overload 讓型別檢查擋；
+  執行時 `retrieve` 一進來、送查詢向量或讀起點之前就擋，`repo/visibility.visible_demo_papers`
+  組條件時再擋一次）。`filters` 的期刊、年份、主題、方法、
   `has_abstract`、`this_week` 和找論文清單同一套；`filters.scope` 要和 `scope` 同名（`demo` 時要是
   預設的 `tracked`），對不上就丟錯（不默默以其中一個為準）。
 - 結果：融合後全部的結果（最多 2 × `leg_limit` 篇）在 Python 切出 `offset` 之後的 `k` 篇；`total` 是
@@ -128,6 +129,9 @@ def retrieve(
     """
     config = setup.retrieval
     scope = RetrievalScope(scope)
+    if scope is RetrievalScope.DEMO and not isinstance(viewer, PublicViewer):
+        # 分流之前就擋（審查 H1）：不送查詢向量、不占額度、不讀起點。repo 組條件時會再擋一次。
+        raise TypeError(f"demo 範圍只給 PublicViewer（現在是 {type(viewer).__name__}）")
     if (query is None) == (paper_id is None):
         raise ValueError("query 與 paper_id 要剛好給一個")
     if type(k) is not int or not 1 <= k <= config.max_results:

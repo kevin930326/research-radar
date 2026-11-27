@@ -275,6 +275,65 @@ def test_rrf_puts_papers_found_by_both_legs_first_and_drops_vectors_below_the_fl
     assert scores == sorted(scores, reverse=True)
 
 
+@pytest.mark.parametrize(
+    ("rrf_k", "leader"), [(1, "p"), (60, "q")], ids=["k1-best-rank-wins", "k60-rank-sum-wins"]
+)
+def test_rrf_k_decides_between_two_papers_found_by_both_legs(
+    db: TestDatabase,
+    database: Database,
+    published: uuid.UUID,
+    owner: MemberViewer,
+    rrf_k: int,
+    leader: str,
+) -> None:
+    # 審查 M8：p 的名次是（向量 1、全文 5），q 是（向量 2、全文 3）。RRF 分數 Σ 1 ÷ (k＋名次)：
+    # k＝1 時 p 0.667 > q 0.583；k＝60 時 q 0.03200 > p 0.03178。
+    # 其他三篇只有全文腿（名次 1、2、4）。
+    # 全文腿的名次由標題裡 trust 出現的次數決定（越多越前面）。
+    def titled(number: int, times: int) -> uuid.UUID:
+        return make_paper(
+            database, db, number, snapshot_id=published, title=" ".join(["trust"] * times)
+        )
+
+    t1, t2, q, t4, p = titled(1, 6), titled(2, 5), titled(3, 4), titled(4, 3), titled(5, 2)
+    put_vector(db, p, near(0))
+    put_vector(db, q, near(1))
+    setup = setup_with(retrieval=RETRIEVAL.model_copy(update={"rrf_k": rrf_k}))
+
+    page = search(owner, database, "trust", setup=setup)
+
+    ranks = {hit.paper_id: (hit.vector_rank, hit.text_rank) for hit in page.hits}
+    assert ranks == {
+        t1: (None, 1),
+        t2: (None, 2),
+        q: (2, 3),
+        t4: (None, 4),
+        p: (1, 5),
+    }
+    # 兩個 k 下，t1（1 ÷ (k＋1)）都排在 p、q 之後：k＝1 是 0.5，k＝60 是 0.01639。
+    first_two = [p, q] if leader == "p" else [q, p]
+    assert ids(page) == [*first_two, t1, t2, t4]
+
+
+def test_personal_vector_leg_breaks_distance_ties_by_id_before_the_cut(
+    db: TestDatabase, database: Database, published: uuid.UUID, owner: MemberViewer
+) -> None:
+    # 審查 M3：每條腿只取 2 名，20 篇的向量一模一樣（同距離）：入榜的一定是 id 最小的兩篇。論文、
+    # 文獻庫、向量都照 id 由大到小重寫或寫入（表裡的實體順序跟著倒過來），讓「先掃到的先入榜」選錯。
+    papers = [make_paper(database, db, number, snapshot_id=published) for number in range(20)]
+    for paper in sorted(papers, reverse=True):
+        execute(db, "UPDATE paper SET publication_year = 2021 WHERE id = %s", paper)
+        put_in_library(database, owner.member_id, paper)
+        put_vector(db, paper, near(1))
+    # 有統計資料時規劃器走循序掃描（實體順序）；沒有時走主鍵索引，剛好是 id 順序，測不出來。
+    execute(db, "ANALYZE paper, library_item, embedding")
+    setup = setup_with(retrieval=RETRIEVAL.model_copy(update={"leg_limit": 2}))
+
+    page = search(owner, database, "測試", scope=RetrievalScope.PERSONAL, setup=setup, k=4)
+
+    assert ids(page) == sorted(papers)[:2]
+
+
 def test_chinese_query_finds_english_papers_only_through_the_vector_leg(
     db: TestDatabase, database: Database, published: uuid.UUID, owner: MemberViewer
 ) -> None:
@@ -525,14 +584,26 @@ def test_excluded_papers_never_appear_in_any_scope_or_path(
         )
         assert similar.hits == ()
 
+    # 取消排除之後重新出現在兩條腿（全文檢索資料一直都在，審查 M7）。
+    execute(db, "UPDATE paper SET excluded_reason = NULL WHERE id = %s", later)
+    for scope in RetrievalScope.PERSONAL, RetrievalScope.LAB, RetrievalScope.TRACKED:
+        page = search(owner, database, "trust", scope=scope)
+        assert set(ids(page)) == {kept, later}
+        (back,) = [hit for hit in page.hits if hit.paper_id == later]
+        assert back.vector_rank is not None
+        assert back.text_rank is not None
+
 
 def test_demo_scope_only_takes_public_viewer(
     db: TestDatabase, database: Database, published: uuid.UUID, owner: MemberViewer
 ) -> None:
     demo = make_paper(database, db, 1, snapshot_id=published, title="Ledger adoption")
     counted = make_paper(database, db, 2, snapshot_id=published, title="Ledger trust")
-    execute(db, "UPDATE paper SET demo_eligible = true WHERE id = %s", demo)
-    for paper in (demo, counted):
+    # 示範站選過、之後才被排除的：demo 範圍也不出現（審查 M7）。
+    excluded = make_paper(database, db, 3, snapshot_id=published, title="Ledger erratum")
+    execute(db, "UPDATE paper SET demo_eligible = true WHERE id IN (%s, %s)", demo, excluded)
+    execute(db, "UPDATE paper SET excluded_reason = 'erratum' WHERE id = %s", excluded)
+    for paper in (demo, counted, excluded):
         put_vector(db, paper, near(0))
 
     public = PublicViewer()
@@ -550,6 +621,29 @@ def test_demo_scope_only_takes_public_viewer(
             )
     # 訪客用 tracked 看得到兩篇（`counted_paper`）；demo 只有示範站有完整內容的那一篇。
     assert set(ids(search(public, database, "ledger"))) == {demo, counted}
+
+
+def test_demo_scope_is_refused_before_sending_the_query_or_reading_the_anchor(
+    db: TestDatabase, database: Database, published: uuid.UUID, owner: MemberViewer
+) -> None:
+    # 審查 H1：非 PublicViewer 的 demo 在分流前就擋，不送查詢向量（不占額度）、不讀起點。起點故意
+    # 是「看得到但沒有向量」的論文：讀了起點就會回空結果而不是丟錯。
+    anchor = make_paper(database, db, 1, snapshot_id=published, title="Ledger adoption")
+    setup = setup_with(NeverCalled())
+    for viewer in (owner, SystemViewer()):
+        for target in ({"query": "ledger"}, {"paper_id": anchor}):
+            with pytest.raises(TypeError, match="PublicViewer"):
+                retrieve(  # type: ignore[call-overload]
+                    viewer,
+                    database,
+                    setup,
+                    scope=RetrievalScope.DEMO,
+                    filters=PaperListFilters(),
+                    k=20,
+                    **target,
+                )
+    assert api_calls(db) == []
+    assert execute(db, "SELECT count(*) FROM embedding_quota_hold") == [(0,)]
 
 
 def test_filters_scope_must_match_the_retrieval_scope(
@@ -646,6 +740,12 @@ def test_filters_select_the_same_papers_as_the_paper_list(
 
     assert set(ids(found)) == expected
     assert found.total == len(expected)
+    # 每一篇的標題都有 study：兩條腿都有命中，各自也只拿到同一批
+    # （審查 M7：全文腿漏套條件會被抓到）。
+    both = search(owner, database, "study", scope=RetrievalScope(filters.scope), filters=filters)
+    assert {hit.paper_id for hit in both.hits if hit.vector_rank is not None} == expected
+    assert {hit.paper_id for hit in both.hits if hit.text_rank is not None} == expected
+    assert both.total == len(expected)
 
 
 # --- 找相似論文 ---------------------------------------------------------------------------------

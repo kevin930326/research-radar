@@ -386,7 +386,14 @@ class EmbeddingCallOutcome(StrEnum):
     UNREACHABLE = "unreachable"  # 沒有回應（連線錯誤、逾時），或 408、429、5xx
     REJECTED = "rejected"  # 其他 4xx（設定錯、請求不合法）
     QUOTA_EXHAUSTED = "quota_exhausted"  # 今天的額度放不下，沒有送出
+    # 沒有送出的其他失敗：等額度鎖逾時、adapter 第一次送出前就停下（總時限已到）等（審查 H2）。
+    NOT_SENT = "not_sent"
 
+
+# 沒有送出的結果代碼：沒有狀態碼、估計 token 是 0。
+_UNSENT_OUTCOMES: Final = frozenset(
+    {EmbeddingCallOutcome.QUOTA_EXHAUSTED, EmbeddingCallOutcome.NOT_SENT}
+)
 
 # adapter 會重試的狀態碼（`adapters/workers_ai` 的 `RETRY_STATUSES` 加上 5xx）：當成「連不上」。
 _UNREACHABLE_STATUSES: Final = frozenset({408, 429})
@@ -410,7 +417,7 @@ class EmbeddingApiCall:
     - `estimated_input_tokens`：自己估的 token（Workers AI 不回報用量）；失敗也照記。
     - `cost_usd` 一律記 0：在免費額度內，用量到設定的比例就停（ADR-0040）。
     - `outcome`：查詢向量的結果代碼（`EmbeddingCallOutcome`）；背景向量化是 None。
-      `quota_exhausted` 是沒有送出：`http_status` 一定是 None、估計 token 一定是 0。
+      `quota_exhausted` 與 `not_sent` 是沒有送出：`http_status` 一定是 None、估計 token 一定是 0。
     """
 
     operation: str
@@ -424,10 +431,10 @@ class EmbeddingApiCall:
             raise ValueError(f"不認得的操作：{self.operation!r}")
         if self.outcome is not None:
             object.__setattr__(self, "outcome", EmbeddingCallOutcome(self.outcome))
-        if self.outcome is EmbeddingCallOutcome.QUOTA_EXHAUSTED and (
+        if self.outcome in _UNSENT_OUTCOMES and (
             self.http_status is not None or self.estimated_input_tokens != 0
         ):
-            raise ValueError("quota_exhausted 是沒有送出：http_status 要是 None、估計 token 要是 0")
+            raise ValueError(f"{self.outcome} 是沒有送出：http_status 要是 None、估計 token 要是 0")
         if self.http_status is not None and (
             type(self.http_status) is not int or not 100 <= self.http_status <= 599
         ):

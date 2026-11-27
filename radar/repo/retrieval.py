@@ -252,11 +252,12 @@ def search_papers(
     )
     if RetrievalScope(scope) is RetrievalScope.PERSONAL:
         # 先過濾（自己的文獻庫通常只有幾十到幾百篇）、再精確比距離：MATERIALIZED 讓規劃器不走索引。
+        # 截斷前就用（距離, id）排（審查 M3）：第 N 名附近同距離的論文，入榜的永遠是 id 小的。
         vector_leg = (
             f"vector_pool AS MATERIALIZED (SELECT e.item_id AS paper_id,"
             f" e.vector::halfvec({size}) AS vector{candidates}),"
             f" vector_leg AS MATERIALIZED (SELECT paper_id, vector <=> {query_vector} AS distance"
-            " FROM vector_pool ORDER BY distance LIMIT :leg_limit)"
+            " FROM vector_pool ORDER BY distance, paper_id LIMIT :leg_limit)"
         )
     else:
         connection.execute(
@@ -266,6 +267,8 @@ def search_papers(
             ),
             {"ef_search": max(leg_limit, 40)},
         )
+        # 只照距離排：ORDER BY 多加 id 就用不到 HNSW 索引。索引本來就是近似搜尋（加上
+        # relaxed_order），第 N 名附近同距離時誰入榜不保證（ADR-0005 的「2026-11 實作更新」取捨）。
         vector_leg = (
             f"vector_leg AS MATERIALIZED (SELECT e.item_id AS paper_id, {distance} AS distance"
             f"{candidates} ORDER BY {distance} LIMIT :leg_limit)"

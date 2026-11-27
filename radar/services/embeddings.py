@@ -648,6 +648,7 @@ class _BatchRunner:
             hold_id = create_embedding_quota_hold(
                 connection,
                 tokens,
+                operation=EMBED_DOCUMENTS_OPERATION,
                 reserved_at=now,
                 expires_at=now + timedelta(seconds=config.run_limit_seconds),
             )
@@ -884,6 +885,9 @@ def embed_search_query(
       送出（占用在帳上，另一個看得到）。
     - 每次嘗試後把占用換成一列 `api_call`：`succeeded`、`unreachable`（沒有回應，或 408、429、
       5xx）、`rejected`（其他 4xx）。替身（不回報嘗試）整次呼叫當成一次嘗試記。
+    - 沒有送出的失敗也記一列 `not_sent`（估計 token 0、沒有狀態碼；審查 H2）：等額度鎖逾時（占用
+      前、第一次送出前確認日期、重試前都一樣），或 adapter 在送出前就停下（總時限已到）。所以每次
+      搜尋至少有一列。
     - 回來的向量當作使用者輸入驗（筆數、維度＝設定的維度、數字有限、不是全 0）。
     - 任何一種失敗都不降級成只用關鍵字：額度用完丟 `SearchQuotaExhaustedError`，其他（連不上、
       設定錯、回應不對、等額度鎖逾時）丟 `SearchEmbeddingUnavailableError`。日誌不記查詢內容。
@@ -916,7 +920,7 @@ def embed_search_query(
     except SearchQuotaExhaustedError:
         raise
     except LockWaitTimeoutError:
-        ledger.close(None, billable=False)
+        ledger.close_unsent()
         log.warning("查詢向量等額度鎖逾時，這次搜尋不送")
         raise SearchEmbeddingUnavailableError() from None
     except EmbeddingError as exc:
@@ -950,9 +954,16 @@ class _QueryLedger:
       重查），之後每次重試再占一次；放不下記一列 `quota_exhausted`、丟
       `EmbeddingQuotaReachedError`。
     - adapter 每次嘗試後 `hooks.after`：刪掉占用、記一列這次嘗試的 `api_call`（帶結果代碼）；
-      沒送出只放掉占用。
+      沒送出（`sent=False`）記一列 `not_sent`（估計 token 0）。
     - provider 回來或丟錯之後 `close`：從沒回報過嘗試（替身）就把整次呼叫當成一次嘗試記帳；回報過
-      卻還留著占用（那次嘗試沒送出）就只放掉。
+      卻還留著占用（那次嘗試沒送出）就照 `not_sent` 結清。
+    - 等額度鎖逾時 `close_unsent`：還有占用就照 `not_sent` 結清；沒有占用（占用前、重試前等不到）
+      就直接記一列 `not_sent`。
+
+    **已送出、還沒結清就中斷**（審查 H3 核對）：真的 adapter 在 `before()` 之後的送出包在
+    `try/finally` 裡，`finally` 一定呼叫 `after(sent=True)`（`BaseException` 也一樣），所以不會有
+    「送了卻被當成沒送」的占用；結清的交易本身失敗（資料庫斷線、行程被砍）時占用留在資料庫，過期後
+    由下一次占用照 `embed_query` 轉成用量（`self._hold` 已經是 None，`close` 不會把它刪掉）。
     """
 
     def __init__(
@@ -1023,6 +1034,7 @@ class _QueryLedger:
             hold_id = create_embedding_quota_hold(
                 connection,
                 self._tokens,
+                operation=EMBED_QUERY_OPERATION,
                 reserved_at=now,
                 expires_at=now + timedelta(seconds=config.run_limit_seconds),
             )
@@ -1042,7 +1054,6 @@ class _QueryLedger:
         hold, self._hold = self._hold, None
         if hold is None:
             return
-        call = None
         if attempt.sent:
             call = EmbeddingApiCall(
                 operation=EMBED_QUERY_OPERATION,
@@ -1051,8 +1062,28 @@ class _QueryLedger:
                 called_at=hold.checked_at,
                 outcome=embedding_call_outcome(attempt.http_status),
             )
+        else:
+            call = self._unsent(hold.checked_at)
         with self._database.transaction() as connection:
             delete_embedding_quota_hold(connection, hold.id, call)
+
+    @staticmethod
+    def _unsent(at: datetime) -> EmbeddingApiCall:
+        return EmbeddingApiCall(
+            operation=EMBED_QUERY_OPERATION,
+            http_status=None,
+            estimated_input_tokens=0,
+            called_at=at,
+            outcome=EmbeddingCallOutcome.NOT_SENT,
+        )
+
+    def close_unsent(self) -> None:
+        """等額度鎖逾時、這次搜尋不送：記一列 `not_sent`（見類別說明）。"""
+        if self._hold is not None:
+            self._after(EmbeddingAttempt(sent=False, http_status=None, billable=False))
+            return
+        with self._database.transaction() as connection:
+            create_embedding_api_call(connection, self._unsent(self._now()))
 
     def close(self, http_status: int | None, *, billable: bool) -> None:
         """provider 回來或丟錯之後：沒結清的占用照整次呼叫的結果記帳（見類別說明）。"""

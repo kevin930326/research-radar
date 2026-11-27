@@ -5,7 +5,7 @@
 - `config/retrieval.yaml` 讀得過、值是寫好的初始值；每種錯誤在讀取時擋下
   （「檔名：欄位路徑：原因」）。
 - 清單範圍換成檢索範圍；結果頁（`RetrievalPage`）與融合結果（`FusedMatch`）的不變條件。
-- 查詢向量的結果代碼（`embedding_call_outcome`）與 `quota_exhausted` 的紀錄條件。
+- 查詢向量的結果代碼（`embedding_call_outcome`）與 `quota_exhausted`、`not_sent` 的紀錄條件。
 
 資料全是測試自己編的。
 """
@@ -295,3 +295,25 @@ def test_outcome_string_is_normalized_and_unknown_is_rejected() -> None:
             called_at=NOW,
             outcome="timeout",  # type: ignore[arg-type]
         )
+
+
+def test_not_sent_record_has_no_status_and_no_tokens() -> None:
+    # 審查 H2：沒有送出的其他失敗（等額度鎖逾時等）也記一列，條件和 quota_exhausted 一樣。
+    record = EmbeddingApiCall(
+        operation=EMBED_QUERY_OPERATION,
+        http_status=None,
+        estimated_input_tokens=0,
+        called_at=NOW,
+        outcome=EmbeddingCallOutcome.NOT_SENT,
+    )
+    assert record.outcome is EmbeddingCallOutcome.NOT_SENT
+
+    for status, tokens in [(200, 0), (None, 6)]:
+        with pytest.raises(ValueError, match="not_sent"):
+            EmbeddingApiCall(
+                operation=EMBED_QUERY_OPERATION,
+                http_status=status,
+                estimated_input_tokens=tokens,
+                called_at=NOW,
+                outcome=EmbeddingCallOutcome.NOT_SENT,
+            )

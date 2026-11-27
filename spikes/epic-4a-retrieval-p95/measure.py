@@ -2,7 +2,8 @@
 （真的模型 `@cf/qwen/qwen3-embedding-0.6b` 的 HNSW 部分索引），量 `services/retrieval.retrieve`
 （搜尋：查詢向量用假 provider 回，不連網路；找相似論文：用存好的向量）每次呼叫的 p50／p95。
 
-- 只連 `RADAR_TEST_ADMIN_DATABASE_URL` 指的測試用 PostgreSQL（不是 55434 就停）；建一個全新的
+- 只連 `RADAR_TEST_ADMIN_DATABASE_URL` 指的測試用 PostgreSQL（解析連線設定，主機不是
+  127.0.0.1／localhost 或埠不是 55434 就停）；建一個全新的
   `radar_test_<亂數>`，量完刪掉。
 - 標題與摘要是從 200 個假字裡隨機挑的；向量是 200 個「主題」方向加上雜訊（同主題的論文彼此相近）。
 - 每種情況先暖身 20 次，再量 200 次。結果寫到 `output/results.json`。
@@ -21,6 +22,9 @@ import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
+
+import psycopg
+from psycopg.conninfo import conninfo_to_dict
 
 from radar.config import load_embedding_config, load_retrieval_config
 from radar.domain.library import AddedVia
@@ -164,9 +168,32 @@ def _measure(call: Callable[[int], RetrievalPage]) -> dict[str, float]:
     }
 
 
-def main() -> None:
-    if ":55434/" not in admin_url():
+ALLOWED_HOSTS = frozenset({"127.0.0.1", "localhost"})
+ALLOWED_PORT = "55434"
+
+
+def require_local_test_database(url: str) -> None:
+    """連線設定解析後，主機（含 `hostaddr`）只能是 127.0.0.1／localhost、埠只能是 55434（審查 M10）。
+
+    只看字串裡有沒有 `:55434/` 擋不住別台主機的 55434；沒寫主機或埠時 libpq 會用環境變數或預設值，
+    也不放行。
+
+    Raises:
+        SystemExit: 不是本機 55434 的測試資料庫（不建庫、不遷移、不刪任何東西）。
+    """
+    try:
+        info = conninfo_to_dict(url)
+    except psycopg.ProgrammingError:
+        sys.exit("連線設定解析不了，不跑")
+    host, port, hostaddr = info.get("host"), info.get("port"), info.get("hostaddr")
+    if host not in ALLOWED_HOSTS or port != ALLOWED_PORT:
         sys.exit("只准連 127.0.0.1:55434 的測試資料庫")
+    if hostaddr is not None and hostaddr != "127.0.0.1":
+        sys.exit("只准連 127.0.0.1:55434 的測試資料庫")
+
+
+def main() -> None:
+    require_local_test_database(admin_url())
     rng = random.Random(SEED)
     embedding = load_embedding_config(CONFIG_ENV)
     retrieval = load_retrieval_config(CONFIG_ENV)

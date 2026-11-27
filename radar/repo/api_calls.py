@@ -36,7 +36,12 @@ from sqlalchemy import (
     text,
 )
 
-from radar.domain.embeddings import EMBED_DOCUMENTS_OPERATION, WORKERS_AI_SOURCE, EmbeddingApiCall
+from radar.domain.embeddings import (
+    EMBED_DOCUMENTS_OPERATION,
+    EMBED_QUERY_OPERATION,
+    WORKERS_AI_SOURCE,
+    EmbeddingApiCall,
+)
 from radar.domain.raw_records import ApiCall, ApiUsage, RawSource
 from radar.domain.viewer import SystemViewer
 from radar.repo.models import Base
@@ -78,7 +83,8 @@ api_call_table = Table(
         name="estimated_input_tokens_iff_workers_ai",
     ),
     CheckConstraint(
-        "outcome IS NULL OR outcome IN ('succeeded', 'unreachable', 'rejected', 'quota_exhausted')",
+        "outcome IS NULL OR outcome IN"
+        " ('succeeded', 'unreachable', 'rejected', 'quota_exhausted', 'not_sent')",
         name="outcome",
     ),
 )
@@ -86,12 +92,14 @@ api_call_table = Table(
 
 # 向量化的額度占用（遷移 0015、ADR-0040）：一次 Workers AI 嘗試送出前占住的估計 token。嘗試結束
 # 就刪掉並換成那次嘗試的 `api_call`；行程中斷留下的占用過了 `expires_at` 由下一次占用轉成用量
-# （當作已計費，記在占用當天）。
+# （當作已計費，記在占用當天，`operation` 照占用記：搜尋的查詢向量是 `embed_query`，遷移 0023）。
 embedding_quota_hold_table = Table(
     "embedding_quota_hold",
     Base.metadata,
     Column("id", Uuid, primary_key=True, server_default=text("uuidv7()")),
     Column("estimated_input_tokens", Integer, nullable=False),
+    # 這筆占用是哪一種請求（遷移 0023）：過期轉成用量時照記。0023 之前的列是 `embed_documents`。
+    Column("operation", Text, nullable=False, server_default=text("'embed_documents'")),
     Column("reserved_at", DateTime(timezone=True), nullable=False),
     Column("expires_at", DateTime(timezone=True), nullable=False),
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
@@ -235,34 +243,53 @@ def delete_expired_embedding_quota_holds(connection: Connection, now: datetime) 
     """把 `expires_at` 已到（≤ `now`）的占用刪掉、各換成一列 `api_call`，回換了幾列。
 
     占用過期代表那次嘗試的行程沒有回來記帳（被砍、資料庫斷線）：不知道對方有沒有算 neurons，
-    照占用的估計 token 記成用量（`http_status` 是 NULL、`called_at` 是占用的時間），保守。
+    照占用的估計 token 記成用量（`http_status` 與 `outcome` 是 NULL、`called_at` 是占用的時間、
+    `operation` 照占用：搜尋的查詢向量記 `embed_query`），保守。
     在呼叫端開好的交易裡做（要先拿額度鎖 `repo/db.EMBEDDING_QUOTA_LOCK_KEY`），不 commit。
     """
     result = connection.execute(
         text(
             "WITH expired AS ("
             "   DELETE FROM embedding_quota_hold WHERE expires_at <= :now"
-            "   RETURNING estimated_input_tokens, reserved_at"
+            "   RETURNING operation, estimated_input_tokens, reserved_at"
             " )"
             " INSERT INTO api_call"
             " (source, operation, http_status, cost_usd, estimated_input_tokens, called_at)"
-            " SELECT :source, :operation, NULL, 0, estimated_input_tokens, reserved_at FROM expired"
+            " SELECT :source, operation, NULL, 0, estimated_input_tokens, reserved_at FROM expired"
         ),
-        {"now": now, "source": WORKERS_AI_SOURCE, "operation": EMBED_DOCUMENTS_OPERATION},
+        {"now": now, "source": WORKERS_AI_SOURCE},
     )
     return int(result.rowcount)
 
 
 def create_embedding_quota_hold(
-    connection: Connection, tokens: int, *, reserved_at: datetime, expires_at: datetime
+    connection: Connection,
+    tokens: int,
+    *,
+    operation: str,
+    reserved_at: datetime,
+    expires_at: datetime,
 ) -> uuid.UUID:
-    """新增一筆占用（`tokens` 個估計 token），回它的 id。在呼叫端開好的交易裡做，不 commit。"""
+    """新增一筆占用（`operation` 這種請求的 `tokens` 個估計 token），回它的 id。在呼叫端開好的
+    交易裡做，不 commit。
+
+    Raises:
+        ValueError: `operation` 不是 `embed_documents` 或 `embed_query`。
+    """
+    if operation not in (EMBED_DOCUMENTS_OPERATION, EMBED_QUERY_OPERATION):
+        raise ValueError(f"不認得的操作：{operation!r}")
     value = connection.execute(
         text(
-            "INSERT INTO embedding_quota_hold (estimated_input_tokens, reserved_at, expires_at)"
-            " VALUES (:tokens, :reserved_at, :expires_at) RETURNING id"
+            "INSERT INTO embedding_quota_hold"
+            " (estimated_input_tokens, operation, reserved_at, expires_at)"
+            " VALUES (:tokens, :operation, :reserved_at, :expires_at) RETURNING id"
         ),
-        {"tokens": tokens, "reserved_at": reserved_at, "expires_at": expires_at},
+        {
+            "tokens": tokens,
+            "operation": operation,
+            "reserved_at": reserved_at,
+            "expires_at": expires_at,
+        },
     ).scalar_one()
     return uuid.UUID(str(value))
 
