@@ -310,7 +310,7 @@ def test_repo_config_file_is_valid_and_matches_the_registered_model() -> None:
     assert config.api.base_url == "https://api.cloudflare.com/client/v4"
     assert config.quota.daily_free_neurons == 10000
     assert config.quota.neurons_per_million_input_tokens == 1075
-    assert config.quota.stop_at_ratio == Decimal("0.9")
+    assert config.quota.stop_at_ratio == Decimal("0.8")
     assert config.quota.verified_on == date(2026, 11, 15)
     assert config.quota.source_url == (
         "https://developers.cloudflare.com/workers-ai/platform/pricing/"

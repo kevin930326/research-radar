@@ -25,6 +25,7 @@ from radar.domain.import_report import ImportBaseline
 from radar.domain.jobs import scheduled_jobs
 from radar.domain.llm_batches import LlmBatchConfig
 from radar.domain.pricing import ModelsConfig
+from radar.domain.retrieval import RetrievalConfig
 from radar.domain.settings import MigrationSettings, Settings, heartbeat_url_field
 from radar.domain.taxonomy import Taxonomy, taxonomy_registry_problems
 from radar.domain.trend_config import TrendConfig
@@ -193,6 +194,9 @@ LLM_BATCHES_FILE = "llm_batches.yaml"
 # 趨勢與覆蓋率的規則設定值（ADR-0011、ADR-0062）：計數方塊的 API 與示範站匯出讀
 # （`load_trend_config`）。
 TREND_FILE = "trend.yaml"
+# 檢索（Story 4.1、ADR-0005）：搜尋、找相似論文、問答的 `services/retrieval.retrieve` 讀
+# （`load_retrieval_config`）。
+RETRIEVAL_FILE = "retrieval.yaml"
 
 
 def config_dir(environ: Mapping[str, str] | None = None) -> Path:
@@ -399,6 +403,22 @@ def load_trend_config(environ: Mapping[str, str] | None = None) -> TrendConfig:
     """
     problems: list[str] = []
     config = _load_yaml_model(config_dir(environ), TREND_FILE, TrendConfig, problems)
+    if problems or config is None:
+        raise ConfigError(problems)
+    return config
+
+
+def load_retrieval_config(environ: Mapping[str, str] | None = None) -> RetrievalConfig:
+    """讀 `RADAR_CONFIG_DIR` 下的 `retrieval.yaml`（相似度下限、每條腿取幾名、RRF 的 k、每頁幾篇、
+    問答取幾篇、查詢字串長度上限）並驗證。
+
+    讀法與錯誤格式和 `load_domain_config` 相同（「檔名：欄位路徑：原因」）。
+
+    Raises:
+        ConfigError: 缺檔、不是合法 YAML、鍵寫兩次或內容不對（例如下限不在 0 到 1 之間、多鍵）。
+    """
+    problems: list[str] = []
+    config = _load_yaml_model(config_dir(environ), RETRIEVAL_FILE, RetrievalConfig, problems)
     if problems or config is None:
         raise ConfigError(problems)
     return config

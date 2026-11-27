@@ -61,6 +61,7 @@ SHARED_TABLES: Mapping[str, str] = {
     "paper": "論文書目",
     "paper_abstract": "論文摘要",
     "paper_keyword": "論文關鍵字",
+    "paper_search_document": "論文的全文檢索資料（觸發器從標題與目前的摘要算出，Story 4.1）",
     "external_id": "論文的外部識別碼（DOI、OpenAlex ID）",
     "snapshot": "資料快照",
     "weekly_run": "每週更新的執行紀錄",

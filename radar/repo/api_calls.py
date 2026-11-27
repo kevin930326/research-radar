@@ -59,6 +59,9 @@ api_call_table = Table(
     # （遷移 0015、ADR-0040）。
     Column("estimated_input_tokens", Integer),
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
+    # 查詢向量（`embed_query`）每次嘗試的結果代碼（遷移 0023、Story 4.1）：分得出「額度用完」
+    # （沒有送出）和「連不上」。背景向量化與 OpenAlex 的列是 NULL。
+    Column("outcome", Text),
     Index("ix_api_call_source_called_at", "source", "called_at"),
     CheckConstraint("source IN ('openalex', 'workers_ai')", name="source"),
     CheckConstraint("operation ~ '^[a-z][a-z0-9_]*$'", name="operation_format"),
@@ -73,6 +76,10 @@ api_call_table = Table(
     CheckConstraint(
         "(source = 'workers_ai') = (estimated_input_tokens IS NOT NULL)",
         name="estimated_input_tokens_iff_workers_ai",
+    ),
+    CheckConstraint(
+        "outcome IS NULL OR outcome IN ('succeeded', 'unreachable', 'rejected', 'quota_exhausted')",
+        name="outcome",
     ),
 )
 
@@ -200,15 +207,18 @@ def create_api_calls(connection: Connection, calls: Sequence[ApiCall]) -> int:
 
 
 def create_embedding_api_call(connection: Connection, call: EmbeddingApiCall) -> None:
-    """記一次向量化請求（`source`＝`workers_ai`、`cost_usd`＝0、估計的輸入 token）。
+    """記一次向量化請求（`source`＝`workers_ai`、`cost_usd`＝0、估計的輸入 token；查詢向量另記
+    結果代碼 `outcome`）。
 
     在呼叫端開好的交易裡做，不 commit（services 用自己的短交易立刻 commit）。
     """
     connection.execute(
         text(
             "INSERT INTO api_call"
-            " (source, operation, http_status, cost_usd, estimated_input_tokens, called_at)"
-            " VALUES (:source, :operation, :http_status, 0, :estimated_input_tokens, :called_at)"
+            " (source, operation, http_status, cost_usd, estimated_input_tokens, called_at,"
+            " outcome)"
+            " VALUES (:source, :operation, :http_status, 0, :estimated_input_tokens, :called_at,"
+            " :outcome)"
         ),
         {
             "source": WORKERS_AI_SOURCE,
@@ -216,6 +226,7 @@ def create_embedding_api_call(connection: Connection, call: EmbeddingApiCall) ->
             "http_status": call.http_status,
             "estimated_input_tokens": call.estimated_input_tokens,
             "called_at": call.called_at,
+            "outcome": None if call.outcome is None else call.outcome.value,
         },
     )
 

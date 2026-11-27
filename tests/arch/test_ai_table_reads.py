@@ -286,7 +286,11 @@ def test_view_read_scanner_catches_reads_outside_the_allowlist() -> None:
 # 加進這裡並檢查這一點。
 PAPER_FILTERS_MODULE = "radar.repo.paper_filters"
 PAPER_FILTERS_NAME = "CLASSIFICATION_KEYS"
-PAPER_FILTERS_USERS = frozenset({"radar/repo/stats.py", "radar/repo/paper_list.py"})
+# 檢索（Story 4.1）：`repo/retrieval.py` 經 `paper_filters._field_conditions` 用到同一個片段，
+# 兩條腿都接 `visible_papers`。
+PAPER_FILTERS_USERS = frozenset(
+    {"radar/repo/stats.py", "radar/repo/paper_list.py", "radar/repo/retrieval.py"}
+)
 
 
 def _module_of(relative: str) -> str:

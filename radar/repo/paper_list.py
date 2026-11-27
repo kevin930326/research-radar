@@ -6,7 +6,8 @@
   （`visibility.visible_library_items`）。三種都再接 `visibility.visible_papers(viewer)`。
 - 條件：期刊、年份多值是「或」（`= ANY`）；主題、方法多值預設是「或」、`MatchMode.ALL` 時是「且」
   （Story 3.20、ADR-0011 的 2026-11-27 更新）：每個欄位只接一次
-  `repo/paper_filters.CLASSIFICATION_KEYS`（和計數方塊的 `topic`、`method` 格同一個片段），
+  `repo/paper_filters.CLASSIFICATION_KEYS`（這些條件由 `paper_filters._field_conditions` 組，和檢索
+  共用，Story 4.1）（和計數方塊的 `topic`、`method` 格同一個片段），
   `key = ANY(:keys)`。「或」取有任一個 key 的論文（`DISTINCT`）；「且」依論文分組、
   `HAVING count(*) = 給的值的個數`（片段對同一篇同一個 key 只有
   一列，所以數到的個數就是符合的 key 數）。兩種結果都包成 `ARRAY(...)`，論文 `id = ANY(那個陣列)`：
@@ -26,10 +27,9 @@ from typing import Any, Final
 
 from sqlalchemy import Connection, text
 
-from radar.domain.paper_list import MatchMode, PaperListCursor, PaperListFilters, PaperListScope
-from radar.domain.taxonomy import TaxonomyField
+from radar.domain.paper_list import PaperListCursor, PaperListFilters, PaperListScope
 from radar.domain.viewer import Viewer
-from radar.repo.paper_filters import CLASSIFICATION_KEYS
+from radar.repo.paper_filters import _field_conditions
 from radar.repo.visibility import visible_lab_papers, visible_library_items, visible_papers
 
 # 查詢裡論文（`counted_paper` 或 `paper`）的別名；兩種來源用同一個，條件才能共用。
@@ -37,39 +37,12 @@ _ALIAS: Final = "listed"
 _ORDER: Final = f" ORDER BY {_ALIAS}.publication_year DESC NULLS LAST, {_ALIAS}.id DESC"
 
 
-def _all_keys_condition(field: TaxonomyField, param: str) -> str:
-    """論文的有效分類在 `field` 同時有 `:param`（key 的陣列，不重複）裡的每一個 key（「且」）；
-    `:{param}_count` 是陣列的長度。
-
-    寫成 `id = ANY(ARRAY(子查詢))`、不寫 `id IN (子查詢)`：`IN` 的寫法規劃器把 `HAVING` 估成 1 列，
-    選了巢狀迴圈、一再重算整個有效分類（一萬篇要 20 秒以上，量過）；`ARRAY(...)` 一定只算一次。
-    """
-    return (
-        f"{_ALIAS}.id = ANY(ARRAY(SELECT classification_key.paper_id"
-        f" FROM ({CLASSIFICATION_KEYS}) AS classification_key"
-        f" WHERE classification_key.field = '{TaxonomyField(field).value}'"
-        f" AND classification_key.key = ANY(:{param})"
-        f" GROUP BY classification_key.paper_id HAVING count(*) = :{param}_count))"
-    )
-
-
-def _any_key_condition(field: TaxonomyField, param: str) -> str:
-    """論文的有效分類在 `field` 有 `:param`（key 的陣列）裡的任一個 key（「或」）。寫法和
-    `_all_keys_condition` 一樣包成 `ARRAY(...)`（只算一次），差在不分組、不數個數。"""
-    return (
-        f"{_ALIAS}.id = ANY(ARRAY(SELECT DISTINCT classification_key.paper_id"
-        f" FROM ({CLASSIFICATION_KEYS}) AS classification_key"
-        f" WHERE classification_key.field = '{TaxonomyField(field).value}'"
-        f" AND classification_key.key = ANY(:{param})))"
-    )
-
-
 def _conditions(
     viewer: Viewer, filters: PaperListFilters, current_snapshot_id: uuid.UUID | None
 ) -> tuple[str, dict[str, Any]]:
-    """範圍與篩選的 SQL 條件（接在可見條件後面，以 AND 開頭）與參數。"""
+    """範圍與篩選的 SQL 條件（接在可見條件後面，以 AND 開頭）與參數。篩選條件和檢索共用
+    （`repo/paper_filters._field_conditions`，Story 4.1）。"""
     parts: list[str] = []
-    params: dict[str, Any] = {}
     match filters.scope:
         case PaperListScope.TRACKED:
             pass  # `counted_paper` 本身就排除了被排除的、範圍外的、快照沒發佈的
@@ -85,36 +58,8 @@ def _conditions(
                 "EXISTS (SELECT 1 FROM library_item AS listed_item"
                 f" WHERE listed_item.paper_id = {_ALIAS}.id AND {mine})",
             ]
-    if filters.journal_issn_ls:
-        parts.append(f"{_ALIAS}.journal_issn_l = ANY(:journals)")
-        params["journals"] = list(filters.journal_issn_ls)
-    if filters.years:
-        parts.append(f"{_ALIAS}.publication_year = ANY(:years)")
-        params["years"] = list(filters.years)
-    for field, param, keys, mode in (
-        (TaxonomyField.TOPIC, "topics", filters.topics, filters.topic_match),
-        (TaxonomyField.METHOD, "methods", filters.methods, filters.method_match),
-    ):
-        if not keys:
-            continue
-        params[param] = list(keys)
-        if mode is MatchMode.ALL:  # 已去重（`PaperListFilters`），個數就是要同時符合的 key 數
-            parts.append(_all_keys_condition(field, param))
-            params[f"{param}_count"] = len(keys)
-        else:
-            parts.append(_any_key_condition(field, param))
-    if filters.has_abstract is not None:
-        current = (
-            "EXISTS (SELECT 1 FROM paper_abstract AS listed_abstract"
-            f" WHERE listed_abstract.paper_id = {_ALIAS}.id AND listed_abstract.is_current)"
-        )
-        parts.append(current if filters.has_abstract else f"NOT {current}")
-    if filters.this_week:
-        if current_snapshot_id is None:
-            parts.append("FALSE")  # 還沒有已發佈的快照：沒有「本週新增」
-        else:
-            parts.append(f"{_ALIAS}.first_snapshot_id = :snapshot_id")
-            params["snapshot_id"] = current_snapshot_id
+    fields, params = _field_conditions(filters, current_snapshot_id, alias=_ALIAS)
+    parts += fields
     return "".join(f" AND {part}" for part in parts), params
 
 

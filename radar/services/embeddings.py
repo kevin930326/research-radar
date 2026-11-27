@@ -56,16 +56,19 @@ import uuid
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 
 import structlog
 
 from radar.domain.embeddings import (
     EMBED_DOCUMENTS_OPERATION,
+    EMBED_QUERY_OPERATION,
     EMBED_SEPARATOR,
     AttemptHooks,
     EmbeddingApiCall,
     EmbeddingAttempt,
     EmbeddingBacklog,
+    EmbeddingCallOutcome,
     EmbeddingCandidate,
     EmbeddingConfig,
     EmbeddingConfigurationError,
@@ -80,6 +83,7 @@ from radar.domain.embeddings import (
     NoEmbeddingInputError,
     build_embedding_input,
     check_embedding_vectors,
+    embedding_call_outcome,
     estimate_embedding_tokens,
     is_zero_at_halfvec,
     quota_allows,
@@ -94,12 +98,15 @@ from radar.domain.policy import (
     CloudPolicy,
     CloudSafeText,
     clear_for_cloud,
+    cloud_text,
     join_cloud_safe_texts,
 )
 from radar.domain.processing import ProcessingTask, plan_for
+from radar.domain.retrieval import SearchEmbeddingUnavailableError, SearchQuotaExhaustedError
 from radar.domain.viewer import SystemViewer, Viewer
 from radar.ports import EmbeddingProvider
 from radar.repo.api_calls import (
+    create_embedding_api_call,
     create_embedding_quota_hold,
     delete_embedding_quota_hold,
     delete_expired_embedding_quota_holds,
@@ -853,3 +860,205 @@ class _BatchRunner:
             log.warning(
                 "把向量化的 derivation_run 改成 failed 也失敗", error_type=type(cleanup).__name__
             )
+
+
+# --- 搜尋的查詢向量（Story 4.1、ADR-0005 的「2026-11 實作更新」） -------------------------------
+
+
+def embed_search_query(
+    actor: Viewer,
+    database: Database,
+    provider: EmbeddingProvider,
+    config: EmbeddingConfig,
+    text: CloudSafeText,
+    *,
+    clock: Callable[[], datetime],
+) -> list[float]:
+    """把搜尋的查詢轉成向量（`provider.embed_query`），和背景向量化記在同一本帳（`api_call`，
+    operation `embed_query`、每次嘗試一列，帶結果代碼 `outcome`）、共用同一套額度占用。
+
+    - 額度：搜尋可以用到每日免費額度的 100%（背景向量化停在 `stop_at_ratio`，留給搜尋）。送出前
+      在額度鎖內占住這次的估計 token（查詢文字＋設定的指示文字），放不下就不送：記一列
+      `quota_exhausted`（估計 token 0、沒有狀態碼）、寫一筆警告日誌、丟
+      `SearchQuotaExhaustedError`。兩個請求同時搶最後的額度時，額度鎖讓它們排隊，只有放得下的那個
+      送出（占用在帳上，另一個看得到）。
+    - 每次嘗試後把占用換成一列 `api_call`：`succeeded`、`unreachable`（沒有回應，或 408、429、
+      5xx）、`rejected`（其他 4xx）。替身（不回報嘗試）整次呼叫當成一次嘗試記。
+    - 回來的向量當作使用者輸入驗（筆數、維度＝設定的維度、數字有限、不是全 0）。
+    - 任何一種失敗都不降級成只用關鍵字：額度用完丟 `SearchQuotaExhaustedError`，其他（連不上、
+      設定錯、回應不對、等額度鎖逾時）丟 `SearchEmbeddingUnavailableError`。日誌不記查詢內容。
+
+    `actor` 是發出搜尋的讀者身分（只用來表明這次寫帳是誰的請求；寫的是共用的用量帳，不看權限）。
+
+    Raises:
+        EmbeddingModelMismatchError: provider 的模型和設定不同（沒送任何請求）。
+        SearchQuotaExhaustedError: 今天的額度放不下這次查詢。
+        SearchEmbeddingUnavailableError: 其他原因沒能轉成向量。
+    """
+    del actor  # 用量帳是全站共用的，不分讀者（AD-25）。
+    if provider.model_id != config.model_id:
+        raise EmbeddingModelMismatchError(
+            "provider 的模型和 config/embeddings.yaml 的 model_id 不同"
+        )
+    texts = [cloud_text(text)]
+    if config.query_instruction is not None:
+        texts.append(config.query_instruction)
+    ledger = _QueryLedger(
+        database, config, clock, estimate_embedding_tokens(texts, config.token_estimate)
+    )
+    try:
+        ledger.start()
+        with report_attempts_to(ledger.hooks):
+            raw = provider.embed_query(text)
+    except EmbeddingQuotaReachedError:
+        ledger.close(None, billable=False)
+        raise SearchQuotaExhaustedError() from None
+    except SearchQuotaExhaustedError:
+        raise
+    except LockWaitTimeoutError:
+        ledger.close(None, billable=False)
+        log.warning("查詢向量等額度鎖逾時，這次搜尋不送")
+        raise SearchEmbeddingUnavailableError() from None
+    except EmbeddingError as exc:
+        ledger.close(exc.http_status, billable=not isinstance(exc, EmbeddingConfigurationError))
+        log.warning(
+            "查詢向量沒有轉成功，搜尋回固定的錯誤（不降級成只用關鍵字）",
+            error_code=exc.code.value,
+            http_status=exc.http_status,
+        )
+        raise SearchEmbeddingUnavailableError() from None
+    except BaseException:
+        ledger.close(None, billable=True)
+        raise
+    ledger.close(200, billable=True)
+    try:
+        (vector,) = check_embedding_vectors(
+            [raw], count=1, dimensions=config.dimensions, allow_zero=False
+        )
+    except EmbeddingError as exc:
+        log.warning("查詢向量的回應不對，搜尋回固定的錯誤", error_code=exc.code.value)
+        raise SearchEmbeddingUnavailableError() from None
+    return vector
+
+
+class _QueryLedger:
+    """一次 `embed_query` 的額度占用與記帳（做法同 `_AttemptLedger`，額度用到 100%）。
+
+    - `start`：送出前在額度鎖內占住（放不下就記一列 `quota_exhausted` 並丟
+      `SearchQuotaExhaustedError`）。
+    - adapter 每次嘗試前 `hooks.before`：第一次沿用 `start` 的占用（跨過 UTC 午夜就照新的一天
+      重查），之後每次重試再占一次；放不下記一列 `quota_exhausted`、丟
+      `EmbeddingQuotaReachedError`。
+    - adapter 每次嘗試後 `hooks.after`：刪掉占用、記一列這次嘗試的 `api_call`（帶結果代碼）；
+      沒送出只放掉占用。
+    - provider 回來或丟錯之後 `close`：從沒回報過嘗試（替身）就把整次呼叫當成一次嘗試記帳；回報過
+      卻還留著占用（那次嘗試沒送出）就只放掉。
+    """
+
+    def __init__(
+        self,
+        database: Database,
+        config: EmbeddingConfig,
+        clock: Callable[[], datetime],
+        tokens: int,
+    ) -> None:
+        self._database = database
+        self._config = config
+        # 搜尋可以用到 100%：只改停下的比例，其他數字照設定。
+        self._quota = config.quota.model_copy(update={"stop_at_ratio": Decimal(1)})
+        self._clock = clock
+        self._tokens = tokens
+        self._hold: _Hold | None = None
+        self._reported = False
+        self.hooks = AttemptHooks(before=self._before, after=self._after)
+
+    def _now(self) -> datetime:
+        now = self._clock()
+        if now.tzinfo is None or now.utcoffset() is None:
+            raise ValueError("時鐘回的時間要帶時區")
+        return now
+
+    def start(self) -> None:
+        """送出前占住這次的額度。
+
+        Raises:
+            SearchQuotaExhaustedError: 放不下（已記一列 `quota_exhausted`）。
+            LockWaitTimeoutError: 等額度鎖逾時。
+        """
+        hold = self._reserve(None)
+        if hold is None:
+            raise SearchQuotaExhaustedError()
+        self._hold = hold
+
+    def _reserve(self, current: _Hold | None) -> _Hold | None:
+        config = self._config
+        with self._database.transaction_with_lock_timeout(config.lock_timeout_ms) as connection:
+            Database.transaction_lock(connection, EMBEDDING_QUOTA_LOCK_KEY)
+            now = self._now()
+            day_start = _utc_day_start(now)
+            if current is not None:
+                if _utc_day_start(current.checked_at) == day_start:
+                    return _Hold(current.id, now)
+                delete_embedding_quota_hold(connection, current.id, None)
+            delete_expired_embedding_quota_holds(connection, now)
+            used, held = get_embedding_quota_usage(SystemViewer(), connection, day_start)
+            if not quota_allows(used + held, self._tokens, self._quota):
+                create_embedding_api_call(
+                    connection,
+                    EmbeddingApiCall(
+                        operation=EMBED_QUERY_OPERATION,
+                        http_status=None,
+                        estimated_input_tokens=0,
+                        called_at=now,
+                        outcome=EmbeddingCallOutcome.QUOTA_EXHAUSTED,
+                    ),
+                )
+                log.warning(
+                    "Workers AI 今天的額度用完了，搜尋回固定的錯誤（不降級成只用關鍵字）",
+                    used_tokens=used,
+                    held_tokens=held,
+                    next_tokens=self._tokens,
+                )
+                return None
+            hold_id = create_embedding_quota_hold(
+                connection,
+                self._tokens,
+                reserved_at=now,
+                expires_at=now + timedelta(seconds=config.run_limit_seconds),
+            )
+        return _Hold(hold_id, now)
+
+    def _before(self) -> None:
+        first = not self._reported
+        self._reported = True
+        hold = self._reserve(self._hold if first else None)
+        if hold is None:
+            self._hold = None
+            raise EmbeddingQuotaReachedError()
+        self._hold = hold
+
+    def _after(self, attempt: EmbeddingAttempt) -> None:
+        self._reported = True
+        hold, self._hold = self._hold, None
+        if hold is None:
+            return
+        call = None
+        if attempt.sent:
+            call = EmbeddingApiCall(
+                operation=EMBED_QUERY_OPERATION,
+                http_status=attempt.http_status,
+                estimated_input_tokens=self._tokens if attempt.billable else 0,
+                called_at=hold.checked_at,
+                outcome=embedding_call_outcome(attempt.http_status),
+            )
+        with self._database.transaction() as connection:
+            delete_embedding_quota_hold(connection, hold.id, call)
+
+    def close(self, http_status: int | None, *, billable: bool) -> None:
+        """provider 回來或丟錯之後：沒結清的占用照整次呼叫的結果記帳（見類別說明）。"""
+        if self._hold is None:
+            return
+        if self._reported:
+            self._after(EmbeddingAttempt(sent=False, http_status=None, billable=False))
+        else:
+            self._after(EmbeddingAttempt(sent=True, http_status=http_status, billable=billable))
