@@ -8,6 +8,7 @@ import AxeBuilder from "@axe-core/playwright";
 import type { Page } from "@playwright/test";
 
 import { MEMBERS, gate } from "./api-mock.ts";
+import { axeSourceFor } from "./axe-source.ts";
 import { TEXT } from "./expected.ts";
 import { expect, test } from "./fixtures.ts";
 import { expectValidLanding, recordDocumentResponses } from "./landing.ts";
@@ -64,7 +65,7 @@ async function isSameDocument(page: Page): Promise<boolean> {
 
 async function axeViolations(page: Page): Promise<string[]> {
   // 不檢查 Base UI 的焦點守衛（ADR-0037 第 5 點；Safari 上它還帶 role=button，axe 會誤報沒有名稱）。
-  const results = await new AxeBuilder({ page }).withTags(TAGS).exclude("[data-base-ui-focus-guard]").analyze();
+  const results = await new AxeBuilder({ page, axeSource: axeSourceFor(page) }).withTags(TAGS).exclude("[data-base-ui-focus-guard]").analyze();
   return results.violations.map((violation) => `${violation.id}: ${violation.help}`);
 }
 

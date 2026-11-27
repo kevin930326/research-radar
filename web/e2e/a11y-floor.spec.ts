@@ -11,6 +11,7 @@
 import AxeBuilder from "@axe-core/playwright";
 import type { Page } from "@playwright/test";
 
+import { axeSourceFor } from "./axe-source.ts";
 import { expect, test } from "./fixtures.ts";
 import { A11Y_SITES, MISSING_PATH } from "./pages.ts";
 
@@ -218,7 +219,7 @@ for (const site of A11Y_SITES) {
       test(`${site.name} ${path}: no axe violations`, async ({ page }) => {
         await page.goto(url);
         await expect(page.locator("main h1")).toBeVisible();
-        const results = await new AxeBuilder({ page }).withTags(TAGS).analyze();
+        const results = await new AxeBuilder({ page, axeSource: axeSourceFor(page) }).withTags(TAGS).analyze();
         expect(results.violations.map((violation) => `${violation.id}: ${violation.help}`)).toEqual([]);
       });
 
@@ -238,7 +239,7 @@ for (const site of A11Y_SITES) {
           // 不檢查 Base UI 的焦點守衛：它是 tabindex=0＋aria-hidden 的 span（data-base-ui-focus-guard），
           // 焦點一進來就由 React 代收的 focus 事件轉走，axe 看不到這段處理，會誤判成 aria-hidden-focus。
           // 之前能過是因為 axe 把 role=dialog 當成模態而判成「無法判定」，不是真的沒問題。
-          const results = await new AxeBuilder({ page }).withTags(TAGS).exclude("[data-base-ui-focus-guard]").analyze();
+          const results = await new AxeBuilder({ page, axeSource: axeSourceFor(page) }).withTags(TAGS).exclude("[data-base-ui-focus-guard]").analyze();
           expect(
             results.violations.map(
               (violation) =>
