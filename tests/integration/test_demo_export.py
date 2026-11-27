@@ -1845,6 +1845,136 @@ def test_takeover_log_says_what_happened_to_the_directory(
     assert says in taken_over
 
 
+@pytest.mark.parametrize("error", [KeyboardInterrupt(), OSError(errno.EIO, "disk")], ids=type)
+def test_unreadable_manifest_after_the_rename_is_treated_as_published(
+    db: TestDatabase,
+    database: Database,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    error: BaseException,
+) -> None:
+    # epic-3m PR A（Opus 確認新高 1、Codex 第 5 次複查 K1 部分）：manifest 換名成功之後停下（中斷，
+    # 或換名那一下回報錯誤），而且之後每次讀 manifest 都失敗（不知道換了沒有）：當成已發佈，不記
+    # 失敗、留在 running，這次寫好的目錄留著；之後補排時補記成功、不重寫（Kevin 2026-11-26 決定）。
+    snapshots = publish_snapshots(db)
+    seed_papers(db, database, [PaperSpec("a", 1)], snapshots=snapshots)
+    switched: list[bool] = []
+    real_replace, real_read = service._replace_file, service._read_manifest
+
+    def replace_then_stop(*args: Any) -> None:
+        real_replace(*args)
+        switched.append(True)
+        raise error
+
+    def read(out: Any) -> Any:
+        if switched:
+            raise OSError(errno.EIO, "unreadable")
+        return real_read(out)
+
+    monkeypatch.setattr(service, "_replace_file", replace_then_stop)
+    monkeypatch.setattr(service, "_read_manifest", read)
+    run = queue_demo_export(SYSTEM, database)
+
+    expected = (
+        DemoExportPublishedUnrecordedError if isinstance(error, Exception) else KeyboardInterrupt
+    )
+    with capture_logs() as logs, pytest.raises(expected):
+        run_demo_export(SYSTEM, database, demo_setup(), run.id, tmp_path, clock=_clock)
+
+    assert switched == [True]
+    written = _files(tmp_path)
+    assert json.loads(written[MANIFEST_FILE])["export_id"] == "2-1"
+    assert sorted(path.name for path in (tmp_path / PREVIEW_DIR).iterdir()) == [
+        "2-1",
+        MANIFEST_FILE,
+    ]
+    assert _rows(db) == [(1, "running", None)]
+    events = [entry["event"] for entry in logs]
+    assert any("不知道換了沒有：當成已發佈待補記" in event for event in events)
+    assert any("沒有記上成功；sweep 補排時會補記" in event for event in events)
+    assert not any(event == "示範站匯出失敗" for event in events)
+    monkeypatch.undo()
+    _make_stale(db)
+
+    result = run_demo_export(SYSTEM, database, demo_setup(), run.id, tmp_path, clock=_clock)
+
+    assert result is not None
+    assert result.export_id == "2-1"
+    assert _files(tmp_path) == written
+    assert _rows(db) == [(1, "succeeded", None)]
+
+
+def test_failure_before_the_manifest_rename_still_removes_the_directory_when_unreadable(
+    db: TestDatabase, database: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # epic-3m PR A：還沒開始換 manifest 的名就失敗（寫暫存 manifest 時出錯）＝確定沒換。之後讀
+    # manifest 也失敗時行為不變：這次寫好的目錄刪掉、manifest 沒有出現，記成 error。
+    snapshots = publish_snapshots(db)
+    seed_papers(db, database, [PaperSpec("a", 1)], snapshots=snapshots)
+    failed: list[bool] = []
+    real_write, real_read = service._write_file, service._read_manifest
+
+    def write(directory_fd: int, name: str, content: bytes) -> None:
+        if name.startswith(f".{MANIFEST_FILE}.tmp-"):
+            failed.append(True)
+            raise OSError(errno.EIO, "disk")
+        real_write(directory_fd, name, content)
+
+    def read(out: Any) -> Any:
+        if failed:
+            raise OSError(errno.EIO, "unreadable")
+        return real_read(out)
+
+    monkeypatch.setattr(service, "_write_file", write)
+    monkeypatch.setattr(service, "_read_manifest", read)
+    run = queue_demo_export(SYSTEM, database)
+
+    with pytest.raises(OSError, match="disk"):
+        run_demo_export(SYSTEM, database, demo_setup(), run.id, tmp_path, clock=_clock)
+
+    assert failed == [True]
+    assert list((tmp_path / PREVIEW_DIR).iterdir()) == []
+    assert _rows(db) == [(1, "failed", "error")]
+
+
+def test_takeover_log_says_the_written_directory_was_moved_away(
+    db: TestDatabase, database: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # epic-3m PR A（Opus 確認新中 1）：寫好 2-1 之後有人把它搬走（沒有換進別的目錄），接著換
+    # manifest 前發現被接手：被接手的日誌寫「寫過、但目錄已經不在原位」，不寫「這次還沒寫匯出
+    # 目錄」；搬走的目錄不動。
+    snapshots = publish_snapshots(db)
+    seed_papers(db, database, [PaperSpec("a", 1)], snapshots=snapshots)
+    preview = tmp_path / PREVIEW_DIR
+    moved = tmp_path / "moved-2-1"
+    real_write = service._write_export_dir
+
+    def write_then_move(*args: Any) -> None:
+        real_write(*args)
+        (preview / "2-1").rename(moved)
+
+    real_owned = update_demo_export_if_owned
+    calls: list[int] = []
+
+    def owned(connection: Any, demo_export_id: Any, token: Any) -> bool:
+        calls.append(1)
+        return False if len(calls) == 5 else bool(real_owned(connection, demo_export_id, token))
+
+    monkeypatch.setattr(service, "_write_export_dir", write_then_move)
+    monkeypatch.setattr(service, "update_demo_export_if_owned", owned)
+    run = queue_demo_export(SYSTEM, database)
+
+    with capture_logs() as logs, pytest.raises(DemoExportTakenOverError):
+        run_demo_export(SYSTEM, database, demo_setup(), run.id, tmp_path, clock=_clock)
+
+    assert any(moved.iterdir())
+    assert list(preview.iterdir()) == []
+    (taken_over,) = [entry["event"] for entry in logs if "被別的行程接手" in entry["event"]]
+    assert "這次寫過匯出目錄，但目錄已經不在原位" in taken_over
+    assert "這次還沒寫匯出目錄" not in taken_over
+    assert _rows(db) == [(1, "running", None)]
+
+
 def test_fsync_failure_right_after_the_directory_rename_removes_the_directory(
     db: TestDatabase, database: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
