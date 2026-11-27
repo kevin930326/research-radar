@@ -45,8 +45,9 @@ api:
 
 # 搜尋的查詢向量（embed_query）自己的時限與重試（Story 4.1 PR B）。上面的 api 是為背景整批向量化
 # 設的（總時限 480 秒），搜尋的人在等，NFR-19 的 2 秒以這一段為主，所以另用較短的數字。
-# 三個數字只准比 api 的同名數字短或少（讀檔時核對，api 行程啟動時要有這一段）；退避與
-# Retry-After 的上限沿用 api.retry。超過時限一樣算「連不上」（search_embedding_unavailable）。
+# 總時限一定要比 api.total_timeout_seconds 短，逾時與次數不能比 api 的長或多（讀檔時核對，api 行程
+# 啟動時要有這一段）；退避與 Retry-After 的上限沿用 api.retry。超過時限一樣算「連不上」
+# （search_embedding_unavailable）。
 # 對方正常回標頭時，一次查詢最久 = total_timeout_seconds ＋ 2 × timeout_seconds（3＋4＝7 秒）。
 query_request:
   timeout_seconds: 2

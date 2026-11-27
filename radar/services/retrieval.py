@@ -20,7 +20,9 @@
   `has_abstract`、`this_week` 和找論文清單同一套；`filters.scope` 要和 `scope` 同名（`demo` 時要是
   預設的 `tracked`），對不上就丟錯（不默默以其中一個為準）。
 - 結果：融合後全部的結果（最多 2 × `leg_limit` 篇）在 Python 切出 `offset` 之後的 `k` 篇；`total` 是
-  融合後的篇數。兩者出自同一句查詢，所以 `total` 等於翻得到的篇數。
+  融合後的篇數。兩者出自同一句查詢，所以 `total` 等於翻得到的篇數。結果帶著排名那個交易讀到的
+  已發佈快照（`RetrievalPage.snapshot`；找相似論文的起點沒有向量時也照樣讀），呼叫端的回應用它，
+  不另外重讀（PR B 審查 M3）。
 
 `setup` 由行程啟動時讀好的設定組成（services 不讀設定檔）。
 """
@@ -46,6 +48,7 @@ from radar.domain.retrieval import (
     clean_search_query,
     query_log_facts,
 )
+from radar.domain.snapshot import Snapshot
 from radar.domain.viewer import PublicViewer, SystemViewer, Viewer
 from radar.ports import EmbeddingProvider
 from radar.repo.db import Database
@@ -143,9 +146,9 @@ def retrieve(
         raise ValueError("filters.scope 和 scope 對不上")
 
     if paper_id is not None:
-        matches = _similar(viewer, database, setup, paper_id, scope, filters)
+        matches, snapshot = _similar(viewer, database, setup, paper_id, scope, filters)
     else:
-        matches = _search(viewer, database, setup, query, scope, filters)
+        matches, snapshot = _search(viewer, database, setup, query, scope, filters)
     page = matches[offset : offset + k]
     return RetrievalPage(
         hits=tuple(
@@ -160,6 +163,7 @@ def retrieve(
         total=len(matches),
         offset=offset,
         k=k,
+        snapshot=snapshot,
     )
 
 
@@ -170,7 +174,7 @@ def _search(
     query: object,
     scope: RetrievalScope,
     filters: PaperListFilters,
-) -> list[FusedMatch]:
+) -> tuple[list[FusedMatch], Snapshot | None]:
     config = setup.retrieval
     text = clean_search_query(query, max_length=config.query_max_length)
     log.info("檢索：搜尋", scope=scope.value, **query_log_facts(text))
@@ -181,7 +185,7 @@ def _search(
     )
     with database.read_only_snapshot_transaction() as connection:
         snapshot = find_latest_published_snapshot(SystemViewer(), connection)
-        return search_papers(
+        matches = search_papers(
             viewer,
             connection,
             model_id=setup.embedding.model_id,
@@ -194,6 +198,7 @@ def _search(
             rrf_k=config.rrf_k,
             max_distance=config.vector_max_distance,
         )
+    return matches, snapshot
 
 
 def _similar(
@@ -203,7 +208,7 @@ def _similar(
     paper_id: uuid.UUID,
     scope: RetrievalScope,
     filters: PaperListFilters,
-) -> list[FusedMatch]:
+) -> tuple[list[FusedMatch], Snapshot | None]:
     config = setup.retrieval
     model_id = setup.embedding.model_id
     with database.read_only_snapshot_transaction() as connection:
@@ -211,10 +216,10 @@ def _similar(
         if anchor is None:
             raise RetrievalAnchorNotFoundError()
         log.info("檢索：找相似論文", scope=scope.value, has_vector=anchor.embedding is not None)
-        if anchor.embedding is None:
-            return []
         snapshot = find_latest_published_snapshot(SystemViewer(), connection)
-        return search_papers(
+        if anchor.embedding is None:
+            return [], snapshot
+        matches = search_papers(
             viewer,
             connection,
             model_id=model_id,
@@ -228,3 +233,4 @@ def _similar(
             max_distance=config.vector_max_distance,
             exclude_paper_id=paper_id,
         )
+    return matches, snapshot

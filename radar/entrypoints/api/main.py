@@ -112,18 +112,21 @@ def main() -> int:
         embedding_config = load_embedding_config()
         if embedding_config.query_request is None:
             raise ConfigError(["embeddings.yaml：query_request：api 行程要有查詢向量自己的時限"])
+        # Cloudflare 金鑰（PR B 審查 M6）：兩個都有 → 搜尋照常；兩個都沒有 → 照常啟動、寫一筆警告，
+        # 搜尋回 search_embedding_unavailable、找相似論文照常（本機開發、CI、只看論文的部署都沒有
+        # 金鑰）；只有一個 → 設定寫錯，不啟動（訊息只有變數名稱、不含值）。
+        key_fields = ("cloudflare_account_id", "cloudflare_api_token")
+        missing = [env_name(field) for field in key_fields if getattr(settings, field) is None]
         embedding_provider = None
-        if settings.cloudflare_account_id is None or settings.cloudflare_api_token is None:
-            # 不擋啟動（本機開發、CI、只看論文的部署都沒有金鑰）；搜尋回
-            # search_embedding_unavailable，找相似論文照常。
+        if len(missing) == len(key_fields):
             log.warning(
                 "沒有 Cloudflare 金鑰，搜尋會回 search_embedding_unavailable",
                 service="api",
-                missing=[
-                    env_name(field)
-                    for field in ("cloudflare_account_id", "cloudflare_api_token")
-                    if getattr(settings, field) is None
-                ],
+                missing=missing,
+            )
+        elif missing:
+            raise ConfigError(
+                [f"缺少環境變數 {name}（Cloudflare 的兩個金鑰要一起設定）" for name in missing]
             )
         else:
             embedding_provider = build_embedding_provider(settings, embedding_config)

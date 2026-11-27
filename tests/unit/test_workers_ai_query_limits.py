@@ -176,6 +176,76 @@ def test_query_succeeds_within_its_limits() -> None:
     assert _provider(handler, clock).embed_query(_query("trust in platforms")) == _vectors(1)[0]
 
 
+def _late_end(clock: _FakeClock, *, late_by: float) -> Any:
+    """回 200、完整的 JSON 一塊就送到（時限內），但回應拖了 `late_by` 秒才結束（撥假時鐘）。"""
+    body = json.dumps(_envelope(_vectors(1))).encode()
+
+    def stream() -> Iterator[bytes]:
+        yield body
+        clock.now += late_by
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(200, content=stream())
+
+    return handler
+
+
+def test_query_response_that_ends_after_the_deadline_is_a_timeout() -> None:
+    # 審查 M1：JSON 在時限內送完，回應卻在 3 秒的總時限之後才結束：不算成功，當成逾時（不帶狀態碼，
+    # 記帳是 unreachable）；不再重試（已經沒有時間）。
+    clock = _FakeClock()
+    hooks = _Hooks()
+
+    with report_attempts_to(hooks.hooks()), pytest.raises(EmbeddingTransientError) as caught:
+        _provider(_late_end(clock, late_by=5), clock).embed_query(_query("trust in platforms"))
+
+    assert caught.value.http_status is None
+    assert "總時限" in str(caught.value)
+    assert hooks.attempts == [EmbeddingAttempt(sent=True, http_status=None, billable=True)]
+
+
+def test_query_response_that_ends_within_the_deadline_succeeds() -> None:
+    clock = _FakeClock()
+
+    vector = _provider(_late_end(clock, late_by=1), clock).embed_query(_query("trust"))
+
+    assert vector == _vectors(1)[0]
+
+
+def test_query_slow_trickle_past_the_deadline_has_no_status() -> None:
+    # 讀到一半就過總時限（查詢）：一樣不帶狀態碼（回應沒有在時限內讀完＝逾時）。
+    clock = _FakeClock()
+    body = json.dumps(_envelope(_vectors(1))).encode()
+
+    def trickle() -> Iterator[bytes]:
+        for start in range(0, len(body), 8):
+            clock.now += 1
+            yield body[start : start + 8]
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(200, content=trickle())
+
+    hooks = _Hooks()
+    with report_attempts_to(hooks.hooks()), pytest.raises(EmbeddingTransientError) as caught:
+        _provider(handler, clock).embed_query(_query("trust in platforms"))
+
+    assert caught.value.http_status is None
+    assert clock.now == 3
+    assert hooks.attempts == [EmbeddingAttempt(sent=True, http_status=None, billable=True)]
+
+
+def test_documents_response_that_ends_late_is_unchanged() -> None:
+    # 背景向量化照舊（審查 M1 只動查詢）：最後一塊在時限內到就照樣成功。
+    clock = _FakeClock()
+    clock.now = 0
+
+    vectors = _provider(_late_end(clock, late_by=500), clock).embed_documents(
+        [_document("an abstract")]
+    )
+
+    assert vectors == _vectors(1)
+
+
 def test_query_api_must_use_the_same_base_url() -> None:
     other = QUERY_API.model_copy(update={"base_url": "https://elsewhere.example/client/v4"})
     with pytest.raises(ValueError, match="base_url"):
@@ -211,6 +281,8 @@ def test_shipped_config_has_short_query_limits_and_unchanged_background_limits()
     [
         ("timeout_seconds", 61, "timeout_seconds 不能比"),
         ("total_timeout_seconds", 481, "total_timeout_seconds 不能比"),
+        # 審查 M5：總時限和背景一樣也不收（等於沒設）。
+        ("total_timeout_seconds", 480, "total_timeout_seconds 不能比"),
         ("attempts", 6, "attempts 不能比"),
         ("timeout_seconds", 0, "timeout_seconds"),
         ("attempts", 0, "attempts"),
@@ -236,6 +308,20 @@ def test_query_limits_longer_than_the_background_are_rejected_at_load(
     with pytest.raises(ConfigError) as caught:
         load_embedding_config({"RADAR_CONFIG_DIR": str(tmp_path)})
     assert all(problem.startswith("embeddings.yaml：") for problem in caught.value.problems)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"), [("timeout_seconds", 60), ("attempts", 5), ("total_timeout_seconds", 479)]
+)
+def test_query_limits_at_the_boundary_are_accepted(field: str, value: float) -> None:
+    # 單次逾時、次數和背景一樣可以；總時限要嚴格比較短（479 可以、480 不行）。
+    data = load_embedding_config(REAL_ENV).model_dump(mode="json")
+    data["query_request"][field] = value
+
+    config = EmbeddingConfig.model_validate(data)
+
+    assert config.query_request is not None
+    assert getattr(config.query_request, field) == value
 
 
 def test_without_query_request_the_config_still_loads_for_the_worker() -> None:

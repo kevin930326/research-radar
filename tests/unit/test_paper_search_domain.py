@@ -7,20 +7,27 @@
 
 import base64
 import shutil
+import signal
 import uuid
 from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
+import httpx2
 import pytest
+import uvicorn
 
+import radar.adapters.workers_ai as workers_ai
 import radar.entrypoints.api.main as api_main
+import radar.entrypoints.api.paper_list as paper_list_routes
 from radar.domain.errors import ErrorCode
 from radar.domain.paper_list import (
     PaperListCursor,
     decode_paper_list_cursor,
     encode_paper_list_cursor,
 )
+from radar.domain.policy import CloudPolicy, ContentSource, clear_for_cloud
 from radar.domain.retrieval import (
     MAX_RETRIEVAL_OFFSET,
     PaperSearchPage,
@@ -30,7 +37,10 @@ from radar.domain.retrieval import (
     encode_retrieval_cursor,
 )
 from radar.domain.snapshot import Snapshot, SnapshotStatus
+from radar.entrypoints.api.openapi import build_schema_app
+from radar.entrypoints.api.paper_list import PaperSearchSetup
 from radar.entrypoints.api.problems import PROBLEM_STATUS
+from radar.entrypoints.bootstrap import Database, ReadinessProbes
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -179,3 +189,144 @@ def test_api_does_not_start_with_a_broken_retrieval_config(
     assert api_main.main() == 1
 
     assert "retrieval.yaml：rrf_k" in capsys.readouterr().out
+
+
+# --- api 的正式組裝：Cloudflare 金鑰、請求日誌（審查 M6、M7）-----------------------------------
+#
+# 照正式的 `main()` 跑到最後（設定、組路由、uvicorn 的設定），只換掉三樣：就緒檢查的連線池（不連資料
+# 庫）、uvicorn 的 Server（不開連接埠，記下設定）、訊號處理（不動測試行程的訊號）。搜尋的設定從
+# `build_paper_list_routes` 的引數記下來（呼叫照樣交給真的函式）。
+
+FAKE_ACCOUNT = "0123456789abcdef0123456789abcdef"
+FAKE_TOKEN = "fake-token-for-tests"
+KEY_NAMES = ("RADAR_CLOUDFLARE_ACCOUNT_ID", "RADAR_CLOUDFLARE_API_TOKEN")
+
+
+class _Assembled:
+    def __init__(self) -> None:
+        self.searches: list[PaperSearchSetup] = []
+        self.servers: list[uvicorn.Config] = []
+
+
+def _run_api_main(monkeypatch: pytest.MonkeyPatch, keys: dict[str, str]) -> tuple[int, _Assembled]:
+    assembled = _Assembled()
+    monkeypatch.setenv("RADAR_CONFIG_DIR", str(ROOT / "config"))
+    monkeypatch.setenv("DATABASE_URL", "postgresql://radar_app@db:5432/radar")
+    for name in KEY_NAMES:
+        monkeypatch.delenv(name, raising=False)
+    for name, value in keys.items():
+        monkeypatch.setenv(name, value)
+
+    def probes(_settings: Any, *, pool_size: int) -> ReadinessProbes:
+        return ReadinessProbes(
+            ping=lambda: True, schema_state=_fail_if_called, database=cast(Database, object())
+        )
+
+    real_build = paper_list_routes.build_paper_list_routes
+
+    def build_paper_list_routes(*args: Any) -> Any:
+        assembled.searches.append(args[-1])
+        return real_build(*args)
+
+    class _Server:
+        def __init__(self, config: uvicorn.Config) -> None:
+            assembled.servers.append(config)
+
+        def run(self) -> None:
+            return None
+
+    monkeypatch.setattr(api_main, "build_readiness_probes", probes)
+    monkeypatch.setattr(api_main, "build_paper_list_routes", build_paper_list_routes)
+    monkeypatch.setattr(uvicorn, "Server", _Server)
+    monkeypatch.setattr(signal, "signal", lambda *_args: None)
+    return api_main.main(), assembled
+
+
+def test_api_with_both_keys_really_queries_workers_ai_with_them(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # 兩個金鑰都有：正式組裝出來的 provider 真的拿這兩個值送查詢（MockTransport，不連外）。
+    seen: list[httpx2.Request] = []
+    vector = [0.5] + [0.0] * 1023
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        seen.append(request)
+        return httpx2.Response(
+            200,
+            json={"success": True, "errors": [], "result": {"shape": [1, 1024], "data": [vector]}},
+        )
+
+    monkeypatch.setattr(
+        workers_ai,
+        "WorkersAiEmbeddingProvider",
+        partial(workers_ai.WorkersAiEmbeddingProvider, transport=httpx2.MockTransport(handler)),
+    )
+    code, assembled = _run_api_main(
+        monkeypatch, {KEY_NAMES[0]: FAKE_ACCOUNT, KEY_NAMES[1]: FAKE_TOKEN}
+    )
+
+    assert code == 0
+    (search,) = assembled.searches
+    assert search.provider is not None
+    query = clear_for_cloud("trust", ContentSource.USER_QUERY, None, CloudPolicy())
+    assert search.provider.embed_query(query) == vector
+    (request,) = seen
+    assert f"/accounts/{FAKE_ACCOUNT}/ai/run/" in request.url.path
+    assert request.headers["Authorization"] == f"Bearer {FAKE_TOKEN}"
+
+
+@pytest.mark.parametrize("given", KEY_NAMES)
+def test_api_with_only_one_key_does_not_start(
+    given: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # 只有一個金鑰是設定寫錯：不啟動（不建連線池），訊息只有缺的變數名稱、不含值。
+    (missing,) = [name for name in KEY_NAMES if name != given]
+    value = FAKE_ACCOUNT if given == KEY_NAMES[0] else FAKE_TOKEN
+    monkeypatch.setenv("RADAR_CONFIG_DIR", str(ROOT / "config"))
+    monkeypatch.setenv("DATABASE_URL", "postgresql://radar_app@db:5432/radar")
+    monkeypatch.delenv(missing, raising=False)
+    monkeypatch.setenv(given, value)
+    monkeypatch.setattr(api_main, "build_readiness_probes", _fail_if_called)
+
+    assert api_main.main() == 1
+
+    out = capsys.readouterr().out
+    assert f"缺少環境變數 {missing}" in out
+    assert value not in out
+
+
+def test_api_without_keys_starts_warns_once_and_search_has_no_provider(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    code, assembled = _run_api_main(monkeypatch, {})
+
+    assert code == 0
+    (search,) = assembled.searches
+    assert search.provider is None
+    out = capsys.readouterr().out
+    warnings = [line for line in out.splitlines() if "沒有 Cloudflare 金鑰" in line]
+    assert len(warnings) == 1
+
+
+def test_api_server_writes_no_access_log(monkeypatch: pytest.MonkeyPatch) -> None:
+    # 審查 M7：`q` 在網址裡。uvicorn 的請求日誌（access log）會印完整網址含查詢字串，所以正式的
+    # uvicorn 設定一定關掉它；請求日誌只由 app 的中介層記（只記路徑）。也不用 uvicorn 自己的日誌設定
+    # （`log_config=None`，交給 `configure_logging`）。
+    code, assembled = _run_api_main(monkeypatch, {})
+
+    assert code == 0
+    (config,) = assembled.servers
+    assert config.access_log is False
+    assert config.log_config is None
+
+
+def test_openapi_declares_the_search_errors_on_the_paper_list() -> None:
+    # 審查 M9：404、503 宣告在端點上，內容型別和實際一樣是 problem+json（前端的型別才分得出來）。
+    schema = build_schema_app().openapi()
+    responses = schema["paths"]["/api/v1/papers"]["get"]["responses"]
+
+    for status in ("404", "503"):
+        assert responses[status]["content"] == {
+            "application/problem+json": {"schema": {"$ref": "#/components/schemas/ProblemDetails"}}
+        }
+    assert "ProblemDetails" in schema["components"]["schemas"]

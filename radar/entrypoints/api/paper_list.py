@@ -17,8 +17,10 @@
   開放）。`next_cursor` 是融合後名次的位移（`domain/retrieval.RetrievalCursor`，寫明是搜尋還是找相似
   論文），和清單的 keyset 位置互相不收（422）。`q` 不收的字（空的、太長、控制字元等）422；起點論文
   不存在、看不到或被排除 404 `not_found`（同一個回應）；額度用完 503 `search_quota_exhausted`；
-  Workers AI 連不上、逾時或 api 沒有 Cloudflare 金鑰 503 `search_embedding_unavailable`。錯誤都帶
-  `no-store`。查詢內容不寫進日誌（中介層只記路徑；`retrieve` 只記長度與有沒有中文）。
+  Workers AI 連不上、逾時或 api 沒有 Cloudflare 金鑰 503 `search_embedding_unavailable`。這裡丟的
+  錯誤都帶 `no-store`（框架擋下的型別錯誤是共用處理器回的，不帶，和清單一樣；ADR-0050 已知限制）；
+  404、503 宣告在端點的 OpenAPI 回應上。查詢內容不寫進日誌（uvicorn 的 access log 關著、中介層只記
+  路徑；`retrieve` 只記長度與有沒有中文）。
 - 這裡只做形狀轉換（論文列用 `domain/contracts.PaperRow`），條件的驗證在
   `domain/paper_list.parse_paper_list_filters`，看不看得到在 repo 的查詢裡。
 - `GET /api/v1/cube`：計數方塊（Story 3.15、ADR-0062）：`total` 與 `with_abstract` 的計數、
@@ -79,7 +81,7 @@ from radar.entrypoints.api.auth import (
     member_as_expected,
     origin_dependency,
 )
-from radar.entrypoints.api.problems import ApiProblemError
+from radar.entrypoints.api.problems import PROBLEM_MEDIA_TYPE, ApiProblemError, ProblemDetails
 from radar.entrypoints.api.web import web_mounted
 from radar.entrypoints.bootstrap import Database
 from radar.ports import EmbeddingProvider
@@ -100,6 +102,24 @@ _RETRIEVAL_SCOPES: Final[Mapping[PaperListScope, MemberScope]] = {
 type SearchPage = Callable[
     [MemberViewer, PaperListFilters, str | None, uuid.UUID | None, int], PaperSearchPage
 ]
+
+
+# 搜尋與找相似論文多出的兩種錯誤，在端點上宣告（PR B 審查 M9）：前端的型別與文件看得到；內容型別和
+# 實際一樣是 `application/problem+json`（全站的 `default` 回應由 `problems.problem_openapi` 換）。
+_PROBLEM_SCHEMA: Final = {"$ref": f"#/components/schemas/{ProblemDetails.__name__}"}
+_SEARCH_RESPONSES: Final[dict[int | str, dict[str, object]]] = {
+    404: {
+        "description": "`similar_to` 的論文不存在、看不到或被排除（`not_found`）",
+        "content": {PROBLEM_MEDIA_TYPE: {"schema": _PROBLEM_SCHEMA}},
+    },
+    503: {
+        "description": (
+            "搜尋的查詢沒能轉成向量：額度用完（`search_quota_exhausted`）或連不上"
+            "（`search_embedding_unavailable`）"
+        ),
+        "content": {PROBLEM_MEDIA_TYPE: {"schema": _PROBLEM_SCHEMA}},
+    },
+}
 
 
 def _cube_not_configured(_viewer: MemberViewer) -> CubeResponse:
@@ -222,7 +242,7 @@ def build_paper_list_routes(
             k=search.retrieval.page_size,
             offset=offset,
         )
-        rows, snapshot = paper_list_service.list_ranked_papers(
+        rows = paper_list_service.list_ranked_papers(
             viewer, database, [hit.paper_id for hit in found.hits]
         )
         end = offset + len(found.hits)
@@ -230,8 +250,9 @@ def build_paper_list_routes(
         if found.hits and end < found.total:
             mode = RetrievalMode.SEARCH if query is not None else RetrievalMode.SIMILAR
             next_cursor = encode_retrieval_cursor(RetrievalCursor(mode=mode, offset=end))
+        # 快照用排名時讀到的那一個（`this_week` 的篩選與回應一致，審查 M3）。
         return PaperSearchPage(
-            rows=rows, next_cursor=next_cursor, total=found.total, snapshot=snapshot
+            rows=rows, next_cursor=next_cursor, total=found.total, snapshot=found.snapshot
         )
 
     return PaperListRoutes(
@@ -290,7 +311,7 @@ def install_paper_list_routes(
 
     router = APIRouter(prefix=API_V1_PREFIX, dependencies=[Depends(origin_dependency(auth_routes))])
 
-    @router.get("/papers")
+    @router.get("/papers", responses=_SEARCH_RESPONSES)
     def list_papers(
         request: Request,
         response: Response,

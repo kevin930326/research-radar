@@ -308,7 +308,26 @@ def _unit_vector(step: int) -> list[float]:
 def _paper_search(ctx: PermissionContext) -> EndpointRequest:
     # 一句話搜尋 A 的文獻庫（`personal`）：A 的私人論文標題有 hidden 與金絲雀，全文檢索腿找得到；
     # B 的 `personal` 是空清單（total 0），也不會在日誌或回應裡看到金絲雀。查詢向量用假的 provider。
+    # B 自己的文獻庫也放一篇和查詢無關的論文（沒有向量、字也對不上；審查 M8）：真的走了搜尋，B 才是
+    # 空清單；`q` 被忽略、退回舊清單時，B 會拿到自己那一篇，換人測試就失敗。
     _private_paper_in_owner_library(ctx)
+    database = ctx.extras["database"]
+    unrelated = create_hidden_paper(
+        database,
+        doi="10.9/other-unrelated",
+        openalex_id="W987654323",
+        title="Governance of shared ledgers",
+        abstract="We survey ledger governance.",
+    )
+    with database.transaction() as connection:
+        item = create_library_item(
+            connection,
+            SystemViewer(),
+            owner_id=uuid.UUID(ctx.other.member_id),
+            paper_id=unrelated,
+            added_via=AddedVia.UPLOAD,
+        )
+    assert item is not None
     _publish_a_snapshot(ctx)
     return EndpointRequest(query={"q": "hidden paper", "scope": "personal"})
 

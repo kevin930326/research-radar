@@ -935,15 +935,25 @@ export type listPapersResponse200 = {
   status: 200
 }
 
+export type listPapersResponse404 = {
+  data: ProblemDetails
+  status: 404
+}
+
+export type listPapersResponse503 = {
+  data: ProblemDetails
+  status: 503
+}
+
 export type listPapersResponseDefault = {
   data: ProblemDetails
-  status: Exclude<HTTPStatusCodes, 200>
+  status: Exclude<HTTPStatusCodes, 200 | 404 | 503>
 }
 
 export type listPapersResponseSuccess = (listPapersResponse200) & {
   headers: Headers;
 };
-export type listPapersResponseError = (listPapersResponseDefault) & {
+export type listPapersResponseError = (listPapersResponse404 | listPapersResponse503 | listPapersResponseDefault) & {
   headers: Headers;
 };
 

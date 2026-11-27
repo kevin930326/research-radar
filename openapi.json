@@ -770,6 +770,26 @@
                 }
               }
             }
+          },
+          "404": {
+            "description": "`similar_to` 的論文不存在、看不到或被排除（`not_found`）",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "搜尋的查詢沒能轉成向量：額度用完（`search_quota_exhausted`）或連不上（`search_embedding_unavailable`）",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
           }
         }
       }

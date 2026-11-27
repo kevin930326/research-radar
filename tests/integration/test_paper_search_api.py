@@ -57,7 +57,9 @@ from radar.entrypoints.api.app import create_app
 from radar.entrypoints.api.auth import SESSION_COOKIE, build_auth_routes
 from radar.entrypoints.api.main import install_api_routes
 from radar.entrypoints.api.paper_list import PaperSearchSetup, paper_list_response
+from radar.entrypoints.logging_config import configure_logging
 from radar.repo.db import Database
+from radar.services import embeddings as embeddings_service
 from radar.services import paper_list as paper_list_service
 from radar.services import retrieval as retrieval_service
 from radar.services.members import allow_member
@@ -509,6 +511,29 @@ def test_personal_search_never_sees_another_members_library(
     assert ids(api.ok([("q", "trust"), ("scope", "personal")])) == [mine]
 
 
+def test_lab_search_finds_uncounted_lab_papers_and_tracked_does_not(
+    db: TestDatabase, database: Database, published: uuid.UUID
+) -> None:
+    # 審查 M8：一篇全實驗室看得到、但還沒算進任何快照（不在 `counted_paper`）的論文：`lab` 找得到，
+    # `tracked` 找不到（兩個範圍誤用同一套條件就會失敗）。
+    counted = make_paper(database, db, 1, snapshot_id=published, title="Trust counted")
+    uncounted = make_paper(database, db, 2, snapshot_id=None, title="Trust not yet counted")
+    for paper_id in (counted, uncounted):
+        put_vector(db, paper_id, near(0))
+    api = Api(database, search_setup(QueryVectors()))
+
+    assert set(ids(api.ok([("q", "trust"), ("scope", "lab")]))) == {counted, uncounted}
+    assert ids(api.ok([("q", "trust"), ("scope", "tracked")])) == [counted]
+    # 找相似論文同一套範圍。
+    anchor = make_paper(database, db, 3, snapshot_id=published, title="Anchor")
+    put_vector(db, anchor, near(1))
+    assert set(ids(api.ok([("similar_to", str(anchor)), ("scope", "lab")]))) == {
+        counted,
+        uncounted,
+    }
+    assert ids(api.ok([("similar_to", str(anchor)), ("scope", "tracked")])) == [counted]
+
+
 # --- 錯誤：額度用完、連不上、逾時、沒有金鑰 ------------------------------------------------------
 
 
@@ -641,6 +666,89 @@ def test_query_deadline_before_sending_is_unavailable_and_recorded_as_not_sent(
     assert api_calls(db) == [("embed_query", "not_sent", None)]
 
 
+@pytest.mark.usefixtures("_no_retry_wait")
+def test_query_read_timeout_is_unavailable_and_every_attempt_is_recorded(
+    db: TestDatabase, database: Database, published: uuid.UUID
+) -> None:
+    # 審查 M2：真的讀取逾時（httpx 的 ReadTimeout，不是 503）。查詢最多 2 次、每次的讀取逾時是查詢
+    # 自己的 2 秒；兩次都記 unreachable（沒有狀態碼），占用清乾淨。
+    trust_papers(database, db, published, 1)
+    clock = _FakeClock()
+    read_timeouts: list[float] = []
+
+    def read_timeout(request: httpx2.Request) -> httpx2.Response:
+        read_timeouts.append(request.extensions["timeout"]["read"])
+        raise httpx2.ReadTimeout("slow")
+
+    api = Api(database, search_setup(_workers_ai(read_timeout, clock, SHORT_QUERY), SHORT_QUERY))
+
+    problem(api.get([("q", "trust")]), UNAVAILABLE_503)
+
+    assert read_timeouts == [2, 2]
+    assert api_calls(db) == [("embed_query", "unreachable", None)] * 2
+    assert execute(db, "SELECT count(*) FROM embedding_quota_hold") == [(0,)]
+
+
+@pytest.mark.usefixtures("_no_retry_wait")
+def test_query_deadline_after_the_quota_hold_is_not_sent_and_released(
+    db: TestDatabase, database: Database, published: uuid.UUID, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 審查 M2：嘗試前的額度確認（`before`）做完、占用還在時，時間就過了總時限（例如等額度鎖
+    # 等很久）：不送，記一列 not_sent，占用清乾淨。
+    trust_papers(database, db, published, 1)
+    clock = _FakeClock()
+    real_before = embeddings_service._QueryLedger._before
+    held: list[int] = []
+
+    def slow_before(self: Any) -> None:
+        real_before(self)
+        ((count,),) = execute(db, "SELECT count(*) FROM embedding_quota_hold")
+        held.append(count)
+        clock.now += 4  # 查詢的總時限是 3 秒
+
+    monkeypatch.setattr(embeddings_service._QueryLedger, "_before", slow_before)
+
+    def never(request: httpx2.Request) -> httpx2.Response:
+        raise AssertionError("不該送出")
+
+    api = Api(database, search_setup(_workers_ai(never, clock, SHORT_QUERY), SHORT_QUERY))
+
+    problem(api.get([("q", "trust")]), UNAVAILABLE_503)
+
+    assert held == [1]  # 確實是占住額度之後才到期
+    assert api_calls(db) == [("embed_query", "not_sent", None)]
+    assert execute(db, "SELECT count(*) FROM embedding_quota_hold") == [(0,)]
+
+
+@pytest.mark.usefixtures("_no_retry_wait")
+def test_query_response_that_ends_after_the_deadline_is_unavailable_and_recorded(
+    db: TestDatabase, database: Database, published: uuid.UUID
+) -> None:
+    # 審查 M1：完整的 JSON 在時限內送到，回應卻拖到 3 秒的總時限之後才結束：不當成功，503
+    # `search_embedding_unavailable`，記 unreachable（沒有狀態碼），占用清乾淨。
+    trust_papers(database, db, published, 1)
+    clock = _FakeClock()
+    body = (
+        b'{"success": true, "errors": [], "result": {"shape": [1, 8], "data": [['
+        + b", ".join([b"1.0"] + [b"0.0"] * 7)
+        + b"]]}}"
+    )
+
+    def stream() -> Iterator[bytes]:
+        yield body
+        clock.now += 5
+
+    def late_end(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(200, content=stream())
+
+    api = Api(database, search_setup(_workers_ai(late_end, clock, SHORT_QUERY), SHORT_QUERY))
+
+    problem(api.get([("q", "trust")]), UNAVAILABLE_503)
+
+    assert api_calls(db) == [("embed_query", "unreachable", None)]
+    assert execute(db, "SELECT count(*) FROM embedding_quota_hold") == [(0,)]
+
+
 def test_without_cloudflare_keys_search_is_unavailable_and_similar_still_works(
     db: TestDatabase, database: Database, published: uuid.UUID
 ) -> None:
@@ -731,3 +839,100 @@ def test_query_text_never_reaches_the_logs(
             "query_has_cjk": False,
         }
     ]
+
+
+# --- 同一頁的快照（審查 M3）-----------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("mode", ["q", "similar_to"])
+def test_this_week_and_the_snapshot_in_the_response_are_the_same_snapshot(
+    db: TestDatabase,
+    database: Database,
+    published: uuid.UUID,
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+) -> None:
+    # 排名之後、讀論文列之前剛好發佈了下一個快照：回應的 `snapshot` 要是篩 `this_week` 用的那一個
+    # （第 1 號），不能是剛發佈的第 2 號（舊一週的 items 標成新一週）。
+    anchor = make_paper(database, db, 0, snapshot_id=published, title="Trust anchor")
+    put_vector(db, anchor, near(0))
+    fresh = make_paper(database, db, 1, snapshot_id=published, title="Trust this week")
+    put_vector(db, fresh, near(1))
+    real_rows = paper_list_service.list_ranked_papers
+    published_next: list[uuid.UUID] = []
+
+    def rows_after_a_new_snapshot(*args: Any) -> Any:
+        published_next.append(make_snapshot(db, 2))
+        return real_rows(*args)
+
+    monkeypatch.setattr(paper_list_service, "list_ranked_papers", rows_after_a_new_snapshot)
+    api = Api(database, search_setup(QueryVectors()))
+    value = "trust" if mode == "q" else str(anchor)
+
+    body = api.ok([(mode, value), ("this_week", "true")])
+
+    assert len(published_next) == 1
+    assert fresh in ids(body)
+    assert body["snapshot"] == {"number": 1, "as_of": "2026-11-16T02:30:00Z"}
+
+
+def test_anchor_without_a_vector_still_reports_the_snapshot(
+    db: TestDatabase, database: Database, published: uuid.UUID
+) -> None:
+    anchor = make_paper(database, db, 0, snapshot_id=published)
+    api = Api(database, search_setup(NeverCalled()))
+
+    body = api.ok([("similar_to", str(anchor))])
+
+    assert body["snapshot"] == {"number": 1, "as_of": "2026-11-16T02:30:00Z"}
+
+
+# --- 正式的日誌設定（審查 M7）---------------------------------------------------------------------
+
+
+class _ThenUnreachable:
+    """第一次照 `QueryVectors` 回向量，之後都連不上（同一個 app 走成功與 503 兩條路）。"""
+
+    model_id = MODEL
+
+    def __init__(self) -> None:
+        self._vectors = QueryVectors()
+        self.calls = 0
+
+    def embed_documents(self, texts: Any) -> list[list[float]]:
+        raise AssertionError("不該呼叫")
+
+    def embed_query(self, text: Any) -> list[float]:
+        self.calls += 1
+        if self.calls == 1:
+            return self._vectors.embed_query(text)
+        raise EmbeddingTransientError("重試用完仍失敗（ConnectError）")
+
+
+def test_query_text_never_reaches_the_formatted_logs(
+    db: TestDatabase,
+    database: Database,
+    published: uuid.UUID,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # 用正式的日誌設定（`configure_logging`：structlog 與標準函式庫的 logging 都輸出成 JSON，含
+    # uvicorn、starlette 的紀錄器），送 200、422、503 三種帶測試標記的查詢：輸出裡一次都不能出現。
+    # 日誌設定要在測試本體裡呼叫（handler 才綁到 capsys 這時的輸出）。
+    marker = "zebra-quokka-7f1d"
+    trust_papers(database, db, published, 2)
+    api = Api(database, search_setup(_ThenUnreachable()))
+    configure_logging()
+    capsys.readouterr()
+
+    api.ok([("q", f"{marker} trust")])
+    problem(api.get([("q", f"{marker}\x00")]), PROBLEM_422)
+    problem(api.get([("q", f"{marker} trust")]), UNAVAILABLE_503)
+    problem(api.get([("q", marker), ("similar_to", str(uuid.uuid4()))]), PROBLEM_422)
+
+    out = capsys.readouterr()
+    logs = out.out + out.err
+    finished = [line for line in logs.splitlines() if "請求完成" in line]
+    assert len(finished) == 4  # 真的接到了這四個請求的日誌
+    assert all('"path": "/api/v1/papers"' in line for line in finished)
+    assert marker not in logs
+    assert "zebra" not in logs

@@ -136,8 +136,9 @@ class QueryRequestLimits(BaseModel):
     """搜尋的查詢向量（`embed_query`）自己的時限與重試次數（Story 4.1 PR B）。
 
     背景向量化的 `api`（總時限 480 秒、5 次嘗試）是為整批文件設的；搜尋的人在等，NFR-19 的 2 秒
-    以這一段為主，所以查詢另用較短的數字。只准比 `api` 的同名數字短或少（`EmbeddingConfig` 讀檔時
-    核對），退避與 `Retry-After` 的上限沿用 `api.retry`。
+    以這一段為主，所以查詢另用較短的數字（`EmbeddingConfig` 讀檔時核對）：總時限一定要比 `api` 的
+    短（一樣就等於沒設，PR B 審查 M5），單次逾時與嘗試次數不能比 `api` 的長或多。退避與
+    `Retry-After` 的上限沿用 `api.retry`。
     """
 
     model_config = _FROZEN
@@ -241,9 +242,10 @@ class EmbeddingConfig(BaseModel):
             return self
         if limits.timeout_seconds > self.api.timeout_seconds:
             raise ValueError("query_request.timeout_seconds 不能比 api.timeout_seconds 長")
-        if limits.total_timeout_seconds > self.api.total_timeout_seconds:
+        if limits.total_timeout_seconds >= self.api.total_timeout_seconds:
             raise ValueError(
-                "query_request.total_timeout_seconds 不能比 api.total_timeout_seconds 長"
+                "query_request.total_timeout_seconds 不能比 api.total_timeout_seconds 長，"
+                "也不能一樣（要比較短）"
             )
         if limits.attempts > self.api.retry.attempts:
             raise ValueError("query_request.attempts 不能比 api.retry.attempts 多")

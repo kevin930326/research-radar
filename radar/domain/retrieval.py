@@ -163,6 +163,9 @@ class RetrievalPage:
     """`retrieve` 的結果：這一頁（融合後名次 `offset + 1` 起最多 `k` 篇）與 `total`（算得上結果的
     篇數，最多 `RetrievalConfig.max_results`；和翻得到的篇數一致）。只有 ID 與名次，不含內容。
 
+    `snapshot`：排名時（`this_week` 篩選用）讀到的已發佈快照；還沒有快照、或沒有讀（例如直接組的
+    結果）是 None。回應的 `snapshot` 要用這一個，篩選與回應才對得上（PR B 審查 M3）。
+
     Raises:
         ValueError: 名次不是從 `offset + 1` 連續、篇數超過 `k`，或 `total` 比翻得到的少。
     """
@@ -171,6 +174,7 @@ class RetrievalPage:
     total: int
     offset: int
     k: int
+    snapshot: Snapshot | None = None
 
     def __post_init__(self) -> None:
         if type(self.total) is not int or self.total < 0:
