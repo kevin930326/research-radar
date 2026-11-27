@@ -1,7 +1,7 @@
 // 找論文切回視窗時的確認（PR #114 收尾，epic-3l PR C）：確認中途丟例外時，等著的加入／移出不能永遠停在「送出中」（G5）；
 // focus 與 visibilitychange 一起來時只確認一次（S4）；同一次切回只確認一次、離開再回來才是新的一次（X3）；確認不會 reject（X4）；
 // 認出換人之後清快取失敗也當成換了人（X1）。不用畫面：直接呼叫切回視窗時跑的那個函式（memberCheckOnReturn）。
-import { QueryClient, QueryObserver } from "@tanstack/react-query";
+import { QueryClient, QueryObserver, onlineManager } from "@tanstack/react-query";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { datasource } from "../datasource";
@@ -10,7 +10,7 @@ import { toApiParams } from "../pages/search-filters";
 import { sendLibraryChange } from "./library-change";
 import { memberCheckOnReturn } from "./member";
 import { filtersKey, paperListKey } from "./paper-queries";
-import { meQuery, pendingMemberCheck } from "./session";
+import { meQuery, memberGeneration, pendingMemberCheck } from "./session";
 
 const A = { member_id: "00000000-0000-4000-8000-00000000000a", display_name: "Test Member A" };
 const B = { member_id: "00000000-0000-4000-8000-00000000000b", display_name: "Test Member B" };
@@ -262,6 +262,72 @@ describe("checking the member when coming back to the window (#114 follow-up)", 
     // 切分頁時 focus 可能比選取晚一點到：變回看得見那一刻還沒被選取，focus 緊接著來。
     await Promise.all([confirm("visible", false), confirm("focus")]);
     expect(me).toHaveBeenCalledTimes(1);
+    stop();
+  });
+});
+
+describe("the previous check is paused while offline (epic-3n C-5)", () => {
+  // 讓出一次給瀏覽器的事件迴圈：真的 focus／visibilitychange、點擊都是在這種空檔進來的（不是等固定的時間）。
+  const nextEvent = () => new Promise<void>((done) => setTimeout(done, 0));
+  afterEach(() => {
+    vi.restoreAllMocks();
+    onlineManager.setOnline(true);
+  });
+
+  it("C-5: another member is found after coming back online: an add clicked during the second return is not sent", async () => {
+    const queryClient = new QueryClient();
+    queryClient.mount();
+    queryClient.setQueryData(meQuery.queryKey, A);
+    const stop = holdRow(queryClient);
+    vi.spyOn(datasource.session!, "me").mockResolvedValue(B);
+    const swap = vi.fn();
+    const { confirm, leave } = memberCheckOnReturn(queryClient, { swap, toLogin: () => {}, reload: () => {} });
+    // 離線：第一次確認的「我是誰」被暫停（不是「還在路上」）。
+    onlineManager.setOnline(false);
+    const first = confirm("visible");
+    await nextEvent();
+    expect(queryClient.getQueryState(meQuery.queryKey)?.fetchStatus).toBe("paused");
+    // 切走再切回：第二次確認等著第一次。
+    leave();
+    const second = confirm("visible");
+    await nextEvent();
+    const source = addSource();
+    const sent = sendLibraryChange(queryClient, source, PAPER, "add", () => {}, { expectedMemberId: A.member_id });
+    await nextEvent();
+    onlineManager.setOnline(true);
+    await Promise.all([first, second]);
+    // 修之前：第二次再問一次，快取已經是乙，判成「同一個人」，這筆加入帶甲送出（add 被呼叫 1 次）。
+    expect(await sent).toBe("failed");
+    expect(source.add).not.toHaveBeenCalled();
+    expect(swap).toHaveBeenCalledTimes(1);
+    expect(memberGeneration(queryClient)).toBe(1);
+    stop();
+  });
+
+  it("C-5: the sign-in expired while offline: back to the sign-in page once, and the waiting add is not sent", async () => {
+    const queryClient = new QueryClient();
+    queryClient.mount();
+    queryClient.setQueryData(meQuery.queryKey, A);
+    const stop = holdRow(queryClient);
+    const me = vi.spyOn(datasource.session!, "me").mockResolvedValue(null);
+    const toLogin = vi.fn();
+    const { confirm, leave } = memberCheckOnReturn(queryClient, { swap: () => {}, toLogin, reload: () => {} });
+    onlineManager.setOnline(false);
+    const first = confirm("visible");
+    await nextEvent();
+    leave();
+    const second = confirm("visible");
+    await nextEvent();
+    const source = addSource();
+    const sent = sendLibraryChange(queryClient, source, PAPER, "add", () => {}, { expectedMemberId: A.member_id });
+    await nextEvent();
+    onlineManager.setOnline(true);
+    await Promise.all([first, second]);
+    expect(await sent).toBe("failed");
+    expect(source.add).not.toHaveBeenCalled();
+    // 修之前：第二次再問一次（me 2 次），又回登入頁一次（toLogin 2 次）。
+    expect(me).toHaveBeenCalledTimes(1);
+    expect(toLogin).toHaveBeenCalledTimes(1);
     stop();
   });
 });

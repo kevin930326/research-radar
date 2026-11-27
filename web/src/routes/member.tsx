@@ -358,8 +358,13 @@ export function memberCheckOnReturn(
           previous.next = mine.verdict;
           await queryClient.cancelQueries({ queryKey: meQuery.queryKey, exact: true });
         } else {
-          // 上一次已經問到答案、正在清快取或重新掛上：等它做完再問（不打斷它清到一半）。
-          await previous.verdict;
+          // 上一次已經問到答案、正在清快取或重新掛上，或請求因為離線暫停（fetchStatus 是 "paused"）：等它做完。
+          // 它認出換了人（或登入過期）時，這一次就是同一個結果，不再問：再問一次會因為快取已經是新的人而判成「同一個人」，
+          // 讓等著的寫入照舊帶上一個人送出（epic-3n C-5）；登入過期時也不會再回登入頁一次。
+          if ((await previous.verdict) === "changed") {
+            settle("changed");
+            return;
+          }
         }
       }
       const generation = memberGeneration(queryClient);
