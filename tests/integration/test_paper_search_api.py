@@ -819,13 +819,13 @@ def test_without_q_or_similar_to_the_response_is_the_list_field_by_field(
 def test_query_text_never_reaches_the_logs(
     db: TestDatabase, database: Database, published: uuid.UUID
 ) -> None:
-    secret = "zebra-quokka-7f1d trust"
+    query_text = "zebra-quokka-7f1d trust"
     trust_papers(database, db, published, 2)
     api = Api(database, search_setup(QueryVectors()))
 
     with capture_logs() as logs:
-        api.ok([("q", secret)])
-        problem(api.get([("q", secret + "\x00")]), PROBLEM_422)
+        api.ok([("q", query_text)])
+        problem(api.get([("q", query_text + "\x00")]), PROBLEM_422)
 
     assert logs
     assert not any("zebra" in str(record) for record in logs)
@@ -835,7 +835,7 @@ def test_query_text_never_reaches_the_logs(
             "event": "檢索：搜尋",
             "log_level": "info",
             "scope": "tracked",
-            "query_length": len(secret),
+            "query_length": len(query_text),
             "query_has_cjk": False,
         }
     ]
