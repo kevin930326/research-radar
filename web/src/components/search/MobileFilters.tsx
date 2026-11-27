@@ -131,13 +131,16 @@ export function FilterSheet({ count, total, sections, extra, clear, children, ro
   }, []);
   // firefox 只在焦點完全看不到時才照捲動留白捲動：焦點落在上半部（或下半部）一部分被固定那一列蓋住的元件上時，它不捲
   //（epic-3l PR E 的 CI、epic-3n PR A 在 firefox 重現）。所以焦點一進來就自己量：被蓋住多少，捲動區就往回（或往下）捲多少。
-  // chromium、webkit 已經照捲動留白捲好，量出來沒被蓋住，這裡什麼都不做。
+  // chromium、webkit 已經照捲動留白捲好，量出來沒被蓋住，這裡什麼都不做。只看鍵盤的焦點（見下面）。
   const keepFocusInView = (event: FocusEvent<HTMLDivElement>) => {
     const popup = event.currentTarget;
     const head = headRef.current;
     const foot = footRef.current;
     const target = event.target;
     if (head === null || foot === null || head.contains(target) || foot.contains(target)) return;
+    // 只管鍵盤移過來的焦點：用滑鼠或手指點的時候，瀏覽器（Mac 的 Safari、webkit）在按下那一刻就給焦點，這時一捲，
+    // 放開時元件已經不在指頭底下，點擊就落空（epic-3n PR A 在本機 webkit 量到）。點的那一個本來就在看得到的地方。
+    if (!target.matches(":focus-visible")) return;
     const box = target.getBoundingClientRect();
     const top = head.getBoundingClientRect().bottom;
     const bottom = foot.getBoundingClientRect().top;
