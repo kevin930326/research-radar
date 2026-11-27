@@ -339,14 +339,14 @@ export function memberCheckOnReturn(
   let seen = new Set<"focus" | "visible">();
   // 這一次切回是「變回看得見、視窗沒有被選取」開始的：那一次的確認做完了沒（N2）。
   let unfocusedStart: { done: boolean } | undefined;
-  // 最近一次的確認：還沒有結果時，新的一次接手（`next`：新的一次的結果）。
-  // `handled`：認出換人或登入過期之後，換畫面或回登入頁已經做完。
+  // 最近一次的確認：還沒有結果時，新的一次接手（`taker`：接手的那一次，結果照它的）。
+  // `handled`：認出換人或登入過期之後，換畫面或回登入頁已經做完（照用別一次的結果時，也照用它的這個記號）。
   type Check = {
     verdict: Promise<MemberCheckVerdict>;
     settled: boolean;
     asked: boolean;
     handled: boolean;
-    next?: Promise<MemberCheckVerdict>;
+    taker?: Check;
   };
   let latest: Check | undefined;
   // 現在正在問「我是誰」的那一次（不一定是最近一次：最近一次可能只是在等它）。
@@ -379,20 +379,23 @@ export function memberCheckOnReturn(
         if (current !== undefined && !current.settled && !current.asked && queryClient.getQueryState(meQuery.queryKey)?.fetchStatus === "fetching") {
           // 那一次的「我是誰」還在路上：它（以及等著它的每一次）跟著這一次的結果；取消那個請求（取消後回應不寫進快取），
           // 下面重新問（N1）。
-          current.next = mine.verdict;
+          current.taker = mine;
           await queryClient.cancelQueries({ queryKey: meQuery.queryKey, exact: true });
         } else {
           // 上一次已經問到答案、正在清快取或重新掛上，或請求因為離線暫停（fetchStatus 是 "paused"）：等它做完。
           // 它認出換了人（或登入過期）時，這一次就是同一個結果，不再問：再問一次會因為快取已經是新的人而判成「同一個人」，
           // 讓等著的寫入照舊帶上一個人送出（epic-3n C-5）；登入過期時也不會再回登入頁一次。
           const verdict = await previous.verdict;
-          // 上一次（或它等的那一次）被這一次接手了：結果就是這一次之後問到的那個，照用。
-          if (previous.next !== undefined) {
+          // 上一次被更晚的一次接手了：結果就是接手那一次問到的，照用（連同它換畫面或回登入頁做完了沒）。
+          if (previous.taker !== undefined) {
+            mine.handled = previous.taker.handled;
             settle(verdict);
             return;
           }
           if (verdict === "changed") {
             if (previous.handled) {
+              // 照用「已經處理過」：之後等著這一次的那一次也就不會再回登入頁一次（epic-3n PR D 確認審查）。
+              mine.handled = true;
               settle("changed");
               return;
             }
@@ -412,8 +415,9 @@ export function memberCheckOnReturn(
       mine.asked = true;
       if (asker === mine) asker = undefined;
       // 問的期間又切回來、新的一次接手了：這個答案（或例外）可能是舊的，不照它做（N1）。
-      if (mine.next !== undefined) {
-        const verdict = await mine.next;
+      if (mine.taker !== undefined) {
+        const verdict = await mine.taker.verdict;
+        mine.handled = mine.taker.handled;
         settle(carriedChange ? "changed" : verdict);
         return;
       }

@@ -420,6 +420,7 @@ describe("the previous check is paused while offline (epic-3n C-5)", () => {
     // 恢復連線：第一次的請求重新送出，之後一直不回來。
     onlineManager.setOnline(true);
     await nextEvent();
+    expect(queryClient.getQueryState(meQuery.queryKey)?.fetchStatus).toBe("fetching");
     leave();
     const third = confirm("visible");
     // 修之前（75f0a3e）：第三次只等第二次、第二次等第一次，全部永遠沒有結果（這一行等不到，測試逾時）。
@@ -427,5 +428,30 @@ describe("the previous check is paused while offline (epic-3n C-5)", () => {
     expect(await sent).toBe("failed");
     expect(source.add).not.toHaveBeenCalled();
     expect(swap).toHaveBeenCalledTimes(1);
+  });
+
+  it("the sign-in expired while offline and the window came back three times: back to the sign-in page once", async () => {
+    const queryClient = mountedClient();
+    const me = vi.spyOn(datasource.session!, "me").mockResolvedValue(null);
+    const toLogin = vi.fn();
+    const { confirm, leave } = memberCheckOnReturn(queryClient, { swap: () => {}, toLogin, reload: () => {} });
+    onlineManager.setOnline(false);
+    const checks = [confirm("visible")];
+    for (let again = 0; again < 2; again += 1) {
+      await nextEvent();
+      leave();
+      checks.push(confirm("visible"));
+    }
+    await nextEvent();
+    const source = addSource();
+    const sent = sendLibraryChange(queryClient, source, PAPER, "add", () => {}, { expectedMemberId: A.member_id });
+    await nextEvent();
+    onlineManager.setOnline(true);
+    await Promise.all(checks);
+    expect(await sent).toBe("failed");
+    expect(source.add).not.toHaveBeenCalled();
+    // 修之前：第三次看到第二次「沒處理過」，又問一次、又回登入頁一次（me 2 次、toLogin 2 次）。
+    expect(me).toHaveBeenCalledTimes(1);
+    expect(toLogin).toHaveBeenCalledTimes(1);
   });
 });
