@@ -400,4 +400,32 @@ describe("the previous check is paused while offline (epic-3n C-5)", () => {
     expect(await sent).toBe("failed");
     expect(swap).toHaveBeenCalledTimes(1);
   });
+
+  it("the first check's request never comes back after going online: a third return takes over, the waiting add is not sent and gets an answer", async () => {
+    const queryClient = mountedClient();
+    vi.spyOn(datasource.session!, "me")
+      .mockReturnValueOnce(new Promise<never>(() => {}))
+      .mockResolvedValue(B);
+    const swap = vi.fn();
+    const { confirm, leave } = memberCheckOnReturn(queryClient, { swap, toLogin: () => {}, reload: () => {} });
+    onlineManager.setOnline(false);
+    const first = confirm("visible");
+    await nextEvent();
+    const source = addSource();
+    const sent = sendLibraryChange(queryClient, source, PAPER, "add", () => {}, { expectedMemberId: A.member_id });
+    await nextEvent();
+    leave();
+    const second = confirm("visible");
+    await nextEvent();
+    // 恢復連線：第一次的請求重新送出，之後一直不回來。
+    onlineManager.setOnline(true);
+    await nextEvent();
+    leave();
+    const third = confirm("visible");
+    // 修之前（75f0a3e）：第三次只等第二次、第二次等第一次，全部永遠沒有結果（這一行等不到，測試逾時）。
+    await Promise.all([first, second, third]);
+    expect(await sent).toBe("failed");
+    expect(source.add).not.toHaveBeenCalled();
+    expect(swap).toHaveBeenCalledTimes(1);
+  });
 });
