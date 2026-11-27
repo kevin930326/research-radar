@@ -69,6 +69,10 @@ async function expectNoMemberFeatures(page: Page): Promise<void> {
   }
   // 「沒有產生成功」：成員版與示範站現在同字（55 條第 31 條），改看那一行標的 key（parts.tsx 的 useFailedText）。
   await expect(page.locator("[data-text-key='paper:paper.state.failed']")).toHaveCount(0);
+  // 兩句之後又不同字時，照原本用字比對（直接寫 t(...)、沒標 key 的也抓得到）。
+  if (text("paper:paper.state.failed") !== text("demo:demo.paper.failed")) {
+    await expect(page.getByText(text("paper:paper.state.failed"))).toHaveCount(0);
+  }
   expect(LATER_OR_MEMBER_ONLY.length).toBeGreaterThan(5);
   // 畫面上每一段字（文字節點，去掉空白）；清單一行一段，行尾「…」只比開頭（和比對工具相同的比法）。
   const paragraphs = await page.evaluate(() => {
