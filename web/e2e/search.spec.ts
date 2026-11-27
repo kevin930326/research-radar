@@ -740,7 +740,6 @@ test.describe("search: entry points", () => {
 // Story 3.20：主題多選的「任一個／同時符合」（設計稿 filter-match-mode.html 的成員版）。假清單裡 ERP 與供應鏈沒有
 // 同一篇，所以任一個有論文、同時符合是 0 篇（「改看符合任一個的 N 篇」）。篇數照替身同一套規則算。
 test.describe("search: any or all topics (Story 3.20)", () => {
-  const ERP = PAPER_FIXTURES.displayNames.topics.find((topic) => topic.key === "erp")!.name;
   const SUPPLY = PAPER_FIXTURES.displayNames.topics.find((topic) => topic.key === "supply_chain")!.name;
   const ANY_TOTAL = expectedTotal("topic=erp&topic=supply_chain");
   const ALL_TOTAL = expectedTotal("topic=erp&topic=supply_chain&topic_match=all");

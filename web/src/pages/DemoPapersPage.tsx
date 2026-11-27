@@ -178,11 +178,11 @@ export function DemoPapersPage({ params: addressParams, onUpdate }: DemoPapersPa
       <DataDateBar snapshot={manifestData?.snapshot ?? null} />
       {/* tabIndex：按「改看符合任一個的 N 篇」之後焦點移到這裡（focusHeading）。 */}
       <h1 data-page-heading tabIndex={-1} className="mt-[14px] font-title-zh text-page-title-zh text-balance text-text-primary split:mt-[18px]">
-        {heading.map(({ node, wrap }, at) => (
+        {heading.map((node, at) => (
           <span key={at}>
             {at > 0 ? " " : null}
-            {/* 多個主題、方法用「或」「＋」接的那一段可以在中間換行（設計稿 .cj 那一段沒有 nowrap）。 */}
-            <span className={wrap ? undefined : "whitespace-nowrap"}>
+            {/* 多個主題、方法用「或」「＋」接的那一段只在「或」「＋」兩邊的空格換行（接的字 whitespace-normal），名稱本身不從中間拆開（設計稿 .cj 那一段沒有 nowrap，但設計稿的名稱都短，沒畫到會換行的情形）。 */}
+            <span className="whitespace-nowrap">
               {node}
               {at < heading.length - 1 || matched !== null ? <span className="pl-[0.3em] text-text-tertiary"> ·</span> : null}
             </span>
@@ -230,12 +230,6 @@ export function DemoPapersPage({ params: addressParams, onUpdate }: DemoPapersPa
   );
 }
 
-/** 標題的一段：內容，與可不可以在中間換行（多個主題、方法用「或」「＋」接的那一段可以）。 */
-interface HeadingPart {
-  node: ReactNode;
-  wrap: boolean;
-}
-
 /**
  * 標題那一行的各段（設計稿：每段後面接「 ·」，最後是篇數）。沒有條件是「全部論文」。
  * 期刊選了好幾本時用「、」接起來（設計稿只畫了一個的樣子、EXPERIENCE.md 沒寫，是自訂的寫法，列給 Kevin；
@@ -248,9 +242,9 @@ function headingParts(
   params: DemoPapersParams,
   names: DisplayNames | null,
   { t, thisWeek, unclassified }: { t: TFunction<"demo">; thisWeek: string; unclassified: string },
-): HeadingPart[] {
-  const parts: HeadingPart[] = [];
-  const plain = (node: string) => parts.push({ node, wrap: false });
+): ReactNode[] {
+  const parts: ReactNode[] = [];
+  const plain = (node: string) => parts.push(node);
   if (params.title !== undefined) plain(t("demo.papers.titleHas", { query: params.title.trim() }));
   if (params.this_week === true) plain(thisWeek);
   const joined = (values: string[], all: boolean) => {
@@ -260,15 +254,14 @@ function headingParts(
       return;
     }
     const word = t(all ? "demo.papers.allJoin" : "demo.papers.anyJoin");
-    parts.push({
-      node: values.map((value, at) => (
+    parts.push(
+      values.map((value, at) => (
         <Fragment key={at}>
-          {at > 0 ? <span className="text-text-secondary">{word}</span> : null}
+          {at > 0 ? <span className="whitespace-normal text-text-secondary">{word}</span> : null}
           {value}
         </Fragment>
       )),
-      wrap: true,
-    });
+    );
   };
   if (names !== null) {
     const journals = selectedKeys(params.journal).map((key) => journalName(names, key));
@@ -285,7 +278,7 @@ function headingParts(
   if (params.from !== undefined && params.to !== undefined) plain(t("demo.papers.years", { years: formatYears(params.from, params.to) }));
   if (params.abstract === true) plain(t("demo.papers.withAbstract"));
   if (params.full === true) plain(t("demo.papers.withFull"));
-  return parts.length === 0 ? [{ node: t("demo.papers.all"), wrap: false }] : parts;
+  return parts.length === 0 ? [t("demo.papers.all")] : parts;
 }
 
 /**

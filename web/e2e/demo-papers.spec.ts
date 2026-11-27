@@ -467,7 +467,7 @@ test.describe("demo paper list: any or all (Story 3.20)", () => {
     expect(count((at) => has("methods", at, METHODS, "all"))).toBe(0);
   });
 
-  test("desktop: topics are any by default, the switch makes them all, the title says 或 or ＋, and the zero link goes back", async ({ page }) => {
+  test("desktop: topics are any by default, the switch makes them all, the title joins them with the any or all word, and the zero link goes back", async ({ page }) => {
     const anyCount = count((at) => has("topics", at, TOPICS, "any"));
     await open(page, `?topic=${TOPICS[0]}`);
     await chip(page, text("search:search.filter.topic")).click();
@@ -507,7 +507,7 @@ test.describe("demo paper list: any or all (Story 3.20)", () => {
     await expect(page.locator("h1")).toBeFocused();
   });
 
-  test("desktop: methods have their own switch, independent of the topic one; journals still use 、", async ({ page }) => {
+  test("desktop: methods have their own switch, independent of the topic one; journals keep the list separator", async ({ page }) => {
     const methodAny = (at: number) => has("methods", at, METHODS, "any");
     await open(page, `?method=${METHODS.join(",")}`);
     await expectCount(page, count(methodAny));
