@@ -1924,6 +1924,58 @@ def test_unreadable_manifest_after_the_rename_is_treated_as_published(
     assert _rows(db) == [(1, "succeeded", None)]
 
 
+def test_second_interrupt_while_cleaning_up_after_the_rename_is_treated_as_published(
+    db: TestDatabase, database: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # epic-3m PR A（Gemini PR154-963235a-sec 中 1）：manifest 換名成功後收到 Ctrl-C，清理重讀
+    # manifest 時又收到第二次 Ctrl-C（清理還沒確認換了沒有），之後 manifest 也讀不出來：不知道換了
+    # 沒有，當成已發佈、不記失敗、留在 running，目錄留著；補排時補記成功。
+    snapshots = publish_snapshots(db)
+    seed_papers(db, database, [PaperSpec("a", 1)], snapshots=snapshots)
+    switched: list[bool] = []
+    reads: list[bool] = []
+    real_replace, real_read = service._replace_file, service._read_manifest
+
+    def replace_then_interrupt(*args: Any) -> None:
+        real_replace(*args)
+        switched.append(True)
+        raise KeyboardInterrupt
+
+    def read(out: Any) -> Any:
+        if not switched:
+            return real_read(out)
+        reads.append(True)
+        if len(reads) == 1:
+            raise KeyboardInterrupt
+        raise OSError(errno.EIO, "unreadable")
+
+    monkeypatch.setattr(service, "_replace_file", replace_then_interrupt)
+    monkeypatch.setattr(service, "_read_manifest", read)
+    run = queue_demo_export(SYSTEM, database)
+
+    with pytest.raises(KeyboardInterrupt):
+        run_demo_export(SYSTEM, database, demo_setup(), run.id, tmp_path, clock=_clock)
+
+    assert switched == [True]
+    assert reads
+    written = _files(tmp_path)
+    assert json.loads(written[MANIFEST_FILE])["export_id"] == "2-1"
+    assert sorted(path.name for path in (tmp_path / PREVIEW_DIR).iterdir()) == [
+        "2-1",
+        MANIFEST_FILE,
+    ]
+    assert _rows(db) == [(1, "running", None)]
+    monkeypatch.undo()
+    _make_stale(db)
+
+    result = run_demo_export(SYSTEM, database, demo_setup(), run.id, tmp_path, clock=_clock)
+
+    assert result is not None
+    assert result.export_id == "2-1"
+    assert _files(tmp_path) == written
+    assert _rows(db) == [(1, "succeeded", None)]
+
+
 def test_unreadable_manifest_when_the_rename_did_not_happen_is_settled_by_the_rerun(
     db: TestDatabase, database: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

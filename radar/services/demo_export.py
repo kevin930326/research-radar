@@ -308,7 +308,16 @@ def run_demo_export(
             )
             raise
         except BaseException as exc:
-            _record_failure(database, out, run, token, exc, published=progress.switched)
+            # 開始換名之後、清理還沒確認沒換之前又被中斷（例如連按兩次 Ctrl-C）：不知道換了沒有，
+            # 一樣當成已發佈（ADR-0061）。清理確認沒換時會把 replacing 清掉。
+            _record_failure(
+                database,
+                out,
+                run,
+                token,
+                exc,
+                published=progress.switched or progress.replacing,
+            )
             raise
     log.info(
         "示範站匯出完成",
@@ -625,7 +634,7 @@ class _Progress:
       之前就停下時，由 `_publish` 的清理重讀 manifest 補設；讀不出 manifest（不知道換了沒有）時也
       補設，當成已發佈（ADR-0061）。
     - `replacing`：已經開始換 manifest 的名（`_swap_manifest` 換名前設）；清理只在這之後才需要重讀
-      manifest 看換了沒有。
+      manifest 看換了沒有，確認沒換才清掉。還沒清掉就記失敗時（清理途中又被中斷）當成已發佈。
     - `written`：這次寫的匯出目錄的 (`st_dev`, `st_ino`)（取自改名前的暫存目錄，改名不變）。改名前
       就設、改名確定失敗才清掉；清理只刪身分相同的目錄。
     - `renamed`：暫存目錄已經改名成 `preview/<匯出編號>/`（`_rename_dir` 回來後設）。清理時找不到
@@ -1127,6 +1136,7 @@ def _clean_up_before_switch(out: _Output, run: DemoExportRun, progress: _Progres
             export_id=run.export_id,
         )
         return
+    progress.replacing = False
     if progress.written is None:
         return
     progress.dir = _discard_export_dir(
