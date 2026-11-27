@@ -1,6 +1,6 @@
 import { Dialog } from "@base-ui/react/dialog";
 import { Link } from "@tanstack/react-router";
-import { useCallback, useId, useRef, useState, type ReactNode } from "react";
+import { useCallback, useId, useRef, useState, type FocusEvent, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 
 import { DESKTOP_QUERY, useCloseAcrossBreakpoint } from "../../hooks/use-close-across-breakpoint";
@@ -129,6 +129,21 @@ export function FilterSheet({ count, total, sections, extra, clear, children, ro
       popupRef.current = null;
     };
   }, []);
+  // firefox 只在焦點完全看不到時才照捲動留白捲動：焦點落在上半部（或下半部）一部分被固定那一列蓋住的元件上時，它不捲
+  //（epic-3l PR E 的 CI、epic-3n PR A 在 firefox 重現）。所以焦點一進來就自己量：被蓋住多少，捲動區就往回（或往下）捲多少。
+  // chromium、webkit 已經照捲動留白捲好，量出來沒被蓋住，這裡什麼都不做。
+  const keepFocusInView = (event: FocusEvent<HTMLDivElement>) => {
+    const popup = event.currentTarget;
+    const head = headRef.current;
+    const foot = footRef.current;
+    const target = event.target;
+    if (head === null || foot === null || head.contains(target) || foot.contains(target)) return;
+    const box = target.getBoundingClientRect();
+    const top = head.getBoundingClientRect().bottom;
+    const bottom = foot.getBoundingClientRect().top;
+    if (box.top < top) popup.scrollTop -= top - box.top;
+    else if (box.bottom > bottom) popup.scrollTop += box.bottom - bottom;
+  };
   const bodyId = useId();
   const firstSectionRef = useRef<HTMLButtonElement>(null);
   const focusFirst = () => firstSectionRef.current?.focus();
@@ -160,6 +175,7 @@ export function FilterSheet({ count, total, sections, extra, clear, children, ro
       <Dialog.Portal>
         <Dialog.Popup
           ref={attachPopup}
+          onFocus={keepFocusInView}
           finalFocus={() => {
             // 關閉動畫（0.25 秒）結束時才還焦點。
             // 焦點已經移到別處（關的同時點了或聚焦在別的東西上）就留在那裡，不拉回「篩選」（同 FilterMenus.tsx 的 finalFocus，

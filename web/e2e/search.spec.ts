@@ -644,6 +644,17 @@ test.describe("search: filters", () => {
     await expect(page.locator("[data-mobile-filter]")).toBeFocused();
   });
 
+  test("desktop: focus moved elsewhere while a filter menu closes at phone width stays there, not handed to the phone filter button", async ({ page }) => {
+    // epic-3n C-4：跨寬度關上時也照「焦點已經移到別處就不搶」（FilterMenus.tsx 的 finalFocus，同手機滿版篩選的 X7）。
+    await openSearch(page, "?topic=e_commerce");
+    const topic = chip(page, "search:search.filter.topic");
+    await topic.click();
+    await expect(page.getByRole("checkbox", { name: ECOMMERCE })).toBeVisible();
+    await crossWidthAndFocus(page, topic, PHONE, "header a");
+    await expect(page.getByRole("checkbox", { name: ECOMMERCE })).toHaveCount(0);
+    await expect(page.locator("header a").first()).toBeFocused();
+  });
+
   test("desktop: clearing after a custom year range shows no limit and the default boxes again", async ({ page }) => {
     // 確認審查 N1 的桌機版：年份選單裡自訂後，按頁面上的「清除篩選」，再打開年份選單是「不限」與預設年份。
     const thisYear = taipeiYear();

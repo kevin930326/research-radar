@@ -790,6 +790,57 @@ test.describe("demo paper list: filter menu layout", () => {
     expect(scrolled).toBeGreaterThan(0);
     expect(hidden).toEqual([]);
   });
+
+  for (const edge of ["top", "bottom"] as const) {
+    test(`phone: Tab onto a control that is partly under the fixed ${edge} bar scrolls it fully into view`, async ({ page, browserName }) => {
+      // epic-3n PR A（epic-3l E-4）：firefox 在焦點元件「一部分看得到」時不照捲動留白捲動，被固定的那一列蓋住一截
+      //（CI 量到「主題」上半部被蓋 35px）。上面那條照順序按 Tab，蓋到多少要看字型與版面，不一定碰得到；
+      // 這條先把捲動位置擺成剛好蓋住 10px，再從旁邊那一個按一次 Tab／Shift+Tab 移過去，一定碰得到。
+      const key = edge === "top" ? (browserName === "webkit" ? "Alt+Shift+Tab" : "Shift+Tab") : browserName === "webkit" ? "Alt+Tab" : "Tab";
+      await open(page, "?topic=erp", PHONE);
+      await page.getByRole("button", { name: fill(text("search:search.mobile.filterCount"), { count: 1 }), exact: true }).click();
+      const sheet = page.getByRole("dialog");
+      await sheet.getByRole("button", { name: text("search:search.filter.topic") }).click();
+      await expect(sheet.getByRole("checkbox", { name: text("paper:paper.classification.unclassified"), exact: true })).toBeAttached();
+      await page.evaluate(() => Promise.all(document.getAnimations().map((animation) => animation.finished.catch(() => undefined))));
+      // 目標：頂部是「主題」那一列（從它的下一個可以按的元件往回按）；底部是捲動區最後一個可以按的元件（從前一個往下按）。
+      const placed = await sheet.evaluate((popup, which) => {
+        const bars = [...popup.querySelectorAll<HTMLElement>("*")].filter((element) => getComputedStyle(element).position === "sticky");
+        const head = bars[0]!;
+        const foot = bars[bars.length - 1]!;
+        const controls = [...popup.querySelectorAll<HTMLElement>("button, input, a[href]")].filter(
+          (element) => !head.contains(element) && !foot.contains(element),
+        );
+        const topicAt = controls.findIndex((element) => element.getAttribute("aria-controls") !== null && element.textContent?.includes("ERP"));
+        const last = controls.length - 1;
+        const target = which === "top" ? controls[topicAt]! : controls[last]!;
+        const from = which === "top" ? controls[topicAt + 1]! : controls[last - 1]!;
+        popup.scrollTop = 0;
+        const box = target.getBoundingClientRect();
+        if (which === "top") popup.scrollTop = box.top - head.getBoundingClientRect().bottom + 10;
+        else popup.scrollTop = box.bottom - foot.getBoundingClientRect().top - 10;
+        const after = target.getBoundingClientRect();
+        target.setAttribute("data-probe-target", "");
+        from.focus({ preventScroll: true });
+        const covered =
+          which === "top" ? head.getBoundingClientRect().bottom - after.top : after.bottom - foot.getBoundingClientRect().top;
+        return { covered: Math.round(covered), fromFocused: document.activeElement === from };
+      }, edge);
+      // 擺好了：目標真的被蓋住 10px、焦點在旁邊那一個上，這條才有測到。
+      expect(placed).toEqual({ covered: 10, fromFocused: true });
+      await page.keyboard.press(key);
+      const target = sheet.locator("[data-probe-target]");
+      await expect(target).toBeFocused();
+      const hiddenBy = await sheet.evaluate((popup, which) => {
+        const bars = [...popup.querySelectorAll<HTMLElement>("*")].filter((element) => getComputedStyle(element).position === "sticky");
+        const box = document.activeElement!.getBoundingClientRect();
+        return which === "top"
+          ? Math.round(bars[0]!.getBoundingClientRect().bottom - box.top)
+          : Math.round(box.bottom - bars[bars.length - 1]!.getBoundingClientRect().top);
+      }, edge);
+      expect(hiddenBy).toBeLessThanOrEqual(0);
+    });
+  }
 });
 
 for (const width of [1440, 1000, 500]) {
