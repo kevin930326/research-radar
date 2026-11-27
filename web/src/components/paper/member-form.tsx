@@ -36,7 +36,7 @@ export function dataAttr(kind: FormKind, name: string, value = ""): Record<strin
 }
 
 /**
- * 設計稿 button.lk 與 a.hit（「有 N 位成員修正過」「修正分類」「回報錯誤」）：看起來 28px 高。按鈕本身 44×44，上下各 -8px
+ * 設計稿 button.lk 與 a.hit（「N 位成員修正過」「修正分類」「回報錯誤」）：看起來 28px 高。按鈕本身 44×44，上下各 -8px
  * 的外距讓這一行看起來和設計稿一樣高。字級由呼叫端加（修正分類 13px、回報錯誤 14px）。
  */
 export const LINK_CLASS =
@@ -50,7 +50,7 @@ export interface PickOption {
 /**
  * 一組標籤（設計稿 button.pk：看起來 32px 高；按鈕本身 44px，上下各 -6px 的外距，兩排之間的 12px 剛好分給上下兩排）。
  * - `multiple`（修正分類）：可複選，每顆是 aria-pressed 的按鈕，外層 role=group。
- * - 單選（回報錯誤的「哪一欄」）：外層 role=radiogroup、每顆 role=radio＋aria-checked（設計稿的寫法）。照 radio 的鍵盤操作：
+ * - 單選（回報錯誤的「欄位」）：外層 role=radiogroup、每顆 role=radio＋aria-checked（設計稿的寫法）。照 radio 的鍵盤操作：
  *   整組只有一顆在 Tab 順序裡（選中的那顆，沒選時第一顆），方向鍵移到上一顆／下一顆並選它，空白鍵與 Enter 選目前這顆。
  */
 export function PickGroup({

@@ -207,7 +207,7 @@ test.describe("search: states", () => {
 
   test("an empty library without conditions has nothing to clear", async ({ page, apiMock }) => {
     // 審查 S1-8：沒有條件時「清除篩選」按了沒反應，所以不放。Story 3.17：文獻庫是空的時，訊息條是
-    // 「你的文獻庫還沒有論文」＋「改找所有追蹤期刊」（State Patterns「12. 找論文」；「上傳或匯入」是 Epic 6）。
+    // 「還沒有論文」＋「改找所有追蹤期刊」（State Patterns「12. 找論文」；「上傳或匯入」是 Epic 6）。
     // F11（Kevin 2026-11-20 准改準備方式）：文獻庫真的是空的（替身的文獻庫設成空），清單的假資料保持完整。
     apiMock.libraryIds = [];
     await openSearch(page, "?scope=personal");

@@ -23,7 +23,7 @@
     "bar": {
       "asOf": "資料截至 {{date}}",
       "snapshot": "· #{{number}}",
-      "snapshotInfo": "第 {{number}} 次整理出來的資料",
+      "snapshotInfo": "第 {{number}} 次整理",
       "number": "#{{number}}"
     }
   },
@@ -34,14 +34,14 @@
   },
   "footer": {
     "source": {
-      "text": "資料來源　OpenAlex 開放書目資料"
+      "text": "資料來源　OpenAlex"
     },
     "links": {
       "coverage": "資料涵蓋範圍",
       "notice": "使用須知"
     },
     "update": {
-      "frequency": "每週更新一次"
+      "frequency": "每週更新"
     }
   }
 }

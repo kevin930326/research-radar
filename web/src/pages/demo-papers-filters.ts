@@ -1,6 +1,6 @@
 // 示範站論文清單（Story 3.14 示範站；EXPERIENCE.md 畫面 7）的篩選條件：網址參數怎麼讀、怎麼寫，
 // 以及在瀏覽器裡怎麼篩（AD-20：讀 papers-index.json 與 titles.json，條件怎麼合照 AD-19／ADR-0050 第 2 點）。
-// 和成員版找論文（search-filters.ts）規則不同的地方不硬湊：多了方法、「只看有摘要的」「只看有完整內容的」、
+// 和成員版找論文（search-filters.ts）規則不同的地方不硬湊：多了方法、「有摘要」「有完整內容」、
 // 標題裡的字；沒有範圍。期刊、年份、主題、方法、本週新增、目前顯示幾篇的網址寫法和找論文相同，直接用它的檢查。
 // 只處理資料，畫面上的字由 i18n 提供。
 import type { DemoPaperRow } from "../datasource/types";
@@ -25,13 +25,13 @@ export interface DemoPapersParams {
   /** 主題、方法選了兩個以上時「同時符合」（Story 3.20；寫法同找論文，省略是任一個）。 */
   topic_match?: "all";
   method_match?: "all";
-  /** 只看有摘要的。 */
+  /** 「有摘要」：只留有摘要的論文。 */
   abstract?: true;
-  /** 只看有完整內容的。 */
+  /** 「有完整內容」：只留有完整內容的論文。 */
   full?: true;
   /** 從連結帶進來的條件「本週新增」（可以移除的標籤）。 */
   this_week?: true;
-  /** 用標題裡的字篩選（字面比對）。 */
+  /** 標題關鍵字（字面比對）。 */
   title?: string;
   /** 目前顯示幾篇（按過「再載入」才有；省略是一頁）。 */
   shown?: number;

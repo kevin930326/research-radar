@@ -49,23 +49,20 @@ async function open(page: Page, base: string, viewport = DESKTOP): Promise<void>
 /** 名詞說明的詞與解釋；「快照編號」的例子是這一次的快照編號（`snapshot`；還不知道快照時是設計稿的 12）。 */
 async function expectTerms(page: Page, snapshot = 12): Promise<void> {
   await expect(page.locator("[data-coverage-terms] dt")).toHaveText(
-    ["scope", "outside", "abstract", "snapshot"].map((key) => text(`coverage:coverage.terms.${key}`)),
+    ["outside", "snapshot"].map((key) => text(`coverage:coverage.terms.${key}`)),
   );
   await expect(page.locator("[data-coverage-terms] dd")).toHaveText([
-    text("coverage:coverage.terms.scopeText"),
     text("coverage:coverage.terms.outsideText"),
-    text("coverage:coverage.terms.abstractText"),
     fill(text("coverage:coverage.terms.snapshotText"), { number: snapshot }),
   ]);
 }
 
-/** 說明與 Elsevier 的三段（設計稿的字；期刊縮寫和表格同一份對照表）。 */
+/** 說明與 Elsevier 的兩句（設計稿的字；期刊縮寫和表格同一份對照表）。 */
 async function expectIntroAndElsevier(page: Page): Promise<void> {
   await expect(page.locator("main h1 + p")).toHaveText(text("coverage:coverage.intro.text"));
   await expect(page.locator("[data-coverage-elsevier] p")).toHaveText([
     fill(text("coverage:coverage.elsevier.journals"), { journals: text("coverage:coverage.elsevier.list") }),
     text("coverage:coverage.elsevier.effect"),
-    text("coverage:coverage.elsevier.note"),
   ]);
 }
 

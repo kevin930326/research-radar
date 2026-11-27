@@ -6,12 +6,12 @@
     "limits": {
       "heading": "這個系統不做的事",
       "noQuestions": "不產生研究問題。",
-      "noPasteable": "不提供可以直接貼進論文的段落。",
-      "screeningOnly": "中文重點只供篩選閱讀，不可直接放入論文。"
+      "noPasteable": "不提供可直接貼進論文的段落。",
+      "screeningOnly": "中文重點只供篩選，不可放入論文。"
     },
     "numbers": {
       "heading": "怎麼讀這裡的數字",
-      "coverage": "每本期刊、每一年有多少論文有摘要，在資料涵蓋範圍。"
+      "coverage": "各期刊各年的摘要比例，見資料涵蓋範圍。"
     }
   }
 }

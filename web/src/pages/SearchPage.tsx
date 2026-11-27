@@ -129,7 +129,7 @@ export function SearchPage({ params: addressParams, onUpdate, onSignedOut, membe
   }, [key, queryClient]);
 
   const found = list.data?.kind === "found" ? list.data.list : null;
-  // 範圍是我的文獻庫、沒有條件、0 篇：再讀一次文獻庫的篇數，真的是 0 才說「你的文獻庫還沒有論文」；文獻庫有論文、
+  // 範圍是我的文獻庫、沒有條件、0 篇：再讀一次文獻庫的篇數，真的是 0 才說「還沒有論文」；文獻庫有論文、
   // 但都不在找論文的範圍裡（例如被排除）時照一般的「沒有符合的論文」（F11，Kevin 2026-11-20）。
   const personalZero = !start && found !== null && found.total === 0 && params.scope === "personal" && !hasConditions(params);
   const libraryCount = useQuery({ ...libraryCountQuery(memberId), enabled: personalZero && !paused });
@@ -285,7 +285,7 @@ export function SearchPage({ params: addressParams, onUpdate, onSignedOut, membe
   } else if (start) {
     body = <StartBlock list={found} names={state.names} />;
   } else if (personalZero) {
-    // 範圍是我的文獻庫、沒有條件、0 篇：文獻庫真的是空的才是「你的文獻庫還沒有論文」（Story 3.17；State Patterns
+    // 範圍是我的文獻庫、沒有條件、0 篇：文獻庫真的是空的才是「還沒有論文」（Story 3.17；State Patterns
     // 「12. 找論文」）；文獻庫有論文時是「沒有符合的論文」，沒有條件可以清除（F11）。篇數還沒讀到時照樣是骨架。
     const total = libraryCount.data?.kind === "found" ? libraryCount.data.total : null;
     body =
@@ -494,7 +494,7 @@ function ZeroBar({
 
 /**
  * 範圍選我的文獻庫、但文獻庫是空的（State Patterns「12. 找論文」；樣子參考設計稿 search.html「文獻庫是空的」那一條）：
- * 「你的文獻庫還沒有論文」＋「改找所有追蹤期刊」。「上傳或匯入」是 Epic 6（AR-67），不放。
+ * 「還沒有論文」＋「改找所有追蹤期刊」。「上傳或匯入」是 Epic 6（AR-67），不放。
  */
 function LibraryEmptyBar() {
   const { t } = useTranslation("search");

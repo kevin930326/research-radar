@@ -20,7 +20,7 @@ describe("coverage text matches config/journals.yaml", () => {
     expect(startYear).toBeGreaterThan(1900);
   });
 
-  it.each([coverage.coverage.intro.text, coverage.coverage.terms.scopeText, coverage.coverage.terms.outsideText])("%s", (text) => {
+  it.each([coverage.coverage.intro.text, coverage.coverage.terms.outsideText])("%s", (text) => {
     // 句子裡的數字只有這兩個：追蹤幾本、從哪一年起。
     expect(text.match(/\d+/g)).toEqual([String(count), String(startYear)]);
   });

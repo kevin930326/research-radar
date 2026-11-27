@@ -43,7 +43,7 @@ import {
 // - /login：登入頁（開發與試用期間是假登入頁），不用登入。
 // - 其他成員版的頁面都在「要登入」的外框（app）底下：每次進頁面先問「我是誰」。
 //   沒登入（401）就到登入頁，網址帶 next（登入後回到原本那一頁）；本來在站內（快取裡有上一次的成員）
-//   才是「登入過期」，多帶 expired，登入頁顯示「登入已經過期，請再登入一次」。直接打開網址時快取是空的，不顯示。
+//   才是「登入過期」，多帶 expired，登入頁顯示「登入過期，請重新登入」。直接打開網址時快取是空的，不顯示。
 //   「我是誰」問不到（網路、伺服器錯誤）是全站共用的「載入失敗」。
 // - 登入後第一頁是找論文（Story 3.14 起；之前是使用須知，AR-67），所以 / 導到 /search。
 // - /search：找論文（Story 3.14 成員版）。篩選與目前顯示幾篇都寫進網址（AD-21），路由驗證網址參數；
@@ -459,7 +459,7 @@ function usePaperLibrary(page: PaperPageData, readAs: ReadAs): LibraryControl {
 /**
  * 論文頁的修正分類（Story 3.11）：送出帶 `readAs`（同 usePaperLibrary，ADR-0055）。成功之後這一份論文頁資料的分類區塊
  * 換成 API 回的（「◆ 已核對」＋人數，中文重點的標章因此改寫全文）；同 usePaperLibrary，只對按的時候那一份資料有效。
- * 歷史按「有 N 位成員修正過」才讀；讀到 401 照登入過期處理，409 照「發現換人」處理，其他沒讀到就不顯示（沒有設計稿，列給 Kevin）。
+ * 歷史按「N 位成員修正過」才讀；讀到 401 照登入過期處理，409 照「發現換人」處理，其他沒讀到就不顯示（沒有設計稿，列給 Kevin）。
  */
 function useClassificationFix(page: PaperPageData, readAs: ReadAs): { page: PaperPageData; control: ClassificationFixControl } {
   const sendFix = useSendClassificationFix(readAs);
@@ -500,7 +500,7 @@ function useClassificationFix(page: PaperPageData, readAs: ReadAs): { page: Pape
 
 /**
  * 論文頁的回報錯誤（Story 3.12）：送出帶 `readAs`（同 useClassificationFix，ADR-0055）與畫面上那一筆中文重點的
- * `zh_summary_id`（ADR-0064）。成功之後這一份論文頁資料的中文重點區塊換成 API 回的（那一欄多了「有成員回報此欄可能有誤」）；
+ * `zh_summary_id`（ADR-0064）。成功之後這一份論文頁資料的中文重點區塊換成 API 回的（那一欄多了「有成員回報可能有誤」）；
  * 同 usePaperLibrary，只對按的時候那一份資料有效。
  */
 function useSummaryReport(page: PaperPageData, readAs: ReadAs): { zhSummary: PaperPageData["zh_summary"]; control: SummaryReportControl } {

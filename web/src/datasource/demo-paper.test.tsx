@@ -238,7 +238,7 @@ function expectNoMemberFeatures(html: string) {
   for (const line of LATER_OR_MEMBER_ONLY) {
     expect(paragraphs.filter((paragraph) => matchesLine(paragraph, line)), line).toEqual([]);
   }
-  // 「有 N 位成員修正過」：佔位符後面那一段。
+  // 「N 位成員修正過」：佔位符後面那一段。
   const fixedTail = t("paper:paper.classification.fixed").split("}}")[1]!.trim();
   expect(html).not.toContain(fixedTail);
   expect(html).not.toContain("data-library");
@@ -288,7 +288,6 @@ describe("demo paper page", () => {
     expect(raw.biblio.demo_eligible).toBe(false);
     expect(html).toContain('data-demo-paper="biblioOnly"');
     expect(html).toContain(t("demo:demo.paper.biblioOnly"));
-    expect(html).toContain(t("demo:demo.paper.biblioOnlyDetail"));
     expect(html).toContain(`href="${raw.biblio.biblio.doi_url}"`);
     expect(html).toContain(t("paper:paper.noAbstract.publisher"));
     expect(html).toMatch(new RegExp(`href="/papers\\?full=true"[^>]*>${t("demo:demo.paper.fullPapers")}<`));

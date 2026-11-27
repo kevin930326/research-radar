@@ -5,9 +5,9 @@ import { RAIL_LABEL_CLASS } from "./parts";
 
 // 論文頁的「我的文獻庫」（Story 3.17；EXPERIENCE.md 畫面 8 輔助欄、State Patterns「8. 論文頁」「手機：已經加入我的文獻庫」）：
 // - 900px 以上在輔助欄「取得全文」下面（設計稿 paper.html）：還沒加入是「加入我的文獻庫」按鈕；
-//   已加入是「● 已在我的文獻庫」＋「移出」（樣子只參考 paper-my-pdf.html 輔助欄「我的文獻庫」那一塊，「我的 PDF」是 Epic 6）。
+//   已加入是「● 已加入」＋「移出」（樣子只參考 paper-my-pdf.html 輔助欄「我的文獻庫」那一塊，「我的 PDF」是 Epic 6）。
 // - 899px 以下（paper.html 手機版）：還沒加入時「加入我的文獻庫」在底部固定列（「開啟全文」旁邊，見 FullTextBar）；
-//   已加入時底部只剩「開啟全文」，「● 已在我的文獻庫」＋「移出」放在書目下面的輔助區（paper-my-pdf.html 手機版的那一塊）。
+//   已加入時底部只剩「開啟全文」，「● 已加入」＋「移出」放在書目下面的輔助區（paper-my-pdf.html 手機版的那一塊）。
 //   沒有 DOI（沒有底部固定列）時，「加入我的文獻庫」也放在這一塊（paper-my-pdf.html 手機版的按鈕；列進決定紀錄）。
 // - 有自己的 PDF、手填書目時不能直接移出（State Patterns）是 Epic 6；這一輪的論文都可以直接移出。
 // - 按下去之後按鈕停用到有結果；失敗時回到原本的樣子（State Patterns 沒有失敗的句子，列給 Kevin 決定）。
@@ -69,7 +69,7 @@ function AddButton({ library }: { library: LibraryControl }) {
   );
 }
 
-/** 「● 已在我的文獻庫」＋「移出」（設計稿 paper-my-pdf.html 的 .lib-in）。 */
+/** 「● 已加入」＋「移出」（設計稿 paper-my-pdf.html 的 .lib-in）。 */
 function InLibraryLine({ library }: { library: LibraryControl }) {
   const { t } = useTranslation("paper");
   const ref = useFocusAfterChange(library.focusToken);

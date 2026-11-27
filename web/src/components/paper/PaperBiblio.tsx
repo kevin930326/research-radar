@@ -207,7 +207,7 @@ export function classificationHasTags(block: ClassificationBlock): boolean {
 
 /**
  * 分類那一行交給成員版的修正分類（Story 3.11）畫的材料。這個檔不 import 修正分類（示範站的建置才不會帶到），
- * 成員版用 `fix`（ClassificationFixRender）把這些排進去：那一行（標籤、標章、「有 N 位成員修正過」、「修正分類」）、
+ * 成員版用 `fix`（ClassificationFixRender）把這些排進去：那一行（標籤、標章、「N 位成員修正過」、「修正分類」）、
  * 下面的「只根據標題分類」、歷史與表單。
  */
 export interface ClassificationRowParts {
@@ -217,7 +217,7 @@ export interface ClassificationRowParts {
   tags: ReactNode;
   /** 「只根據標題分類」那一行；沒有是 null。 */
   titleOnly: ReactNode;
-  /** 「有 N 位成員修正過[，意見不同]」；沒有人修正過是 null。 */
+  /** 「N 位成員修正過[，意見不同]」；沒有人修正過是 null。 */
   countLabel: string | null;
   block: ClassificationBlock;
   /** 主題、方法的顯示名稱（照分類表的順序）。 */
@@ -235,7 +235,7 @@ interface ClassificationProps {
   names: DisplayNames | null;
   /** 這一頁第一個未核對的標章在這裡（寫全文）。 */
   firstBadge: boolean;
-  /** 成員版的修正分類（Story 3.11）；示範站與沒給的時候照原本的樣子（「有 N 位成員修正過」是下面的一行說明）。 */
+  /** 成員版的修正分類（Story 3.11）；示範站與沒給的時候照原本的樣子（「N 位成員修正過」是下面的一行說明）。 */
   fix?: ClassificationFixRender;
 }
 

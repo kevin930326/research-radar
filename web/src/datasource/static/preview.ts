@@ -542,7 +542,7 @@ function sharedField(field: { keys: string[]; human_verified: boolean } | null):
  *   （示範站只匯出計入統計的論文，ADR-0061）。這幾個欄位共用元件現在都不畫。
  * - 分類是 null（摘要來源不允許公開）：not_applicable，整個分類那一行不顯示（Kevin 2026-11-25 決定）。
  * - 沒有摘要（noAbstract）：中文重點與研究模型是 no_input（「中文重點與原文摘要」合成一塊、研究模型寫
- *   「沒有摘要，所以沒有研究模型。」，和成員版的「沒有摘要」相同）。
+ *   「沒有摘要」，和成員版相同）。
  * - 只有書目與 withheld：三個內容區塊都不畫（論文頁用 `limited`），這裡填 not_applicable。
  */
 export function demoPaperPage(paper: ShardPaper, kind: DemoPaperKind, snapshot: SnapshotRef): PaperPageResponse {
