@@ -9,8 +9,8 @@ EXPERIENCE.md 畫面 8 第 3 點、
   行分隔符 U+2028（Zl）、段落分隔符 U+2029（Zp）、格式字元（Cf：零寬空白 U+200B、
   BOM U+FEFF、雙向覆寫 U+202A～U+202E、U+2066～U+2069 等，看不見卻會改變顯示或比對）
   與存不進資料庫的字。只有零寬連接 U+200D 放行：組合 emoji 要用它，它本身不改變文字方向。
-  這條比修正分類的理由（Story 3.11 的 `_check_reason`）多擋了格式字元；理由的規則不在
-  這個 Story 改。
+  擋哪些、放行哪些在 `member_text_characters`，和修正分類的理由（Story 3.11 的 `_check_reason`）共用
+  同一份（epic-3m 起理由也擋格式字元）。
 - **只回報成員看到的、而且現在有效的那一筆中文重點**：中文重點是 `ready`（有內容）才收；成員送來
   畫面上那一筆的 `zh_summary_id`，和鎖裡讀到的有效那一筆不同（送出前重新產生了）就不收
   （`SummaryChangedError`，api 回 409 `summary_changed`，ADR-0064），回報指向那一筆；還在產生、
@@ -22,7 +22,6 @@ EXPERIENCE.md 畫面 8 第 3 點、
   （`OpenSummaryReport`）的形狀。
 """
 
-import unicodedata
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
@@ -32,16 +31,11 @@ from typing import Final
 from radar.domain.ai_blocks import AiBlock, AiBlockState, AiProduct, ZhSummaryValue
 from radar.domain.fingerprints import named_lock_key
 from radar.domain.judgments import SummaryField
+from radar.domain.member_text_characters import ZERO_WIDTH_JOINER, is_rejected_character
 from radar.domain.papers import check_storable_text
 
 # 說明的上限（EXPERIENCE.md 決定第 98 項：理由與說明上限 100 字）。
 NOTE_MAX_LENGTH: Final = 100
-
-# 說明不收的字元類別（見模組說明）。
-_REJECTED_CATEGORIES: Final = frozenset({"Cc", "Cs", "Zl", "Zp", "Cf"})
-# 例外：零寬連接 U+200D（組合 emoji 要用它；不改變文字方向）。
-_ZERO_WIDTH_JOINER: Final = "\u200d"
-_ALLOWED_FORMAT_CHARACTERS: Final = frozenset({_ZERO_WIDTH_JOINER})
 
 # 稽核事件的動作與對象（小寫識別字，寫出去之後不改名）。
 REPORT_SUMMARY_ACTION: Final = "report_summary"
@@ -68,12 +62,6 @@ class SummaryReportInvalidError(ValueError):
         super().__init__(problem.value)
 
 
-def _rejected_character(char: str) -> bool:
-    if char in _ALLOWED_FORMAT_CHARACTERS:
-        return False
-    return unicodedata.category(char) in _REJECTED_CATEGORIES
-
-
 def _clean_note(note: object) -> str:
     """驗說明（見模組說明），回去掉前後空白的字。先看字元再去空白（頭尾的控制字元也不收）。
 
@@ -84,7 +72,7 @@ def _clean_note(note: object) -> str:
         raise SummaryReportInvalidError(SummaryReportProblem.NOTE_MISSING)
     if not isinstance(note, str):
         raise SummaryReportInvalidError(SummaryReportProblem.NOTE_NOT_TEXT)
-    if any(_rejected_character(char) for char in note):
+    if any(is_rejected_character(char) for char in note):
         raise SummaryReportInvalidError(SummaryReportProblem.NOTE_INVALID_CHARACTER)
     try:
         check_storable_text(note, "說明")
@@ -92,7 +80,7 @@ def _clean_note(note: object) -> str:
         raise SummaryReportInvalidError(SummaryReportProblem.NOTE_INVALID_CHARACTER) from None
     text = note.strip()
     # 只有空白與零寬連接（U+200D 本身看不見）也算沒寫。
-    if not text.replace(_ZERO_WIDTH_JOINER, "").strip():
+    if not text.replace(ZERO_WIDTH_JOINER, "").strip():
         raise SummaryReportInvalidError(SummaryReportProblem.NOTE_MISSING)
     if len(text) > NOTE_MAX_LENGTH:
         raise SummaryReportInvalidError(SummaryReportProblem.NOTE_TOO_LONG)
