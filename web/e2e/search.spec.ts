@@ -42,6 +42,23 @@ async function openSearch(page: Page, query = "", viewport = DESKTOP): Promise<v
   await expect(page.locator("h1")).toHaveText(text("search:search.page.title"));
 }
 
+/**
+ * 按 Esc 關掉選單，選單還沒拆掉、還沒還焦點的時候把焦點移到頁面上（選單外）第一個符合 `selector` 的元素：模擬關的同時
+ * 點了或聚焦在別的東西上。選單拆掉時不能把焦點拉回打開它的按鈕（epic-3j 6-2，同 FilterMenus.tsx 的 finalFocus）。
+ * 等一個 microtask 再移：手機的滿版選單打開時頁面藏起來，Esc 之後頁面那一次重畫完才看得到、才能聚焦（選單這時還在）。
+ */
+async function escapeAndFocus(page: Page, selector: string): Promise<void> {
+  const moved = await page.evaluate(async (target) => {
+    (document.activeElement ?? document.body).dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+    await Promise.resolve();
+    const outside = [...document.querySelectorAll<HTMLElement>(target)].find((element) => element.closest("[role=dialog], [role=menu]") === null)!;
+    outside.focus();
+    // 選單還在、焦點真的移過去了，這條測試才有測到「拆掉時焦點已經在別處」。
+    return document.querySelector("[role=dialog], [role=menu]") !== null && document.activeElement === outside;
+  }, selector);
+  expect(moved).toBe(true);
+}
+
 function listRequests(requests: { path: string }[]): URLSearchParams[] {
   return requests
     .filter((request) => request.path.startsWith("/api/v1/papers?") || request.path === "/api/v1/papers")
@@ -564,6 +581,17 @@ test.describe("search: filters", () => {
     await expect(custom).not.toBeChecked();
     await expect(fromBox).toHaveValue("2016");
     await expect(toBox).toHaveValue(thisYear);
+  });
+
+  test("phone: focus moved elsewhere while the filter sheet slides away stays there, not pulled back to the filter button", async ({ page }) => {
+    // epic-3j 6-2：滑出的動畫（0.25 秒）結束才還焦點；那時焦點已經在別處就不拉回「篩選」（MobileFilters.tsx 的 finalFocus）。
+    await openSearch(page, "", PHONE);
+    await page.locator("[data-mobile-filter]").click();
+    const sheet = page.getByRole("dialog");
+    await expect(sheet).toBeVisible();
+    await escapeAndFocus(page, "header a");
+    await expect(sheet).toHaveCount(0);
+    await expect(page.locator("header a").first()).toBeFocused();
   });
 
   test("a desktop menu closed by narrowing to phone width hands the focus to the phone filter button", async ({ page }) => {

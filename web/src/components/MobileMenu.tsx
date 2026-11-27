@@ -63,6 +63,7 @@ export function MobileMenu({ member, open, onOpenChange, triggerRef, desktopFocu
   const logOut = useLogOut();
   const errorId = useId();
   const closedByBreakpoint = useRef(false);
+  const popupRef = useRef<HTMLDivElement>(null);
   // 打開、關掉都經過這裡（Dialog、品牌與使用須知的連結、視窗變寬）：登出中以外都清掉上一次的錯誤。
   const changeOpen = (next: boolean) => {
     if (!logOut.isPending) logOut.reset();
@@ -85,10 +86,17 @@ export function MobileMenu({ member, open, onOpenChange, triggerRef, desktopFocu
         <Dialog.Popup
           aria-label={t("nav.menu.open")}
           className="fixed inset-[0px] z-10 flex flex-col overflow-y-auto bg-background split:hidden"
+          ref={popupRef}
           finalFocus={() => {
-            if (!closedByBreakpoint.current) return true;
-            closedByBreakpoint.current = false;
-            return desktopFocusRef.current;
+            if (closedByBreakpoint.current) {
+              closedByBreakpoint.current = false;
+              return desktopFocusRef.current;
+            }
+            // 焦點已經移到別處（關的同時點了或聚焦在別的東西上）就留在那裡，不拉回「選單」按鈕（同 FilterMenus.tsx 的 finalFocus，
+            // epic-3j 6-2）。Base UI 本來有這個保護，但 finalFocus 給函式時會跳過它（連回傳 true 也一樣），所以自己判斷；不要改回 `return true`。
+            // 焦點還在選單裡、或落在 body（選單一關就不能聚焦，焦點會先落到這裡）才照常回到「選單」按鈕。
+            const active = document.activeElement;
+            return active === null || active === document.body || popupRef.current?.contains(active) === true;
           }}
         >
           <div className={HEADER_CLASS}>

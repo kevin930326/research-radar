@@ -106,6 +106,7 @@ export function FilterSheet({ count, total, sections, extra, clear, children, ro
   const [open, setOpen] = useState(false);
   const [section, setSection] = useState<string | null>(firstKey);
   const closedByBreakpoint = useRef(false);
+  const popupRef = useRef<HTMLDivElement>(null);
   const bodyId = useId();
   const firstSectionRef = useRef<HTMLButtonElement>(null);
   const focusFirst = () => firstSectionRef.current?.focus();
@@ -136,10 +137,18 @@ export function FilterSheet({ count, total, sections, extra, clear, children, ro
       </div>
       <Dialog.Portal>
         <Dialog.Popup
+          ref={popupRef}
           finalFocus={() => {
-            if (!closedByBreakpoint.current) return true;
-            closedByBreakpoint.current = false;
-            return document.querySelector<HTMLElement>("[data-filter-chip]");
+            if (closedByBreakpoint.current) {
+              closedByBreakpoint.current = false;
+              return document.querySelector<HTMLElement>("[data-filter-chip]");
+            }
+            // 關閉動畫（0.25 秒）結束時才還焦點。
+            // 焦點已經移到別處（關的同時點了或聚焦在別的東西上）就留在那裡，不拉回「篩選」（同 FilterMenus.tsx 的 finalFocus，
+            // epic-3j 6-2）。Base UI 本來有這個保護，但 finalFocus 給函式時會跳過它（連回傳 true 也一樣），所以自己判斷；不要改回 `return true`。
+            // 焦點還在滿版篩選裡、或落在 body（滿版一關就不能聚焦，Esc 關掉時焦點會先落到這裡）才照常回到「篩選」。
+            const active = document.activeElement;
+            return active === null || active === document.body || popupRef.current?.contains(active) === true;
           }}
           className="fixed inset-[0px] z-10 overflow-y-auto bg-background leading-normal tracking-0 text-text-primary transition-transform duration-250 data-[ending-style]:translate-y-full data-[starting-style]:translate-y-full split:hidden"
         >
