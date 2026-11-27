@@ -31,6 +31,7 @@ import {
   FIRST_PAGE,
   clearMemberQueries,
   loadMember,
+  meQuery,
   memberGeneration,
   trackMemberCheck,
   useCachedMemberId,
@@ -287,7 +288,8 @@ function useMemberCheckWhileHolding(): number {
         leave();
         return;
       }
-      void confirm("visible");
+      // 視窗沒有被選取時變得看得見（例如蓋住它的視窗移開了）：之後點回來的 focus 要能算成新的一次（epic-3l C 確認 N2）。
+      void confirm("visible", document.hasFocus());
     };
     // 和 TanStack Query 判斷「切回視窗」一樣聽 window 的 visibilitychange（document 發的會冒泡上來）。
     window.addEventListener("focus", onFocus);
@@ -308,38 +310,70 @@ function useMemberCheckWhileHolding(): number {
  * 留著會變成沒接住的錯誤；epic-3l C 審查 X4）；畫面不等它。
  * - 同一次切回只確認一次（#114 收尾 S4）：分頁切回來時 focus 與「變回看得見」兩個事件都會來，不管一起來、或第二個晚到
  *   （第一次已經做完），都不再確認。怎麼認「新的一次切回」（epic-3l C 審查 X3）：分頁藏起來（`leave`）之後；或同一種事件又來了
- *   （視窗要先失焦才會再 focus、分頁要先藏起來才會再變回看得見，所以同一種事件第二次來表示中間離開過）。新的一次就算
- *   上一次還沒做完也照常確認。不聽視窗失焦事件（blur）：建置檢查（tailwind-guard）把 "blur" 這個字當成不產生 CSS 的類別。
- *   做不到的情況：上一次切回只來了「變回看得見」、沒有 focus，接著切到別的程式再切回來（只有 focus），會被當成同一次而不確認；
- *   下一次切回就照常（寫入照樣帶畫面資料的 readAs，後端擋換人）。
+ *   （視窗要先失焦才會再 focus、分頁要先藏起來才會再變回看得見，所以同一種事件第二次來表示中間離開過）；或「變回看得見」
+ *   那一刻視窗沒有被選取（`focused` 是 false，入口傳 document.hasFocus()），那一次的確認做完之後才來的 focus（epic-3l C 確認 N2：
+ *   視窗沒被選取時變得看得見，之後才點回來；做完之前就來的 focus 當成同一次，因為切分頁時 focus 可能比選取晚一點到）。
+ *   不聽視窗失焦事件（blur）：建置檢查（tailwind-guard）把 "blur" 這個字當成不產生 CSS 的類別。
+ * - 新的一次就算上一次還沒做完也照常確認，而且**重新問一次**「我是誰」（epic-3l C 確認 N1）：上一次的請求還在路上時，
+ *   TanStack 會把新的問題併進那個請求（那是在別的分頁換人之前送出的，答案可能是舊的），所以先取消它（取消後它的回應不寫進快取，
+ *   也不會蓋掉新的答案）再問。上一次的確認改成跟著新的一次的結果（等著它的加入／移出也一樣），不自己收尾、不當成「問不到」。
+ *   上一次已經問到答案（正在清快取或重新掛上）就先等它做完，再問一次（不打斷它清到一半）。
  * - 確認途中丟例外（清快取、重新掛上失敗）：一律當成「換了人」收尾，等著的加入／移出不送、按鈕回到按之前的樣子
  *   （#114 收尾 G5：本來確認永遠沒有結果，按鈕一直停在送出中）。當成「換了人」是因為走到那裡時已經知道不是同一位，
  *   或是沒有人；不能當成同一位送出。
  * - 問「我是誰」那一步（loadMember）丟例外：世代號（換人就加 1）變了就是「換了人」——loadMember 認出別人、開始清上一位的
  *   快取時世代號先加 1，之後清快取才失敗；或是問的期間別的流程已經清過。沒變才是「問不到」（epic-3l C 審查 X1）。
- * 「我是誰」一直沒有回來（不是例外）時確認也一直沒有結果，按鈕會停在送出中：要修只能加計時器，這一輪不做（決定紀錄 C）。
+ * 「我是誰」一直沒有回來（不是例外）時確認也一直沒有結果，按鈕會停在送出中：要修只能加計時器，這一輪不做（決定紀錄 C）；
+ * 離開再切回來的那一次會重新問，問到了，上一次等著的也跟著有結果（N1）。
  */
 export function memberCheckOnReturn(
   queryClient: QueryClient,
   actions: { swap: () => void; toLogin: () => Promise<void> | void; reload: () => Promise<void> | void },
-): { confirm: (event: "focus" | "visible") => Promise<void>; leave: () => void } {
+): { confirm: (event: "focus" | "visible", focused?: boolean) => Promise<void>; leave: () => void } {
   // 這一次切回已經來過的事件（新的一次切回時清掉）。
   let seen = new Set<"focus" | "visible">();
+  // 這一次切回是「變回看得見、視窗沒有被選取」開始的：那一次的確認做完了沒（N2）。
+  let unfocusedStart: { done: boolean } | undefined;
+  // 最近一次的確認：還沒有結果時，新的一次接手（`next`：新的一次的結果）。
+  type Check = { verdict: Promise<MemberCheckVerdict>; settled: boolean; asked: boolean; next?: Promise<MemberCheckVerdict> };
+  let latest: Check | undefined;
   const check = async () => {
     let resolve: (verdict: MemberCheckVerdict) => void = () => {};
-    trackMemberCheck(queryClient, new Promise<MemberCheckVerdict>((done) => (resolve = done)));
-    let settled = false;
+    const mine: Check = { verdict: new Promise<MemberCheckVerdict>((done) => (resolve = done)), settled: false, asked: false };
+    trackMemberCheck(queryClient, mine.verdict);
+    const previous = latest;
+    latest = mine;
     const settle = (verdict: MemberCheckVerdict) => {
-      if (settled) return;
-      settled = true;
+      if (mine.settled) return;
+      mine.settled = true;
       resolve(verdict);
     };
     try {
+      if (previous !== undefined && !previous.settled) {
+        if (!previous.asked && queryClient.getQueryState(meQuery.queryKey)?.fetchStatus === "fetching") {
+          // 上一次的「我是誰」還在路上：它跟著這一次的結果；取消那個請求（取消後回應不寫進快取），下面重新問（N1）。
+          previous.next = mine.verdict;
+          await queryClient.cancelQueries({ queryKey: meQuery.queryKey, exact: true });
+        } else {
+          // 上一次已經問到答案、正在清快取或重新掛上：等它做完再問（不打斷它清到一半）。
+          await previous.verdict;
+        }
+      }
       const generation = memberGeneration(queryClient);
       let member;
+      let failed = false;
       try {
         ({ member } = await loadMember(queryClient));
       } catch {
+        failed = true;
+      }
+      mine.asked = true;
+      // 問的期間又切回來、新的一次接手了：這個答案（或例外）可能是舊的，不照它做（N1）。
+      if (mine.next !== undefined) {
+        settle(await mine.next);
+        return;
+      }
+      if (failed) {
         settle(memberGeneration(queryClient) === generation ? "unknown" : "changed");
         return;
       }
@@ -364,20 +398,29 @@ export function memberCheckOnReturn(
     }
   };
   return {
-    confirm: async (event) => {
-      const sameReturn = seen.size > 0 && !seen.has(event);
-      if (!sameReturn) seen = new Set();
+    confirm: async (event, focused = true) => {
+      const afterUnfocusedStart = event === "focus" && unfocusedStart?.done === true;
+      const sameReturn = seen.size > 0 && !seen.has(event) && !afterUnfocusedStart;
+      if (!sameReturn) {
+        seen = new Set();
+        unfocusedStart = undefined;
+      }
       seen.add(event);
       if (sameReturn) return;
-      if (queryClient.getQueryCache().findAll({ queryKey: ["paper-list"], type: "active", predicate: hasHeldRows }).length === 0) return;
+      const job = { done: false };
+      if (event === "visible" && !focused) unfocusedStart = job;
       try {
+        if (queryClient.getQueryCache().findAll({ queryKey: ["paper-list"], type: "active", predicate: hasHeldRows }).length === 0) return;
         await check();
       } catch {
         // 等著的加入／移出已經在 finally 收到結果；這裡只是不讓錯誤留在事件入口（見上面）。
+      } finally {
+        job.done = true;
       }
     },
     leave: () => {
       seen = new Set();
+      unfocusedStart = undefined;
     },
   };
 }

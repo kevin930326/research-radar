@@ -606,6 +606,19 @@ test.describe("search: filters", () => {
     await expect(page.locator("header a").first()).toBeFocused();
   });
 
+  for (const how of ["no key pressed", "one Tab"] as const) {
+    test(`phone: focus in the filter sheet (${how}) when it closes at desktop width is handed to the first filter chip`, async ({ page }) => {
+      // epic-3l C 確認 N3：跨寬度關上、焦點還在滿版篩選裡時，交給桌機版的第一個篩選標籤（MobileFilters.tsx 的 finalFocus）。
+      await openSearch(page, "", PHONE);
+      await page.locator("[data-mobile-filter]").click();
+      await expect(page.getByRole("dialog")).toBeVisible();
+      if (how === "one Tab") await page.keyboard.press("Tab");
+      await page.setViewportSize(DESKTOP);
+      await expect(page.locator("[role=dialog]")).toHaveCount(0);
+      await expect(page.locator("[data-filter-chip]").first()).toBeFocused();
+    });
+  }
+
   for (const how of ["Esc", "the close button"] as const) {
     test(`phone: closing the filter sheet with ${how} gives the focus back to the filter button`, async ({ page }) => {
       // epic-3l C 審查 X9：一般關閉（焦點還在滿版篩選裡、或 Esc 之後落在 body）照常回到「篩選」（MobileFilters.tsx 的 finalFocus）。

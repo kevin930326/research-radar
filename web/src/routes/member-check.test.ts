@@ -182,4 +182,86 @@ describe("checking the member when coming back to the window (#114 follow-up)", 
     stopAgain();
     stop();
   });
+  it("N1: left and came back while the first 'who am I' is still out: asked again (B), no add is sent, the page is re-mounted once", async () => {
+    const queryClient = new QueryClient();
+    queryClient.setQueryData(meQuery.queryKey, A);
+    const stop = holdRow(queryClient);
+    // 第一次的請求在另一個分頁換成乙之前就送出了（答案是甲、還沒回來）；之後再問就是乙。
+    let answerFirst: (member: typeof A) => void = () => {};
+    const me = vi
+      .spyOn(datasource.session!, "me")
+      .mockReturnValueOnce(new Promise((done) => (answerFirst = done)))
+      .mockResolvedValueOnce(B);
+    const swap = vi.fn();
+    const { confirm, leave } = memberCheckOnReturn(queryClient, { swap, toLogin: () => {}, reload: () => {} });
+    const source = addSource();
+    const first = confirm("visible");
+    const early = sendLibraryChange(queryClient, source, PAPER, "add", () => {}, { expectedMemberId: A.member_id });
+    leave();
+    const second = confirm("visible");
+    const late = sendLibraryChange(queryClient, source, PAPER, "add", () => {}, { expectedMemberId: A.member_id });
+    answerFirst(A);
+    await Promise.all([first, second]);
+    // 修之前：第二次併進第一次的請求（只問 1 次），拿到甲、判成同一位，兩個加入都帶甲送出。
+    expect(me).toHaveBeenCalledTimes(2);
+    expect(await early).toBe("failed");
+    expect(await late).toBe("failed");
+    expect(source.add).not.toHaveBeenCalled();
+    expect(swap).toHaveBeenCalledTimes(1);
+    expect(queryClient.getQueryData(meQuery.queryKey)).toEqual(B);
+    stop();
+  });
+
+  it("N1: the first 'who am I' answers after the new check already found B: it does not overwrite B or re-mount again", async () => {
+    const queryClient = new QueryClient();
+    queryClient.setQueryData(meQuery.queryKey, A);
+    const stop = holdRow(queryClient);
+    let answerFirst: (member: typeof A) => void = () => {};
+    const me = vi
+      .spyOn(datasource.session!, "me")
+      .mockReturnValueOnce(new Promise((done) => (answerFirst = done)))
+      .mockResolvedValueOnce(B);
+    const swap = vi.fn();
+    const reload = vi.fn();
+    const { confirm, leave } = memberCheckOnReturn(queryClient, { swap, toLogin: () => {}, reload });
+    const first = confirm("visible");
+    leave();
+    // 修之前：第二次併進第一次還沒回來的請求，這一行一直等不到（測試逾時）。
+    await confirm("visible");
+    expect(swap).toHaveBeenCalledTimes(1);
+    // 舊的請求這時才回來（甲）。
+    answerFirst(A);
+    await first;
+    expect(queryClient.getQueryData(meQuery.queryKey)).toEqual(B);
+    expect(swap).toHaveBeenCalledTimes(1);
+    expect(reload).toHaveBeenCalledTimes(1);
+    expect(me).toHaveBeenCalledTimes(2);
+    stop();
+  });
+
+  it("N2: visible while the window was not selected, then focus after that check is done: a new return, checked again", async () => {
+    const queryClient = new QueryClient();
+    queryClient.setQueryData(meQuery.queryKey, A);
+    const stop = holdRow(queryClient);
+    const me = vi.spyOn(datasource.session!, "me").mockResolvedValue(A);
+    const { confirm } = memberCheckOnReturn(queryClient, { swap: () => {}, toLogin: () => {}, reload: () => {} });
+    // 蓋住它的視窗移開了（看得見、但視窗沒被選取），過一陣子才點回來（focus）。
+    await confirm("visible", false);
+    // 修之前：當成同一次切回，不再確認（1 次）。
+    await confirm("focus");
+    expect(me).toHaveBeenCalledTimes(2);
+    stop();
+  });
+
+  it("N2: visible while the window was not selected, focus comes while that check is still out: the same return, asked once", async () => {
+    const queryClient = new QueryClient();
+    queryClient.setQueryData(meQuery.queryKey, A);
+    const stop = holdRow(queryClient);
+    const me = vi.spyOn(datasource.session!, "me").mockResolvedValue(A);
+    const { confirm } = memberCheckOnReturn(queryClient, { swap: () => {}, toLogin: () => {}, reload: () => {} });
+    // 切分頁時 focus 可能比選取晚一點到：變回看得見那一刻還沒被選取，focus 緊接著來。
+    await Promise.all([confirm("visible", false), confirm("focus")]);
+    expect(me).toHaveBeenCalledTimes(1);
+    stop();
+  });
 });
