@@ -214,7 +214,8 @@ def test_passes_every_parameter_and_returns_the_page() -> None:
 
 
 def test_passes_match_modes() -> None:
-    # Story 3.20：`topic_match`、`method_match` 原樣交給條件的解析；沒給時是 `any`（見上面的預設）。
+    # Story 3.20：`topic_match`、`method_match` 原樣交給條件的解析（沒給時的預設見
+    # `test_defaults_are_tracked_and_no_filter`：`PaperListQuery()` 的兩個欄位是 `any`）。
     fake = FakePaperList()
 
     response = _get(
@@ -236,8 +237,6 @@ def test_passes_match_modes() -> None:
             method_match=MatchMode.ANY,
         )
     ]
-    assert PaperListQuery().topic_match is MatchMode.ANY
-    assert PaperListQuery().method_match is MatchMode.ANY
 
 
 @pytest.mark.parametrize(

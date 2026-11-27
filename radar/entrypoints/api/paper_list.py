@@ -5,7 +5,8 @@
   `Cache-Control: no-store`。每一列的 `in_my_library` 與範圍「我的文獻庫」是成員專屬的：認完 session
   再比對 `X-Radar-Expected-Member`（`auth.member_as_expected`，不符 409、格式不對 400、沒帶照常，
   ADR-0055）。
-- `topic_match`、`method_match`：主題、方法給多個值怎麼合（`any` 預設、`all`；Story 3.20）。
+- `topic_match`、`method_match`：主題、方法給多個值怎麼合（`any` 預設、`all`；Story 3.20）。和
+  `scope` 一樣是單值參數：同一個參數給兩次時取最後一個（框架的行為），不算錯。
 - 不認得的期刊、主題、方法代碼，年份超出範圍，任一個多值參數超過 50 個值，`cursor` 不是上一頁給的
   寫法 → 422 `request_invalid`（`ApiProblemError`，帶 `no-store`）；型別不對（`year=abc`、不認得的
   `scope`、`topic_match`／`method_match`）由框架擋下，一樣是 422 `request_invalid`。

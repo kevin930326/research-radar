@@ -150,6 +150,10 @@ def parse_paper_list_filters(
     methods = set(taxonomy.keys(TaxonomyField.METHOD))
     if any(key not in methods for key in query.methods):
         raise InvalidPaperListQueryError("有不認得的方法代碼")
+    try:
+        topic_match, method_match = MatchMode(query.topic_match), MatchMode(query.method_match)
+    except ValueError:
+        raise InvalidPaperListQueryError("topic_match、method_match 只收 any 或 all") from None
     return PaperListFilters(
         journal_issn_ls=tuple(sorted({issn_of[key] for key in query.journals})),
         years=tuple(sorted(set(query.years))),
@@ -158,8 +162,8 @@ def parse_paper_list_filters(
         has_abstract=query.has_abstract,
         this_week=query.this_week,
         scope=PaperListScope(query.scope),
-        topic_match=MatchMode(query.topic_match),
-        method_match=MatchMode(query.method_match),
+        topic_match=topic_match,
+        method_match=method_match,
     )
 
 
