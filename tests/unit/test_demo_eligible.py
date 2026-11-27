@@ -113,6 +113,13 @@ def test_no_publisher_fields_is_not_eligible() -> None:
     assert is_demo_eligible("cc-by", (), (), TEST_EXCLUSIONS, journal_issn_l=None) is False
 
 
+def test_omitting_the_journal_issn_l_raises_type_error() -> None:
+    # 期刊 ISSN-L 是必填的關鍵字參數（PR #127；沒有期刊時明確傳 None）：新的呼叫端忘了帶會直接
+    # 丟錯，不會讓期刊這一道靜默不生效（ADR-0052 更新 2026-11-22）。
+    with pytest.raises(TypeError, match="journal_issn_l"):
+        is_demo_eligible("cc-by", ("P1",), ("Open",), TEST_EXCLUSIONS)  # type: ignore[call-arg]
+
+
 @pytest.mark.parametrize(
     ("ids", "names"),
     [
