@@ -4,6 +4,7 @@
 // (3) 720×450（1440 寬放大 200%）沒有橫向捲動、文字元素互不重疊；
 // (4) 第一層標題剛好一個；
 // (5) 論文標題與摘要元素自己有 lang，且和內容的語言一致（英文是 en，中文是 zh 開頭）；
+//     PAPER_TITLE_PAGES 上的頁面另外要至少有一個論文標題（不然沒有東西可查也會算通過）；
 // (6) 開發站另跑 axe（正式建置由 3.1 的 a11y.spec.ts 跑），每個說明框點開後也跑一次。
 // 頁面清單和站內連結檢查同一份（pages.ts），新頁面加進來就自動被檢查。
 // 「任一個／同時符合」切換出現的狀態（Story 3.20，pages.ts 的 MATCH_SWITCH_STATES）另外打開來檢查 (1)、(2)：
@@ -16,7 +17,7 @@ import type { Page } from "@playwright/test";
 import { axeSourceFor } from "./axe-source.ts";
 import { expect, test } from "./fixtures.ts";
 import { openMatchSwitch } from "./match-switch.ts";
-import { A11Y_SITES, MATCH_SWITCH_STATES, MISSING_PATH, SITES } from "./pages.ts";
+import { A11Y_SITES, MATCH_SWITCH_STATES, MISSING_PATH, PAPER_TITLE_PAGES, SITES } from "./pages.ts";
 
 const TAGS = ["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"];
 /** accent-gold（#e3b466）的計算值。 */
@@ -212,9 +213,13 @@ for (const site of A11Y_SITES) {
 
     if (missing) continue;
 
+    // 名單是寫死的（pages.ts 的 PAPER_TITLE_PAGES），不是「有標題才查」：該有論文的頁面變成空的或卡在骨架就會失敗。
+    const expectsTitles = PAPER_TITLE_PAGES[site.name].includes(path);
     test(`${site.name} ${path}: paper titles and abstracts carry the lang of their text`, async ({ page }) => {
       await page.goto(url);
-      await expect(page.locator("main h1")).toBeVisible();
+      // 等骨架換掉才查：只等 h1 時，清單頁可能在骨架畫面就檢查，那時沒有論文標題，直接算通過（epic-3j 6-1）。
+      await waitForPage(page, false);
+      if (expectsTitles) await expect(page.locator("[data-paper-text='title']").first()).toBeVisible();
       expect(await paperLangProblems(page)).toEqual([]);
     });
 
@@ -303,6 +308,13 @@ for (const state of MATCH_SWITCH_STATES) {
     }
   });
 }
+
+// 「該有論文標題」的名單每一頁都要在 A11Y_SITES 的頁面清單裡：頁面改名或拿掉時，名單不會留著一個永遠跑不到的網址。
+test("every page that should show paper titles is in the page list", () => {
+  for (const site of A11Y_SITES) {
+    for (const path of PAPER_TITLE_PAGES[site.name]) expect(site.pages).toContain(path);
+  }
+});
 
 // 反例：證明上面的 Tab 走訪（同一個 walkFocus）真的抓得到沒有金色外框的元素，不是什麼都放過。
 test("the focus check notices an element without the gold ring", async ({ page, browserName }) => {
