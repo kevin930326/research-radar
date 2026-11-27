@@ -625,6 +625,31 @@ test.describe("demo paper list: any or all (Story 3.20)", () => {
     await expectCount(page, methodAny);
     await expect(page.locator("h1")).toBeFocused();
   });
+
+  test("phone: the any link is pressed while the filter sheet is still sliding away: the focus stays on the heading", async ({ page }) => {
+    // epic-3j 6-2／epic-3l CI 除錯（A-ci-debug.md）：上一條在 firefox、webkit 時好時壞，因為按「看 0 篇」之後滿版篩選要滑 0.25 秒
+    // 才拆掉，連結按得太快時，拆掉那一刻焦點被拉回「篩選」按鈕、蓋掉標題（MobileFilters.tsx 的 finalFocus）。
+    // 這裡固定做出「還在滑的時候就按了連結」：同一段腳本裡按「看 0 篇」再按連結，不靠機器快慢。
+    const methodAny = count((at) => has("methods", at, METHODS, "any"));
+    await open(page, `?method=${METHODS.join(",")}&method_match=all`, PHONE);
+    await expect(page.locator("[data-state='zero']")).toBeVisible();
+    await page.locator("[data-mobile-filter]").click();
+    const sheet = page.getByRole("dialog");
+    const apply = sheet.getByRole("button", { name: fill(text("search:search.mobile.apply"), { count: 0 }) });
+    await expect(apply).toBeVisible();
+    const label = fill(text("search:search.mobile.apply"), { count: 0 });
+    const pressed = await page.evaluate((name) => {
+      [...document.querySelectorAll<HTMLButtonElement>("[role=dialog] button")].find((button) => button.textContent?.trim() === name)!.click();
+      document.querySelector<HTMLElement>("[data-state='zero'] [data-any-match]")!.click();
+      // 滿版篩選還在（還沒拆掉、還沒還焦點），焦點已經在標題上。
+      return document.querySelector("[role=dialog]") !== null && document.activeElement?.matches("h1[data-page-heading]") === true;
+    }, label);
+    expect(pressed).toBe(true);
+    await expect(sheet).toHaveCount(0);
+    await expect(page).not.toHaveURL(/method_match/);
+    await expectCount(page, methodAny);
+    await expect(page.locator("h1")).toBeFocused();
+  });
 });
 
 for (const width of [1440, 1000, 500]) {
