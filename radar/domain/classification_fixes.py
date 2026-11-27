@@ -5,7 +5,9 @@
   所以不能改成 `unclassified`（它不是分類表的 `key`），送出後兩欄一定都是人工值（「已核對」）。
 - **理由選填**：前後空白去掉；去掉後是空字串當作沒寫；上限 `REASON_MAX_LENGTH` 個字（Unicode
   code point，不是位元組也不是 UTF-16 單位；前端同一種算法）；不能含控制字元（一行的輸入框打不出來；
-  NUL、換行、Tab 都算）、行分隔符 U+2028、段落分隔符 U+2029 與存不進資料庫的字。
+  NUL、換行、Tab 都算）、行分隔符 U+2028、段落分隔符 U+2029、格式字元（零寬空白、BOM、雙向覆寫
+  這類看不見的字；零寬連接 U+200D 放行）與存不進資料庫的字。擋哪些、放行哪些和回報中文重點的說明
+  共用 `one_line_text` 同一份（epic-3m，Kevin 2026-11-26 決定 D14；NFC 正規化不做）。
 - **分類沒有成功的論文先不收**（`NO_AI_CLASSIFICATION`）：能不能修正等 Kevin 決定（TASK 第 6 部分
   第 8 點），決定前後端拒收，和畫面不給入口一致。
 - 成員送來的值一律當使用者輸入驗（AGENTS.md），前端的檢查不算數。錯誤只帶原因代號
@@ -16,7 +18,6 @@
 - 同一篇的修正排隊做（`classification_fix_lock_key`）：「和目前不同」要在同一把鎖裡讀、比、寫。
 """
 
-import unicodedata
 import uuid
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
@@ -26,6 +27,7 @@ from typing import Final, Self
 
 from radar.domain.ai_blocks import AiBlock, AiBlockState, AiProduct, ClassificationValue
 from radar.domain.fingerprints import named_lock_key
+from radar.domain.one_line_text import is_rejected_character
 from radar.domain.papers import check_storable_text
 from radar.domain.taxonomy import Taxonomy, TaxonomyField
 
@@ -48,7 +50,7 @@ class ClassificationFixProblem(StrEnum):
     REASON_NOT_TEXT = "reason_not_text"  # 理由不是字串
     REASON_TOO_LONG = "reason_too_long"  # 理由超過 100 字
     REASON_INVALID_CHARACTER = (
-        "reason_invalid_character"  # 理由有控制字元、分隔符或存不進資料庫的字
+        "reason_invalid_character"  # 理由有控制字元、分隔符、格式字元或存不進資料庫的字
     )
     NO_AI_CLASSIFICATION = "no_ai_classification"  # 分類沒有成功的結果（等 Kevin 決定前不收）
 
@@ -121,18 +123,15 @@ def _check_keys(value: object, field: TaxonomyField, taxonomy: Taxonomy) -> tupl
     return tuple(sorted(keys))
 
 
-# 理由裡不收的字元類別：控制字元、落單的代理字元、行分隔符、段落分隔符。
-_REJECTED_CATEGORIES: Final = frozenset({"Cc", "Cs", "Zl", "Zp"})
-
-
 def _check_reason(value: object) -> str | None:
     if value is None:
         return None
     if not isinstance(value, str):
         raise ClassificationFixInvalidError(ClassificationFixProblem.REASON_NOT_TEXT, "reason")
     # 先看字元再去空白：換行、Tab 這類控制字元在頭尾也不收（一行的輸入框打不出來）。行分隔符
-    # U+2028（Zl）、段落分隔符 U+2029（Zp）不是控制字元，但一樣會讓理由變成好幾行，也不收。
-    if any(unicodedata.category(char) in _REJECTED_CATEGORIES for char in value):
+    # U+2028（Zl）、段落分隔符 U+2029（Zp）不是控制字元，但一樣會讓理由變成好幾行，也不收；
+    # 零寬空白、雙向覆寫這類格式字元（Cf）看不見卻會改變顯示，也不收（零寬連接 U+200D 放行）。
+    if any(is_rejected_character(char) for char in value):
         raise ClassificationFixInvalidError(
             ClassificationFixProblem.REASON_INVALID_CHARACTER, "reason"
         )

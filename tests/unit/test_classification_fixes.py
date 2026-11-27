@@ -2,11 +2,13 @@
 
 後端的每一條規則各有一條測試（前端的檢查不算數）：主題與方法各至少一個、每個都是現在分類表的
 `key`（不收 `unclassified`、放錯欄位、不存在的 key、重複）、和目前的有效值不同才收、理由選填與上限
-100 字（code point）、理由不收控制字元、行分隔符與段落分隔符、存不進資料庫的字；分類沒有成功的
+100 字（code point）、理由不收控制字元、行分隔符與段落分隔符、格式字元（零寬連接放行）、存不進
+資料庫的字；分類沒有成功的
 論文先不收（等 Kevin 決定）。錯誤訊息不回顯成員送的值。分類表用真的 `config/taxonomy.yaml`。
 資料全是測試自己編的（成員名字是明顯的假名）。
 """
 
+import unicodedata
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -224,6 +226,59 @@ def test_reason_rejects_control_and_unstorable_characters(reason: str) -> None:
 @pytest.mark.parametrize("reason", [3, ["理由"], {"r": 1}])
 def test_reason_must_be_text(reason: object) -> None:
     assert _problem(reason=reason).problem is ClassificationFixProblem.REASON_NOT_TEXT
+
+
+# --- 理由裡的格式字元（Cf；epic-3m PR B，照回報說明的做法） ------------------------------------
+
+REASON_FORMAT_CHARACTERS = [
+    "\u200b",  # 零寬空白
+    "\u200c",  # 零寬不連接
+    "\ufeff",  # BOM（零寬不換行空白）
+    "\u00ad",  # 軟連字號
+    "\u200e",  # 由左至右標記
+    "\u200f",  # 由右至左標記
+    *[chr(code) for code in range(0x202A, 0x202F)],  # 雙向嵌入與覆寫 U+202A～U+202E
+    *[chr(code) for code in range(0x2066, 0x206A)],  # 雙向隔離 U+2066～U+2069
+    "\U000e0041",  # 標籤字元
+]
+
+
+def test_the_reason_format_character_list_is_what_it_says() -> None:
+    assert len(REASON_FORMAT_CHARACTERS) == 16
+    assert {unicodedata.category(char) for char in REASON_FORMAT_CHARACTERS} == {"Cf"}
+
+
+@pytest.mark.parametrize("char", REASON_FORMAT_CHARACTERS, ids=lambda char: f"U+{ord(char):04X}")
+def test_reason_rejects_format_characters_at_the_start_middle_and_end(char: str) -> None:
+    for reason in (char + "跨平台", "跨" + char + "平台", "跨平台" + char, char):
+        error = _problem(reason=reason)
+        assert error.problem is ClassificationFixProblem.REASON_INVALID_CHARACTER
+        assert error.field == "reason"
+
+
+def test_reason_rejects_every_format_character_except_the_zero_width_joiner() -> None:
+    # 整個 Unicode 的 Cf 都擋，只有零寬連接 U+200D 放行（和回報中文重點的說明同一份規則）。
+    format_characters = [
+        chr(code) for code in range(0x110000) if unicodedata.category(chr(code)) == "Cf"
+    ]
+    assert "\u200d" in format_characters
+    for char in format_characters:
+        if char == "\u200d":
+            continue
+        assert (
+            _problem(reason="理由" + char).problem
+            is ClassificationFixProblem.REASON_INVALID_CHARACTER
+        ), f"U+{ord(char):04X}"
+
+
+@pytest.mark.parametrize(
+    "reason",
+    ["\u200d跨平台", "跨\u200d平台", "跨平台\u200d", "跨平台👩\u200d💻", "👨\u200d👩\u200d👧"],
+    ids=["start", "middle", "end", "emoji", "family"],
+)
+def test_reason_allows_the_zero_width_joiner(reason: str) -> None:
+    # 零寬連接 U+200D 放行：組合 emoji 要用它，它本身不改變文字方向。
+    assert _check(reason=reason).reason == reason
 
 
 # --- 目前的值 ---------------------------------------------------------------------------------
