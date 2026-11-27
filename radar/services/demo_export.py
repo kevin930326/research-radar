@@ -191,7 +191,9 @@ class DemoExportCheckError(DemoExportError):
 class DemoExportPublishedUnrecordedError(Exception):
     """manifest 已經換成這一次（讀者已經看得到新的一批，**已發佈**），但之後的步驟
     （fsync `preview/`、記成功、commit）失敗：那一筆留在 `running`，之後接手（sweep 補排）時
-    補記成功、不重寫。`error_type` 是原本的錯誤類別（不串原例外：訊息可能帶主機或帳號）。"""
+    補記成功、不重寫。換 manifest 的名那一下停下、又讀不出 manifest（不知道換了沒有）時也丟這個
+    （當成已發佈，ADR-0061）：補排時確認，其實沒換就照一般流程重做。`error_type` 是原本的錯誤
+    類別（不串原例外：訊息可能帶主機或帳號）。"""
 
     def __init__(self, export_id: str, error_type: str) -> None:
         self.export_id = export_id
@@ -260,7 +262,7 @@ def run_demo_export(
         DemoExportCheckError: 自我檢查沒過（什麼都沒寫，manifest 不換）。
         DemoExportError: 其他已知的失敗（原因代碼見 `failure`）。
         DemoExportTakenOverError: 做到一半被別的行程接手（狀態不改、manifest 不換；這次寫好的匯出
-            目錄刪掉；同名目錄已經不是這次寫的（被換掉）不刪，刪不掉或已經被搬走時日誌另外寫）。
+            目錄刪掉；同名目錄已經不是這次寫的（被換掉）不刪，刪不掉或已經不在原位時日誌另外寫）。
         DemoExportPublishedUnrecordedError: manifest 已經換成這一次，但狀態沒記上（留在 `running`，
             之後接手時補記成功）。換 manifest 的名那一下停下、又讀不出 manifest（不知道換了沒有）
             時也當成已發佈，這次寫好的匯出目錄留著，補排時確認：真的換了就補記成功，其實沒換就照
@@ -326,8 +328,9 @@ def _record_failure(
     *,
     published: bool = False,
 ) -> None:
-    """把那一筆記成 `failed`。`published`（這個行程已經換好 manifest）時一律不記：manifest 一換好
-    就算已發佈，之後的檢查失敗或中斷都留在 `running`，sweep 補排時 `_recover` 補記（ADR-0061）。
+    """把那一筆記成 `failed`。`published`（這個行程已經換好 manifest，或換名那一下停下、讀不出
+    manifest 而當成已換）時一律不記：manifest 一換好就算已發佈，之後的檢查失敗或中斷都留在
+    `running`，sweep 補排時 `_recover` 補記（ADR-0061）。
     沒換過但 manifest 已經指向這一次、檔案都完整時也不記（被接手前的同一筆換好的）；manifest 指向
     這一次、檔案卻不完整時照樣記失敗（補記不了，不要每 6 小時重排一次）。記不上（資料庫斷線等）
     只記日誌，原本的例外照樣往上丟。"""
@@ -1052,8 +1055,9 @@ def _write_export_dir(
 ) -> None:
     """資料檔寫進暫存目錄、改名成 `preview/<匯出編號>/`，再 fsync `preview/`（新目錄的名字先落到
     磁碟，才換 manifest：主機突然斷電時，不會有指向缺檔的新 manifest）。改名前把暫存目錄的身分記
-    進 `progress.written`，改名確定失敗才清掉：改名之後的任何失敗或中斷（含 fsync）都由
-    `_publish` 的清理刪掉這個目錄。
+    進 `progress.written`，改名確定失敗才清掉；改名回來後設 `progress.renamed`。改名之後的任何失敗
+    或中斷（含 fsync）都由 `_publish` 的清理收拾（確定沒換 manifest 時依身分刪掉這個目錄，找不到就
+    記成已經不在原位）。
 
     Raises:
         DemoExportError: 目錄已經存在（`output_exists`）、路徑不是認得的資料檔（`output_unsafe`）。
