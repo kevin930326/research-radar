@@ -184,8 +184,14 @@ export function useFollowMemberChange(): () => Promise<void> {
  * `readAs`：畫面上那份資料是用誰的身分讀的（論文頁的 loader、清單的查詢結果記下的；ADR-0055）。請求帶它當預期成員，
  * 所以畫面上是上一位的資料時，按下去一定是 409、不會寫進現在登入的人的文獻庫；後端說換了人時整頁換成現在的人。
  * 沒有 `readAs`（資料不是帶預期成員讀的；成員版沒有這種畫面）就不送、回 "failed"：不知道這份資料是誰的，不寫。
+ * `skipOld409`（預設 true）：換人流程做完之後才回來的舊 409 不再跑一次（alreadyFollowed）。論文頁傳 false（#114 收尾 R3-3，
+ * Kevin 選 D3 的 A）：論文頁換人後背景重讀失敗時，畫面停在上一位的資料、路由已經是下一位，每次按都會被當成舊 409，
+ * 要換頁才恢復；不套用就是每次按都照常跑換人流程（後端照樣擋，不會寫錯人）。
  */
-export function useLibraryChange(readAs: ReadAs): (paperId: string, action: LibraryAction) => Promise<LibraryChangeOutcome> {
+export function useLibraryChange(
+  readAs: ReadAs,
+  { skipOld409 = true }: { skipOld409?: boolean } = {},
+): (paperId: string, action: LibraryAction) => Promise<LibraryChangeOutcome> {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
   const router = useRouter();
@@ -199,11 +205,14 @@ export function useLibraryChange(readAs: ReadAs): (paperId: string, action: Libr
       };
       return sendLibraryChange(queryClient, librarySource(), paperId, action, toLogin, {
         expectedMemberId: readAs,
-        routeMemberId: () => (router.state.matches.at(-1)?.context as { member?: Member } | undefined)?.member?.member_id,
+        // 拿不到路由的成員（undefined）就不算舊 409，照常跑換人流程。
+        routeMemberId: skipOld409
+          ? () => (router.state.matches.at(-1)?.context as { member?: Member } | undefined)?.member?.member_id
+          : undefined,
         onMemberChanged: follow,
       });
     },
-    [queryClient, navigate, router, href, readAs, follow],
+    [queryClient, navigate, router, href, readAs, follow, skipOld409],
   );
 }
 

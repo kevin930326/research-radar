@@ -273,36 +273,16 @@ function useMemberCheckWhileHolding(): number {
   // 這個分頁看到換人幾次：給找論文當 key，換人就重新掛上（快取清掉之後，畫面上的查詢不會自己重讀）。
   const [changes, setChanges] = useState(0);
   useEffect(() => {
+    const confirm = memberCheckOnReturn(queryClient, {
+      swap: () => flushSync(() => setChanges((count) => count + 1)),
+      toLogin: async () => {
+        await router.navigate({ to: "/login", search: { next: router.state.location.href, expired: true as const }, replace: true });
+      },
+      reload: () => router.invalidate(),
+    });
     const check = () => {
       if (document.visibilityState === "hidden") return;
-      if (queryClient.getQueryCache().findAll({ queryKey: ["paper-list"], type: "active", predicate: hasHeldRows }).length === 0) return;
-      let settle: (verdict: MemberCheckVerdict) => void = () => {};
-      trackMemberCheck(queryClient, new Promise<MemberCheckVerdict>((resolve) => (settle = resolve)));
-      void (async () => {
-        const generation = memberGeneration(queryClient);
-        let member;
-        try {
-          ({ member } = await loadMember(queryClient));
-        } catch {
-          settle("unknown");
-          return;
-        }
-        if (member !== null && memberGeneration(queryClient) === generation) {
-          settle("same");
-          return;
-        }
-        if (member === null) {
-          // 本來在站內（有暫留列）才會走到這裡，所以是登入過期（和 SearchRoute 的 onSignedOut 一樣）。
-          await clearMemberQueries(queryClient);
-          settle("changed");
-          await router.navigate({ to: "/login", search: { next: router.state.location.href, expired: true as const }, replace: true });
-          return;
-        }
-        // 換了人：先同步重畫（重新掛上），再讓等著的加入／移出知道結果，最後才重問導覽列的人。
-        flushSync(() => setChanges((count) => count + 1));
-        settle("changed");
-        await router.invalidate();
-      })();
+      void confirm();
     };
     // 和 TanStack Query 判斷「切回視窗」一樣聽 window 的 visibilitychange（document 發的會冒泡上來）。
     window.addEventListener("focus", check);
@@ -313,6 +293,67 @@ function useMemberCheckWhileHolding(): number {
     };
   }, [queryClient, router]);
   return changes;
+}
+
+/**
+ * 切回視窗時的確認（useMemberCheckWhileHolding 每次切回來呼叫回傳的函式；拆出來是為了不靠畫面也能測）。
+ * `swap`：換了人時同步重新掛上找論文；`toLogin`：沒有人時回登入頁；`reload`：重跑路由的登入檢查。
+ * 回傳的函式回一個 promise，確認（含收尾）做完才結束；畫面不等它。
+ * - 上一次確認還沒做完又切回來（focus 與 visibilitychange 一起來）：不再確認一次，等著的加入／移出等的是同一次
+ *   （#114 收尾 S4：確認兩次會多重新掛上一次）。上一次做完之後再切回來就照常確認。
+ * - 確認途中丟例外（清快取、重新掛上失敗）：一律當成「換了人」收尾，等著的加入／移出不送、按鈕回到按之前的樣子
+ *   （#114 收尾 G5：本來確認永遠沒有結果，按鈕一直停在送出中）。當成「換了人」是因為走到那裡時已經知道不是同一位，
+ *   或是沒有人；不能當成同一位送出。
+ * 「我是誰」一直沒有回來（不是例外）時確認也一直沒有結果，按鈕會停在送出中：要修只能加計時器，這一輪不做（決定紀錄 C）。
+ */
+export function memberCheckOnReturn(
+  queryClient: QueryClient,
+  actions: { swap: () => void; toLogin: () => Promise<void> | void; reload: () => Promise<void> | void },
+): () => Promise<void> {
+  let running = false;
+  return async () => {
+    if (running) return;
+    if (queryClient.getQueryCache().findAll({ queryKey: ["paper-list"], type: "active", predicate: hasHeldRows }).length === 0) return;
+    running = true;
+    let resolve: (verdict: MemberCheckVerdict) => void = () => {};
+    trackMemberCheck(queryClient, new Promise<MemberCheckVerdict>((done) => (resolve = done)));
+    // 有結果就可以開始下一次確認（不等回登入頁、重問導覽列做完：那兩步卡住時，之後切回來照樣會確認）。
+    let settled = false;
+    const settle = (verdict: MemberCheckVerdict) => {
+      if (settled) return;
+      settled = true;
+      resolve(verdict);
+      running = false;
+    };
+    try {
+      const generation = memberGeneration(queryClient);
+      let member;
+      try {
+        ({ member } = await loadMember(queryClient));
+      } catch {
+        settle("unknown");
+        return;
+      }
+      if (member !== null && memberGeneration(queryClient) === generation) {
+        settle("same");
+        return;
+      }
+      if (member === null) {
+        // 本來在站內（有暫留列）才會走到這裡，所以是登入過期（和 SearchRoute 的 onSignedOut 一樣）。
+        await clearMemberQueries(queryClient);
+        settle("changed");
+        await actions.toLogin();
+        return;
+      }
+      // 換了人：先同步重畫（重新掛上），再讓等著的加入／移出知道結果，最後才重問導覽列的人。
+      actions.swap();
+      settle("changed");
+      await actions.reload();
+    } finally {
+      // 上面已經有結果時這一行沒有作用。
+      settle("changed");
+    }
+  };
 }
 
 /** 我的文獻庫的網址參數：只有「目前顯示幾篇」（按過「再載入」才有；正整數）。 */
@@ -428,7 +469,8 @@ function PaperWithNames({ page, readAs }: { page: PaperPageData; readAs: ReadAs 
  * 重讀回來之前畫面還是上一位的資料，這時再按一次也要帶上一位（後端回 409，不會寫進下一位的文獻庫；審查 fix1 H2）。
  */
 function usePaperLibrary(page: PaperPageData, readAs: ReadAs): LibraryControl {
-  const change = useLibraryChange(readAs);
+  // 論文頁不套用「舊 409 不重跑」（#114 收尾 R3-3）：背景重讀失敗、畫面停在上一位的資料時，按下去照常跑換人流程。
+  const change = useLibraryChange(readAs, { skipOld409: false });
   const [changed, setChanged] = useState<{ page: PaperPageData; inLibrary: boolean } | null>(null);
   const [busy, setBusy] = useState(false);
   const [focusToken, setFocusToken] = useState(0);

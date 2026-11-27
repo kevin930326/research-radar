@@ -9,10 +9,10 @@
 // - 成功：`apply` 改快取（在比對過世代號之後、同一個步驟裡），回它的結果。回應回來時世代號不同（送出之後換了人）
 //   就回 null，不改快取。
 import { useQueryClient, type QueryClient } from "@tanstack/react-query";
-import { useLocation, useNavigate, useRouter } from "@tanstack/react-router";
+import { useLocation, useNavigate } from "@tanstack/react-router";
 import { useCallback } from "react";
 
-import type { Member, ReadAs } from "../datasource/types";
+import type { ReadAs } from "../datasource/types";
 import { alreadyFollowed, useFollowMemberChange } from "./library-change";
 import { clearMemberQueries, memberGeneration, pendingMemberCheck } from "./session";
 
@@ -90,11 +90,12 @@ export async function sendPaperWrite<T, R>(
 /**
  * 回一個函式：用 `readAs` 當預期成員送出一次寫入，401 時回登入頁、409 時照「發現換人」處理。`readAs` 見 useLibraryChange：
  * 沒有 `readAs` 就不送、回 null（不知道畫面上的資料是誰的，不寫）。
+ * 只有論文頁用（修正分類、回報錯誤），所以不套用「舊 409 不重跑」：不給路由的成員，409 一律照常跑換人流程
+ * （同論文頁的加入／移出，useLibraryChange 的 `skipOld409`；#114 收尾 R3-3）。
  */
 export function usePaperWrite(readAs: ReadAs): <T, R>(request: PaperWrite<T, R>) => Promise<R | null> {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
-  const router = useRouter();
   const href = useLocation({ select: (location) => location.href });
   const follow = useFollowMemberChange();
   return useCallback(
@@ -105,10 +106,9 @@ export function usePaperWrite(readAs: ReadAs): <T, R>(request: PaperWrite<T, R>)
       };
       return sendPaperWrite(queryClient, request, toLogin, {
         expectedMemberId: readAs,
-        routeMemberId: () => (router.state.matches.at(-1)?.context as { member?: Member } | undefined)?.member?.member_id,
         onMemberChanged: follow,
       });
     },
-    [queryClient, navigate, router, href, readAs, follow],
+    [queryClient, navigate, href, readAs, follow],
   );
 }
