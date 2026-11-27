@@ -653,6 +653,23 @@ test.describe("search: filters", () => {
     await crossWidthAndFocus(page, topic, PHONE, "header a");
     await expect(page.getByRole("checkbox", { name: ECOMMERCE })).toHaveCount(0);
     await expect(page.locator("header a").first()).toBeFocused();
+    await expect(page.locator("header a").first()).toBeVisible();
+  });
+
+  test("desktop: focus back on the menu's own chip while it closes at phone width is still handed to the phone filter button", async ({ page }) => {
+    // epic-3n PR A 審查（盲審、邊界）：桌機選單不是模態的，焦點回到自己的標籤時選單還開著；縮到手機寬度標籤就藏起來，
+    // 焦點不能留在那裡，要交給「篩選」。三種引擎都會在標籤藏起來時先把焦點移到 body，finalFocus 照常交出去（探針量過）；
+    // 這條守住結果，哪天「焦點在別處就不搶」的判斷改壞了會紅。
+    await openSearch(page, "?topic=e_commerce");
+    const topic = chip(page, "search:search.filter.topic");
+    await topic.click();
+    await expect(page.getByRole("checkbox", { name: ECOMMERCE })).toBeVisible();
+    await topic.focus();
+    await expect(page.getByRole("checkbox", { name: ECOMMERCE })).toBeVisible();
+    await page.setViewportSize(PHONE);
+    await expect(page.getByRole("checkbox", { name: ECOMMERCE })).toHaveCount(0);
+    await expect(page.locator("[data-mobile-filter]")).toBeFocused();
+    await expect(page.locator("[data-mobile-filter]")).toBeVisible();
   });
 
   test("desktop: clearing after a custom year range shows no limit and the default boxes again", async ({ page }) => {
