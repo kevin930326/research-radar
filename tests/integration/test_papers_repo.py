@@ -319,7 +319,8 @@ def test_split_identifiers_keep_doi_paper_not_demo_eligible(
         journal_issn_l=None,
     )
     # 正式寫入帶的是這筆的期刊 ISSN-L（epic-3m PR D）：前提也照同一種帶法再確認一次，之後排除清單
-    # 加了期刊時，這條才不會變成「本來就是 false」的空測試。
+    # 加了期刊時，這條才不會變成「本來就是 false」的空測試。上面帶 None 的那條是既有斷言，照這一輪
+    # 「既有斷言不改」的規則留著。
     assert is_demo_eligible(
         record.primary_license,
         record.publisher_ids,
