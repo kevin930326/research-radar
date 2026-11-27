@@ -2,3 +2,7 @@
 # 變數名稱含 ACCESS，預設的 generic-api-key 規則把它當成金鑰。它不是秘密；之後的 commit 已改成低熵的
 # test-audience。CI 掃整段歷史，不能改寫歷史，所以只放行那一個 commit 的那一行。
 c5d15bb83d3588a1da255377525f0ff501f29ef2:tests/unit/test_auth_settings.py:generic-api-key:34
+# Story 4.1 PR B 的 commit 364fb01：整合測試用自己編的日誌檢查字串（不是秘密），變數名稱是 secret，預設的
+# generic-api-key 規則把它當成金鑰。之後的 commit 已把變數改名為 query_text。CI 掃整段歷史，不能改寫歷史，
+# 所以只放行那一個 commit 的那一行。
+364fb01b92eb726fccc274233ff96ede408a2693:tests/integration/test_paper_search_api.py:generic-api-key:714
