@@ -1,7 +1,7 @@
 import { useId, useLayoutEffect, useRef, useState, type FocusEvent, type KeyboardEvent } from "react";
 import { useTranslation } from "react-i18next";
 
-import { checkYears, presetRange, type YearPreset, type YearProblem } from "../../pages/search-filters";
+import { checkYears, presetRange, selectedKeys, type YearPreset, type YearProblem } from "../../pages/search-filters";
 import {
   UNCLASSIFIED,
   aisCoreJournals,
@@ -125,6 +125,54 @@ export function MethodOptions({ state, size }: { state: FilterState; size: Optio
         />
       ))}
     </>
+  );
+}
+
+/** 有「任一個／同時符合」的兩個欄位。 */
+export type MatchField = "topic" | "method";
+
+/**
+ * 主題、方法選了兩個以上時的「任一個／同時符合」（Story 3.20；設計稿 filter-match-mode.html 的 .mm）：
+ * 樣式照範圍切換那一組（文字切換、選中的金色底線；桌機 13px、手機 14px 高 44px），沒有新的代幣。
+ * 選的不到兩個時不出現（勾第二個才出現、取消剩一個時消失，網址上的設定由 tidyMatch 拿掉，回到任一個）。
+ * 桌機放在選單最下面那一列的左邊（FilterMenu 的 footerStart）；手機放在滿版篩選底部「看 N 篇」的上面一行，
+ * 只在那一段展開時（FilterSection 的 footer）。按了之後焦點留在按的那一顆（同一個按鈕，不重建）。
+ * 可點範圍：桌機看得到的 32px 高、按鈕本身 44px（負外距抵掉）；「任一個」三個字不到 44px 寬，左右各多 4px（負外距抵掉）。
+ */
+export function MatchSwitch({ state, field, label, size }: { state: FilterState; field: MatchField; label: string; size: OptionSize }) {
+  const { t } = useTranslation("search");
+  if (selectedKeys(state.params[field]).length < 2) return null;
+  const all = state.params[field === "topic" ? "topic_match" : "method_match"] === "all";
+  const pick = (next: boolean) => () =>
+    state.update((current) =>
+      field === "topic" ? { ...current, topic_match: next ? "all" : undefined } : { ...current, method_match: next ? "all" : undefined },
+    );
+  return (
+    <div
+      role="group"
+      aria-label={t("search.filter.matchGroup", { label })}
+      data-match-switch={field}
+      className={size === "menu" ? "inline-flex gap-[20px]" : "flex gap-[28px] border-b border-hairline px-[20px] py-[2px]"}
+    >
+      {([false, true] as const).map((mode) => {
+        const on = mode === all;
+        return (
+          <button
+            key={String(mode)}
+            type="button"
+            aria-pressed={on}
+            onClick={pick(mode)}
+            className={`-mx-1 inline-flex h-tap-target cursor-pointer items-center bg-transparent px-1 tracking-004 transition-[color] duration-200 hover:text-text-primary ${
+              size === "menu" ? "-my-[6px] text-s13" : "text-s14"
+            } ${on ? "text-text-primary" : "text-text-secondary"}`}
+          >
+            <span className={`border-b py-[5px] transition-[border-color] duration-200 ${on ? "border-accent-gold" : "border-transparent"}`}>
+              {t(mode ? "search.filter.matchAll" : "search.filter.matchAny")}
+            </span>
+          </button>
+        );
+      })}
+    </div>
   );
 }
 

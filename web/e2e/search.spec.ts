@@ -737,6 +737,211 @@ test.describe("search: entry points", () => {
   });
 });
 
+// Story 3.20：主題多選的「任一個／同時符合」（設計稿 filter-match-mode.html 的成員版）。假清單裡 ERP 與供應鏈沒有
+// 同一篇，所以任一個有論文、同時符合是 0 篇（「改看符合任一個的 N 篇」）。篇數照替身同一套規則算。
+test.describe("search: any or all topics (Story 3.20)", () => {
+  const ERP = PAPER_FIXTURES.displayNames.topics.find((topic) => topic.key === "erp")!.name;
+  const SUPPLY = PAPER_FIXTURES.displayNames.topics.find((topic) => topic.key === "supply_chain")!.name;
+  const ANY_TOTAL = expectedTotal("topic=erp&topic=supply_chain");
+  const ALL_TOTAL = expectedTotal("topic=erp&topic=supply_chain&topic_match=all");
+  const anyButton = (scope: Page | ReturnType<Page["getByRole"]>) =>
+    scope.locator("[data-match-switch='topic']").getByRole("button", { name: text("search:search.filter.matchAny") });
+  const allButton = (scope: Page | ReturnType<Page["getByRole"]>) =>
+    scope.locator("[data-match-switch='topic']").getByRole("button", { name: text("search:search.filter.matchAll") });
+  /** 網址正好是 /search?…（逗號寫成 , 或 %2C 都算）。 */
+  const at = (query: string) => new RegExp(`/search\\?${query.replace(/[?]/g, "\\?").replace(/,/g, "(%2C|,)")}$`);
+  const anyLink = (page: Page) =>
+    page.locator("[data-state='zero']").getByRole("link", { name: fill(text("search:search.empty.anyInstead"), { count: ANY_TOTAL }) });
+
+  test("the fixture has papers for any and none for all", () => {
+    expect(ANY_TOTAL).toBeGreaterThan(0);
+    expect(ALL_TOTAL).toBe(0);
+  });
+
+  test("desktop: the switch shows up with the second topic, changes the count and the chip, and survives a reload", async ({ page, apiMock }) => {
+    await openSearch(page, "?topic=erp");
+    await chip(page, "search:search.filter.topic").click();
+    // 只選一個：沒有切換。
+    await expect(page.locator("[data-match-switch]")).toHaveCount(0);
+    await page.getByRole("checkbox", { name: SUPPLY }).click();
+    await expect(page.getByRole("checkbox", { name: SUPPLY })).toBeChecked();
+    await expect(page).toHaveURL(at("topic=erp,supply_chain"));
+    // 勾到第二個：切換出現、預設任一個，篇數是任一個的、標籤「主題 · 2 個」。
+    await expect(page.getByRole("group", { name: fill(text("search:search.filter.matchGroup"), { label: text("search:search.filter.topic") }) })).toBeVisible();
+    await expect(anyButton(page)).toHaveAttribute("aria-pressed", "true");
+    await expect(allButton(page)).toHaveAttribute("aria-pressed", "false");
+    await expect(chip(page, "search:search.filter.topic")).toContainText(fill(text("search:search.filter.topicCount"), { count: 2 }));
+    await expect(page.locator("[data-result-count]")).toHaveText(foundText(ANY_TOTAL));
+    expect((await lastListRequest(apiMock.requests)).get("topic_match")).toBeNull();
+
+    await allButton(page).click();
+    await expect(page).toHaveURL(at("topic=erp,supply_chain&topic_match=all"));
+    // 焦點留在按的那一顆（AR-69）；標籤「主題 · 同時符合 2 個」。
+    await expect(allButton(page)).toBeFocused();
+    await expect(allButton(page)).toHaveAttribute("aria-pressed", "true");
+    await expect(chip(page, "search:search.filter.topic")).toContainText(fill(text("search:search.filter.matchAllCount"), { count: 2 }));
+    await expect.poll(async () => (await lastListRequest(apiMock.requests)).get("topic_match")).toBe("all");
+    await expect(page.locator("[data-state='zero']")).toBeVisible();
+
+    await page.reload();
+    await expect(chip(page, "search:search.filter.topic")).toContainText(fill(text("search:search.filter.matchAllCount"), { count: 2 }));
+    await expect(page.locator("[data-state='zero']")).toBeVisible();
+
+    // 取消勾選剩一個：切換消失、網址上不留 topic_match，回到任一個。
+    await chip(page, "search:search.filter.topic").click();
+    await expect(allButton(page)).toHaveAttribute("aria-pressed", "true");
+    await page.getByRole("checkbox", { name: SUPPLY }).click();
+    await expect(page).toHaveURL(`${member.baseURL}/search?topic=erp`);
+    await expect(page.locator("[data-match-switch]")).toHaveCount(0);
+    // 再勾回來是任一個（不是記住的同時符合）。
+    await page.getByRole("checkbox", { name: SUPPLY }).click();
+    await expect(page).toHaveURL(at("topic=erp,supply_chain"));
+    await expect(anyButton(page)).toHaveAttribute("aria-pressed", "true");
+  });
+
+  test("desktop: the switch sits left of clear in the menu's bottom row, works from the keyboard, and is at least 44×44", async ({ page }) => {
+    await openSearch(page, "?topic=erp,supply_chain");
+    await chip(page, "search:search.filter.topic").click();
+    const any = anyButton(page);
+    const all = allButton(page);
+    const clear = page.getByRole("link", { name: text("search:search.filter.clear"), exact: true });
+    const [anyBox, allBox, clearBox] = await Promise.all([any.boundingBox(), all.boundingBox(), clear.boundingBox()]);
+    expect(anyBox!.x).toBeLessThan(allBox!.x);
+    expect(allBox!.x).toBeLessThan(clearBox!.x);
+    for (const box of [anyBox!, allBox!]) {
+      expect(box.width).toBeGreaterThanOrEqual(44);
+      expect(box.height).toBeGreaterThanOrEqual(44);
+    }
+    // 鍵盤：Tab 走到「同時符合」、空白鍵按下去，焦點留在那一顆。
+    await any.focus();
+    await page.keyboard.press("Tab");
+    await expect(all).toBeFocused();
+    await page.keyboard.press("Space");
+    await expect(page).toHaveURL(/[?&]topic_match=all(&|$)/);
+    await expect(all).toBeFocused();
+    await page.keyboard.press("Shift+Tab");
+    await expect(any).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expect(page).toHaveURL(at("topic=erp,supply_chain"));
+    await expect(any).toBeFocused();
+    // 「清除」拿掉主題，也拿掉 topic_match。
+    await all.click();
+    await expect(page).toHaveURL(/[?&]topic_match=all(&|$)/);
+    await clear.click();
+    await expect(page).toHaveURL(`${member.baseURL}/search`);
+  });
+
+  test("all with zero papers links to the any count; the link puts topics back to any and focuses the heading", async ({ page, apiMock }) => {
+    await openSearch(page, "?topic=erp,supply_chain&topic_match=all");
+    const zero = page.locator("[data-state='zero']");
+    await expect(zero).toContainText(text("search:search.empty.noMatch"));
+    await expect(anyLink(page)).toBeVisible();
+    // 「改看符合任一個的 N 篇」在「清除篩選」前面；N 向 API 再查一次（主題改回任一個，沒有 topic_match）。
+    const links = await zero.getByRole("link").allTextContents();
+    expect(links).toEqual([fill(text("search:search.empty.anyInstead"), { count: ANY_TOTAL }), text("search:search.filter.clearAll")]);
+    expect(listRequests(apiMock.requests).some((params) => params.getAll("topic").length === 2 && params.get("topic_match") === null)).toBe(true);
+    const box = await anyLink(page).boundingBox();
+    expect(box!.height).toBeGreaterThanOrEqual(44);
+    await anyLink(page).click();
+    await expect(page).toHaveURL(at("topic=erp,supply_chain"));
+    await expect(page.locator("[data-result-count]")).toHaveText(foundText(ANY_TOTAL));
+    await expect(rows(page)).toHaveCount(ANY_TOTAL);
+    await expect(page.locator("h1")).toBeFocused();
+  });
+
+  test("all with zero papers: no link when any is zero too, or when the any count fails (and no error)", async ({ page }) => {
+    // 任一個也是 0 篇（期刊再限定到沒有這兩個主題的那一年）：不出現連結。
+    expect(expectedTotal("journal=misq&year=2016&topic=erp&topic=supply_chain")).toBe(0);
+    await openSearch(page, "?journal=misq&from=2016&to=2016&topic=erp,supply_chain&topic_match=all");
+    await expect(page.locator("[data-state='zero']")).toBeVisible();
+    await expect(page.locator("[data-any-match]")).toHaveCount(0);
+    // 任一個的篇數查失敗：不出現連結、不報錯（清單本身照常）。後註冊的路由先處理（蓋過替身）。
+    let failedCounts = 0;
+    await page.route("**/api/v1/papers?*", async (route) => {
+      const url = new URL(route.request().url());
+      if (url.searchParams.getAll("topic").length === 2 && url.searchParams.get("topic_match") === null) {
+        failedCounts += 1;
+        await route.fulfill({ status: 500, contentType: "application/problem+json", body: JSON.stringify({ type: "about:blank", title: "error", status: 500, code: "internal_error" }) });
+        return;
+      }
+      await route.fallback();
+    });
+    await openSearch(page, "?topic=erp,supply_chain&topic_match=all");
+    await expect(page.locator("[data-state='zero']")).toBeVisible();
+    await expect(page.locator("[data-state='zero'] [data-any-match]")).toHaveCount(0);
+    await expect.poll(() => failedCounts).toBeGreaterThan(0);
+    await expect(page.locator("[data-state='zero'] [data-any-match]")).toHaveCount(0);
+    await expect(page.locator("[data-state='error']")).toHaveCount(0);
+  });
+
+  test("a method_match=all in the address is sent to the API and kept; removing a method drops it", async ({ page }) => {
+    // 找論文沒有方法的選單；方法從網址帶進來。假資料的顯示名稱只有一個方法，這一條另外給兩個方法的顯示名稱與一份空的清單。
+    const names = { ...PAPER_FIXTURES.displayNames, methods: [...PAPER_FIXTURES.displayNames.methods, { key: "survey_sem", name: "Survey" }] };
+    await page.route("**/api/v1/display-names", (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(names) }));
+    await page.route("**/api/v1/papers?*", (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ items: [], next_cursor: null, total: 0, snapshot: LIST_FIXTURES.snapshot }),
+      }),
+    );
+    const sent: URLSearchParams[] = [];
+    page.on("request", (request) => {
+      if (request.url().includes("/api/v1/papers?")) sent.push(new URL(request.url()).searchParams);
+    });
+    await openSearch(page, "?method=experiment,survey_sem&method_match=all");
+    await expect(page.locator("[data-state='zero']")).toBeVisible();
+    expect(sent.some((params) => params.getAll("method").length === 2 && params.get("method_match") === "all")).toBe(true);
+    await expect(page).toHaveURL(/[?&]method_match=all(&|$)/);
+    // 移除一個方法標籤：剩一個，method_match 跟著拿掉。
+    await page.locator("[data-condition='method']:visible").first().getByRole("button", { name: text("search:search.filter.removeCondition") }).click();
+    await expect(page).toHaveURL(`${member.baseURL}/search?method=survey_sem`);
+  });
+
+  test("phone: the switch is above the apply button only while the topic section is open", async ({ page }) => {
+    await openSearch(page, "?topic=erp", PHONE);
+    await page.locator("[data-mobile-filter]").click();
+    const sheet = page.getByRole("dialog");
+    const topic = sheet.locator("[data-filter-section='topic'] > button");
+    await topic.click();
+    await expect(sheet.locator("[data-match-switch]")).toHaveCount(0);
+    await sheet.getByRole("checkbox", { name: SUPPLY }).click();
+    await expect(sheet.getByRole("checkbox", { name: SUPPLY })).toBeChecked();
+    await expect(anyButton(sheet)).toHaveAttribute("aria-pressed", "true");
+    await expect(topic).toContainText(fill(text("search:search.filter.topicCount"), { count: 2 }));
+    const apply = sheet.getByRole("button", { name: fill(text("search:search.mobile.apply"), { count: ANY_TOTAL }) });
+    await expect(apply).toBeVisible();
+    // 切換在「看 N 篇」上面一行、同樣寬的固定列裡；可點範圍至少 44×44。
+    const [switchBox, applyBox] = await Promise.all([sheet.locator("[data-match-switch='topic']").boundingBox(), apply.boundingBox()]);
+    expect(switchBox!.y + switchBox!.height).toBeLessThanOrEqual(applyBox!.y);
+    for (const box of [await anyButton(sheet).boundingBox(), await allButton(sheet).boundingBox()]) {
+      expect(box!.width).toBeGreaterThanOrEqual(44);
+      expect(box!.height).toBeGreaterThanOrEqual(44);
+    }
+    await allButton(sheet).click();
+    await expect(page).toHaveURL(/[?&]topic_match=all(&|$)/);
+    await expect(allButton(sheet)).toBeFocused();
+    await expect(topic).toContainText(fill(text("search:search.filter.matchAllCount"), { count: 2 }));
+    await expect(sheet.getByRole("button", { name: fill(text("search:search.mobile.apply"), { count: ALL_TOTAL }) })).toBeVisible();
+    // 收起主題那一段：切換不見（只在那一組展開時出現）；展開期刊也一樣。
+    await topic.click();
+    await expect(sheet.locator("[data-match-switch]")).toHaveCount(0);
+    await sheet.locator("[data-filter-section='journal'] > button").click();
+    await expect(sheet.locator("[data-match-switch]")).toHaveCount(0);
+    await topic.click();
+    await expect(allButton(sheet)).toHaveAttribute("aria-pressed", "true");
+  });
+
+  test("phone: all with zero papers links to the any count", async ({ page }) => {
+    await openSearch(page, "?topic=erp,supply_chain&topic_match=all", PHONE);
+    await expect(anyLink(page)).toBeVisible();
+    await anyLink(page).click();
+    await expect(page).toHaveURL(at("topic=erp,supply_chain"));
+    await expect(rows(page)).toHaveCount(ANY_TOTAL);
+    await expect(page.locator("h1")).toBeFocused();
+  });
+});
+
 for (const width of [1440, 1000, 500]) {
   test(`search screenshot at ${width}px`, async ({ page, browserName }) => {
     test.skip(browserName !== "chromium", "screenshots are taken in chromium only");

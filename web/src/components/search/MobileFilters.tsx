@@ -8,7 +8,7 @@ import { formatCount, splitTemplate } from "../../pages/paper-format";
 import { TRACKING_START_YEAR, appliedFilterCount, clearConditions } from "../../pages/search-filters";
 import type { ClearTarget } from "./FilterMenus";
 import { journalValue, topicValue, yearValue, type FilterState } from "./filters";
-import { JournalOptions, TopicOptions, YearOptions } from "./FilterLists";
+import { JournalOptions, MatchSwitch, TopicOptions, YearOptions } from "./FilterLists";
 import { Caret, CrossIcon, FilterIcon } from "./parts";
 
 // 手機（899px 以下）的篩選（EXPERIENCE.md 畫面 12 第 8 點、設計稿 search-no-box.html 的 .mfbtn 與 .msw）：
@@ -26,6 +26,11 @@ export interface FilterSection {
   label: string;
   value: string | null;
   body: ReactNode;
+  /**
+   * 這一段展開時放在底部「看 N 篇」上面一行的東西：主題、方法的「任一個／同時符合」（Story 3.20；設計稿
+   * filter-match-mode.html 的手機 .mm，固定在底部那一列裡，清單再長也看得到、不會把選項往下推）。
+   */
+  footer?: ReactNode;
 }
 
 interface MobileFiltersProps {
@@ -50,7 +55,13 @@ export function MobileFilters({ state, total, children }: MobileFiltersProps) {
       value: yearValue(state),
       body: <YearOptions state={state} size="sheet" startYear={TRACKING_START_YEAR} />,
     },
-    { key: "topic", label: t("search.filter.topic"), value: topicValue(state, t, unclassified), body: <TopicOptions state={state} size="sheet" /> },
+    {
+      key: "topic",
+      label: t("search.filter.topic"),
+      value: topicValue(state, t, unclassified),
+      body: <TopicOptions state={state} size="sheet" />,
+      footer: <MatchSwitch state={state} field="topic" label={t("search.filter.topic")} size="sheet" />,
+    },
   ];
   return (
     <FilterSheet
@@ -98,6 +109,7 @@ export function FilterSheet({ count, total, sections, extra, clear, children, ro
   const bodyId = useId();
   const firstSectionRef = useRef<HTMLButtonElement>(null);
   const focusFirst = () => firstSectionRef.current?.focus();
+  const footer = sections.find(({ key }) => key === section)?.footer ?? null;
   const changeOpen = (next: boolean) => {
     if (next) setSection(firstKey);
     setOpen(next);
@@ -166,7 +178,9 @@ export function FilterSheet({ count, total, sections, extra, clear, children, ro
               );
             })}
             {extra}
-            <div className="sticky bottom-[0px] mt-auto flex items-center justify-between gap-4 border-t border-hairline bg-background px-[20px] py-[14px]">
+            <div className="sticky bottom-[0px] mt-auto border-t border-hairline bg-background">
+              {footer}
+              <div className="flex items-center justify-between gap-4 px-[20px] py-[14px]">
               {count > 0 ? (
                 // 按了它會不見，焦點先移到第一段的標題（審查 S2-3）。
                 <Link
@@ -190,6 +204,7 @@ export function FilterSheet({ count, total, sections, extra, clear, children, ro
                       part.slot === null ? part.text : <span key={index}>{formatCount(total)}</span>,
                     )}
               </Dialog.Close>
+            </div>
             </div>
           </div>
         </Dialog.Popup>

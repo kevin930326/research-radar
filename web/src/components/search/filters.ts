@@ -65,12 +65,36 @@ export function journalValue(state: FilterState, t: TFunction<"search">): string
   return t("search.filter.journalCount", { count: keys.length });
 }
 
-/** 主題：一個寫名稱，多個寫「N 個」。 */
-export function topicValue(state: FilterState, t: TFunction<"search">, unclassified: string): string | null {
-  const keys = selectedKeys(state.params.topic);
+/** 主題、方法：一個寫名稱，多個寫「N 個」，選了同時符合寫「同時符合 N 個」（Story 3.20）。 */
+function classificationValue(
+  keys: string[],
+  all: boolean,
+  name: (key: string) => string,
+  t: TFunction<"search">,
+): string | null {
   if (keys.length === 0) return null;
-  if (keys.length === 1) return topicName(state.names, keys[0]!, unclassified);
-  return t("search.filter.topicCount", { count: keys.length });
+  if (keys.length === 1) return name(keys[0]!);
+  return t(all ? "search.filter.matchAllCount" : "search.filter.topicCount", { count: keys.length });
+}
+
+/** 主題：一個寫名稱，多個寫「N 個」或「同時符合 N 個」。 */
+export function topicValue(state: FilterState, t: TFunction<"search">, unclassified: string): string | null {
+  return classificationValue(
+    selectedKeys(state.params.topic),
+    state.params.topic_match === "all",
+    (key) => topicName(state.names, key, unclassified),
+    t,
+  );
+}
+
+/** 方法（示範站論文清單）：寫法同主題。 */
+export function methodValue(state: FilterState, t: TFunction<"search">): string | null {
+  return classificationValue(
+    selectedKeys(state.params.method),
+    state.params.method_match === "all",
+    (key) => state.names?.methods.find((entry) => entry.key === key)?.name ?? key,
+    t,
+  );
 }
 
 /** 年份：選的範圍（「2020–2026」，同一年寫一次）。 */
@@ -96,4 +120,12 @@ export { yearPreset };
 export function focusFilters(): void {
   const desktop = typeof window.matchMedia === "function" && window.matchMedia(DESKTOP_QUERY).matches;
   document.querySelector<HTMLElement>(desktop ? "[data-filter-chip]" : "[data-mobile-filter]")?.focus();
+}
+
+/**
+ * 「改看符合任一個的 N 篇」按了之後，這個連結會不見（Story 3.20）：焦點移到頁面標題（示範站的標題寫著條件與篇數，
+ * 找論文是「找論文」，下面接著是「找到 N 篇」）。標題要有 tabIndex={-1} 才能接焦點。
+ */
+export function focusHeading(): void {
+  document.querySelector<HTMLElement>("h1[data-page-heading]")?.focus();
 }

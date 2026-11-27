@@ -11,7 +11,9 @@
       "titleHas": "標題有「{{query}}」",
       "withAbstract": "有摘要",
       "withFull": "有完整內容",
-      "separator": "、"
+      "separator": "、",
+      "anyJoin": " 或 ",
+      "allJoin": " ＋ "
     },
     "filter": {
       "abstractOnly": "只看有摘要的",

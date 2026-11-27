@@ -9,9 +9,18 @@ import { NewTabNote } from "../components/ExternalArrow";
 import { PaperTitle } from "../components/PaperText";
 import { ClassificationTagLink, UnclassifiedTag } from "../components/paper/PaperBiblio";
 import { FilterMenu, type ClearTarget } from "../components/search/FilterMenus";
-import { JournalOptions, MethodOptions, TopicOptions, YearOptions } from "../components/search/FilterLists";
-import { focusFilters, journalName, topicName, type FilterState } from "../components/search/filters";
-import { ConditionTag, ErrorBar, More } from "../components/search/ListParts";
+import { JournalOptions, MatchSwitch, MethodOptions, TopicOptions, YearOptions } from "../components/search/FilterLists";
+import {
+  focusFilters,
+  journalName,
+  journalValue,
+  methodValue,
+  topicName,
+  topicValue,
+  yearValue,
+  type FilterState,
+} from "../components/search/filters";
+import { AnyMatchLink, ConditionTag, ErrorBar, More } from "../components/search/ListParts";
 import { FilterSheet, type FilterSection } from "../components/search/MobileFilters";
 import { OpenFullText } from "../components/search/PaperRows";
 import { CrossIcon, FilterOption, NoticeIcon, formatYears } from "../components/search/parts";
@@ -19,6 +28,7 @@ import { datasource } from "../datasource";
 import type { DemoPaperRow } from "../datasource/types";
 import type { DisplayNames } from "../generated/model";
 import {
+  anyMatchCount,
   clearDemoConditions,
   demoFilterCount,
   filterDemoRows,
@@ -29,7 +39,7 @@ import {
   type DemoPapersParams,
 } from "./demo-papers-filters";
 import { externalUrl, formatCount } from "./paper-format";
-import { TRACKING_START_YEAR, currentTaipeiYear, selectedKeys, type SearchParams } from "./search-filters";
+import { TRACKING_START_YEAR, anyMatch, currentTaipeiYear, hasAllMatch, selectedKeys, tidyMatch, type SearchParams } from "./search-filters";
 
 // 示範站的論文清單（Story 3.14 示範站；EXPERIENCE.md 畫面 7、State Patterns「7. 論文清單」；
 // 設計稿 docs/ux/reference/screens/papers-demo.html）。
@@ -92,8 +102,9 @@ export function DemoPapersPage({ params: addressParams, onUpdate }: DemoPapersPa
   const names = data?.names ?? null;
   // 網址上不認得的期刊、主題、方法代號拿掉（舊書籤；同找論文）。
   const params = names === null ? addressParams : knownDemoOnly(addressParams, names);
+  // 每一次換條件都拿掉不到兩個的「同時符合」（Story 3.20）。
   const update = (change: (current: DemoPapersParams) => DemoPapersParams) =>
-    onUpdate((current) => ({ ...change(current), shown: undefined }));
+    onUpdate((current) => tidyMatch({ ...change(current), shown: undefined }));
   const unclassified = tp("paper.classification.unclassified");
 
   // 共用的篩選選單與選項看的是找論文的條件形狀（期刊、年份、主題、方法的欄位相同），改了再寫回這一頁的條件。
@@ -130,7 +141,14 @@ export function DemoPapersPage({ params: addressParams, onUpdate }: DemoPapersPa
   } else if (data === null || matched === null) {
     body = <DemoSkeletonRows label={ts("search.results.loading")} />;
   } else if (matched.length === 0) {
-    body = <ZeroBar clear={hasDemoConditions(params) ? clear : null} />;
+    // 同時符合查到 0 篇：主題與方法都改回任一個的篇數在瀏覽器裡算（Story 3.20）。
+    const anyCount = hasAllMatch(params) ? anyMatchCount(data.rows, params) : null;
+    body = (
+      <ZeroBar
+        clear={hasDemoConditions(params) ? clear : null}
+        any={anyCount === null || anyCount === 0 ? null : { count: anyCount, target: { to: "/papers", search: { ...anyMatch(params), shown: undefined } } }}
+      />
+    );
   } else {
     const pageSize = data.pageSize;
     const shown = Math.min(Math.max(params.shown ?? pageSize, pageSize), matched.length);
@@ -158,12 +176,14 @@ export function DemoPapersPage({ params: addressParams, onUpdate }: DemoPapersPa
   return (
     <div data-page="demo-papers" className="text-s14 leading-normal tracking-0 text-text-primary">
       <DataDateBar snapshot={manifestData?.snapshot ?? null} />
-      <h1 className="mt-[14px] font-title-zh text-page-title-zh text-balance text-text-primary split:mt-[18px]">
-        {heading.map((part, at) => (
+      {/* tabIndex：按「改看符合任一個的 N 篇」之後焦點移到這裡（focusHeading）。 */}
+      <h1 data-page-heading tabIndex={-1} className="mt-[14px] font-title-zh text-page-title-zh text-balance text-text-primary split:mt-[18px]">
+        {heading.map(({ node, wrap }, at) => (
           <span key={at}>
             {at > 0 ? " " : null}
-            <span className="whitespace-nowrap">
-              {part}
+            {/* 多個主題、方法用「或」「＋」接的那一段可以在中間換行（設計稿 .cj 那一段沒有 nowrap）。 */}
+            <span className={wrap ? undefined : "whitespace-nowrap"}>
+              {node}
               {at < heading.length - 1 || matched !== null ? <span className="pl-[0.3em] text-text-tertiary"> ·</span> : null}
             </span>
           </span>
@@ -210,33 +230,62 @@ export function DemoPapersPage({ params: addressParams, onUpdate }: DemoPapersPa
   );
 }
 
+/** 標題的一段：內容，與可不可以在中間換行（多個主題、方法用「或」「＋」接的那一段可以）。 */
+interface HeadingPart {
+  node: ReactNode;
+  wrap: boolean;
+}
+
 /**
  * 標題那一行的各段（設計稿：每段後面接「 ·」，最後是篇數）。沒有條件是「全部論文」。
- * 一個欄位選了好幾個時用「、」接起來（設計稿只畫了一個的樣子、EXPERIENCE.md 沒寫，是自訂的寫法，列給 Kevin；
+ * 期刊選了好幾本時用「、」接起來（設計稿只畫了一個的樣子、EXPERIENCE.md 沒寫，是自訂的寫法，列給 Kevin；
  * 預期檔裡這一條沒有出處，寫在預期檔 screens 的第 7 項）。
+ * 主題、方法選了好幾個時：任一個用「 或 」、同時符合用「 ＋ 」接，接的字是第二層字色（Story 3.20；設計稿
+ * filter-match-mode.html 的 .cj）。
  * 顯示名稱還沒讀到時（載入中、錯誤）不寫期刊、主題、方法這幾段。
  */
 function headingParts(
   params: DemoPapersParams,
   names: DisplayNames | null,
   { t, thisWeek, unclassified }: { t: TFunction<"demo">; thisWeek: string; unclassified: string },
-): string[] {
-  const parts: string[] = [];
-  if (params.title !== undefined) parts.push(t("demo.papers.titleHas", { query: params.title.trim() }));
-  if (params.this_week === true) parts.push(thisWeek);
-  const join = (values: string[]) => values.join(t("demo.papers.separator"));
+): HeadingPart[] {
+  const parts: HeadingPart[] = [];
+  const plain = (node: string) => parts.push({ node, wrap: false });
+  if (params.title !== undefined) plain(t("demo.papers.titleHas", { query: params.title.trim() }));
+  if (params.this_week === true) plain(thisWeek);
+  const joined = (values: string[], all: boolean) => {
+    if (values.length === 0) return;
+    if (values.length === 1) {
+      plain(values[0]!);
+      return;
+    }
+    const word = t(all ? "demo.papers.allJoin" : "demo.papers.anyJoin");
+    parts.push({
+      node: values.map((value, at) => (
+        <Fragment key={at}>
+          {at > 0 ? <span className="text-text-secondary">{word}</span> : null}
+          {value}
+        </Fragment>
+      )),
+      wrap: true,
+    });
+  };
   if (names !== null) {
     const journals = selectedKeys(params.journal).map((key) => journalName(names, key));
-    if (journals.length > 0) parts.push(join(journals));
-    const topics = selectedKeys(params.topic).map((key) => topicName(names, key, unclassified));
-    if (topics.length > 0) parts.push(join(topics));
-    const methods = selectedKeys(params.method).map((key) => names.methods.find((entry) => entry.key === key)?.name ?? key);
-    if (methods.length > 0) parts.push(join(methods));
+    if (journals.length > 0) plain(journals.join(t("demo.papers.separator")));
+    joined(
+      selectedKeys(params.topic).map((key) => topicName(names, key, unclassified)),
+      params.topic_match === "all",
+    );
+    joined(
+      selectedKeys(params.method).map((key) => names.methods.find((entry) => entry.key === key)?.name ?? key),
+      params.method_match === "all",
+    );
   }
-  if (params.from !== undefined && params.to !== undefined) parts.push(t("demo.papers.years", { years: formatYears(params.from, params.to) }));
-  if (params.abstract === true) parts.push(t("demo.papers.withAbstract"));
-  if (params.full === true) parts.push(t("demo.papers.withFull"));
-  return parts.length === 0 ? [t("demo.papers.all")] : parts;
+  if (params.from !== undefined && params.to !== undefined) plain(t("demo.papers.years", { years: formatYears(params.from, params.to) }));
+  if (params.abstract === true) plain(t("demo.papers.withAbstract"));
+  if (params.full === true) plain(t("demo.papers.withFull"));
+  return parts.length === 0 ? [{ node: t("demo.papers.all"), wrap: false }] : parts;
 }
 
 /**
@@ -247,9 +296,10 @@ function DesktopMenus({ state, params, unclassified }: { state: FilterState; par
   const { t } = useTranslation("search");
   const { t: tp } = useTranslation("paper");
   const values = menuValues(state, unclassified, t);
+  // 「清除」拿掉這一個選單的條件；主題、方法的「同時符合」跟著拿掉（Story 3.20）。
   const clearOf = (field: "journal" | "topic" | "method"): ClearTarget => ({
     to: "/papers",
-    search: { ...params, [field]: undefined, shown: undefined },
+    search: tidyMatch({ ...params, [field]: undefined, shown: undefined }),
   });
   return (
     <>
@@ -259,34 +309,42 @@ function DesktopMenus({ state, params, unclassified }: { state: FilterState; par
       <FilterMenu label={t("search.filter.year")} value={values.year} width="narrow" clear={null}>
         <YearOptions state={state} size="menu" startYear={TRACKING_START_YEAR} />
       </FilterMenu>
-      <FilterMenu label={t("search.filter.topic")} value={values.topic} width="narrow" clear={clearOf("topic")}>
+      <FilterMenu
+        label={t("search.filter.topic")}
+        value={values.topic}
+        width="narrow"
+        clear={clearOf("topic")}
+        footerStart={<MatchSwitch state={state} field="topic" label={t("search.filter.topic")} size="menu" />}
+      >
         <TopicOptions state={state} size="menu" />
       </FilterMenu>
-      <FilterMenu label={tp("paper.classification.method")} value={values.method} width="narrow" clear={clearOf("method")}>
+      <FilterMenu
+        label={tp("paper.classification.method")}
+        value={values.method}
+        width="narrow"
+        clear={clearOf("method")}
+        footerStart={<MatchSwitch state={state} field="method" label={tp("paper.classification.method")} size="menu" />}
+      >
         <MethodOptions state={state} size="menu" />
       </FilterMenu>
     </>
   );
 }
 
-/** 選單標籤（與手機每一段的標題右邊）寫的「選了什麼」：一個寫名稱，多個寫「N 本」「N 個」。 */
+/**
+ * 選單標籤（與手機每一段的標題右邊）寫的「選了什麼」：一個寫名稱，多個寫「N 本」「N 個」，主題、方法選了同時符合寫
+ * 「同時符合 N 個」（和找論文同一套寫法，filters.ts）。
+ */
 function menuValues(
   state: FilterState,
   unclassified: string,
   t: TFunction<"search">,
 ): Record<"journal" | "year" | "topic" | "method", string | null> {
-  const one = (keys: string[], name: (key: string) => string, countKey: "search.filter.journalCount" | "search.filter.topicCount") =>
-    keys.length === 0 ? null : keys.length === 1 ? name(keys[0]!) : t(countKey, { count: keys.length });
-  const { params, names } = state;
   return {
-    journal: one(selectedKeys(params.journal), (key) => journalName(names, key), "search.filter.journalCount"),
-    year: params.from === undefined || params.to === undefined ? null : formatYears(params.from, params.to),
-    topic: one(selectedKeys(params.topic), (key) => topicName(names, key, unclassified), "search.filter.topicCount"),
-    method: one(
-      selectedKeys(params.method),
-      (key) => names?.methods.find((entry) => entry.key === key)?.name ?? key,
-      "search.filter.topicCount",
-    ),
+    journal: journalValue(state, t),
+    year: yearValue(state),
+    topic: topicValue(state, t, unclassified),
+    method: methodValue(state, t),
   };
 }
 
@@ -412,8 +470,20 @@ function DemoMobileFilters({
       value: values.year,
       body: <YearOptions state={state} size="sheet" startYear={TRACKING_START_YEAR} />,
     },
-    { key: "topic", label: t("search.filter.topic"), value: values.topic, body: <TopicOptions state={state} size="sheet" /> },
-    { key: "method", label: tp("paper.classification.method"), value: values.method, body: <MethodOptions state={state} size="sheet" /> },
+    {
+      key: "topic",
+      label: t("search.filter.topic"),
+      value: values.topic,
+      body: <TopicOptions state={state} size="sheet" />,
+      footer: <MatchSwitch state={state} field="topic" label={t("search.filter.topic")} size="sheet" />,
+    },
+    {
+      key: "method",
+      label: tp("paper.classification.method"),
+      value: values.method,
+      body: <MethodOptions state={state} size="sheet" />,
+      footer: <MatchSwitch state={state} field="method" label={tp("paper.classification.method")} size="sheet" />,
+    },
   ];
   const extra = (
     <div className="border-b border-hairline py-[6px]">
@@ -562,8 +632,11 @@ function FullContentMark({ full }: { full: boolean }) {
   );
 }
 
-/** 篩到 0 篇（State Patterns「7. 論文清單」）：「沒有符合的論文」＋「清除篩選」（只剩標題的字時沒有可以清除的）。 */
-function ZeroBar({ clear }: { clear: ClearTarget | null }) {
+/**
+ * 篩到 0 篇（State Patterns「7. 論文清單」）：「沒有符合的論文」＋「清除篩選」（只剩標題的字時沒有可以清除的）。
+ * 同時符合查到 0 篇、改回任一個有論文時，「清除篩選」前面多「改看符合任一個的 N 篇」（`any`；Story 3.20）。
+ */
+function ZeroBar({ clear, any }: { clear: ClearTarget | null; any: { count: number; target: ClearTarget } | null }) {
   const { t } = useTranslation("search");
   return (
     <div role="status" data-state="zero" className="mt-[36px] flex max-w-reading-width items-start gap-[14px] split:mt-12">
@@ -573,7 +646,8 @@ function ZeroBar({ clear }: { clear: ClearTarget | null }) {
       <div>
         <p className="text-s17 leading-170 text-text-primary">{t("search.empty.noMatch")}</p>
         {clear === null ? null : (
-          <div className="mt-2">
+          <div className="mt-2 flex flex-wrap gap-x-[28px]">
+            {any === null ? null : <AnyMatchLink count={any.count} target={any.target} />}
             <ClearAllLink target={clear} className="-my-1 text-nav" />
           </div>
         )}

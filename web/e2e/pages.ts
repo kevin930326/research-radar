@@ -40,6 +40,25 @@ export function demoPaperId(number: number): string {
  */
 export const DEMO_PAPER_PAGES = [1, 2, 3, 12, 9].map((number) => `/papers/${demoPaperId(number)}`);
 
+/**
+ * 選單打開、「任一個／同時符合」切換出現的狀態（Story 3.20）：網址上的條件已經選了兩個以上，打開後才看得到切換，
+ * 所以不放進 SITES 的頁面清單（那一份是直接打開的網址），由 a11y.spec.ts、a11y-floor.spec.ts 另外打開來檢查。
+ * `field` 是哪一個選單（主題、方法）；`phone` 是手機寬度的滿版篩選（展開那一段），否則是桌機的下拉選單。
+ */
+export interface MatchSwitchState {
+  site: "member" | "demo";
+  path: string;
+  field: "topic" | "method";
+  phone: boolean;
+}
+
+export const MATCH_SWITCH_STATES: MatchSwitchState[] = [
+  { site: "member", path: "/search?topic=erp,supply_chain", field: "topic", phone: false },
+  { site: "member", path: "/search?topic=erp,supply_chain&topic_match=all", field: "topic", phone: true },
+  { site: "demo", path: "/papers?topic=erp,knowledge_collaboration&method=survey_sem,experiment&method_match=all", field: "method", phone: false },
+  { site: "demo", path: "/papers?topic=erp,knowledge_collaboration&topic_match=all", field: "topic", phone: true },
+];
+
 /** 一定不存在的網址：用來檢查「找不到這一頁」。 */
 export const MISSING_PATH = "/no/such/page";
 

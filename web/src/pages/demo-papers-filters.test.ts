@@ -1,16 +1,20 @@
 // 示範站論文清單的篩選（Story 3.14 示範站）：網址參數的檢查、條件怎麼合（AD-19／ADR-0050 第 2 點：
-// 不同欄位「且」、期刊與年份多值「或」、主題與方法多值「且」）、排序、清除篩選與手機的「篩選 · N」。
+// 不同欄位「且」、期刊與年份多值「或」；主題與方法多值預設「或」、*_match=all 時「且」，Story 3.20）、排序、
+// 清除篩選與手機的「篩選 · N」。
 import { describe, expect, it } from "vitest";
 
 import type { DemoPaperRow } from "../datasource/types";
 import {
+  anyMatchCount,
   clearDemoConditions,
   demoFilterCount,
   filterDemoRows,
   hasDemoConditions,
   isAllPapers,
+  fromSearchParams,
   knownDemoOnly,
   MAX_TITLE_QUERY,
+  toSearchParams,
   validateDemoPapersParams,
 } from "./demo-papers-filters";
 
@@ -94,12 +98,13 @@ describe("demo paper list filtering", () => {
     expect(ids(filterDemoRows([...mixed].reverse(), {}))).toEqual(["0000000B-0000-4000-8000-000000000000", "0000000a-0000-4000-8000-000000000000"]);
   });
 
-  it("ORs journals and years, ANDs topics and methods, ANDs different fields", () => {
+  it("ORs journals and years, ANDs topics and methods when *_match=all, ANDs different fields", () => {
     expect(ids(filterDemoRows(rows, { journal: "misq,io" }))).toEqual(["e", "c", "a"]);
     expect(ids(filterDemoRows(rows, { from: 2024, to: 2025 }))).toEqual(["e", "b", "c"]);
     expect(ids(filterDemoRows(rows, { topic: "erp" }))).toEqual(["b", "a"]);
-    expect(ids(filterDemoRows(rows, { topic: "erp,e_commerce" }))).toEqual(["a"]);
-    expect(ids(filterDemoRows(rows, { method: "experiment,survey_sem" }))).toEqual(["b"]);
+    // Story 3.20：原本沒帶 *_match 就是「且」；預設改成「或」之後，這兩條明確帶 all（保住原本在測的「且」）。
+    expect(ids(filterDemoRows(rows, { topic: "erp,e_commerce", topic_match: "all" }))).toEqual(["a"]);
+    expect(ids(filterDemoRows(rows, { method: "experiment,survey_sem", method_match: "all" }))).toEqual(["b"]);
     expect(ids(filterDemoRows(rows, { topic: "unclassified" }))).toEqual(["c"]);
     expect(ids(filterDemoRows(rows, { journal: "misq", topic: "e_commerce", from: 2025, to: 2025 }))).toEqual(["e"]);
   });
@@ -112,8 +117,71 @@ describe("demo paper list filtering", () => {
     expect(ids(filterDemoRows(rows, { title: "blockchain", journal: "misq" }))).toEqual(["e"]);
   });
 
+  it("ORs topics and methods by default (Story 3.20)", () => {
+    expect(ids(filterDemoRows(rows, { topic: "erp,e_commerce" }))).toEqual(["e", "b", "a"]);
+    expect(ids(filterDemoRows(rows, { method: "experiment,survey_sem" }))).toEqual(["e", "b", "a"]);
+  });
+
+  it("one key gives the same rows either way", () => {
+    expect(ids(filterDemoRows(rows, { topic: "erp", topic_match: "all" }))).toEqual(ids(filterDemoRows(rows, { topic: "erp" })));
+    expect(ids(filterDemoRows(rows, { method: "experiment", method_match: "all" }))).toEqual(ids(filterDemoRows(rows, { method: "experiment" })));
+  });
+
+  it("topic and method each have their own setting; different fields are still ANDed", () => {
+    // 主題「或」（erp 或 e_commerce：a、b、e）、方法「且」（experiment 且 survey_sem：b）→ b。
+    expect(ids(filterDemoRows(rows, { topic: "erp,e_commerce", method: "experiment,survey_sem", method_match: "all" }))).toEqual(["b"]);
+    // 主題「且」（a）、方法「或」（a、b、e）→ a。
+    expect(ids(filterDemoRows(rows, { topic: "erp,e_commerce", topic_match: "all", method: "experiment,survey_sem" }))).toEqual(["a"]);
+    // 期刊、年份照舊：主題「或」再接期刊 misq → a、e。
+    expect(ids(filterDemoRows(rows, { topic: "erp,e_commerce", journal: "misq" }))).toEqual(["e", "a"]);
+  });
+
+  it("unclassified with another topic: any lists both, all is zero (Kevin 2026-11-27)", () => {
+    expect(ids(filterDemoRows(rows, { topic: "erp,unclassified" }))).toEqual(["b", "c", "a"]);
+    expect(filterDemoRows(rows, { topic: "erp,unclassified", topic_match: "all" })).toEqual([]);
+  });
+
+  it("counts the rows with topics and methods back to any, other conditions kept", () => {
+    expect(anyMatchCount(rows, { topic: "erp,unclassified", topic_match: "all" })).toBe(3);
+    expect(anyMatchCount(rows, { topic: "erp,unclassified", topic_match: "all", journal: "misq" })).toBe(1);
+    expect(anyMatchCount(rows, { topic: "erp,e_commerce", topic_match: "all", method: "experiment,survey_sem", method_match: "all", full: true })).toBe(1);
+    expect(anyMatchCount(rows, { journal: "pmj", topic: "erp,e_commerce", topic_match: "all" })).toBe(0);
+  });
+
   it("returns nothing when no paper has every condition", () => {
     expect(filterDemoRows(rows, { journal: "isr", full: true })).toEqual([]);
+  });
+});
+
+describe("demo paper list match mode in the address (Story 3.20)", () => {
+  it("keeps topic_match / method_match only as all and only with two keys or more", () => {
+    expect(validateDemoPapersParams({ topic: "erp,e_commerce", topic_match: "all", method: "experiment,survey_sem", method_match: "all" }, 2026)).toMatchObject({
+      topic_match: "all",
+      method_match: "all",
+    });
+    const single = validateDemoPapersParams({ topic: "erp", topic_match: "all", method: "experiment", method_match: "all" }, 2026);
+    expect(single.topic_match).toBeUndefined();
+    expect(single.method_match).toBeUndefined();
+    expect(validateDemoPapersParams({ topic: "erp,e_commerce", topic_match: "any" }, 2026).topic_match).toBeUndefined();
+    expect(validateDemoPapersParams({ topic: "erp,e_commerce", topic_match: "ALL" }, 2026).topic_match).toBeUndefined();
+  });
+
+  it("round-trips through the shared filter shape, dropping the setting below two keys", () => {
+    const params = { topic: "erp,e_commerce", topic_match: "all" as const, full: true as const, title: "x" };
+    expect(fromSearchParams(params, toSearchParams(params))).toEqual(params);
+    const unticked = fromSearchParams(params, { ...toSearchParams(params), topic: "erp" });
+    expect(unticked.topic_match).toBeUndefined();
+    expect(unticked).toMatchObject({ topic: "erp", full: true, title: "x" });
+  });
+
+  it("drops the setting when unknown keys leave fewer than two", () => {
+    const names = { journals: [], topics: [{ key: "erp", name: "ERP" }], methods: [] };
+    expect(knownDemoOnly({ topic: "erp,gone", topic_match: "all" }, names).topic_match).toBeUndefined();
+    expect(knownDemoOnly({ topic: "erp,unclassified", topic_match: "all" }, names).topic_match).toBe("all");
+  });
+
+  it("clearing every condition also drops the setting", () => {
+    expect(clearDemoConditions({ topic: "erp,e_commerce", topic_match: "all", title: "x" })).toEqual({ title: "x" });
   });
 });
 

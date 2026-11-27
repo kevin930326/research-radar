@@ -6,7 +6,7 @@
 import type { DemoPaperRow } from "../datasource/types";
 import { normalizeForTitleMatch, titleMatcher } from "../datasource/title-match";
 import type { DisplayNames } from "../generated/model";
-import { currentTaipeiYear, knownOnly, selectedKeys, validateSearchParams, type SearchParams } from "./search-filters";
+import { anyMatch, currentTaipeiYear, knownOnly, selectedKeys, tidyMatch, validateSearchParams, type SearchParams } from "./search-filters";
 
 /** 標題裡的字最多幾個字（網址不會無限長；超過的截掉）。 */
 export const MAX_TITLE_QUERY = 200;
@@ -18,10 +18,13 @@ export interface DemoPapersParams {
   /** 年份範圍的起訖（含）；兩個都有才算數。 */
   from?: number;
   to?: number;
-  /** 主題代號，逗號分隔（多選，「且」）。 */
+  /** 主題代號，逗號分隔（多選；預設「或」，topic_match=all 時「且」）。 */
   topic?: string;
-  /** 方法代號，逗號分隔（多選，「且」）。 */
+  /** 方法代號，逗號分隔（多選；預設「或」，method_match=all 時「且」）。 */
   method?: string;
+  /** 主題、方法選了兩個以上時「同時符合」（Story 3.20；寫法同找論文，省略是任一個）。 */
+  topic_match?: "all";
+  method_match?: "all";
   /** 只看有摘要的。 */
   abstract?: true;
   /** 只看有完整內容的。 */
@@ -52,6 +55,8 @@ export function validateDemoPapersParams(search: Record<string, unknown>, curren
     to: shared.to,
     topic: shared.topic,
     method: shared.method,
+    topic_match: shared.topic_match,
+    method_match: shared.method_match,
     abstract: flag(search.abstract),
     full: flag(search.full),
     this_week: shared.this_week,
@@ -60,14 +65,31 @@ export function validateDemoPapersParams(search: Record<string, unknown>, curren
   };
 }
 
-/** 給找論文共用的篩選選項用（期刊、年份、主題、方法的欄位名稱與寫法相同）。 */
+/** 給找論文共用的篩選選項用（期刊、年份、主題、方法與它們的「同時符合」，欄位名稱與寫法相同）。 */
 export function toSearchParams(params: DemoPapersParams): SearchParams {
-  return { journal: params.journal, from: params.from, to: params.to, topic: params.topic, method: params.method };
+  return {
+    journal: params.journal,
+    from: params.from,
+    to: params.to,
+    topic: params.topic,
+    method: params.method,
+    topic_match: params.topic_match,
+    method_match: params.method_match,
+  };
 }
 
-/** 共用的篩選選項改了期刊、年份、主題、方法：寫回示範站的條件（其他條件不動）。 */
+/** 共用的篩選選項改了期刊、年份、主題、方法：寫回示範站的條件（其他條件不動；不到兩個的「同時符合」拿掉）。 */
 export function fromSearchParams(params: DemoPapersParams, next: SearchParams): DemoPapersParams {
-  return { ...params, journal: next.journal, from: next.from, to: next.to, topic: next.topic, method: next.method };
+  return tidyMatch({
+    ...params,
+    journal: next.journal,
+    from: next.from,
+    to: next.to,
+    topic: next.topic,
+    method: next.method,
+    topic_match: next.topic_match,
+    method_match: next.method_match,
+  });
 }
 
 /** 拿掉顯示名稱裡沒有的期刊、主題、方法代號（主題另外認得「未分類」；同找論文）。 */
@@ -106,11 +128,14 @@ export function isAllPapers(params: DemoPapersParams): boolean {
   return !hasDemoConditions(params) && params.title === undefined;
 }
 
-/** 一篇論文的分類代號裡有沒有全部這幾個（「且」）。 */
-function hasAll(keys: readonly string[] | null, wanted: readonly string[]): boolean {
+/**
+ * 一篇論文的分類代號合不合：`all` 是全部這幾個都有（「且」），`any` 是有任一個（「或」）。
+ * 沒有分類（null）的論文只在沒有這個條件時留下（同後端：沒有有效分類的論文不會出現在分類的片段裡）。
+ */
+function hasKeys(keys: readonly string[] | null, wanted: readonly string[], mode: "any" | "all"): boolean {
   if (wanted.length === 0) return true;
   if (keys === null) return false;
-  return wanted.every((key) => keys.includes(key));
+  return mode === "all" ? wanted.every((key) => keys.includes(key)) : wanted.some((key) => keys.includes(key));
 }
 
 // 每一篇正規化過的標題（第一次比對時算、之後重用）：標題框每打一個字都要全部重篩，不必每次都對每一篇重做 NFKC
@@ -140,14 +165,18 @@ function byYearThenId(a: DemoPaperRow, b: DemoPaperRow): number {
 }
 
 /**
- * 在瀏覽器裡篩（AD-20）：不同欄位之間「且」；期刊、年份多值「或」（年份是一段範圍）；主題、方法多值「且」
- * （AD-19、ADR-0050 第 2 點，和成員版同一套）；標題的字用資料來源層的比對規則（title-match.ts）。
+ * 在瀏覽器裡篩（AD-20）：不同欄位之間「且」；期刊、年份多值「或」（年份是一段範圍）；主題、方法多值預設「或」、
+ * `*_match=all` 時「且」（ADR-0011 的 2026-11-27 更新、Story 3.20，和成員版的後端同一套）；
+ * 標題的字用資料來源層的比對規則（title-match.ts）。
  * 結果的順序和成員版相同：年份新到舊、同一年 id 由大到小、沒有年份的放最後。
  */
 export function filterDemoRows(rows: readonly DemoPaperRow[], params: DemoPapersParams): DemoPaperRow[] {
   const journals = selectedKeys(params.journal);
   const topics = selectedKeys(params.topic);
   const methods = selectedKeys(params.method);
+  const tidy = tidyMatch(params);
+  const topicMode = tidy.topic_match === "all" ? "all" : "any";
+  const methodMode = tidy.method_match === "all" ? "all" : "any";
   const matchTitle = params.title === undefined ? null : titleMatcher(params.title);
   return rows
     .filter(
@@ -156,12 +185,17 @@ export function filterDemoRows(rows: readonly DemoPaperRow[], params: DemoPapers
         (params.from === undefined ||
           params.to === undefined ||
           (row.year !== null && params.from <= row.year && row.year <= params.to)) &&
-        hasAll(row.topics, topics) &&
-        hasAll(row.methods, methods) &&
+        hasKeys(row.topics, topics, topicMode) &&
+        hasKeys(row.methods, methods, methodMode) &&
         (params.abstract !== true || row.hasAbstract) &&
         (params.full !== true || row.hasFullContent) &&
         (params.this_week !== true || row.isNewThisWeek) &&
         (matchTitle === null || matchTitle(normalizedTitle(row))),
     )
     .sort(byYearThenId);
+}
+
+/** 主題與方法都改回「任一個」、其他條件不變時的篇數（同時符合 0 篇時的「改看符合任一個的 N 篇」；在瀏覽器裡算）。 */
+export function anyMatchCount(rows: readonly DemoPaperRow[], params: DemoPapersParams): number {
+  return filterDemoRows(rows, anyMatch(params)).length;
 }

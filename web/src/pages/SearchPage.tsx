@@ -9,7 +9,7 @@ import { focusFilters, type FilterState } from "../components/search/filters";
 import { FilterMenus } from "../components/search/FilterMenus";
 import { MobileFilters } from "../components/search/MobileFilters";
 import { PaperRowList, SkeletonRows } from "../components/search/PaperRows";
-import { ConditionTag, ErrorBar, More } from "../components/search/ListParts";
+import { AnyMatchLink, ConditionTag, ErrorBar, More } from "../components/search/ListParts";
 import { NoticeIcon } from "../components/search/parts";
 import type { PaperList } from "../datasource/types";
 import type { SnapshotRef } from "../generated/model";
@@ -18,14 +18,17 @@ import { clientConfigQuery, displayNamesQuery, filtersKey, hasHeldRows, libraryC
 import { formatCount, splitTemplate } from "./paper-format";
 import {
   START_ROWS,
+  anyMatch,
   appliedFilterCount,
   clearConditions,
   currentTaipeiYear,
+  hasAllMatch,
   hasConditions,
   isStart,
   joinKeys,
   knownOnly,
   selectedKeys,
+  tidyMatch,
   toApiParams,
   type SearchParams,
 } from "./search-filters";
@@ -129,6 +132,15 @@ export function SearchPage({ params: addressParams, onUpdate, onSignedOut, membe
   // 但都不在找論文的範圍裡（例如被排除）時照一般的「沒有符合的論文」（F11，Kevin 2026-11-20）。
   const personalZero = !start && found !== null && found.total === 0 && params.scope === "personal" && !hasConditions(params);
   const libraryCount = useQuery({ ...libraryCountQuery(memberId), enabled: personalZero && !paused });
+  // 同時符合查到 0 篇：主題與方法都改回任一個、其他條件不變時有幾篇（「改看符合任一個的 N 篇」；Story 3.20）。
+  // 向 API 再查一次、只用 total（讀一頁；同一組條件之前讀過就接著用那一份，不再打 API）。查失敗、登入過期、換了人
+  // 都只是不顯示這個連結，不另外報錯（清單本身的查詢照常處理那幾種情況）。
+  const allZero = !start && !personalZero && found !== null && found.total === 0 && hasAllMatch(params);
+  const anyList = useQuery({
+    ...paperListQuery(queryClient, toApiParams(anyMatch(params)), 1, memberId),
+    enabled: allZero && known !== null && !paused,
+  });
+  const anyCount = allZero && anyList.data?.kind === "found" ? anyList.data.list.total : null;
   const queries = personalZero ? [config, names, list, libraryCount] : [config, names, list];
 
   // 直接打開（重新整理）網址時最多讀 MAX_SHOWN 篇（paperListQuery）：網址的 shown 比讀到的多、後面還有的時候，
@@ -193,7 +205,8 @@ export function SearchPage({ params: addressParams, onUpdate, onSignedOut, membe
     params,
     names: namesData,
     currentYear,
-    update: (change) => onUpdate((current) => ({ ...change(current), shown: undefined })),
+    // 每一次換條件都拿掉不到兩個的「同時符合」（取消勾選剩一個、移除帶進來的方法時；Story 3.20）。
+    update: (change) => onUpdate((current) => tidyMatch({ ...change(current), shown: undefined })),
   };
   // 已經有資料時，背景重讀失敗不把整個畫面換成錯誤（審查 S1-5）。
   const failed = queries.some((query) => query.isError && query.data === undefined);
@@ -270,7 +283,7 @@ export function SearchPage({ params: addressParams, onUpdate, onSignedOut, membe
       );
   } else if (found.total === 0) {
     // 範圍裡本來就沒有論文、也沒有條件時，沒有東西可以清除。
-    body = <ZeroBar clear={hasConditions(params) ? params : null} />;
+    body = <ZeroBar clear={hasConditions(params) ? params : null} anyCount={anyCount} />;
   } else {
     const rows = found.items.slice(0, limit);
     // 離線時查詢是「暫停」不是「讀取中」，一樣算在等（審查 S1-13）。
@@ -298,7 +311,10 @@ export function SearchPage({ params: addressParams, onUpdate, onSignedOut, membe
   return (
     <div data-page="search" className="text-s14 leading-normal tracking-0 text-text-primary">
       <DataDateBar snapshot={snapshot} />
-      <h1 className="mt-[14px] font-title-zh text-page-title-zh text-text-primary split:mt-[18px]">{t("search.page.title")}</h1>
+      {/* tabIndex：按「改看符合任一個的 N 篇」之後焦點移到這裡（focusHeading）。 */}
+      <h1 data-page-heading tabIndex={-1} className="mt-[14px] font-title-zh text-page-title-zh text-text-primary split:mt-[18px]">
+        {t("search.page.title")}
+      </h1>
       <div className="mt-6 split:mt-8 split:flex split:flex-wrap split:items-center split:gap-x-[28px] split:gap-y-3">
         <ScopeSwitch params={params} onChange={(scope) => state.update((current) => ({ ...current, scope }))} />
         <span aria-hidden="true" className="hidden h-[18px] w-px bg-border split:block" />
@@ -426,8 +442,11 @@ function StartBlock({ list, names }: { list: PaperList; names: FilterState["name
   );
 }
 
-/** 篩到 0 篇（State Patterns「12. 找論文」）：「沒有符合的論文」＋「清除篩選」（沒有條件時不放）。 */
-function ZeroBar({ clear }: { clear: SearchParams | null }) {
+/**
+ * 篩到 0 篇（State Patterns「12. 找論文」）：「沒有符合的論文」＋「清除篩選」（沒有條件時不放）。
+ * 同時符合查到 0 篇、改回任一個有論文時，「清除篩選」前面多「改看符合任一個的 N 篇」（`anyCount`；Story 3.20）。
+ */
+function ZeroBar({ clear, anyCount = null }: { clear: SearchParams | null; anyCount?: number | null }) {
   const { t } = useTranslation("search");
   return (
     <div role="status" data-state="zero" className="mt-[36px] flex max-w-reading-width items-start gap-[14px] split:mt-12">
@@ -437,7 +456,10 @@ function ZeroBar({ clear }: { clear: SearchParams | null }) {
       <div>
         <p className="text-s17 leading-170 text-text-primary">{t("search.empty.noMatch")}</p>
         {clear === null ? null : (
-          <div className="mt-2">
+          <div className="mt-2 flex flex-wrap gap-x-[28px]">
+            {anyCount !== null && anyCount > 0 ? (
+              <AnyMatchLink count={anyCount} target={{ to: "/search", search: { ...anyMatch(clear), shown: undefined } }} />
+            ) : null}
             <ClearLink params={clear} className="-my-1 text-nav" />
           </div>
         )}
