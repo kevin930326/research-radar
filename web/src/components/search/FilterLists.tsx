@@ -84,7 +84,7 @@ export function TopicOptions({ state, size, twoColumns = false }: { state: Filte
   const toggle = (key: string) => () => state.update((current) => ({ ...current, topic: toggleKey(current.topic, key) }));
   return (
     <>
-      <div data-topic-columns={twoColumns ? 2 : 1} className={twoColumns ? "columns-2 gap-x-[0px] [&>*]:break-inside-avoid" : undefined}>
+      <div className={twoColumns ? "columns-2 gap-x-[0px] [&>*]:break-inside-avoid" : undefined}>
         {(state.names?.topics ?? []).map((topic) => (
           <FilterOption
             key={topic.key}

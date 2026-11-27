@@ -725,6 +725,71 @@ test.describe("demo paper list: filter menu layout", () => {
       expect(box.y + box.height).toBeLessThanOrEqual(PHONE.height);
     }
   });
+
+  test("desktop: a menu too tall for the window still opens below its chip, not beside it", async ({ page }) => {
+    // 期刊選單 490px 一欄、14 本，在 1280×900 放不下；沒有「一律在下方」的設定時會翻到旁邊、蓋住別的標籤（epic-3l PR E 審查 Y2）。
+    await open(page);
+    const chip = page.locator("[data-filter-chip]").filter({ hasText: text("search:search.filter.journal") });
+    await chip.click();
+    const menu = page.getByRole("dialog");
+    await expect(menu).toBeVisible();
+    await page.evaluate(() => Promise.all(document.getAnimations().map((animation) => animation.finished.catch(() => undefined))));
+    const menuBox = (await menu.boundingBox())!;
+    const chipBox = (await chip.locator(":scope > span").boundingBox())!;
+    // 放在標籤下方 40px 時真的放不下，這條測試才有測到（和選單實際放在哪裡無關）。
+    expect(chipBox.y + 40 + menuBox.height).toBeGreaterThan(DESKTOP.height);
+    expect(Math.round(menuBox.y - chipBox.y)).toBe(40);
+    expect(Math.round(menuBox.x)).toBe(Math.round(chipBox.x));
+  });
+
+  test("phone: moving through the sheet with Tab, the focused control is never hidden under the fixed top or bottom bar", async ({ page, browserName }) => {
+    // webkit 的 Tab 預設只走表單元件，Alt+Tab 才走全部（同 a11y-floor.spec.ts）。
+    const forward = browserName === "webkit" ? "Alt+Tab" : "Tab";
+    const backward = browserName === "webkit" ? "Alt+Shift+Tab" : "Shift+Tab";
+    await open(page, "?topic=erp", PHONE);
+    await page.getByRole("button", { name: fill(text("search:search.mobile.filterCount"), { count: 1 }), exact: true }).click();
+    const sheet = page.getByRole("dialog");
+    await sheet.getByRole("button", { name: text("search:search.filter.topic") }).click();
+    await expect(sheet.getByRole("checkbox", { name: text("paper:paper.classification.unclassified"), exact: true })).toBeAttached();
+    await page.evaluate(() => Promise.all(document.getAnimations().map((animation) => animation.finished.catch(() => undefined))));
+    const first = sheet.getByRole("button", { name: text("search:search.filter.journal") });
+    const last = sheet.getByRole("button", { name: fill(text("search:search.mobile.apply"), { count: count((at) => INDEX.topics[at]?.includes("erp") === true) }) });
+    /** 焦點所在的元件被固定的頂部或底部那一列蓋住多少（頂部、底部裡面的元件不算）；回傳 null 是沒被蓋住。 */
+    const covered = () =>
+      page.evaluate(() => {
+        const active = document.activeElement as HTMLElement;
+        const popup = active.closest<HTMLElement>("[role=dialog]")!;
+        const bars = [...popup.querySelectorAll<HTMLElement>("*")].filter((element) => getComputedStyle(element).position === "sticky");
+        const head = bars[0]!;
+        const foot = bars[bars.length - 1]!;
+        if (head.contains(active) || foot.contains(active)) return null;
+        const box = active.getBoundingClientRect();
+        const top = head.getBoundingClientRect().bottom;
+        const bottom = foot.getBoundingClientRect().top;
+        if (box.top >= top - 0.5 && box.bottom <= bottom + 0.5) return null;
+        const label = (active.closest("label") ?? active).textContent?.trim() || active.getAttribute("aria-label");
+        return `${label} ${Math.round(box.top)}-${Math.round(box.bottom)} (visible ${Math.round(top)}-${Math.round(bottom)}, scrollTop ${popup.scrollTop})`;
+      });
+    const hidden: string[] = [];
+    let scrolled = 0;
+    await first.focus();
+    for (const [key, end] of [
+      [forward, last],
+      [backward, first],
+    ] as const) {
+      for (let step = 0; step < 100; step += 1) {
+        await page.keyboard.press(key);
+        const where = await covered();
+        if (where !== null) hidden.push(`${key}: ${where}`);
+        scrolled = Math.max(scrolled, await sheet.evaluate((element) => element.scrollTop));
+        if (await end.evaluate((element) => element === document.activeElement)) break;
+      }
+      await expect(end).toBeFocused();
+    }
+    // 真的捲動了，這條測試才有測到。
+    expect(scrolled).toBeGreaterThan(0);
+    expect(hidden).toEqual([]);
+  });
 });
 
 for (const width of [1440, 1000, 500]) {
