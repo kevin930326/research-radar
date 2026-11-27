@@ -1,7 +1,7 @@
 // 回報錯誤（Story 3.12；EXPERIENCE.md 畫面 8 第 3 點；設計稿 paper.html 的「回報錯誤」四個狀態）：表單在中文重點標題下面原地展開、
-// 「哪一欄」只能選一個（radio）、選了欄位也寫了說明才能送；送出中、沒有成功（選的與寫的都留著）、送出後那一欄內容下面多一行
-// 金色空心三角＋「有成員回報此欄可能有誤」；說明最多 100 個 code point、沒有「剩 N 字」；鍵盤打開與收起表單時焦點的去處、
-// 「哪一欄」的方向鍵；連點兩下只送一次；寫入帶預期成員與畫面上那一筆中文重點的 ID，另一個分頁換了人時什麼都不寫、整頁換成
+// 「欄位」只能選一個（radio）、選了欄位也寫了說明才能送；送出中、沒有成功（選的與寫的都留著）、送出後那一欄內容下面多一行
+// 金色空心三角＋「有成員回報可能有誤」；說明最多 100 個 code point、沒有「剩 N 字」；鍵盤打開與收起表單時焦點的去處、
+// 「欄位」的方向鍵；連點兩下只送一次；寫入帶預期成員與畫面上那一筆中文重點的 ID，另一個分頁換了人時什麼都不寫、整頁換成
 // 現在的人（ADR-0055）；送出前中文重點換了（409 summary_changed）照「沒有成功」留著、重讀論文頁（ADR-0064）；登入過期回登入頁；
 // 中文重點沒有產生成功時沒有「回報錯誤」；可點範圍至少 44px；示範站沒有「回報錯誤」與回報的標記；
 // 1440／1000／500 三種寬度、四個狀態的整頁截圖（只在 chromium；截圖存檔供人工看，自動比對由 design-compare 負責 1280／390）。
@@ -174,7 +174,7 @@ test("sending: the button says sending, fields and note are locked, cancel is hi
   });
   await expect(form(page)).toHaveCount(0);
   await expect(open(page)).toBeVisible();
-  // 那一欄內容下面一行：金色空心三角＋「有成員回報此欄可能有誤」；內容不變、其他欄沒有。
+  // 那一欄內容下面一行：金色空心三角＋「有成員回報可能有誤」；內容不變、其他欄沒有。
   await expect(mark(page, "findings")).toHaveText(text("paper:paper.summary.reported"));
   await expect(mark(page, "findings").locator("svg")).toHaveCSS("color", "rgb(227, 180, 102)");
   await expect(page.locator("main [data-summary-field] [data-note='reported']")).toHaveCount(1);

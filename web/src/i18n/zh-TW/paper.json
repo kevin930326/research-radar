@@ -4,7 +4,7 @@
       "authorSeparator": "、",
       "doi": "DOI",
       "openAlex": "OpenAlex",
-      "citations": "被引用 {{citations}} 次 · 平均每年 {{perYear}} 次",
+      "citations": "被引用 {{citations}} 次 · 年均 {{perYear}} 次",
       "citationsOnly": "被引用 {{citations}} 次",
       "hasAbstract": "有摘要",
       "noAbstract": "沒有摘要"
@@ -15,8 +15,8 @@
       "label": "分類",
       "unclassified": "未分類",
       "titleOnly": "只根據標題分類",
-      "fixed": "有 {{members}} 位成員修正過",
-      "disagree": "有 {{members}} 位成員修正過，意見不同"
+      "fixed": "{{members}} 位成員修正過",
+      "disagree": "{{members}} 位成員修正過，意見不同"
     },
     "fix": {
       "open": "修正分類",
@@ -24,19 +24,19 @@
       "cancel": "取消",
       "reason": "理由",
       "optional": "　選填",
-      "hint": "送出後不能撤回，改錯了再修正一次",
+      "hint": "送出後不能撤回",
       "sending": "送出中…",
-      "failed": "沒有送出成功。你選的還在，再試一次",
+      "failed": "沒有送出成功，再試一次",
       "current": "目前採用"
     },
     "report": {
       "open": "回報錯誤",
-      "field": "哪一欄",
+      "field": "欄位",
       "note": "說明",
       "send": "送出回報",
       "sending": "送出中…",
       "cancel": "取消",
-      "failed": "沒有送出成功。你寫的還在，再試一次"
+      "failed": "沒有送出成功，再試一次"
     },
     "summary": {
       "heading": "中文重點",
@@ -46,7 +46,7 @@
       "findings": "發現",
       "notMentioned": "摘要未提及",
       "screeningOnly": "供篩選閱讀，不可直接放入論文",
-      "reported": "有成員回報此欄可能有誤"
+      "reported": "有成員回報可能有誤"
     },
     "model": {
       "heading": "研究模型",
@@ -57,9 +57,9 @@
       "evidenceSource": "證據來源",
       "fromAbstract": "摘要",
       "fromFulltext": "全文",
-      "abstractOnly": "研究模型只根據摘要，可能不完整",
-      "empty": "摘要裡沒有寫出可以擷取的假設",
-      "noAbstract": "沒有摘要，所以沒有研究模型。"
+      "abstractOnly": "只根據摘要，可能不完整",
+      "empty": "摘要沒有寫出假設",
+      "noAbstract": "沒有摘要"
     },
     "evidence": {
       "empirical_test": "實證檢定",
@@ -77,8 +77,8 @@
     },
     "supportInfo": {
       "label": "未說明與不判定的差別",
-      "not_stated": "未說明：這篇有檢定這條假設，但摘要沒寫結果。",
-      "not_determined": "不判定：這篇不是用統計檢定的研究，例如訪談或概念性文章，所以沒有成立與否。"
+      "not_stated": "未說明：作者有檢定這條假設，但摘要沒寫結果",
+      "not_determined": "不判定：這篇不做統計檢定（例如訪談），所以沒有成立不成立"
     },
     "abstract": {
       "heading": "原文摘要",
@@ -90,22 +90,21 @@
     },
     "noAbstract": {
       "heading": "中文重點與原文摘要",
-      "message": "這篇論文在 OpenAlex 沒有摘要，所以沒有中文重點。",
-      "detail": "書目、分類和引用照常可以用。要看內容，請到出版社頁面。",
-      "publisher": "到出版社頁面看這篇（DOI）"
+      "message": "這篇沒有摘要，也沒有中文重點",
+      "publisher": "到出版社頁面"
     },
     "state": {
       "failed": "沒有產生成功，可以請管理者重跑",
-      "pending": "還在產生，晚一點再回來看",
-      "budget": "這個月的 AI 額度用完了，下個月才會產生"
+      "pending": "還在產生",
+      "budget": "本月 AI 額度用完，下個月產生"
     },
     "fullText": {
       "heading": "取得全文",
       "open": "開啟全文",
-      "vpn": "連學校 VPN 時會直接到全文頁",
-      "vpnBelow": "連學校 VPN 時，下方的「開啟全文」會直接到全文頁",
+      "vpn": "連學校 VPN 可直接看全文",
+      "vpnBelow": "連學校 VPN 可直接看全文",
       "openAccess": "開放取用版本",
-      "noDoi": "這篇沒有 DOI，沒有全文連結"
+      "noDoi": "沒有全文連結"
     },
     "names": {
       "loadFailed": "沒有載入成功",
@@ -121,7 +120,7 @@
     "library": {
       "heading": "我的文獻庫",
       "add": "加入我的文獻庫",
-      "added": "已在我的文獻庫",
+      "added": "已加入",
       "remove": "移出"
     }
   }

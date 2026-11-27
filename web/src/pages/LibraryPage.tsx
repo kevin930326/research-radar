@@ -22,15 +22,15 @@ import { externalUrl, formatCount, splitTemplate } from "./paper-format";
 // - 一次列 client-config 的 library_page_size 篇（50）；「再載入 N 篇」「已顯示 n／N」，剩下不到一頁時寫實際的篇數，
 //   全部列出來以後不顯示。目前顯示幾篇寫進網址（shown，AD-21）。
 // - 勾選後：900px 以上，寫篇數的那一行原地換成選取列（黏在視窗上緣）；899px 以下選取列固定在畫面底部（寫篇數那一行照留著）。
-//   「開啟全文」：一次最多 10 篇（超過時停用，旁邊「一次最多開 10 篇」）；每篇開一個新分頁（DOI 連結），
+//   「開啟全文」：一次最多 10 篇（超過時停用，旁邊「最多 10 篇」）；每篇開一個新分頁（DOI 連結），
 //   沒有 DOI 的跳過（「N 篇沒有全文連結，已跳過」）；開了之後按鈕原地顯示「已開啟 N 篇」2 秒；
-//   瀏覽器擋住新分頁時不顯示這一句，改在選取列下方列出連結。手機一次開不了多個分頁：在底部選取列上方列出連結。
+//   瀏覽器擋住新分頁時不顯示這一句，改在選取列下方列出連結。手機一次只能開一篇：在底部選取列上方列出連結。
 //   瀏覽器擋住時列出的是還沒開出來的那幾篇（已經開了的不重複列）。
 //   連結只開後端給的 DOI 連結（externalUrl 只收 http／https），不組學校代理或付費牆的網址。
 // - 「移出」：那一列原地變成「已移出」＋「復原」，不跳確認；離開這一頁後消失（離開時丟掉文獻庫清單的快取）。
 //   後端回 404（已經不在，例如另一個分頁移出了）時只顯示「已移出」、不給「復原」：這一次沒有真的移出，
 //   復原會拿到別次移出的封存（ADR-0049 復原取最新一筆；審查 F3）。
-// - 空的：「你的文獻庫還沒有論文」＋一行「在論文頁按『加入我的文獻庫』」（AR-67 過渡做法，Kevin 2026-11-14 決定；
+// - 空的：「還沒有論文」＋一行「在論文頁按『加入我的文獻庫』」（AR-67 過渡做法，Kevin 2026-11-14 決定；
 //   上傳、匯入兩行與「上傳或匯入」按鈕是 Epic 6）。
 // - 載入中：論文列的骨架；錯誤：「沒有載入成功」＋「重新整理」（照設計稿的字，列給 Kevin 決定）。
 // - 任何一個 API 回 401：照登入過期處理（路由清快取、回登入頁）。
@@ -436,7 +436,7 @@ function CancelButton({ onCancel, className }: { onCancel: () => void; className
   );
 }
 
-/** 900px 以上的選取列（設計稿 .abar）：原地換掉寫篇數的那一行；「已選 N 篇」→「開啟全文」→（一次最多開 10 篇）→「取消」。 */
+/** 900px 以上的選取列（設計稿 .abar）：原地換掉寫篇數的那一行；「已選 N 篇」→「開啟全文」→（最多 10 篇）→「取消」。 */
 function ActionBar(props: ActionProps) {
   return (
     <div data-library-actions className="hidden min-h-[40px] flex-wrap items-center gap-x-[20px] gap-y-2 split:flex">
@@ -449,7 +449,7 @@ function ActionBar(props: ActionProps) {
 }
 
 /**
- * 899px 以下的選取列（設計稿 .dock）：黏在視窗底部（清單很短時也在最下面，見 LibraryPage 的 return）。由上到下：結果與說明（有才佔位）、「一次最多開 10 篇」（各佔一整行）、
+ * 899px 以下的選取列（設計稿 .dock）：黏在視窗底部（清單很短時也在最下面，見 LibraryPage 的 return）。由上到下：結果與說明（有才佔位）、「最多 10 篇」（各佔一整行）、
  * 左邊「已選 N 篇」、右邊「取消」＋「開啟全文」。
  */
 function Dock({ notes, ...props }: ActionProps & { notes: ReactNode }) {
@@ -545,7 +545,8 @@ interface RowProps {
 
 /**
  * 一篇論文（設計稿第二版 .lrow）：勾選框、標題（連到論文頁）、期刊 · 年份；右側「移出」＋「開啟全文」（沒有 DOI 的只有「移出」）。
- * 900px 以上右側一欄寬 120（.lact：「移出」靠左、「開啟全文」靠右）；899px 以下兩個在書目下面一行（間距 24）。
+ * 900px 以上右側一欄寬 120（.lact：「移出」靠左、「開啟全文」靠右）；899px 以下兩個在書目下面一行（間距 24，兩端對齊：
+ * 「開啟全文」靠右）。
  * 移出後是「已移出」＋標題＋「復原」。
  */
 function LibraryRow({ item, first, names, selected, gone, restorable, busy, onSelect, onRemove, onRestore }: RowProps) {
@@ -612,7 +613,8 @@ function LibraryRow({ item, first, names, selected, gone, restorable, busy, onSe
           <div className="min-w-[0px] flex-1">
             <RowTitle id={paper.id} title={paper.title} />
             <Meta row={paper} names={names} noAbstract={false} />
-            <div className="mt-2 flex items-center gap-6 split:hidden">
+            {/* 兩端對齊：「移出」靠左、「開啟全文」固定靠右（設計稿 2026-11-21 的小修改）。 */}
+            <div className="mt-2 flex items-center justify-between gap-6 split:hidden">
               {remove("-ml-[9px]")}
               {doiUrl === null ? null : <OpenFullText href={doiUrl} size="compact" />}
             </div>

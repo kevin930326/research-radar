@@ -12,7 +12,7 @@ import { BlockLine, NoteLine, SECTION_CLASS, SectionHeading, badgeProvenance, us
 //   （信封的規則：只有 ready 帶內容，ADR-0015；Codex 審查 3.8 中 2）。
 // - 有內容的狀態（ready、empty）卻沒有來歷：不顯示內容（ADR-0010 第 8 點、ADR-0015「沒有來歷就不顯示內容」），
 //   顯示「沒有產生成功」那一行，沒有標章（Codex 審查 3.8 中 1；資料壞了不會自己好，Kevin 2026-11-17 決定）。
-// - 有成員回報、還沒處理的欄位，那一欄內容下面一行：金色空心三角＋「有成員回報此欄可能有誤」（設計稿 paper.html
+// - 有成員回報、還沒處理的欄位，那一欄內容下面一行：金色空心三角＋「有成員回報可能有誤」（設計稿 paper.html
 //   .rep-mark：上 4px、13px、行高 1.6、沒有字距、第二層文字色，三角 13×13 和字隔 8px）。示範站的資料沒有回報，不會出現。
 // - 沒有產生成功／還在產生／額度用完：標題下一行狀態（paper-ai-failed.html），沒有標章與固定一行。
 // - 「回報錯誤」（Story 3.12）：成員版才有，由外層用 `report`（SummaryReportRender）把標題列右邊的「回報錯誤」與原地展開的
@@ -53,7 +53,7 @@ interface ZhSummarySectionProps {
   report?: SummaryReportRender;
 }
 
-/** 回報的標記：金色空心三角＋「有成員回報此欄可能有誤」（見檔頭）。 */
+/** 回報的標記：金色空心三角＋「有成員回報可能有誤」（見檔頭）。 */
 function ReportedMark() {
   const { t } = useTranslation("paper");
   return (

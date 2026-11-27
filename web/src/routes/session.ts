@@ -169,7 +169,7 @@ export function safeNextPath(value: unknown): string | undefined {
 export interface LoginSearch {
   /** 登入後要回去的站內路徑。 */
   next?: string;
-  /** 本來在站內、登入過期才被送回來（顯示「登入已經過期，請再登入一次」）。 */
+  /** 本來在站內、登入過期才被送回來（顯示「登入過期，請重新登入」）。 */
   expired?: true;
   /** 開發環境用：要用哪一位測試成員登入（成員 ID）；沒給就用假登入清單的第一位。 */
   member?: string;

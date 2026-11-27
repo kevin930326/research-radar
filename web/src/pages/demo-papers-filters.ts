@@ -1,14 +1,14 @@
 // 示範站論文清單（Story 3.14 示範站；EXPERIENCE.md 畫面 7）的篩選條件：網址參數怎麼讀、怎麼寫，
 // 以及在瀏覽器裡怎麼篩（AD-20：讀 papers-index.json 與 titles.json，條件怎麼合照 AD-19／ADR-0050 第 2 點）。
-// 和成員版找論文（search-filters.ts）規則不同的地方不硬湊：多了方法、「只看有摘要的」「只看有完整內容的」、
-// 標題裡的字；沒有範圍。期刊、年份、主題、方法、本週新增、目前顯示幾篇的網址寫法和找論文相同，直接用它的檢查。
+// 和成員版找論文（search-filters.ts）規則不同的地方不硬湊：多了方法、「有摘要」「有完整內容」、
+// 標題關鍵字；沒有範圍。期刊、年份、主題、方法、本週新增、目前顯示幾篇的網址寫法和找論文相同，直接用它的檢查。
 // 只處理資料，畫面上的字由 i18n 提供。
 import type { DemoPaperRow } from "../datasource/types";
 import { normalizeForTitleMatch, titleMatcher } from "../datasource/title-match";
 import type { DisplayNames } from "../generated/model";
 import { anyMatch, currentTaipeiYear, knownOnly, selectedKeys, tidyMatch, validateSearchParams, type SearchParams } from "./search-filters";
 
-/** 標題裡的字最多幾個字（網址不會無限長；超過的截掉）。 */
+/** 標題關鍵字最多幾個字（網址不會無限長；超過的截掉）。 */
 export const MAX_TITLE_QUERY = 200;
 
 /** 示範站論文清單的網址參數（路由驗證過的）。省略的欄位是「沒有這個條件」。 */
@@ -25,13 +25,13 @@ export interface DemoPapersParams {
   /** 主題、方法選了兩個以上時「同時符合」（Story 3.20；寫法同找論文，省略是任一個）。 */
   topic_match?: "all";
   method_match?: "all";
-  /** 只看有摘要的。 */
+  /** 「有摘要」：只留有摘要的論文。 */
   abstract?: true;
-  /** 只看有完整內容的。 */
+  /** 「有完整內容」：只留有完整內容的論文。 */
   full?: true;
   /** 從連結帶進來的條件「本週新增」（可以移除的標籤）。 */
   this_week?: true;
-  /** 用標題裡的字篩選（字面比對）。 */
+  /** 標題關鍵字（字面比對）。 */
   title?: string;
   /** 目前顯示幾篇（按過「再載入」才有；省略是一頁）。 */
   shown?: number;
@@ -98,8 +98,8 @@ export function knownDemoOnly(params: DemoPapersParams, names: DisplayNames): De
 }
 
 /**
- * 有沒有可以「清除篩選」的條件：期刊、年份、主題、方法、兩個「只看…的」、本週新增。
- * 標題裡的字不算（它有自己的「清除文字」；設計稿只有標題的字時沒有「清除篩選」）。
+ * 有沒有可以「清除篩選」的條件：期刊、年份、主題、方法、「有摘要」「有完整內容」、本週新增。
+ * 標題關鍵字不算（它有自己的「清除文字」；設計稿只有標題關鍵字時沒有「清除篩選」）。
  */
 export function hasDemoConditions(params: DemoPapersParams): boolean {
   return (
@@ -113,7 +113,7 @@ export function hasDemoConditions(params: DemoPapersParams): boolean {
   );
 }
 
-/** 手機「篩選 · N」：滿版篩選裡有選的項目（期刊、年份、主題、方法、兩個「只看…的」各算一項；設計稿）。 */
+/** 手機「篩選 · N」：滿版篩選裡有選的項目（期刊、年份、主題、方法、「有摘要」「有完整內容」各算一項；設計稿）。 */
 export function demoFilterCount(params: DemoPapersParams): number {
   return [params.journal, params.from, params.topic, params.method, params.abstract, params.full].filter((value) => value !== undefined).length;
 }
