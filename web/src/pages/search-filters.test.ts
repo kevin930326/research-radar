@@ -10,9 +10,11 @@ import {
   clearConditions,
   currentTaipeiYear,
   hasAllMatch,
+  hasStaleMatch,
   isStart,
   knownOnly,
   tidyMatch,
+  tidyMatchKnown,
   toApiParams,
   validateSearchParams,
   yearPreset,
@@ -169,6 +171,51 @@ describe("topic and method match mode (Story 3.20)", () => {
 
   it("clearing the filters drops the setting", () => {
     expect(clearConditions({ topic: "erp,supply_chain", topic_match: "all", scope: "lab" })).toEqual({ scope: "lab" });
+  });
+
+  // 審查 B 的 F1：網址上有分類表已經沒有的主題時，「到不到兩個」數的是認得的。
+  const NAMES = {
+    journals: [],
+    topics: [
+      { key: "erp", name: "ERP" },
+      { key: "supply_chain", name: "Supply chain" },
+    ],
+    methods: [{ key: "experiment", name: "Experiment" }],
+  };
+
+  it("counts only known keys when deciding to keep the setting; the unknown keys stay in the address", () => {
+    // 認得的只剩一個：拿掉 topic_match，代號照舊留著（送 API 前 knownOnly 才拿掉）。
+    expect(tidyMatchKnown({ topic: "erp,gone", topic_match: "all" }, NAMES)).toEqual({ topic: "erp,gone" });
+    // 認得的有兩個：留著。
+    expect(tidyMatchKnown({ topic: "erp,supply_chain,gone", topic_match: "all" }, NAMES)).toEqual({
+      topic: "erp,supply_chain,gone",
+      topic_match: "all",
+    });
+    // 方法各算各的；其他欄位不動。
+    expect(tidyMatchKnown({ journal: "misq", method: "experiment,gone", method_match: "all", shown: 40 }, NAMES)).toEqual({
+      journal: "misq",
+      method: "experiment,gone",
+      shown: 40,
+    });
+    // 顯示名稱還沒讀到：只能照網址上的個數。
+    expect(tidyMatchKnown({ topic: "erp,gone", topic_match: "all" }, null)).toEqual({ topic: "erp,gone", topic_match: "all" });
+  });
+
+  it("a stale all in the address does not carry over to the next pick", () => {
+    // 頁面的 update：換之前、換之後各整理一次。舊書籤 erp,gone + all，再勾 supply_chain：回到任一個。
+    const current = { topic: "erp,gone", topic_match: "all" as const };
+    const next = tidyMatchKnown({ ...tidyMatchKnown(current, NAMES), topic: "erp,gone,supply_chain" }, NAMES);
+    expect(next).toEqual({ topic: "erp,gone,supply_chain" });
+  });
+
+  it("tells when the address bar has a setting the page does not use (to replace the address on open)", () => {
+    expect(hasStaleMatch({ topic: "erp", topic_match: "all" }, validateSearchParams({ topic: "erp", topic_match: "all" }, 2026))).toBe(true);
+    expect(hasStaleMatch({ topic: "erp,supply_chain", topic_match: "ALL" }, validateSearchParams({ topic: "erp,supply_chain", topic_match: "ALL" }, 2026))).toBe(true);
+    expect(hasStaleMatch({ method_match: "all" }, {})).toBe(true);
+    expect(hasStaleMatch({ topic: "erp,gone", topic_match: "all" }, knownOnly({ topic: "erp,gone", topic_match: "all" }, NAMES))).toBe(true);
+    // 用得到、或網址上本來就沒有：不換。
+    expect(hasStaleMatch({ topic: "erp,supply_chain", topic_match: "all" }, { topic: "erp,supply_chain", topic_match: "all" })).toBe(false);
+    expect(hasStaleMatch({ topic: "erp" }, { topic: "erp" })).toBe(false);
   });
 });
 

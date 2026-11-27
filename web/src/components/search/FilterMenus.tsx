@@ -6,7 +6,7 @@ import { useTranslation } from "react-i18next";
 import { PHONE_QUERY, useCloseAcrossBreakpoint } from "../../hooks/use-close-across-breakpoint";
 import { TRACKING_START_YEAR } from "../../pages/search-filters";
 import { journalValue, topicValue, yearValue, type FilterState } from "./filters";
-import { JournalOptions, MatchSwitch, TopicOptions, YearOptions } from "./FilterLists";
+import { JournalOptions, MatchSwitch, TopicOptions, YearOptions, hasMatchSwitch } from "./FilterLists";
 import { Caret } from "./parts";
 
 // 桌機（900px 以上）的三個篩選選單（設計稿 search-no-box.html 的 .chip.f 與 .menu）：期刊、年份、主題。
@@ -43,9 +43,9 @@ interface MenuProps {
    */
   clear: ClearTarget | null;
   /**
-   * 主題、方法選單：底部那一列左邊的「任一個／同時符合」（Story 3.20；選不到兩個時是 null）。給了（連 null 也算）就照
-   * 設計稿 filter-match-mode.html 的 .mfoot 排：上下 6px、內容至少 32px 高、置中，「清除」靠右。
-   * 期刊選單不給，照 search-no-box.html 的底部（上下 10px）。
+   * 主題、方法選單：底部那一列左邊的「任一個／同時符合」（Story 3.20）。只在那一欄選了兩個以上時給（hasMatchSwitch），
+   * 給了就照設計稿 filter-match-mode.html 的 .mfoot 排：上下 6px、內容至少 32px 高、置中，「清除」靠右。
+   * 沒給（期刊選單、只選一個時）照 search-no-box.html 的底部（上下 10px、靠右；README：其餘版面以那兩張為準，審查 B 的 F8）。
    */
   footerStart?: ReactNode;
   children: ReactNode;
@@ -167,7 +167,9 @@ export function FilterMenus({ state }: { state: FilterState }) {
         value={topicValue(state, t, unclassified)}
         width="narrow"
         clear={{ to: "/search", search: { ...state.params, topic: undefined, topic_match: undefined, shown: undefined } }}
-        footerStart={<MatchSwitch state={state} field="topic" label={t("search.filter.topic")} size="menu" />}
+        footerStart={
+          hasMatchSwitch(state, "topic") ? <MatchSwitch state={state} field="topic" label={t("search.filter.topic")} size="menu" /> : undefined
+        }
       >
         <TopicOptions state={state} size="menu" />
       </FilterMenu>

@@ -263,6 +263,16 @@
    * 放在 base 層並加 !important：分層的 !important 是前面的層優先，所以連 utilities 層也蓋得過。
    * 程式裡要知道這個設定時，只能用 src/hooks/use-reduced-motion.ts。
    */
+  /* 「任一個／同時符合」出現時的淡入（設計稿 filter-match-mode.html 的 rrfade，0.25 秒；FilterLists.tsx 的 MatchSwitch）。 */
+  @keyframes match-fade {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
+  }
+
   @media (prefers-reduced-motion: reduce) {
     *,
     *::before,

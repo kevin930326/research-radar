@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import type { TFunction } from "i18next";
-import { Link } from "@tanstack/react-router";
-import { Fragment, useMemo, useState, type CSSProperties, type ReactNode } from "react";
+import { Link, useLocation } from "@tanstack/react-router";
+import { Fragment, useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 
 import { DataDateBar } from "../components/DataDateBar";
@@ -9,7 +9,7 @@ import { NewTabNote } from "../components/ExternalArrow";
 import { PaperTitle } from "../components/PaperText";
 import { ClassificationTagLink, UnclassifiedTag } from "../components/paper/PaperBiblio";
 import { FilterMenu, type ClearTarget } from "../components/search/FilterMenus";
-import { JournalOptions, MatchSwitch, MethodOptions, TopicOptions, YearOptions } from "../components/search/FilterLists";
+import { JournalOptions, MatchSwitch, MethodOptions, TopicOptions, YearOptions, hasMatchSwitch } from "../components/search/FilterLists";
 import {
   focusFilters,
   journalName,
@@ -39,7 +39,17 @@ import {
   type DemoPapersParams,
 } from "./demo-papers-filters";
 import { externalUrl, formatCount } from "./paper-format";
-import { TRACKING_START_YEAR, anyMatch, currentTaipeiYear, hasAllMatch, selectedKeys, tidyMatch, type SearchParams } from "./search-filters";
+import {
+  TRACKING_START_YEAR,
+  anyMatch,
+  currentTaipeiYear,
+  hasAllMatch,
+  hasStaleMatch,
+  selectedKeys,
+  tidyMatch,
+  tidyMatchKnown,
+  type SearchParams,
+} from "./search-filters";
 
 // 示範站的論文清單（Story 3.14 示範站；EXPERIENCE.md 畫面 7、State Patterns「7. 論文清單」；
 // 設計稿 docs/ux/reference/screens/papers-demo.html）。
@@ -102,9 +112,24 @@ export function DemoPapersPage({ params: addressParams, onUpdate }: DemoPapersPa
   const names = data?.names ?? null;
   // 網址上不認得的期刊、主題、方法代號拿掉（舊書籤；同找論文）。
   const params = names === null ? addressParams : knownDemoOnly(addressParams, names);
-  // 每一次換條件都拿掉不到兩個的「同時符合」（Story 3.20）。
+  // 每一次換條件都拿掉不到兩個的「同時符合」（Story 3.20）。「不到兩個」數的是拿掉不認得的代號之後的：
+  // 換之前先整理一次（網址上殘留的不帶進下一組），換完再整理一次（審查 B 的 F1；同找論文）。
   const update = (change: (current: DemoPapersParams) => DemoPapersParams) =>
-    onUpdate((current) => tidyMatch({ ...change(current), shown: undefined }));
+    onUpdate((current) => tidyMatchKnown({ ...change(tidyMatchKnown(current, names)), shown: undefined }, names));
+  // 打開時網址列上的 *_match 用不到：換掉這一筆網址（replace，不多一筆上一頁；審查 B 的 F2，同找論文）。
+  // 網址上沒有主題、方法時不用等分類表；有的話等分類表讀到、拿掉不認得的代號之後再判斷。
+  const rawMatch = useLocation({
+    select: (location) => {
+      const search = location.search as Record<string, unknown>;
+      return { topic_match: search.topic_match, method_match: search.method_match };
+    },
+  });
+  const matchReady = names !== null || (addressParams.topic === undefined && addressParams.method === undefined);
+  const staleMatch = matchReady && hasStaleMatch(rawMatch, params);
+  useEffect(() => {
+    if (!staleMatch) return;
+    onUpdate((current) => tidyMatchKnown(current, names));
+  }, [staleMatch, onUpdate, names]);
   const unclassified = tp("paper.classification.unclassified");
 
   // 共用的篩選選單與選項看的是找論文的條件形狀（期刊、年份、主題、方法的欄位相同），改了再寫回這一頁的條件。
@@ -181,7 +206,7 @@ export function DemoPapersPage({ params: addressParams, onUpdate }: DemoPapersPa
         {heading.map((node, at) => (
           <span key={at}>
             {at > 0 ? " " : null}
-            {/* 多個主題、方法用「或」「＋」接的那一段只在「或」「＋」兩邊的空格換行（接的字 whitespace-normal），名稱本身不從中間拆開（設計稿 .cj 那一段沒有 nowrap，但設計稿的名稱都短，沒畫到會換行的情形）。 */}
+            {/* 多個主題、方法用「或」「＋」接的那一段只在「或」「＋」兩邊的空格換行（接的字 whitespace-normal），名稱本身不從中間拆開。設計稿 .cj 那一段沒有 nowrap，390 寬時「AI／資料分析」會從「／」後面斷開；這裡刻意不照，列給 Kevin 決定（Story 3.20 的 PR 說明）。 */}
             <span className="whitespace-nowrap">
               {node}
               {at < heading.length - 1 || matched !== null ? <span className="pl-[0.3em] text-text-tertiary"> ·</span> : null}
@@ -238,7 +263,7 @@ export function DemoPapersPage({ params: addressParams, onUpdate }: DemoPapersPa
  * filter-match-mode.html 的 .cj）。
  * 顯示名稱還沒讀到時（載入中、錯誤）不寫期刊、主題、方法這幾段。
  */
-function headingParts(
+export function headingParts(
   params: DemoPapersParams,
   names: DisplayNames | null,
   { t, thisWeek, unclassified }: { t: TFunction<"demo">; thisWeek: string; unclassified: string },
@@ -307,7 +332,9 @@ function DesktopMenus({ state, params, unclassified }: { state: FilterState; par
         value={values.topic}
         width="narrow"
         clear={clearOf("topic")}
-        footerStart={<MatchSwitch state={state} field="topic" label={t("search.filter.topic")} size="menu" />}
+        footerStart={
+          hasMatchSwitch(state, "topic") ? <MatchSwitch state={state} field="topic" label={t("search.filter.topic")} size="menu" /> : undefined
+        }
       >
         <TopicOptions state={state} size="menu" />
       </FilterMenu>
@@ -316,7 +343,11 @@ function DesktopMenus({ state, params, unclassified }: { state: FilterState; par
         value={values.method}
         width="narrow"
         clear={clearOf("method")}
-        footerStart={<MatchSwitch state={state} field="method" label={tp("paper.classification.method")} size="menu" />}
+        footerStart={
+          hasMatchSwitch(state, "method") ? (
+            <MatchSwitch state={state} field="method" label={tp("paper.classification.method")} size="menu" />
+          ) : undefined
+        }
       >
         <MethodOptions state={state} size="menu" />
       </FilterMenu>

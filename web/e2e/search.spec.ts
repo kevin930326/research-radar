@@ -853,6 +853,8 @@ test.describe("search: any or all topics (Story 3.20)", () => {
     expect(expectedTotal("journal=misq&year=2016&topic=erp&topic=supply_chain")).toBe(0);
     await openSearch(page, "?journal=misq&from=2016&to=2016&topic=erp,supply_chain&topic_match=all");
     await expect(page.locator("[data-state='zero']")).toBeVisible();
+    // 等 N 查完（data-any-match-checked）才確認沒有連結：不然連結可能只是還沒出現（審查 B 的 F5）。
+    await expect(page.locator("[data-state='zero']")).toHaveAttribute("data-any-match-checked", "");
     await expect(page.locator("[data-any-match]")).toHaveCount(0);
     // 任一個的篇數查失敗：不出現連結、不報錯（清單本身照常）。後註冊的路由先處理（蓋過替身）。
     let failedCounts = 0;
@@ -867,10 +869,109 @@ test.describe("search: any or all topics (Story 3.20)", () => {
     });
     await openSearch(page, "?topic=erp,supply_chain&topic_match=all");
     await expect(page.locator("[data-state='zero']")).toBeVisible();
-    await expect(page.locator("[data-state='zero'] [data-any-match]")).toHaveCount(0);
     await expect.poll(() => failedCounts).toBeGreaterThan(0);
+    // 查失敗也算查完：等到之後才確認沒有連結（審查 B 的 F5）。
+    await expect(page.locator("[data-state='zero']")).toHaveAttribute("data-any-match-checked", "");
     await expect(page.locator("[data-state='zero'] [data-any-match]")).toHaveCount(0);
     await expect(page.locator("[data-state='error']")).toHaveCount(0);
+  });
+
+  test("a leftover all in the address is replaced on open (no extra history entry) and never sent", async ({ page, apiMock }) => {
+    // 規則 3：該欄位不到兩個（一個 key、不認得的拿掉後剩一個）或看不懂的值時，網址列上不留 topic_match（審查 B 的 F2）。
+    // 先開別的網址，確認換掉的是這一筆、上一頁回到前一個網址。
+    await openSearch(page, "?journal=misq");
+    await page.goto(`${member.baseURL}/search?topic=erp&topic_match=all`);
+    await expect(page).toHaveURL(`${member.baseURL}/search?topic=erp`);
+    await page.goBack();
+    await expect(page).toHaveURL(`${member.baseURL}/search?journal=misq`);
+    for (const [query, kept] of [
+      ["?topic=erp,gone&topic_match=all", "topic=erp(%2C|,)gone"],
+      ["?topic=erp,supply_chain&topic_match=ALL", "topic=erp(%2C|,)supply_chain"],
+      ["?method_match=all", ""],
+    ] as const) {
+      await openSearch(page, query);
+      await expect(page).toHaveURL(new RegExp(`/search${kept === "" ? "" : `\\?${kept}`}$`));
+    }
+    expect(listRequests(apiMock.requests).every((params) => params.get("topic_match") === null && params.get("method_match") === null)).toBe(true);
+  });
+
+  test("a topic the taxonomy no longer has does not keep all alive: dropping to one known topic goes back to any", async ({ page }) => {
+    // 舊書籤：兩個認得的＋一個分類表已經沒有的，同時符合（審查 B 的 F1）。
+    await openSearch(page, "?topic=erp,supply_chain,gone&topic_match=all");
+    await expect(chip(page, "search:search.filter.topic")).toContainText(fill(text("search:search.filter.matchAllCount"), { count: 2 }));
+    await chip(page, "search:search.filter.topic").click();
+    // 取消供應鏈：認得的剩一個，topic_match 拿掉（不認得的代號照舊留在網址上）、切換消失。
+    await page.getByRole("checkbox", { name: SUPPLY }).click();
+    await expect(page).toHaveURL(at("topic=erp,gone"));
+    await expect(page.locator("[data-match-switch]")).toHaveCount(0);
+    // 再勾回來是任一個。
+    await page.getByRole("checkbox", { name: SUPPLY }).click();
+    await expect(page).toHaveURL(at("topic=erp,gone,supply_chain"));
+    await expect(anyButton(page)).toHaveAttribute("aria-pressed", "true");
+    await expect(chip(page, "search:search.filter.topic")).toContainText(fill(text("search:search.filter.topicCount"), { count: 2 }));
+  });
+
+  test("a late any count for the old conditions never shows on the new ones", async ({ page }) => {
+    // 審查 B 的 E3：第一組條件的 N 還沒回來就換了期刊（新的一組也是同時符合 0 篇）。連結上的 N 只會是新那一組的。
+    const journal = PAPER_FIXTURES.displayNames.journals.find((entry) => entry.key === "io")!.name;
+    const newAny = expectedTotal("journal=io&topic=erp&topic=supply_chain");
+    expect(newAny).toBeGreaterThan(0);
+    expect(newAny).not.toBe(ANY_TOTAL);
+    expect(expectedTotal("journal=io&topic=erp&topic=supply_chain&topic_match=all")).toBe(0);
+    const [held, release] = gate();
+    let heldCount = 0;
+    await page.route("**/api/v1/papers?*", async (route) => {
+      const url = new URL(route.request().url());
+      if (url.searchParams.getAll("topic").length === 2 && url.searchParams.get("topic_match") === null && url.searchParams.get("journal") === null) {
+        heldCount += 1;
+        await held;
+      }
+      await route.fallback();
+    });
+    await openSearch(page, "?topic=erp,supply_chain&topic_match=all");
+    await expect(page.locator("[data-state='zero']")).toBeVisible();
+    await expect.poll(() => heldCount).toBeGreaterThan(0);
+    await chip(page, "search:search.filter.journal").click();
+    await page.getByRole("checkbox", { name: journal, exact: true }).click();
+    await page.keyboard.press("Escape");
+    await expect(page).toHaveURL(/[?&]journal=io(&|$)/);
+    const newLink = page.locator("[data-state='zero']").getByRole("link", { name: fill(text("search:search.empty.anyInstead"), { count: newAny }) });
+    await expect(newLink).toBeVisible();
+    const oldAnswer = page.waitForResponse((response) => {
+      const url = new URL(response.url());
+      return url.pathname === "/api/v1/papers" && url.searchParams.getAll("topic").length === 2 && url.searchParams.get("journal") === null && url.searchParams.get("topic_match") === null;
+    });
+    release();
+    // 舊的那一份回來之後：連結還是新那一組的 N。
+    await oldAnswer;
+    await expect(page.locator("[data-state='zero']")).toHaveAttribute("data-any-match-checked", "");
+    await expect(page.locator("[data-any-match]")).toHaveCount(1);
+    await expect(newLink).toBeVisible();
+  });
+
+  test("load more, then all, then back to any: the count, the rows and the address start from one page again", async ({ page }) => {
+    // 審查 B 的 E4：任一個超過一頁，按「再載入」之後切同時符合，網址上的 shown 拿掉、篇數與列數照新的一組。
+    const topics = PAPER_FIXTURES.displayNames.topics.map((topic) => topic.key);
+    const anyAll = expectedTotal(topics.map((key) => `topic=${key}`).join("&"));
+    expect(anyAll).toBeGreaterThan(PAGE_SIZE);
+    expect(expectedTotal(`${topics.map((key) => `topic=${key}`).join("&")}&topic_match=all`)).toBe(0);
+    await openSearch(page, `?topic=${topics.join(",")}`);
+    await expect(rows(page)).toHaveCount(PAGE_SIZE);
+    await page.locator("[data-load-more]").click();
+    await expect(page).toHaveURL(new RegExp(`[?&]shown=${PAGE_SIZE * 2}(&|$)`));
+    await expect(rows(page)).toHaveCount(anyAll);
+    await chip(page, "search:search.filter.topic").click();
+    await allButton(page).click();
+    await expect(page).toHaveURL(/[?&]topic_match=all(&|$)/);
+    await expect(page).not.toHaveURL(/shown=/);
+    await expect(allButton(page)).toBeFocused();
+    await page.keyboard.press("Escape");
+    await expect(page.locator("[data-state='zero']")).toBeVisible();
+    const link = page.locator("[data-state='zero']").getByRole("link", { name: fill(text("search:search.empty.anyInstead"), { count: anyAll }) });
+    await link.click();
+    await expect(page).not.toHaveURL(/topic_match|shown=/);
+    await expect(page.locator("[data-result-count]")).toHaveText(foundText(anyAll));
+    await expect(rows(page)).toHaveCount(PAGE_SIZE);
   });
 
   test("a method_match=all in the address is sent to the API and kept; removing a method drops it", async ({ page }) => {

@@ -105,7 +105,11 @@ export function AnyMatchLink({ count, target }: { count: number; target: ClearTa
       search={target.search}
       replace
       resetScroll={false}
-      onClick={focusHeading}
+      // 按著 Cmd／Ctrl／Shift／Alt 或不是左鍵：瀏覽器開新分頁或新視窗，這一頁不換，焦點不動（審查 B 的低 L）。
+      onClick={(event) => {
+        if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+        focusHeading();
+      }}
       data-any-match
       className="-my-1 inline-flex min-h-tap-target items-center text-nav text-accent-gold no-underline decoration-1 underline-offset-4 hover:underline"
     >

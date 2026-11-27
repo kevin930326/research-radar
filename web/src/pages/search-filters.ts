@@ -137,6 +137,17 @@ export function tidyMatch<T extends MatchFields>(params: T): T {
   };
 }
 
+/**
+ * 網址列上有 `*_match`、但整理過的條件沒有（只有一個 key、不認得的拿掉後不到兩個、`ALL` 這種不認得的值）：
+ * 打開頁面時要把網址列換掉（規則 3「不到兩個時網址上不留」；審查 B 的 F2）。`raw` 是路由檢查前的網址參數。
+ */
+export function hasStaleMatch(raw: Record<string, unknown>, effective: MatchFields): boolean {
+  return (
+    (raw.topic_match !== undefined && effective.topic_match === undefined) ||
+    (raw.method_match !== undefined && effective.method_match === undefined)
+  );
+}
+
 /** 主題或方法有沒有正在用「同時符合」（兩個以上、選了同時符合）。 */
 export function hasAllMatch(params: MatchFields): boolean {
   const tidy = tidyMatch(params);
@@ -165,6 +176,20 @@ export function knownOnly(params: SearchParams, names: DisplayNames): SearchPara
   });
 }
 
+
+/**
+ * 照「拿掉不認得的代號之後」的個數整理「同時符合」（審查 B 的 F1）：網址上有分類表已經沒有的主題（舊書籤）時，
+ * 網址上的個數比實際用到的多，只看網址會把不該留的 `*_match=all` 留下來。不認得的代號本身照舊留在網址上
+ * （送 API 前由 knownOnly 拿掉）。顯示名稱還沒讀到時（null）只能照網址上的個數（tidyMatch）。
+ */
+export function tidyMatchKnown<T extends MatchFields>(params: T, names: DisplayNames | null): T {
+  if (names === null) return tidyMatch(params);
+  const known = knownOnly(
+    { topic: params.topic, method: params.method, topic_match: params.topic_match, method_match: params.method_match },
+    names,
+  );
+  return { ...params, topic_match: known.topic_match, method_match: known.method_match };
+}
 
 /** 選了哪些期刊、主題（網址上的逗號分隔字串拆開）。 */
 export function selectedKeys(value: string | undefined): string[] {

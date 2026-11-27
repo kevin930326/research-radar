@@ -35,5 +35,7 @@ export async function openMatchSwitch(page: Page, baseURL: string, state: MatchS
   // 選單淡入（0.2 秒）結束才檢查：半透明時 axe 會把文字的對比算低（同 a11y-floor.spec.ts 的說明框）。
   const popup = group.locator("xpath=ancestor::*[@data-open or @data-side][1]");
   if ((await popup.count()) > 0) await expect(popup).toHaveCSS("opacity", "1");
+  // 切換自己的淡入（0.25 秒，設計稿 .mm 的 rrfade）也要結束：動畫跑完就從 getAnimations() 拿掉。
+  await expect.poll(() => group.evaluate((element) => element.getAnimations().length)).toBe(0);
   return group;
 }

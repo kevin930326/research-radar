@@ -539,6 +539,48 @@ test.describe("demo paper list: any or all (Story 3.20)", () => {
     );
   });
 
+  test("a leftover all in the address is replaced on open and the list is any", async ({ page }) => {
+    // 規則 3：不到兩個（一個 key、不認得的拿掉後剩一個）或沒有 key 時，網址列上不留 *_match（審查 B 的 F2）。
+    await open(page, "?topic=erp&topic_match=all");
+    await expect(page).toHaveURL(`${demo.baseURL}/papers?topic=erp`);
+    await open(page, `?topic=${TOPICS[0]},gone&topic_match=all`);
+    await expect(page).toHaveURL(new RegExp(`/papers\\?topic=${TOPICS[0]}(%2C|,)gone$`));
+    await expectCount(page, count((at) => has("topics", at, [TOPICS[0]!], "any")));
+    await open(page, "?method_match=all");
+    await expect(page).toHaveURL(`${demo.baseURL}/papers`);
+  });
+
+  test("a topic the taxonomy no longer has does not keep all alive: dropping to one known topic goes back to any", async ({ page }) => {
+    // 舊書籤：兩個認得的＋一個分類表已經沒有的，同時符合（審查 B 的 F1）。
+    await open(page, `?topic=${TOPICS.join(",")},gone&topic_match=all`);
+    await expect(chip(page, text("search:search.filter.topic"))).toContainText(fill(text("search:search.filter.matchAllCount"), { count: 2 }));
+    await chip(page, text("search:search.filter.topic")).click();
+    await option(page, topicNames[1]!).click();
+    await expect(page).not.toHaveURL(/topic_match/);
+    await expect(page).toHaveURL(/[?&]topic=erp(%2C|,)gone(&|$)/);
+    await expect(page.locator("[data-match-switch]")).toHaveCount(0);
+    await option(page, topicNames[1]!).click();
+    await expect(modeButton(page, "topic", "any")).toHaveAttribute("aria-pressed", "true");
+    await expect(page).not.toHaveURL(/topic_match/);
+    await expectCount(page, count((at) => has("topics", at, TOPICS, "any")));
+  });
+
+  test("the switch fades in (0.25s, design .mm) unless reduced motion is on; with one topic the menu's bottom row is the plain one", async ({ page }) => {
+    await open(page, `?topic=${TOPICS[0]}`);
+    await chip(page, text("search:search.filter.topic")).click();
+    // 只選一個：底部列照 papers-demo／search-no-box（上下 10px、只有「清除」；審查 B 的 F8）。
+    const clear = page.getByRole("link", { name: text("search:search.filter.clear"), exact: true });
+    await expect(clear.locator("xpath=..")).toHaveCSS("padding-top", "10px");
+    await option(page, topicNames[1]!).click();
+    const group = switchOf(page, "topic");
+    await expect(group).toHaveCSS("animation-name", "match-fade");
+    await expect(group).toHaveCSS("animation-duration", "0.25s");
+    // 選了兩個：底部列換成 filter-match-mode 的 .mfoot（上下 6px）。
+    await expect(clear.locator("xpath=..")).toHaveCSS("padding-top", "6px");
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    await expect(group).toHaveCSS("animation-name", "none");
+  });
+
   test("zero for all and zero for any too: no link", async ({ page }) => {
     // 範例匯出沒有 2016–2017 年的論文：任一個也是 0 篇。
     expect(count((at) => (INDEX.year[at] ?? 0) <= 2017 && has("topics", at, TOPICS, "any"))).toBe(0);
