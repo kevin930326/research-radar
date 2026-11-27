@@ -143,6 +143,9 @@
 #   2026-11-25 19:05 開工、2026-11-26 22:52（台北）PR 138 合併，約 27.5 小時；執行端凌晨自己停了約 7 小時。
 #   Kevin 2026-11-26 回報自己動手「大概 2 小時」（含看畫面、回決定、回畫面文字清單）。
 #   estimate_h 是 3.7、3.9、3.10、3.11、3.12、3.15 的加總 15.5 h；3.14 的 3.5 h 已經算在 epic-3f 那一筆，這裡不重複算。
+# epic-3k 那一筆：3.20（主題、方法多選可以選任一個或同時符合，PR 147、148）。
+#   2026-11-27 14:49 開工、16:50 收尾（執行約 2 小時），17:59（台北）PR 148 合併，約 3 小時。
+#   Kevin 2026-11-27 回報自己動手「大約 20 分鐘」，記成 0.3。
 # 重估的倍率只用 kevin_h_low、kevin_h_high（見上面「怎麼重估」第 1 點），elapsed_h 只留著對照。
 # 這個區塊要留在 generated 上面，重跑 skill 才不會洗掉註解（2026-11-14 測過）。
 actual_hours:
@@ -160,6 +163,7 @@ actual_hours:
   - {round: epic-3h3, stories: "識別碼分屬兩篇時兩篇都不寫（PR 125，不是 Story）", estimate_h: null, elapsed_h: 1.5, kevin_h_low: 0.5, kevin_h_high: 1, rough: true}
   - {round: epic-3h4, stories: "寫入路徑的收尾、同一種識別碼對不上時略過（PR 127、128，不是 Story）", estimate_h: null, elapsed_h: 2.5, kevin_h_low: 0.5, kevin_h_high: 0.5, rough: true}
   - {round: "epic-3i＋epic-3i-ci", stories: "3.7、3.9、3.10、3.11、3.12、3.14（示範站論文清單）、3.15", estimate_h: 15.5, elapsed_h: 27.5, kevin_h_low: 2, kevin_h_high: 2, rough: true}
+  - {round: epic-3k, stories: "3.20", estimate_h: 3, elapsed_h: 3, kevin_h_low: 0.3, kevin_h_high: 0.3, rough: true}
 
 generated: 11-14-2026 03:46
 last_updated: 11-17-2026 03:10
@@ -218,7 +222,7 @@ development_status:
   3-17-加入-移出與我的文獻庫-基本版: done  # PR 110 已合併
   3-18-備份與還原指令: done  # PR 100 已合併
   3-19-部署到-oracle-試用主機-只有-kevin-連得進去: backlog
-  3-20-主題-方法多選可以選任一個或同時符合: in-progress  # 2026-11-27 新增（Kevin 2026-11-26 決定）；估計 3 h，後端 PR A、前端 PR B 一起看
+  3-20-主題-方法多選可以選任一個或同時符合: done  # 2026-11-27 新增（Kevin 2026-11-26 決定）；估計 3 h，後端 PR A、前端 PR B 一起看
   epic-3-retrospective: optional
 
   epic-4: backlog
