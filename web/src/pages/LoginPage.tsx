@@ -78,7 +78,7 @@ export function LoginPage({ search }: { search: LoginSearch }) {
 
   const outcome = login.data?.kind;
   const pending = login.isPending || outcome === "signedIn";
-  // 按下登入之後就不再顯示「登入已經過期」（設計稿：按下去先清掉訊息行）。
+  // 按下登入之後就不再顯示「登入過期」（設計稿：按下去先清掉訊息行）。
   const note: Note | null =
     outcome === "failed" || login.isError
       ? "failed"

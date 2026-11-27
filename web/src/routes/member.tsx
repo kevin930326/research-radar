@@ -263,7 +263,7 @@ function useMemberSwapPending(queryClient: QueryClient, memberId: string): boole
  * - 還是同一位：不動，暫留列留著。
  * - 換了人（loadMember 清了快取）：找論文立刻重新掛上（同步重畫，上一位的清單馬上離開畫面、換成骨架，不等導覽列重問），
  *   再重跑路由的登入檢查（導覽列換成新的人）。
- * - 沒有人：和清單回 401 一樣清快取、回登入頁並帶 expired（登入已經過期；確認審查 D2）。
+ * - 沒有人：和清單回 401 一樣清快取、回登入頁並帶 expired（登入過期；確認審查 D2）。
  * - 問不到（網路、伺服器錯誤）：不動。
  * 確認進行中這一頁的加入／移出先等結果，換了人或沒有人就不送（trackMemberCheck、sendLibraryChange；確認審查 D1）。
  */

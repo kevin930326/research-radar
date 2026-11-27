@@ -102,7 +102,7 @@ export function alreadyFollowed(queryClient: QueryClient, expected: string | und
  * 寫入時後端說換了人（409 member_changed）之後：照「發現換人」處理（和找論文切回視窗確認時一樣，PR #114）。
  * 1. 問一次「我是誰」（loadMember；換了人它會清掉上一位的查詢快取）。loadMember 沒有清（快取裡的已經是現在的人、或問不到）
  *    也照樣清：後端已經說了這一頁是上一位的。
- * 2. 沒有人：回登入頁並帶「登入已經過期」（`toLogin`）。
+ * 2. 沒有人：回登入頁並帶「登入過期」（`toLogin`）。
  * 3. 有人（或問不到）：找論文、我的文獻庫同步重新掛上（noteMemberSwap；上一位的列馬上離開畫面），再 `reload`
  *    （重跑路由的登入檢查與資料讀取：導覽列、論文頁換成現在的人；問不到就是全站共用的「載入失敗」）。
  *    重新掛上時路由的 context 還是上一位、快取裡的「我是誰」已經是現在的人：頁面這段期間不讀（member.tsx 的
@@ -160,7 +160,7 @@ export const RowsReadAs = createContext<ReadAs>(undefined);
 
 /**
  * 回一個函式：讀取或寫入時後端說換了人（409 member_changed，ADR-0055）之後，照「發現換人」處理（followMemberChange）：
- * 沒有人就回登入頁並帶「登入已經過期」，有人就整頁換成現在的人。
+ * 沒有人就回登入頁並帶「登入過期」，有人就整頁換成現在的人。
  */
 export function useFollowMemberChange(): () => Promise<void> {
   const queryClient = useQueryClient();

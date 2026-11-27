@@ -46,7 +46,7 @@ async function open(page: Page, base: string, viewport = DESKTOP): Promise<void>
   await page.goto(`${base}/coverage`);
 }
 
-/** 名詞說明的詞與解釋；「快照編號」的例子是這一次的快照編號（`snapshot`；還不知道快照時是設計稿的 12）。 */
+/** 名詞說明的詞與解釋（「追蹤範圍外」「快照編號」兩列）。 */
 async function expectTerms(page: Page, snapshot = 12): Promise<void> {
   await expect(page.locator("[data-coverage-terms] dt")).toHaveText(
     ["outside", "snapshot"].map((key) => text(`coverage:coverage.terms.${key}`)),
@@ -204,7 +204,7 @@ test.describe("member coverage page", () => {
     await page.keyboard.press(tabKey(browserName));
     await expect(cell(page, "jes", 2016)).toBeFocused();
     await expect(page.locator("[data-coverage-pick]")).toContainText(text("coverage:coverage.legend.empty"));
-    // 一列 11 格（2016～2026）：再走 11 格到 misq 2016（fixtures/cube.json：53 篇裡 52 篇）。
+    // 一列 11 格（2016～2026）：再走 11 格到 misq 2016（fixtures/cube.json：52／53 篇有摘要）。
     for (let step = 0; step < 11; step += 1) await page.keyboard.press(tabKey(browserName));
     await expect(cell(page, "misq", 2016)).toBeFocused();
     const where = fill(text("coverage:coverage.pick.cell"), { journal: "MISQ", year: 2016 });

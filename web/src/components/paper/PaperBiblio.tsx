@@ -375,7 +375,7 @@ export function PaperBiblio({ page, names, onRetryNames, firstBadge, abstractMar
         {volume}
       </span>,
     );
-  // 平均每年的「截至年份」：資料日期（快照，台北）的年份；沒有快照時用今天。
+  // 年均的「截至年份」：資料日期（快照，台北）的年份；沒有快照時用今天。
   const asOfDate = taipeiDate(page.snapshot === null ? new Date().toISOString() : page.snapshot.as_of);
   const asOfYear = Number((asOfDate ?? new Date().toISOString()).slice(0, 4));
   const perYear =

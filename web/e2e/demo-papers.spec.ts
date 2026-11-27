@@ -196,7 +196,7 @@ test.describe("demo paper list", () => {
     // 一個欄位選了好幾個：用分隔的標點接起來（自訂的寫法，列給 Kevin）。
     await expect(page.locator("h1")).toHaveText(heading([[misq, io].join(text("demo:demo.papers.separator")), withAbstract, withFull], count((at) => journalMatch(at) && both(at))));
 
-    // 標題裡的字（不分大小寫、字面比對）；也寫進網址。
+    // 標題關鍵字（不分大小寫、字面比對）；也寫進網址。
     await page.locator("[data-title-query]").fill("PAPER 5");
     await expect(page).toHaveURL(/[?&]title=PAPER(\+|%20)5/);
     const titleMatch = (at: number) => TITLES[at]!.toLowerCase().includes("paper 5");
@@ -228,7 +228,7 @@ test.describe("demo paper list", () => {
       if (["fetch", "xhr"].includes(request.resourceType())) later.push(request.url());
     });
     const chip = (label: string) => page.locator("[data-filter-chip]").filter({ hasText: label });
-    // 四個選單、兩個「只看…的」、標題的字都在篩選列上。
+    // 四個選單、「有摘要」「有完整內容」、標題關鍵字都在篩選列上。
     for (const label of [
       text("search:search.filter.journal"),
       text("search:search.filter.year"),

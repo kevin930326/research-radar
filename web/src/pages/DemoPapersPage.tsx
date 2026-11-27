@@ -308,7 +308,7 @@ export function headingParts(
 
 /**
  * 桌機的四個篩選選單（期刊、年份、主題、方法；和找論文同一個選單元件）。
- * 選單底部的「清除」只拿掉這一個選單的條件，其他條件（兩個「只看…的」、標題的字、本週新增）留著。
+ * 選單底部的「清除」只拿掉這一個選單的條件，其他條件（「有摘要」「有完整內容」、標題關鍵字、本週新增）留著。
  */
 function DesktopMenus({ state, params, unclassified }: { state: FilterState; params: DemoPapersParams; unclassified: string }) {
   const { t } = useTranslation("search");

@@ -1561,7 +1561,7 @@ test.describe("search rows: remove (review fixes, round 2)", () => {
 });
 
 // PR #114 第 3 輪修正（確認審查 D1、D2）：有暫留列、切回視窗確認登入的人時，上一位的清單不能寫進新登入的人的文獻庫；
-// 確認時已經沒有人要帶「登入已經過期」。
+// 確認時已經沒有人要帶「登入過期」。
 test.describe("search rows: remove (review fixes, round 3)", () => {
   const searchRow = (page: Page, id: string) => page.locator(`[data-paper-row="${id}"]`);
   const heading = (page: Page) => page.locator("main").getByRole("heading", { level: 2 });
