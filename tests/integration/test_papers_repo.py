@@ -318,6 +318,16 @@ def test_split_identifiers_keep_doi_paper_not_demo_eligible(
         DEMO_SCOPE.demo_publishers,
         journal_issn_l=None,
     )
+    # 正式寫入帶的是這筆的期刊 ISSN-L（epic-3m PR D）：前提也照同一種帶法再確認一次，之後排除清單
+    # 加了期刊時，這條才不會變成「本來就是 false」的空測試。上面帶 None 的那條是既有斷言，照這一輪
+    # 「既有斷言不改」的規則留著。
+    assert is_demo_eligible(
+        record.primary_license,
+        record.publisher_ids,
+        record.publisher_names,
+        DEMO_SCOPE.demo_publishers,
+        journal_issn_l=record.journal_issn_l,
+    )
 
     with database.transaction() as connection:
         result = upsert_by_external_id(
@@ -829,7 +839,8 @@ def test_withdrawn_insert_releases_identifiers_before_waiting_for_paper_lock(
 
         thread_c.start()
         thread_c.join(15)
-        # C 不必等 B：B 撤回時已經放掉 10.1/b。舊做法下 C 會卡在 10.1/b 等 B（到語句逾時）。
+        # C 不必等 B：B 停在鎖 A 那篇之前、手上沒有 A 那篇的鎖；C 鎖住 A 那篇後判成「同一種識別碼
+        # 對不上」就結束，不去認領 10.1/b（所以這裡守不住「撤回時放掉 10.1/b」，見上面的說明）。
         assert not thread_c.is_alive()
         assert errors == []
         # A 那篇已經有 DOI 10.1/a、帶來的 10.1/b 沒有主人：「同一種識別碼對不上」，C 鎖住 A 那篇

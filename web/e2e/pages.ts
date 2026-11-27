@@ -80,3 +80,15 @@ export const DEV_SITE: Site = { name: "dev", baseURL: DEV_URL, pages: ["/dev/com
 
 /** 無障礙底線（a11y-floor.spec.ts）跑的頁面：正式建置的每一頁，加上元件示範頁。 */
 export const A11Y_SITES: Site[] = [...SITES, DEV_SITE];
+
+/**
+ * 打開就一定看得到論文標題（[data-paper-text='title']）的頁面（epic-3j 6-1，Kevin 選 A）：a11y-floor 的 lang 測試
+ * 在這幾頁另外要求至少一個標題，免得在骨架或空清單時沒有東西可查、悄悄算通過。找論文、我的文獻庫、示範站清單
+ * 讀假資料（api-mock.ts、fixtures/demo-preview）都有論文；論文頁的標題是 h1；元件示範頁有論文標題的字級樣本。
+ * 使用須知、涵蓋範圍、登入本來就沒有論文標題，不在這裡，lang 測試照舊只查「有的都要對」。
+ */
+export const PAPER_TITLE_PAGES: Record<Site["name"], readonly string[]> = {
+  member: ["/search", "/library", ...PAPER_PAGES],
+  demo: ["/papers", ...DEMO_PAPER_PAGES],
+  dev: ["/dev/components"],
+};

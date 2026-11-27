@@ -51,7 +51,7 @@
    - `scope`：`tracked`（預設）／`lab`／`personal`；
    - `cursor`：上一頁的 `next_cursor`。
    - 沒有文字搜尋參數（Epic 4），沒有排序參數。
-2. **條件怎麼合**：不同欄位之間「且」；期刊、年份多值「或」；主題多值「且」；**方法多值「且」**。
+2. **條件怎麼合**：不同欄位之間「且」；期刊、年份多值「或」；主題多值「且」；**方法多值「且」**。（2026-11-27 起主題、方法多個值預設是「或」，可以切成「且」，見 ADR-0011 的「2026-11-27 更新」、Story 3.20）
 3. **三種範圍**（都再套 `visible_papers(viewer)`，三種都不列 `excluded_reason` 有值的文章，和論文頁回 404 一致）：
    - `tracked`：從 view `counted_paper` 出發，和計數方塊同一群論文。
    - `lab`：`lab_visible` 的論文（`repo/visibility.visible_lab_papers`），含快照還沒發佈的範圍內論文與範圍外的論文；`lab_visible` 這個字仍然只在 `visibility.py`。
