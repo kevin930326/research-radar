@@ -1,0 +1,34 @@
+# 篩選：主題、方法多選的「任一個／同時符合」（Story 3.20；設計稿 filter-match-mode.html，2026-11-27）：設計稿上有、還不做的文字。
+# 給 design-compare.mjs 的 --expect-missing 用（AR-67：畫面上有的就要能用，還不能用的先不放）。
+# 一行一段，要和整段文字完全相同（空白不算）；只寫開頭幾個字的，行尾加「…」。
+# 這一張的論文是編的 36 篇示意資料：比對時用同樣 36 篇的假資料（成員版 mock-api 的 --list-file、示範站的 DEMO_PREVIEW_DIR），
+# 不在這裡列論文的字（同 search-no-box.txt、papers-demo.txt 的做法）。
+
+# 導覽列的連結（同 search-no-box.txt、papers-demo.txt）：目的地還沒做（AR-67），各自做好時接上
+# 「趨勢」：Epic 9
+趨勢
+# 「關係排行表」：Epic 10
+關係排行表
+# 「問答」（成員版）：Epic 5
+問答
+# 「展示問答」「架構與評估」（示範站）：Epic 13
+展示問答
+架構與評估
+# 「成員登入」（示範站）：要連到成員版的網址，示範站的建置還沒有這個設定（Story 3.14 列給 Kevin 決定）
+成員登入
+
+# 示範站每列的期刊縮寫（設計稿寫 MISQ、ISR…）：EXPERIENCE 決定第 92 項（Kevin 2026-11-20）先顯示全名，縮寫之後補
+MISQ
+ISR
+JMIS
+JAIS
+EJIS
+ISJ
+JIT
+JSIS
+DSS
+I&M
+I&O
+PMJ
+TEM
+DATABASE
