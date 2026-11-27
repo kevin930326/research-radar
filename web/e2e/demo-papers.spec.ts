@@ -645,7 +645,8 @@ test.describe("demo paper list: any or all (Story 3.20)", () => {
       return document.querySelector("[role=dialog]") !== null && document.activeElement?.matches("h1[data-page-heading]") === true;
     }, label);
     expect(pressed).toBe(true);
-    await expect(sheet).toHaveCount(0);
+    // 連隱藏的一起算：滿版篩選真的拆掉了才看焦點（epic-3l C 審查 X8）。
+    await expect(page.locator("[role=dialog]")).toHaveCount(0);
     await expect(page).not.toHaveURL(/method_match/);
     await expectCount(page, methodAny);
     await expect(page.locator("h1")).toBeFocused();

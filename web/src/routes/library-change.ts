@@ -34,6 +34,9 @@ export type LibraryChangeOutcome = "done" | "alreadyGone" | "failed";
  * 還是同一代：呼叫 `member.onMemberChanged`（不等它做完，按鈕馬上恢復）、回 "failed"；不重試、不改快取。
  * 例外：這筆 409 是換人流程已經做完之後才回來的舊回應（`alreadyFollowed`）時只回 "failed"，不再跑一次換人流程
  * （不清掉已經載好的新成員的快取、畫面不多閃一次骨架；審查 fix3 G2a）。`member.routeMemberId`：回應回來當下路由認定的成員。
+ * `member.alwaysFollow`（論文頁，#114 收尾 R3-3）：409 member_changed 一律呼叫 `onMemberChanged`，不判斷舊回應、也不先比對
+ * 世代號（送出之後別的流程換過人也照樣跑：同時有一輪在跑就併進那一輪，followMemberChange；epic-3l C 審查 X5）。
+ * 成功與 401 的世代號比對不變。
  */
 export async function sendLibraryChange(
   queryClient: QueryClient,
@@ -45,6 +48,7 @@ export async function sendLibraryChange(
     expectedMemberId?: string;
     routeMemberId?: () => string | undefined;
     onMemberChanged?: () => Promise<void> | void;
+    alwaysFollow?: boolean;
   } = {},
 ): Promise<LibraryChangeOutcome> {
   const generation = memberGeneration(queryClient);
@@ -59,6 +63,10 @@ export async function sendLibraryChange(
   try {
     result = await source[action](paperId, member.expectedMemberId);
   } catch {
+    return "failed";
+  }
+  if (result.kind === "memberChanged" && member.alwaysFollow === true) {
+    void member.onMemberChanged?.();
     return "failed";
   }
   if (!stillCurrent()) {
@@ -186,7 +194,8 @@ export function useFollowMemberChange(): () => Promise<void> {
  * 沒有 `readAs`（資料不是帶預期成員讀的；成員版沒有這種畫面）就不送、回 "failed"：不知道這份資料是誰的，不寫。
  * `skipOld409`（預設 true）：換人流程做完之後才回來的舊 409 不再跑一次（alreadyFollowed）。論文頁傳 false（#114 收尾 R3-3，
  * Kevin 選 D3 的 A）：論文頁換人後背景重讀失敗時，畫面停在上一位的資料、路由已經是下一位，每次按都會被當成舊 409，
- * 要換頁才恢復；不套用就是每次按都照常跑換人流程（後端照樣擋，不會寫錯人）。
+ * 要換頁才恢復；不套用就是每次收到 409 member_changed 都照常跑換人流程（`alwaysFollow`：送出之後世代號變了也一樣；
+ * epic-3l C 審查 X5）。後端照樣擋，不會寫錯人。
  */
 export function useLibraryChange(
   readAs: ReadAs,
@@ -210,6 +219,7 @@ export function useLibraryChange(
           ? () => (router.state.matches.at(-1)?.context as { member?: Member } | undefined)?.member?.member_id
           : undefined,
         onMemberChanged: follow,
+        alwaysFollow: !skipOld409,
       });
     },
     [queryClient, navigate, router, href, readAs, follow, skipOld409],

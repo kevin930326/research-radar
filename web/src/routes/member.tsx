@@ -273,57 +273,66 @@ function useMemberCheckWhileHolding(): number {
   // 這個分頁看到換人幾次：給找論文當 key，換人就重新掛上（快取清掉之後，畫面上的查詢不會自己重讀）。
   const [changes, setChanges] = useState(0);
   useEffect(() => {
-    const confirm = memberCheckOnReturn(queryClient, {
+    const { confirm, leave } = memberCheckOnReturn(queryClient, {
       swap: () => flushSync(() => setChanges((count) => count + 1)),
       toLogin: async () => {
         await router.navigate({ to: "/login", search: { next: router.state.location.href, expired: true as const }, replace: true });
       },
       reload: () => router.invalidate(),
     });
-    const check = () => {
-      if (document.visibilityState === "hidden") return;
-      void confirm();
+    // confirm 不會 reject（見 memberCheckOnReturn）。
+    const onFocus = () => void confirm("focus");
+    const onVisibility = () => {
+      if (document.visibilityState === "hidden") {
+        leave();
+        return;
+      }
+      void confirm("visible");
     };
     // 和 TanStack Query 判斷「切回視窗」一樣聽 window 的 visibilitychange（document 發的會冒泡上來）。
-    window.addEventListener("focus", check);
-    window.addEventListener("visibilitychange", check);
+    window.addEventListener("focus", onFocus);
+    window.addEventListener("visibilitychange", onVisibility);
     return () => {
-      window.removeEventListener("focus", check);
-      window.removeEventListener("visibilitychange", check);
+      window.removeEventListener("focus", onFocus);
+      window.removeEventListener("visibilitychange", onVisibility);
     };
   }, [queryClient, router]);
   return changes;
 }
 
 /**
- * 切回視窗時的確認（useMemberCheckWhileHolding 每次切回來呼叫回傳的函式；拆出來是為了不靠畫面也能測）。
+ * 切回視窗時的確認（useMemberCheckWhileHolding 在 focus、分頁變回看得見時呼叫 `confirm`，分頁藏起來時呼叫 `leave`；
+ * 拆出來是為了不靠畫面也能測）。
  * `swap`：換了人時同步重新掛上找論文；`toLogin`：沒有人時回登入頁；`reload`：重跑路由的登入檢查。
- * 回傳的函式回一個 promise，確認（含收尾）做完才結束；畫面不等它。
- * - 上一次確認還沒做完又切回來（focus 與 visibilitychange 一起來）：不再確認一次，等著的加入／移出等的是同一次
- *   （#114 收尾 S4：確認兩次會多重新掛上一次）。上一次做完之後再切回來就照常確認。
+ * `confirm` 回一個 promise，確認（含收尾）做完才結束，**不會 reject**（中途的例外收在這裡：事件入口沒有人能處理，
+ * 留著會變成沒接住的錯誤；epic-3l C 審查 X4）；畫面不等它。
+ * - 同一次切回只確認一次（#114 收尾 S4）：分頁切回來時 focus 與「變回看得見」兩個事件都會來，不管一起來、或第二個晚到
+ *   （第一次已經做完），都不再確認。怎麼認「新的一次切回」（epic-3l C 審查 X3）：分頁藏起來（`leave`）之後；或同一種事件又來了
+ *   （視窗要先失焦才會再 focus、分頁要先藏起來才會再變回看得見，所以同一種事件第二次來表示中間離開過）。新的一次就算
+ *   上一次還沒做完也照常確認。不聽視窗失焦事件（blur）：建置檢查（tailwind-guard）把 "blur" 這個字當成不產生 CSS 的類別。
+ *   做不到的情況：上一次切回只來了「變回看得見」、沒有 focus，接著切到別的程式再切回來（只有 focus），會被當成同一次而不確認；
+ *   下一次切回就照常（寫入照樣帶畫面資料的 readAs，後端擋換人）。
  * - 確認途中丟例外（清快取、重新掛上失敗）：一律當成「換了人」收尾，等著的加入／移出不送、按鈕回到按之前的樣子
  *   （#114 收尾 G5：本來確認永遠沒有結果，按鈕一直停在送出中）。當成「換了人」是因為走到那裡時已經知道不是同一位，
  *   或是沒有人；不能當成同一位送出。
+ * - 問「我是誰」那一步（loadMember）丟例外：世代號（換人就加 1）變了就是「換了人」——loadMember 認出別人、開始清上一位的
+ *   快取時世代號先加 1，之後清快取才失敗；或是問的期間別的流程已經清過。沒變才是「問不到」（epic-3l C 審查 X1）。
  * 「我是誰」一直沒有回來（不是例外）時確認也一直沒有結果，按鈕會停在送出中：要修只能加計時器，這一輪不做（決定紀錄 C）。
  */
 export function memberCheckOnReturn(
   queryClient: QueryClient,
   actions: { swap: () => void; toLogin: () => Promise<void> | void; reload: () => Promise<void> | void },
-): () => Promise<void> {
-  let running = false;
-  return async () => {
-    if (running) return;
-    if (queryClient.getQueryCache().findAll({ queryKey: ["paper-list"], type: "active", predicate: hasHeldRows }).length === 0) return;
-    running = true;
+): { confirm: (event: "focus" | "visible") => Promise<void>; leave: () => void } {
+  // 這一次切回已經來過的事件（新的一次切回時清掉）。
+  let seen = new Set<"focus" | "visible">();
+  const check = async () => {
     let resolve: (verdict: MemberCheckVerdict) => void = () => {};
     trackMemberCheck(queryClient, new Promise<MemberCheckVerdict>((done) => (resolve = done)));
-    // 有結果就可以開始下一次確認（不等回登入頁、重問導覽列做完：那兩步卡住時，之後切回來照樣會確認）。
     let settled = false;
     const settle = (verdict: MemberCheckVerdict) => {
       if (settled) return;
       settled = true;
       resolve(verdict);
-      running = false;
     };
     try {
       const generation = memberGeneration(queryClient);
@@ -331,7 +340,7 @@ export function memberCheckOnReturn(
       try {
         ({ member } = await loadMember(queryClient));
       } catch {
-        settle("unknown");
+        settle(memberGeneration(queryClient) === generation ? "unknown" : "changed");
         return;
       }
       if (member !== null && memberGeneration(queryClient) === generation) {
@@ -353,6 +362,23 @@ export function memberCheckOnReturn(
       // 上面已經有結果時這一行沒有作用。
       settle("changed");
     }
+  };
+  return {
+    confirm: async (event) => {
+      const sameReturn = seen.size > 0 && !seen.has(event);
+      if (!sameReturn) seen = new Set();
+      seen.add(event);
+      if (sameReturn) return;
+      if (queryClient.getQueryCache().findAll({ queryKey: ["paper-list"], type: "active", predicate: hasHeldRows }).length === 0) return;
+      try {
+        await check();
+      } catch {
+        // 等著的加入／移出已經在 finally 收到結果；這裡只是不讓錯誤留在事件入口（見上面）。
+      }
+    },
+    leave: () => {
+      seen = new Set();
+    },
   };
 }
 

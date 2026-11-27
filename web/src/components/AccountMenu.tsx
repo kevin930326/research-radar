@@ -89,15 +89,17 @@ export function AccountMenu({ member, triggerRef, phoneFocusRef }: AccountMenuPr
             ref={popupRef}
             className={POPUP_CLASS}
             finalFocus={() => {
-              if (closedByBreakpoint.current) {
-                closedByBreakpoint.current = false;
-                return phoneFocusRef.current;
-              }
               // 焦點已經移到別處（關的同時點了或聚焦在別的東西上）就留在那裡，不拉回「帳號」（同 FilterMenus.tsx 的 finalFocus，
               // epic-3j 6-2）。Base UI 本來有這個保護，但 finalFocus 給函式時會跳過它（連回傳 true 也一樣），所以自己判斷；不要改回 `return true`。
               // 焦點還在選單裡、或落在 body（選單一關就不能聚焦，焦點會先落到這裡）才照常回到「帳號」。
               const active = document.activeElement;
-              return active === null || active === document.body || popupRef.current?.contains(active) === true;
+              const returnFocus = active === null || active === document.body || popupRef.current?.contains(active) === true;
+              if (closedByBreakpoint.current) {
+                closedByBreakpoint.current = false;
+                // 縮到手機寬度關上的：交給手機版的「選單」按鈕；焦點已經在別處一樣不搶（epic-3l C 審查 X7）。
+                return returnFocus ? phoneFocusRef.current : false;
+              }
+              return returnFocus;
             }}
           >
             <Menu.Group>

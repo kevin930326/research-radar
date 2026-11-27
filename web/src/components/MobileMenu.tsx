@@ -88,15 +88,17 @@ export function MobileMenu({ member, open, onOpenChange, triggerRef, desktopFocu
           className="fixed inset-[0px] z-10 flex flex-col overflow-y-auto bg-background split:hidden"
           ref={popupRef}
           finalFocus={() => {
-            if (closedByBreakpoint.current) {
-              closedByBreakpoint.current = false;
-              return desktopFocusRef.current;
-            }
             // 焦點已經移到別處（關的同時點了或聚焦在別的東西上）就留在那裡，不拉回「選單」按鈕（同 FilterMenus.tsx 的 finalFocus，
             // epic-3j 6-2）。Base UI 本來有這個保護，但 finalFocus 給函式時會跳過它（連回傳 true 也一樣），所以自己判斷；不要改回 `return true`。
             // 焦點還在選單裡、或落在 body（選單一關就不能聚焦，焦點會先落到這裡）才照常回到「選單」按鈕。
             const active = document.activeElement;
-            return active === null || active === document.body || popupRef.current?.contains(active) === true;
+            const returnFocus = active === null || active === document.body || popupRef.current?.contains(active) === true;
+            if (closedByBreakpoint.current) {
+              closedByBreakpoint.current = false;
+              // 變寬到桌機寬度關上的：交給桌機版的「帳號」；焦點已經在別處一樣不搶（epic-3l C 審查 X7）。
+              return returnFocus ? desktopFocusRef.current : false;
+            }
+            return returnFocus;
           }}
         >
           <div className={HEADER_CLASS}>

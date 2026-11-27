@@ -8,6 +8,7 @@ import type { Page } from "@playwright/test";
 import { LIST_FIXTURES, PAPER_FIXTURES, filterListRows, gate, paperId, type ListFixtureRow } from "./api-mock.ts";
 import { TEXT } from "./expected.ts";
 import { expect, test } from "./fixtures.ts";
+import { crossWidthAndFocus } from "./focus-elsewhere.ts";
 import { SITES } from "./pages.ts";
 
 const member = SITES[0]!;
@@ -590,9 +591,35 @@ test.describe("search: filters", () => {
     const sheet = page.getByRole("dialog");
     await expect(sheet).toBeVisible();
     await escapeAndFocus(page, "header a");
-    await expect(sheet).toHaveCount(0);
+    // 連隱藏的一起算：滿版篩選真的拆掉了才看焦點（epic-3l C 審查 X8）。
+    await expect(page.locator("[role=dialog]")).toHaveCount(0);
     await expect(page.locator("header a").first()).toBeFocused();
   });
+
+  test("phone: focus moved elsewhere while the filter sheet closes at desktop width stays there, not handed to a filter chip", async ({ page }) => {
+    // epic-3l C 審查 X7：跨寬度關上時也照「焦點已經移到別處就不搶」（MobileFilters.tsx 的 finalFocus）。
+    await openSearch(page, "", PHONE);
+    await page.locator("[data-mobile-filter]").click();
+    await expect(page.getByRole("dialog")).toBeVisible();
+    await crossWidthAndFocus(page, page.locator("[data-mobile-filter]"), DESKTOP, "header a");
+    await expect(page.locator("[role=dialog]")).toHaveCount(0);
+    await expect(page.locator("header a").first()).toBeFocused();
+  });
+
+  for (const how of ["Esc", "the close button"] as const) {
+    test(`phone: closing the filter sheet with ${how} gives the focus back to the filter button`, async ({ page }) => {
+      // epic-3l C 審查 X9：一般關閉（焦點還在滿版篩選裡、或 Esc 之後落在 body）照常回到「篩選」（MobileFilters.tsx 的 finalFocus）。
+      await openSearch(page, "?topic=e_commerce", PHONE);
+      const trigger = page.locator("[data-mobile-filter]");
+      await trigger.click();
+      const sheet = page.getByRole("dialog");
+      await expect(sheet).toBeVisible();
+      if (how === "Esc") await page.keyboard.press("Escape");
+      else await sheet.getByRole("button", { name: text("search:search.mobile.close") }).click();
+      await expect(page.locator("[role=dialog]")).toHaveCount(0);
+      await expect(trigger).toBeFocused();
+    });
+  }
 
   test("a desktop menu closed by narrowing to phone width hands the focus to the phone filter button", async ({ page }) => {
     // 審查 S2-4、確認審查 N4：桌機的標籤在手機寬度藏起來，焦點不能留在看不到的地方或掉到 body。
@@ -676,6 +703,31 @@ test.describe("search: page shape", () => {
     const rowLinks = await start.locator("[data-paper-row]").getByRole("link").count();
     await expect(start.getByRole("link")).toHaveCount(rowLinks + 1);
     await expect(page.getByRole("textbox")).toHaveCount(0);
+  });
+
+  test("phone: 'open full text' stays at the right end of the row before and after adding to my library", async ({ page }) => {
+    // P3-3（設計稿 2026-11-21 的小修改；epic-3l C 審查 X11）：899px 以下動作那一排兩端對齊，文獻庫的動作靠左、
+    // 「開啟全文」固定靠右；按「加入」之後左邊換成「● 已加入 移出」（比較寬），「開啟全文」不往左或往右跳。
+    await openSearch(page, "?topic=e_commerce", PHONE);
+    const id = await rows(page)
+      .filter({ has: page.locator("[data-library='add']") })
+      .filter({ has: page.locator("[data-open-full-text]") })
+      .first()
+      .getAttribute("data-paper-row");
+    const row = page.locator(`[data-paper-row="${id}"]`);
+    const fullText = row.locator("[data-open-full-text]");
+    await expect(fullText).toBeVisible();
+    // 「開啟全文」的左緣、右緣，和動作那一排的右緣。
+    const place = () =>
+      fullText.evaluate((link) => {
+        const box = link.getBoundingClientRect();
+        return { left: box.left, right: box.right, end: link.parentElement!.getBoundingClientRect().right };
+      });
+    const before = await place();
+    expect(before.right).toBeCloseTo(before.end, 0);
+    await row.locator("[data-library='add']").click();
+    await expect(row.locator("[data-library='added']")).toBeVisible();
+    expect(await place()).toEqual(before);
   });
 
   test("each row: the title opens the paper page, the right side has only the full-text link in a new tab", async ({ page }) => {
