@@ -124,6 +124,15 @@ def _export(
     return result
 
 
+def _tree(directory: Path) -> dict[str, bytes]:
+    """`directory` 底下每個檔（相對路徑）與內容。"""
+    return {
+        path.relative_to(directory).as_posix(): path.read_bytes()
+        for path in sorted(directory.rglob("*"))
+        if path.is_file()
+    }
+
+
 def _files(output: Path) -> dict[str, bytes]:
     preview = output / PREVIEW_DIR
     return {
@@ -1891,17 +1900,70 @@ def test_unreadable_manifest_after_the_rename_is_treated_as_published(
     assert _rows(db) == [(1, "running", None)]
     events = [entry["event"] for entry in logs]
     assert any("不知道換了沒有：當成已發佈待補記" in event for event in events)
-    assert any("沒有記上成功；sweep 補排時會補記" in event for event in events)
+    assert any("sweep 補排時會確認並補記" in event for event in events)
     assert not any(event == "示範站匯出失敗" for event in events)
     monkeypatch.undo()
     _make_stale(db)
+    rewrites: list[str] = []
+
+    def no_write(directory_fd: int, name: str, content: bytes) -> None:
+        rewrites.append(name)
+
+    def no_replace(*args: Any) -> None:
+        rewrites.append("manifest")
+
+    monkeypatch.setattr(service, "_write_file", no_write)
+    monkeypatch.setattr(service, "_replace_file", no_replace)
 
     result = run_demo_export(SYSTEM, database, demo_setup(), run.id, tmp_path, clock=_clock)
 
     assert result is not None
     assert result.export_id == "2-1"
+    assert rewrites == []
     assert _files(tmp_path) == written
     assert _rows(db) == [(1, "succeeded", None)]
+
+
+def test_unreadable_manifest_when_the_rename_did_not_happen_is_settled_by_the_rerun(
+    db: TestDatabase, database: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # epic-3m PR A（Codex 主審查中 2）：開始換 manifest 的名之後停下、其實沒換成，清理時又讀不出
+    # manifest：分不出來，照樣當成已發佈、留在 running、目錄留著。補排時讀得到 manifest（沒有指向
+    # 這一次），照一般流程重做同一個匯出編號，碰到留著的目錄記成 output_exists（不會一直停在
+    # running），manifest 一直沒出現。
+    snapshots = publish_snapshots(db)
+    seed_papers(db, database, [PaperSpec("a", 1)], snapshots=snapshots)
+    attempted: list[bool] = []
+    real_read = service._read_manifest
+
+    def replace_fails(*args: Any) -> None:
+        attempted.append(True)
+        raise OSError(errno.EIO, "disk")
+
+    def read(out: Any) -> Any:
+        if attempted:
+            raise OSError(errno.EIO, "unreadable")
+        return real_read(out)
+
+    monkeypatch.setattr(service, "_replace_file", replace_fails)
+    monkeypatch.setattr(service, "_read_manifest", read)
+    run = queue_demo_export(SYSTEM, database)
+
+    with pytest.raises(DemoExportPublishedUnrecordedError):
+        run_demo_export(SYSTEM, database, demo_setup(), run.id, tmp_path, clock=_clock)
+
+    assert attempted == [True]
+    assert [path.name for path in (tmp_path / PREVIEW_DIR).iterdir()] == ["2-1"]
+    assert _rows(db) == [(1, "running", None)]
+    monkeypatch.undo()
+    _make_stale(db)
+
+    with pytest.raises(DemoExportError) as caught:
+        run_demo_export(SYSTEM, database, demo_setup(), run.id, tmp_path, clock=_clock)
+
+    assert caught.value.failure is DemoExportFailure.OUTPUT_EXISTS
+    assert [path.name for path in (tmp_path / PREVIEW_DIR).iterdir()] == ["2-1"]
+    assert _rows(db) == [(1, "failed", "output_exists")]
 
 
 def test_failure_before_the_manifest_rename_still_removes_the_directory_when_unreadable(
@@ -1948,10 +2010,12 @@ def test_takeover_log_says_the_written_directory_was_moved_away(
     preview = tmp_path / PREVIEW_DIR
     moved = tmp_path / "moved-2-1"
     real_write = service._write_export_dir
+    moved_files: dict[str, bytes] = {}
 
     def write_then_move(*args: Any) -> None:
         real_write(*args)
         (preview / "2-1").rename(moved)
+        moved_files.update(_tree(moved))
 
     real_owned = update_demo_export_if_owned
     calls: list[int] = []
@@ -1967,7 +2031,8 @@ def test_takeover_log_says_the_written_directory_was_moved_away(
     with capture_logs() as logs, pytest.raises(DemoExportTakenOverError):
         run_demo_export(SYSTEM, database, demo_setup(), run.id, tmp_path, clock=_clock)
 
-    assert any(moved.iterdir())
+    assert moved_files
+    assert _tree(moved) == moved_files
     assert list(preview.iterdir()) == []
     (taken_over,) = [entry["event"] for entry in logs if "被別的行程接手" in entry["event"]]
     assert "這次寫過匯出目錄，但目錄已經不在原位" in taken_over

@@ -263,9 +263,11 @@ def run_demo_export(
             目錄刪掉；同名目錄已經不是這次寫的（被換掉）不刪，刪不掉或已經被搬走時日誌另外寫）。
         DemoExportPublishedUnrecordedError: manifest 已經換成這一次，但狀態沒記上（留在 `running`，
             之後接手時補記成功）。換 manifest 的名那一下停下、又讀不出 manifest（不知道換了沒有）
-            時也當成已發佈，這次寫好的匯出目錄留著。換好 manifest 之後的中斷（`KeyboardInterrupt`
-            等）原樣往上丟，一樣不記失敗。
-        BaseException: 讀資料庫或寫檔的錯誤、中斷原樣往上丟（那一筆已記成 `failed`）。
+            時也當成已發佈，這次寫好的匯出目錄留著，補排時確認：真的換了就補記成功，其實沒換就照
+            一般流程重做（通常碰到留著的目錄記成 `output_exists`）。換好 manifest 之後的中斷
+            （`KeyboardInterrupt` 等）原樣往上丟，一樣不記失敗。
+        BaseException: 讀資料庫或寫檔的錯誤、中斷原樣往上丟（換 manifest 之前的已記成 `failed`；
+            換好之後或不確定換了沒有的不記，留在 `running`）。
     """
     with database.transaction() as connection:
         run = update_demo_export_claimed(
@@ -342,7 +344,8 @@ def _record_failure(
         or (out is not None and _published_here(out, run))
     ):
         log.error(
-            "示範站匯出已經換好 manifest，但沒有記上成功；sweep 補排時會補記",
+            "示範站匯出算已發佈（manifest 已經換好，或換名那一下停下、不確定換了沒有），但沒有記上"
+            "成功；sweep 補排時會確認並補記",
             export_id=run.export_id,
             error_type=type(exc).__name__,
         )
@@ -607,7 +610,7 @@ _TAKEN_OVER_DIR: Final = {
     "none": "這次還沒寫匯出目錄",
     "removed": "這次寫好的匯出目錄已刪掉",
     "kept": "這次寫好的匯出目錄沒有刪掉（見前一筆警告）",
-    "moved": "這次寫過匯出目錄，但目錄已經不在原位（被搬走了），沒有刪",
+    "moved": "這次寫過匯出目錄，但目錄已經不在原位（被搬走或刪掉），沒有刪",
 }
 
 
@@ -623,7 +626,8 @@ class _Progress:
     - `written`：這次寫的匯出目錄的 (`st_dev`, `st_ino`)（取自改名前的暫存目錄，改名不變）。改名前
       就設、改名確定失敗才清掉；清理只刪身分相同的目錄。
     - `renamed`：暫存目錄已經改名成 `preview/<匯出編號>/`（`_rename_dir` 回來後設）。清理時找不到
-      這個目錄，有設＝寫過又被搬走，沒設＝改名沒成功。
+      這個目錄，有設＝寫過、但已經不在原位（被搬走或刪掉）；沒設＝改名沒成功（改名成功到設好之間
+      的那一下停下、目錄又剛好不在時，也會被當成沒成功，只差日誌）。
     - `dir`：被接手時日誌怎麼寫匯出目錄（`none` 沒寫過、`removed` 刪掉了、`kept` 沒刪掉、`moved`
       寫過但已經不在原位）。
     """
@@ -1098,8 +1102,9 @@ def _clean_up_before_switch(out: _Output, run: DemoExportRun, progress: _Progres
     （`replacing`）時先重讀 manifest：換名已經成功、只是還沒設 `switched` 就停下（例如換名那一下收到
     Ctrl-C）時，manifest 已經指向這一次，補設 `switched`、不刪目錄（已發佈、待補記，ADR-0061）；讀不
     出 manifest 時不知道讀者看不看得到，一樣補設 `switched`、目錄留著，當成已發佈、留在 `running` 讓
-    補排處理（Kevin 2026-11-26 決定）。還沒開始換名（確定沒換）時才刪這次寫的目錄
-    （`_discard_export_dir`）。"""
+    補排處理（Kevin 2026-11-26 決定）；`replacing` 設好到換名的系統呼叫之間那一下停下也算在這裡
+    （分不出來）。確定 manifest 沒有指向這一次時（還沒開始換名，或重讀確認沒換）才依身分刪這次寫
+    的目錄（`_discard_export_dir`）。"""
     if progress.switched:
         return
     points_here = _manifest_points_here(out, run) if progress.replacing else False
@@ -1132,14 +1137,15 @@ def _discard_export_dir(
     `st_dev`／`st_ino` 比對是不是這次寫的那一個，不是（被搬走後換成別的目錄）就不刪；是的話相對於
     它的目錄 fd 刪掉裡面的東西，最後再刪掉這個空目錄。manifest 沒有指向它，沒有讀者讀得到。回
     `removed`（刪掉了）、`none`（沒有這個目錄：改名沒成功就停下）、`moved`（改名成功過，但這個名字
-    底下已經沒有目錄：寫過又被搬走，記警告）或 `kept`（不是這次寫的、刪不掉，記警告）；原本的例外
-    由呼叫端照樣往上丟。"""
+    底下已經沒有目錄：寫過、但已經不在原位，被搬走或刪掉，記警告）或 `kept`（不是這次寫的、刪不掉，
+    記警告）；原本的例外由呼叫端照樣往上丟。"""
     try:
         export_fd = _open_dir(export_id, out.preview_fd)
     except FileNotFoundError:
         if renamed:
             log.warning(
-                "換 manifest 之前停下，這次寫過匯出目錄，但目錄已經不在原位（被搬走了），沒有刪",
+                "換 manifest 之前停下，這次寫過匯出目錄，但目錄已經不在原位（被搬走或刪掉），"
+                "沒有刪",
                 export_id=export_id,
             )
             return "moved"
