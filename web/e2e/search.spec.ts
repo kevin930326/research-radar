@@ -8,6 +8,7 @@ import type { Page } from "@playwright/test";
 import { LIST_FIXTURES, PAPER_FIXTURES, filterListRows, gate, paperId, type ListFixtureRow } from "./api-mock.ts";
 import { TEXT } from "./expected.ts";
 import { expect, test } from "./fixtures.ts";
+import { crossWidthAndFocus } from "./focus-elsewhere.ts";
 import { SITES } from "./pages.ts";
 
 const member = SITES[0]!;
@@ -40,6 +41,23 @@ async function openSearch(page: Page, query = "", viewport = DESKTOP): Promise<v
   await page.setViewportSize(viewport);
   await page.goto(`${member.baseURL}/search${query}`);
   await expect(page.locator("h1")).toHaveText(text("search:search.page.title"));
+}
+
+/**
+ * 按 Esc 關掉選單，選單還沒拆掉、還沒還焦點的時候把焦點移到頁面上（選單外）第一個符合 `selector` 的元素：模擬關的同時
+ * 點了或聚焦在別的東西上。選單拆掉時不能把焦點拉回打開它的按鈕（epic-3j 6-2，同 FilterMenus.tsx 的 finalFocus）。
+ * 等一個 microtask 再移：手機的滿版選單打開時頁面藏起來，Esc 之後頁面那一次重畫完才看得到、才能聚焦（選單這時還在）。
+ */
+async function escapeAndFocus(page: Page, selector: string): Promise<void> {
+  const moved = await page.evaluate(async (target) => {
+    (document.activeElement ?? document.body).dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+    await Promise.resolve();
+    const outside = [...document.querySelectorAll<HTMLElement>(target)].find((element) => element.closest("[role=dialog], [role=menu]") === null)!;
+    outside.focus();
+    // 選單還在、焦點真的移過去了，這條測試才有測到「拆掉時焦點已經在別處」。
+    return document.querySelector("[role=dialog], [role=menu]") !== null && document.activeElement === outside;
+  }, selector);
+  expect(moved).toBe(true);
 }
 
 function listRequests(requests: { path: string }[]): URLSearchParams[] {
@@ -207,7 +225,7 @@ test.describe("search: states", () => {
 
   test("an empty library without conditions has nothing to clear", async ({ page, apiMock }) => {
     // 審查 S1-8：沒有條件時「清除篩選」按了沒反應，所以不放。Story 3.17：文獻庫是空的時，訊息條是
-    // 「你的文獻庫還沒有論文」＋「改找所有追蹤期刊」（State Patterns「12. 找論文」；「上傳或匯入」是 Epic 6）。
+    // 「還沒有論文」＋「改找所有追蹤期刊」（State Patterns「12. 找論文」；「上傳或匯入」是 Epic 6）。
     // F11（Kevin 2026-11-20 准改準備方式）：文獻庫真的是空的（替身的文獻庫設成空），清單的假資料保持完整。
     apiMock.libraryIds = [];
     await openSearch(page, "?scope=personal");
@@ -566,6 +584,56 @@ test.describe("search: filters", () => {
     await expect(toBox).toHaveValue(thisYear);
   });
 
+  test("phone: focus moved elsewhere while the filter sheet slides away stays there, not pulled back to the filter button", async ({ page }) => {
+    // epic-3j 6-2：滑出的動畫（0.25 秒）結束才還焦點；那時焦點已經在別處就不拉回「篩選」（MobileFilters.tsx 的 finalFocus）。
+    await openSearch(page, "", PHONE);
+    await page.locator("[data-mobile-filter]").click();
+    const sheet = page.getByRole("dialog");
+    await expect(sheet).toBeVisible();
+    await escapeAndFocus(page, "header a");
+    // 連隱藏的一起算：滿版篩選真的拆掉了才看焦點（epic-3l C 審查 X8）。
+    await expect(page.locator("[role=dialog]")).toHaveCount(0);
+    await expect(page.locator("header a").first()).toBeFocused();
+  });
+
+  test("phone: focus moved elsewhere while the filter sheet closes at desktop width stays there, not handed to a filter chip", async ({ page }) => {
+    // epic-3l C 審查 X7：跨寬度關上時也照「焦點已經移到別處就不搶」（MobileFilters.tsx 的 finalFocus）。
+    await openSearch(page, "", PHONE);
+    await page.locator("[data-mobile-filter]").click();
+    await expect(page.getByRole("dialog")).toBeVisible();
+    await crossWidthAndFocus(page, page.locator("[data-mobile-filter]"), DESKTOP, "header a");
+    await expect(page.locator("[role=dialog]")).toHaveCount(0);
+    await expect(page.locator("header a").first()).toBeFocused();
+  });
+
+  for (const how of ["no key pressed", "one Tab"] as const) {
+    test(`phone: focus in the filter sheet (${how}) when it closes at desktop width is handed to the first filter chip`, async ({ page }) => {
+      // epic-3l C 確認 N3：跨寬度關上、焦點還在滿版篩選裡時，交給桌機版的第一個篩選標籤（MobileFilters.tsx 的 finalFocus）。
+      await openSearch(page, "", PHONE);
+      await page.locator("[data-mobile-filter]").click();
+      await expect(page.getByRole("dialog")).toBeVisible();
+      if (how === "one Tab") await page.keyboard.press("Tab");
+      await page.setViewportSize(DESKTOP);
+      await expect(page.locator("[role=dialog]")).toHaveCount(0);
+      await expect(page.locator("[data-filter-chip]").first()).toBeFocused();
+    });
+  }
+
+  for (const how of ["Esc", "the close button"] as const) {
+    test(`phone: closing the filter sheet with ${how} gives the focus back to the filter button`, async ({ page }) => {
+      // epic-3l C 審查 X9：一般關閉（焦點還在滿版篩選裡、或 Esc 之後落在 body）照常回到「篩選」（MobileFilters.tsx 的 finalFocus）。
+      await openSearch(page, "?topic=e_commerce", PHONE);
+      const trigger = page.locator("[data-mobile-filter]");
+      await trigger.click();
+      const sheet = page.getByRole("dialog");
+      await expect(sheet).toBeVisible();
+      if (how === "Esc") await page.keyboard.press("Escape");
+      else await sheet.getByRole("button", { name: text("search:search.mobile.close") }).click();
+      await expect(page.locator("[role=dialog]")).toHaveCount(0);
+      await expect(trigger).toBeFocused();
+    });
+  }
+
   test("a desktop menu closed by narrowing to phone width hands the focus to the phone filter button", async ({ page }) => {
     // 審查 S2-4、確認審查 N4：桌機的標籤在手機寬度藏起來，焦點不能留在看不到的地方或掉到 body。
     await openSearch(page, "?topic=e_commerce");
@@ -648,6 +716,31 @@ test.describe("search: page shape", () => {
     const rowLinks = await start.locator("[data-paper-row]").getByRole("link").count();
     await expect(start.getByRole("link")).toHaveCount(rowLinks + 1);
     await expect(page.getByRole("textbox")).toHaveCount(0);
+  });
+
+  test("phone: 'open full text' stays at the right end of the row before and after adding to my library", async ({ page }) => {
+    // P3-3（設計稿 2026-11-21 的小修改；epic-3l C 審查 X11）：899px 以下動作那一排兩端對齊，文獻庫的動作靠左、
+    // 「開啟全文」固定靠右；按「加入」之後左邊換成「● 已加入 移出」（比較寬），「開啟全文」不往左或往右跳。
+    await openSearch(page, "?topic=e_commerce", PHONE);
+    const id = await rows(page)
+      .filter({ has: page.locator("[data-library='add']") })
+      .filter({ has: page.locator("[data-open-full-text]") })
+      .first()
+      .getAttribute("data-paper-row");
+    const row = page.locator(`[data-paper-row="${id}"]`);
+    const fullText = row.locator("[data-open-full-text]");
+    await expect(fullText).toBeVisible();
+    // 「開啟全文」的左緣、右緣，和動作那一排的右緣。
+    const place = () =>
+      fullText.evaluate((link) => {
+        const box = link.getBoundingClientRect();
+        return { left: box.left, right: box.right, end: link.parentElement!.getBoundingClientRect().right };
+      });
+    const before = await place();
+    expect(before.right).toBeCloseTo(before.end, 0);
+    await row.locator("[data-library='add']").click();
+    await expect(row.locator("[data-library='added']")).toBeVisible();
+    expect(await place()).toEqual(before);
   });
 
   test("each row: the title opens the paper page, the right side has only the full-text link in a new tab", async ({ page }) => {

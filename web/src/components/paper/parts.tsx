@@ -19,7 +19,7 @@ export const MONO_LABEL_CLASS = "font-mono text-s13 tracking-006 text-text-secon
 export const RAIL_LABEL_CLASS = "font-mono text-s13 tracking-008 text-text-secondary";
 
 /**
- * 區塊裡的一行狀態（paper-ai-failed.html 的「沒有產生成功，可以請管理者重跑」、paper.html 的「沒有摘要，所以沒有研究模型。」）：
+ * 區塊裡的一行狀態（paper-ai-failed.html 的「沒有產生成功，可以請管理者重跑」、paper.html 的「沒有摘要」）：
  * 標題下 16px、16px、行高 1.9、第二層文字色。設計稿沒畫的「還在產生」「額度用完」「研究模型是空的」沿用同一行。
  */
 export function BlockLine({
@@ -69,9 +69,9 @@ export function InfoGlyph({ className }: { className: string }) {
 }
 
 /**
- * 小字的固定一行（「供篩選閱讀，不可直接放入論文」「研究模型只根據摘要，可能不完整」「只根據標題分類」）：
- * 說明圖示＋13px、行高 1.6、第三層文字色，圖示和字隔 9px。設計稿沒畫的「有成員回報此欄可能有誤」
- * 「有 N 位成員修正過」沿用同一行。
+ * 小字的固定一行（「供篩選閱讀，不可直接放入論文」「只根據摘要，可能不完整」「只根據標題分類」）：
+ * 說明圖示＋13px、行高 1.6、第三層文字色，圖示和字隔 9px。設計稿沒畫的「有成員回報可能有誤」
+ * 「N 位成員修正過」沿用同一行。
  */
 export function NoteLine({ children, className, note }: { children: ReactNode; className: string; note: string }) {
   return (

@@ -43,7 +43,6 @@ export function NoAbstractSection({ doiUrl }: { doiUrl: string | null }) {
         </span>
         <div>
           <div className="text-s17 leading-170 text-text-primary">{t("paper.noAbstract.message")}</div>
-          <div className="mt-1 text-s15 leading-180 text-text-secondary">{t("paper.noAbstract.detail")}</div>
           {doiUrl === null ? null : (
             <div className="mt-2 text-s14 tracking-004">
               <a

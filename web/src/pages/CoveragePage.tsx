@@ -11,7 +11,7 @@ import { formatCount } from "./paper-format";
 
 // 資料涵蓋範圍（Story 3.15；EXPERIENCE.md 畫面 9、State Patterns「9. 資料涵蓋範圍」）。樣子照設計稿
 // docs/ux/reference/screens/coverage.html（成員版與示範站版，各有正常／載入中／錯誤，桌機與手機 390）。五個部分：
-// 1. 一段白話說明（追蹤幾本、從哪一年起、資料來源與更新頻率）。
+// 1. 一段白話說明（追蹤幾本、從哪一年起）。
 // 2. 三個讀數：收錄、有摘要（篇數與占比）、第三個成員版是「本週新增」、示範站是「有完整內容」。
 //    數字是連結的照設計稿：成員版只有本週新增（到找論文並帶入「本週新增」；找論文沒有「有摘要」的條件），
 //    示範站三個都是（到論文清單帶入條件）。數字是 0 時不是連結（EXPERIENCE.md「讀數」）。
@@ -21,13 +21,12 @@ import { formatCount } from "./paper-format";
 //    篇數；報讀器只在點或 Tab 到時唸（指到不唸，免得滑過去一直唸）。格子可以聚焦，外框是全站的金色焦點外框（ADR-0037）。
 //    計數壞掉（有摘要比總數多）時算不出表格：整頁當成「沒有載入成功」，不讓整頁崩掉。
 //    899px 以下表格固定 866px 寬、左右捲動，第一欄（期刊）固定在左邊（Responsive & Platform）。
-// 4. Elsevier 四本的說明（設計稿的三句，寫死）。
-// 5. 名詞說明：追蹤範圍、追蹤範圍外、有摘要、快照編號。
+// 4. Elsevier 四本的說明（設計稿的兩句，寫死）。
+// 5. 名詞說明：追蹤範圍外、快照編號（Kevin 2026-11-26 的文字精簡：刪了追蹤範圍、有摘要兩列）。
 // 狀態：載入中是讀數與表格的骨架（沒有圖例與 Elsevier 的說明）；錯誤是全站共用的「沒有載入成功」（ListParts 的
 // ErrorBar），下面接名詞說明。「空的」不會發生（有資料才會產生快照；成員版上線前已完成第一次匯入）：
 // 沒有任何列時照樣畫表格，每一格都是「—」。
-// 說明與名詞說明裡的「14 本」「2016 年」照設計稿寫在 i18n（coverage-text.test.ts 檢查和設定一致）；名詞說明「快照編號」的
-// 例子用這一次的快照編號（設計稿寫 #12；還不知道快照時照設計稿的 12）。
+// 說明與名詞說明裡的「14 本」「2016 年」照設計稿寫在 i18n（coverage-text.test.ts 檢查和設定一致）。
 
 /**
  * 期刊的縮寫（設計稿 coverage.html 與 EXPERIENCE.md 畫面 9 的寫法；I&M、I&O 不是代號轉大寫）。
@@ -49,9 +48,6 @@ export const JOURNAL_ABBREVIATIONS: Readonly<Record<string, string>> = {
   tem: "TEM",
   database: "DATABASE",
 };
-
-/** 設計稿的「快照編號」例子用的號碼（還不知道這一次的快照時）。 */
-const EXAMPLE_SNAPSHOT_NUMBER = 12;
 
 /** 期刊的縮寫：對照表裡有的照表；沒有的（測試用的假期刊）用代號轉大寫。 */
 export function journalAbbreviation(key: string): string {
@@ -132,7 +128,7 @@ export function CoveragePage({ site, state, snapshot, data, links, onRetry }: Co
           {table !== null ? <Elsevier /> : null}
         </>
       )}
-      <Terms snapshotNumber={snapshot?.number ?? EXAMPLE_SNAPSHOT_NUMBER} />
+      <Terms />
     </div>
   );
 }
@@ -387,17 +383,14 @@ function Elsevier() {
     <div data-coverage-elsevier className="mt-[28px] flex max-w-reading-width flex-col gap-[8px] split:mt-[36px]">
       <p className={`${text} text-text-reading`}>{t("coverage.elsevier.journals", { journals: t("coverage.elsevier.list") })}</p>
       <p className={`${text} text-text-reading`}>{t("coverage.elsevier.effect")}</p>
-      <p className={`${text} text-text-primary`}>{t("coverage.elsevier.note")}</p>
     </div>
   );
 }
 
-function Terms({ snapshotNumber }: { snapshotNumber: number }) {
+function Terms() {
   const { t } = useTranslation("coverage");
   const items = [
-    ["scope", "scopeText"],
     ["outside", "outsideText"],
-    ["abstract", "abstractText"],
     ["snapshot", "snapshotText"],
   ] as const;
   return (
@@ -409,7 +402,7 @@ function Terms({ snapshotNumber }: { snapshotNumber: number }) {
         {items.map(([term, text], at) => (
           <div key={term} className={`py-[16px] split:flex split:gap-[32px] split:py-[18px] ${at > 0 ? "border-t border-hairline" : ""}`}>
             <dt className="text-s15 tracking-002 text-text-primary split:w-[160px] split:flex-none split:leading-185">{t(`coverage.terms.${term}`)}</dt>
-            <dd className="mt-[6px] text-s14 leading-185 text-text-secondary split:mt-[0px] split:text-s15 split:tracking-002">{t(`coverage.terms.${text}`, { number: snapshotNumber })}</dd>
+            <dd className="mt-[6px] text-s14 leading-185 text-text-secondary split:mt-[0px] split:text-s15 split:tracking-002">{t(`coverage.terms.${text}`)}</dd>
           </div>
         ))}
       </dl>

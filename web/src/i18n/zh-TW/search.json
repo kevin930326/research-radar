@@ -33,8 +33,8 @@
       "fromLabel": "起始年",
       "toLabel": "結束年",
       "missing": "請輸入年份，例如 2020",
-      "tooEarly": "追蹤範圍從 {{year}} 年開始",
-      "tooLate": "最晚到 {{year}} 年",
+      "tooEarly": "最早 {{year}} 年",
+      "tooLate": "最晚 {{year}} 年",
       "reversed": "起始年不能比結束年晚"
     },
     "condition": {
@@ -54,7 +54,7 @@
     },
     "empty": {
       "noMatch": "沒有符合的論文",
-      "library": "你的文獻庫還沒有論文",
+      "library": "還沒有論文",
       "toTracked": "改找所有追蹤期刊",
       "anyInstead": "改看符合任一個的 {{count}} 篇"
     },

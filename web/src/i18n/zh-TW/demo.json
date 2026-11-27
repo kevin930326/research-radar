@@ -1,7 +1,7 @@
 {
   "demo": {
     "header": {
-      "scope": "示範站 · 靜態快照",
+      "scope": "示範站",
       "papers": "論文"
     },
     "papers": {
@@ -16,9 +16,9 @@
       "allJoin": " ＋ "
     },
     "filter": {
-      "abstractOnly": "只看有摘要的",
-      "fullOnly": "只看有完整內容的",
-      "title": "用標題裡的字篩選",
+      "abstractOnly": "有摘要",
+      "fullOnly": "有完整內容",
+      "title": "標題關鍵字",
       "clearTitle": "清除文字"
     },
     "row": {
@@ -27,8 +27,7 @@
     },
     "paper": {
       "failed": "沒有產生成功",
-      "biblioOnly": "示範站只放授權允許轉載的論文的完整內容。",
-      "biblioOnlyDetail": "這一篇的授權不允許轉載，所以這裡只有書目與分類。",
+      "biblioOnly": "這篇的授權不允許轉載，只有書目與分類",
       "fullPapers": "看有完整內容的論文"
     }
   }

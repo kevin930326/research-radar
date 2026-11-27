@@ -196,7 +196,7 @@ test.describe("demo paper list", () => {
     // 一個欄位選了好幾個：用分隔的標點接起來（自訂的寫法，列給 Kevin）。
     await expect(page.locator("h1")).toHaveText(heading([[misq, io].join(text("demo:demo.papers.separator")), withAbstract, withFull], count((at) => journalMatch(at) && both(at))));
 
-    // 標題裡的字（不分大小寫、字面比對）；也寫進網址。
+    // 標題關鍵字（不分大小寫、字面比對）；也寫進網址。
     await page.locator("[data-title-query]").fill("PAPER 5");
     await expect(page).toHaveURL(/[?&]title=PAPER(\+|%20)5/);
     const titleMatch = (at: number) => TITLES[at]!.toLowerCase().includes("paper 5");
@@ -228,7 +228,7 @@ test.describe("demo paper list", () => {
       if (["fetch", "xhr"].includes(request.resourceType())) later.push(request.url());
     });
     const chip = (label: string) => page.locator("[data-filter-chip]").filter({ hasText: label });
-    // 四個選單、兩個「只看…的」、標題的字都在篩選列上。
+    // 四個選單、「有摘要」「有完整內容」、標題關鍵字都在篩選列上。
     for (const label of [
       text("search:search.filter.journal"),
       text("search:search.filter.year"),
@@ -621,6 +621,32 @@ test.describe("demo paper list: any or all (Story 3.20)", () => {
     await sheet.getByRole("button", { name: fill(text("search:search.mobile.apply"), { count: 0 }) }).click();
     const link = page.locator("[data-state='zero']").getByRole("link", { name: fill(text("search:search.empty.anyInstead"), { count: methodAny }) });
     await link.click();
+    await expect(page).not.toHaveURL(/method_match/);
+    await expectCount(page, methodAny);
+    await expect(page.locator("h1")).toBeFocused();
+  });
+
+  test("phone: the any link is pressed while the filter sheet is still sliding away: the focus stays on the heading", async ({ page }) => {
+    // epic-3j 6-2／epic-3l CI 除錯（A-ci-debug.md）：上一條在 firefox、webkit 時好時壞，因為按「看 0 篇」之後滿版篩選要滑 0.25 秒
+    // 才拆掉，連結按得太快時，拆掉那一刻焦點被拉回「篩選」按鈕、蓋掉標題（MobileFilters.tsx 的 finalFocus）。
+    // 這裡固定做出「還在滑的時候就按了連結」：同一段腳本裡按「看 0 篇」再按連結，不靠機器快慢。
+    const methodAny = count((at) => has("methods", at, METHODS, "any"));
+    await open(page, `?method=${METHODS.join(",")}&method_match=all`, PHONE);
+    await expect(page.locator("[data-state='zero']")).toBeVisible();
+    await page.locator("[data-mobile-filter]").click();
+    const sheet = page.getByRole("dialog");
+    const apply = sheet.getByRole("button", { name: fill(text("search:search.mobile.apply"), { count: 0 }) });
+    await expect(apply).toBeVisible();
+    const label = fill(text("search:search.mobile.apply"), { count: 0 });
+    const pressed = await page.evaluate((name) => {
+      [...document.querySelectorAll<HTMLButtonElement>("[role=dialog] button")].find((button) => button.textContent?.trim() === name)!.click();
+      document.querySelector<HTMLElement>("[data-state='zero'] [data-any-match]")!.click();
+      // 滿版篩選還在（還沒拆掉、還沒還焦點），焦點已經在標題上。
+      return document.querySelector("[role=dialog]") !== null && document.activeElement?.matches("h1[data-page-heading]") === true;
+    }, label);
+    expect(pressed).toBe(true);
+    // 連隱藏的一起算：滿版篩選真的拆掉了才看焦點（epic-3l C 審查 X8）。
+    await expect(page.locator("[role=dialog]")).toHaveCount(0);
     await expect(page).not.toHaveURL(/method_match/);
     await expectCount(page, methodAny);
     await expect(page.locator("h1")).toBeFocused();

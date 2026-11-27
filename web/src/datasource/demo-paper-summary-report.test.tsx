@@ -1,4 +1,4 @@
-// 示範站的論文頁沒有回報錯誤（Story 3.12；EXPERIENCE.md 畫面 8「有完整內容」：沒有回報錯誤，也不顯示「有成員回報此欄可能有誤」）。
+// 示範站的論文頁沒有回報錯誤（Story 3.12；EXPERIENCE.md 畫面 8「有完整內容」：沒有回報錯誤，也不顯示「有成員回報可能有誤」）。
 // 為什麼另外寫一個檔：設計稿比對的 expect-missing/paper.txt 拿掉了「回報錯誤」（成員版現在有了），demo-paper.test.tsx 拿那份清單
 // 當「示範站不得出現」的字，所以那條防線少了「回報錯誤」。那個既有測試不動，這裡另外明確斷言（同 3.11 的
 // demo-paper-classification-fix.test.tsx）。示範站的資料本來就沒有回報（static/preview.ts 填空的），標記也一併斷言。

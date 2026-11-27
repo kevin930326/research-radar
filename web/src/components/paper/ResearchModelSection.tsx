@@ -17,10 +17,10 @@ import {
 
 // 研究模型（EXPERIENCE.md 畫面 8 第 4 點；設計稿 paper.html「正常狀態」的第三塊）：
 // 構面清單（中文名稱＋英文原名）→ 關係清單（因 → 果、證據類型、是否成立、證據來源、假設原句）→ 固定一行
-// 「研究模型只根據摘要，可能不完整」（證據來源是全文時不顯示）。
+// 「只根據摘要，可能不完整」（證據來源是全文時不顯示）。
 // - 構面名稱與假設原句是 AI 產生的文字，只經 AiText（NFR-2）。
-// - `empty`：一行「摘要裡沒有寫出可以擷取的假設」，有標章（設計稿沒畫，沿用 failed 那一行）。
-// - `no_input`（沒有摘要）：一行「沒有摘要，所以沒有研究模型。」，沒有標章（設計稿「沒有摘要」）。
+// - `empty`：一行「摘要沒有寫出假設」，有標章（設計稿沒畫，沿用 failed 那一行）。
+// - `no_input`（沒有摘要）：一行「沒有摘要」，沒有標章（設計稿「沒有摘要」）。
 // - 沒有產生成功／還在產生／額度用完：一行狀態，沒有標章。
 // - 有內容的狀態（ready、empty）卻沒有來歷：不顯示內容（ADR-0010 第 8 點、ADR-0015），顯示「沒有產生成功」那一行，
 //   沒有標章（Codex 審查 3.8 中 1；這是資料壞了、不會自己好，所以不寫「還在產生」，Kevin 2026-11-17 決定）。
@@ -136,7 +136,7 @@ export function ResearchModelSection({ block, firstBadge }: ResearchModelSection
   const failedText = useFailedText();
   const heading = <SectionHeading id="paper-research-model" title={t("paper.model.heading")} />;
   const withoutProvenance = (block.state === "ready" || block.state === "empty") && block.provenance === null;
-  // 有內容但一個構面都沒有，和 empty 一樣是「摘要裡沒有寫出可以擷取的假設」。
+  // 有內容但一個構面都沒有，和 empty 一樣是「摘要沒有寫出假設」。
   const noConstructs = block.state === "ready" && !withoutProvenance && (block.value?.constructs.length ?? 0) === 0;
   let line: string | null;
   switch (block.state) {

@@ -3,7 +3,7 @@ import { useTranslation } from "react-i18next";
 
 import { BrandName, HEADER_CLASS, RadarIcon } from "./Brand";
 
-// 示範站的導覽列（EXPERIENCE.md「導覽」的「示範站其他頁面」：品牌＋範圍標示「示範站 · 靜態快照」／趨勢、關係排行表、
+// 示範站的導覽列（EXPERIENCE.md「導覽」的「示範站其他頁面」：品牌＋範圍標示「示範站」／趨勢、關係排行表、
 // 論文、展示問答、架構與評估、成員登入）。樣子照設計稿 docs/ux/reference/screens/papers-demo.html：
 // 900px 以上上方 30px、品牌 24px，範圍標示接在品牌右邊（DM Mono 12px、第三層字色）；899px 以下上方 14px、品牌 21px，
 // 範圍標示在品牌下面（11px、和品牌名對齊、離品牌 2px）。品牌連結可點範圍 44px（ADR-0037），899px 以下用負外距

@@ -1,6 +1,6 @@
 // 我的文獻庫（Story 3.17，成員版）：EXPERIENCE.md 畫面 13 與 State Patterns「13. 我的文獻庫」的每一種狀態
 // （可以操作、很多篇、勾選、沒有全文連結、超過 10 篇、擋住新分頁、移出、空的、載入中、錯誤），
-// 論文頁的「加入我的文獻庫」／「● 已在我的文獻庫」＋「移出」（含手機：State Patterns「手機：已經加入我的文獻庫」），
+// 論文頁的「加入我的文獻庫」／「● 已加入」＋「移出」（含手機：State Patterns「手機：已經加入我的文獻庫」），
 // 找論文每列的「加入我的文獻庫」／「● 已加入」，以及三種寬度的整頁截圖。
 // 資料是 fixtures/paper-list.json 的假清單（自己編的）；文獻庫是替身的 libraryIds。
 import { fileURLToPath } from "node:url";
@@ -1558,10 +1558,38 @@ test.describe("search rows: remove (review fixes, round 2)", () => {
     await expect(searchRow(page, before[0]!).locator("[data-library='add']")).toBeEnabled();
     await expect(heading(page)).toHaveText(found(before.length));
   });
+
+  test("scope 'my library' holding a removed row: the tab became visible while the window was not selected, then the window is clicked: 'who am I' is asked again (epic-3l C N2)", async ({ page, apiMock }) => {
+    const before = [...apiMock.libraryIds];
+    await page.setViewportSize(DESKTOP);
+    await page.goto(`${member.baseURL}/search?scope=personal`);
+    await expect(page.locator("[data-paper-row]")).toHaveCount(before.length);
+    await searchRow(page, before[0]!).locator("[data-library='remove']").click();
+    await expect(searchRow(page, before[0]!).locator("[data-library='add']")).toBeFocused();
+    const meAsked = () => apiMock.requests.filter((request) => request.path === "/api/v1/me").length;
+    const asked = meAsked();
+    // 蓋住它的視窗移開了：分頁看得見，但視窗沒有被選取（document.hasFocus() 是 false）。
+    await page.evaluate(() => {
+      document.hasFocus = () => false;
+    });
+    const firstAnswer = page.waitForResponse((response) => new URL(response.url()).pathname === "/api/v1/me");
+    await page.evaluate(() => window.dispatchEvent(new Event("visibilitychange")));
+    await firstAnswer;
+    await expect.poll(meAsked).toBe(asked + 1);
+    // 那一次的確認收尾（同一位，什麼都不動）之後，才點回這個視窗。
+    await twoFrames(page);
+    await page.evaluate(() => {
+      document.hasFocus = () => true;
+      window.dispatchEvent(new Event("focus"));
+    });
+    // 修之前：focus 被當成同一次切回，不再問。
+    await expect.poll(meAsked).toBe(asked + 2);
+    await expect(searchRow(page, before[0]!).locator("[data-library='add']")).toBeEnabled();
+  });
 });
 
 // PR #114 第 3 輪修正（確認審查 D1、D2）：有暫留列、切回視窗確認登入的人時，上一位的清單不能寫進新登入的人的文獻庫；
-// 確認時已經沒有人要帶「登入已經過期」。
+// 確認時已經沒有人要帶「登入過期」。
 test.describe("search rows: remove (review fixes, round 3)", () => {
   const searchRow = (page: Page, id: string) => page.locator(`[data-paper-row="${id}"]`);
   const heading = (page: Page) => page.locator("main").getByRole("heading", { level: 2 });
