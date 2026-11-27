@@ -155,6 +155,14 @@ def test_match_modes_default_to_any_and_pass_through() -> None:
 
 
 @pytest.mark.parametrize("name", ["topic_match", "method_match"])
+def test_bad_match_mode_is_an_invalid_query(name: str) -> None:
+    # 審查 A-7：不經過 API（之後的 CLI、MCP）直接給壞值，一樣是 `InvalidPaperListQueryError`。
+    fields: dict[str, Any] = {name: "or"}
+    with pytest.raises(InvalidPaperListQueryError):
+        _parse(**fields)
+
+
+@pytest.mark.parametrize("name", ["topic_match", "method_match"])
 def test_filters_only_take_known_match_modes(name: str) -> None:
     good: dict[str, Any] = {name: "all"}
     bad: dict[str, Any] = {name: "or"}

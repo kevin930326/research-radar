@@ -376,7 +376,7 @@ def test_journals_and_years_are_or_within_and_across(
     assert api.ids([("journal", "isr"), ("journal", "isr")]) == {isr_2020}
 
 
-def test_topics_and_methods_are_and(db: TestDatabase, database: Database, api: Api) -> None:
+def test_topics_and_methods_all_is_and(db: TestDatabase, database: Database, api: Api) -> None:
     published = make_snapshot(db, 1)
     both = make_paper(database, db, 1, snapshot_id=published)
     only_erp = make_paper(database, db, 2, snapshot_id=published)
@@ -418,7 +418,12 @@ def test_topics_and_methods_default_to_any(db: TestDatabase, database: Database,
     # `total` 和列出來的一樣（同一個條件組）。
     assert api.ok(two_topics)["total"] == 3
     assert api.ok([*two_topics, ("topic_match", "all")])["total"] == 1
-    assert none not in api.ids(two_topics)
+    # 重複的 key 去重之後才數個數：`all` 和只給一個時一樣（審查 A-5）。
+    assert api.ids([("topic", "erp"), ("topic", "erp"), ("topic_match", "all")]) == {
+        both,
+        only_erp,
+    }
+    assert none in api.ids()  # 沒分類的那篇只在不篩選時出現
 
 
 @pytest.mark.parametrize("match", ["any", "all"])
@@ -464,6 +469,57 @@ def test_topic_and_method_match_are_independent(
     # 兩個都同時符合、兩個都任一個。
     assert api.ids([*params, ("topic_match", "all"), ("method_match", "all")]) == {both}
     assert api.ids(params) == {both, erp_survey, health_experiment, erp_both_methods}
+
+
+def test_any_match_respects_scope_visibility_and_pages(
+    db: TestDatabase, database: Database, api: Api
+) -> None:
+    # 審查 A-4：「或」的新查法和三種範圍、換人、翻頁一起跑。
+    published = make_snapshot(db, 1)
+    counted = make_paper(database, db, 1, snapshot_id=published)
+    expansion = make_paper(
+        database, db, 2, snapshot_id=published, issn_l=OUTSIDE, origin=PaperOrigin.EXPANSION
+    )
+    private = make_paper(
+        database,
+        db,
+        3,
+        snapshot_id=None,
+        issn_l=OUTSIDE,
+        origin=PaperOrigin.IMPORT,
+        title="A made-up private study",
+    )
+    excluded = make_paper(
+        database, db, 4, snapshot_id=published, excluded_reason="editors_comments"
+    )
+    insert_classification(db, counted, ["erp"])
+    insert_classification(db, expansion, ["health_it"])
+    insert_classification(db, private, ["erp", "health_it"])
+    insert_classification(db, excluded, ["erp"])
+    put_in_library(database, api.owner_id, private)
+    put_in_library(database, api.owner_id, counted)
+    two_topics = [("topic", "erp"), ("topic", "health_it")]
+
+    for token in (api.owner_token, api.other_token):
+        assert api.ids(two_topics, token=token) == {counted}
+        assert api.ids([*two_topics, ("scope", "lab")], token=token) == {counted, expansion}
+    # A 的私人論文只在 A 的文獻庫；B 用「或」也帶不出來。
+    assert api.ids([*two_topics, ("scope", "personal")]) == {private, counted}
+    assert api.ids([*two_topics, ("scope", "personal")], token=api.other_token) == set()
+    both = [*two_topics, ("scope", "personal"), ("topic_match", "all")]
+    assert api.ids(both) == {private}
+
+    # 超過一頁：照 `next_cursor` 翻到底，每篇只出現一次、合起來等於 `total`。
+    many = {counted}
+    for number in range(10, 35):
+        paper_id = make_paper(database, db, number, snapshot_id=published, year=2016 + number % 5)
+        insert_classification(db, paper_id, ["erp"] if number % 2 else ["health_it"])
+        many.add(paper_id)
+    pages = api.walk(two_topics)
+    seen = [uuid.UUID(item["id"]) for page in pages for item in page["items"]]
+    assert len(pages) == 2
+    assert len(seen) == len(set(seen)) == pages[0]["total"] == len(many)
+    assert set(seen) == many
 
 
 def test_unclassified_with_another_topic(db: TestDatabase, database: Database, api: Api) -> None:
