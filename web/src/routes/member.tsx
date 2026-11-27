@@ -31,6 +31,7 @@ import {
   FIRST_PAGE,
   clearMemberQueries,
   loadMember,
+  meQuery,
   memberGeneration,
   trackMemberCheck,
   useCachedMemberId,
@@ -43,7 +44,7 @@ import {
 // - /login：登入頁（開發與試用期間是假登入頁），不用登入。
 // - 其他成員版的頁面都在「要登入」的外框（app）底下：每次進頁面先問「我是誰」。
 //   沒登入（401）就到登入頁，網址帶 next（登入後回到原本那一頁）；本來在站內（快取裡有上一次的成員）
-//   才是「登入過期」，多帶 expired，登入頁顯示「登入已經過期，請再登入一次」。直接打開網址時快取是空的，不顯示。
+//   才是「登入過期」，多帶 expired，登入頁顯示「登入過期，請重新登入」。直接打開網址時快取是空的，不顯示。
 //   「我是誰」問不到（網路、伺服器錯誤）是全站共用的「載入失敗」。
 // - 登入後第一頁是找論文（Story 3.14 起；之前是使用須知，AR-67），所以 / 導到 /search。
 // - /search：找論文（Story 3.14 成員版）。篩選與目前顯示幾篇都寫進網址（AD-21），路由驗證網址參數；
@@ -263,7 +264,7 @@ function useMemberSwapPending(queryClient: QueryClient, memberId: string): boole
  * - 還是同一位：不動，暫留列留著。
  * - 換了人（loadMember 清了快取）：找論文立刻重新掛上（同步重畫，上一位的清單馬上離開畫面、換成骨架，不等導覽列重問），
  *   再重跑路由的登入檢查（導覽列換成新的人）。
- * - 沒有人：和清單回 401 一樣清快取、回登入頁並帶 expired（登入已經過期；確認審查 D2）。
+ * - 沒有人：和清單回 401 一樣清快取、回登入頁並帶 expired（登入過期；確認審查 D2）。
  * - 問不到（網路、伺服器錯誤）：不動。
  * 確認進行中這一頁的加入／移出先等結果，換了人或沒有人就不送（trackMemberCheck、sendLibraryChange；確認審查 D1）。
  */
@@ -273,46 +274,158 @@ function useMemberCheckWhileHolding(): number {
   // 這個分頁看到換人幾次：給找論文當 key，換人就重新掛上（快取清掉之後，畫面上的查詢不會自己重讀）。
   const [changes, setChanges] = useState(0);
   useEffect(() => {
-    const check = () => {
-      if (document.visibilityState === "hidden") return;
-      if (queryClient.getQueryCache().findAll({ queryKey: ["paper-list"], type: "active", predicate: hasHeldRows }).length === 0) return;
-      let settle: (verdict: MemberCheckVerdict) => void = () => {};
-      trackMemberCheck(queryClient, new Promise<MemberCheckVerdict>((resolve) => (settle = resolve)));
-      void (async () => {
-        const generation = memberGeneration(queryClient);
-        let member;
-        try {
-          ({ member } = await loadMember(queryClient));
-        } catch {
-          settle("unknown");
-          return;
-        }
-        if (member !== null && memberGeneration(queryClient) === generation) {
-          settle("same");
-          return;
-        }
-        if (member === null) {
-          // 本來在站內（有暫留列）才會走到這裡，所以是登入過期（和 SearchRoute 的 onSignedOut 一樣）。
-          await clearMemberQueries(queryClient);
-          settle("changed");
-          await router.navigate({ to: "/login", search: { next: router.state.location.href, expired: true as const }, replace: true });
-          return;
-        }
-        // 換了人：先同步重畫（重新掛上），再讓等著的加入／移出知道結果，最後才重問導覽列的人。
-        flushSync(() => setChanges((count) => count + 1));
-        settle("changed");
-        await router.invalidate();
-      })();
+    const { confirm, leave } = memberCheckOnReturn(queryClient, {
+      swap: () => flushSync(() => setChanges((count) => count + 1)),
+      toLogin: async () => {
+        await router.navigate({ to: "/login", search: { next: router.state.location.href, expired: true as const }, replace: true });
+      },
+      reload: () => router.invalidate(),
+    });
+    // confirm 不會 reject（見 memberCheckOnReturn）。
+    const onFocus = () => void confirm("focus");
+    const onVisibility = () => {
+      if (document.visibilityState === "hidden") {
+        leave();
+        return;
+      }
+      // 視窗沒有被選取時變得看得見（例如蓋住它的視窗移開了）：之後點回來的 focus 要能算成新的一次（epic-3l C 確認 N2）。
+      void confirm("visible", document.hasFocus());
     };
     // 和 TanStack Query 判斷「切回視窗」一樣聽 window 的 visibilitychange（document 發的會冒泡上來）。
-    window.addEventListener("focus", check);
-    window.addEventListener("visibilitychange", check);
+    window.addEventListener("focus", onFocus);
+    window.addEventListener("visibilitychange", onVisibility);
     return () => {
-      window.removeEventListener("focus", check);
-      window.removeEventListener("visibilitychange", check);
+      window.removeEventListener("focus", onFocus);
+      window.removeEventListener("visibilitychange", onVisibility);
     };
   }, [queryClient, router]);
   return changes;
+}
+
+/**
+ * 切回視窗時的確認（useMemberCheckWhileHolding 在 focus、分頁變回看得見時呼叫 `confirm`，分頁藏起來時呼叫 `leave`；
+ * 拆出來是為了不靠畫面也能測）。
+ * `swap`：換了人時同步重新掛上找論文；`toLogin`：沒有人時回登入頁；`reload`：重跑路由的登入檢查。
+ * `confirm` 回一個 promise，確認（含收尾）做完才結束，**不會 reject**（中途的例外收在這裡：事件入口沒有人能處理，
+ * 留著會變成沒接住的錯誤；epic-3l C 審查 X4）；畫面不等它。
+ * - 同一次切回只確認一次（#114 收尾 S4）：分頁切回來時 focus 與「變回看得見」兩個事件都會來，不管一起來、或第二個晚到
+ *   （第一次已經做完），都不再確認。怎麼認「新的一次切回」（epic-3l C 審查 X3）：分頁藏起來（`leave`）之後；或同一種事件又來了
+ *   （視窗要先失焦才會再 focus、分頁要先藏起來才會再變回看得見，所以同一種事件第二次來表示中間離開過）；或「變回看得見」
+ *   那一刻視窗沒有被選取（`focused` 是 false，入口傳 document.hasFocus()），那一次的確認做完之後才來的 focus（epic-3l C 確認 N2：
+ *   視窗沒被選取時變得看得見，之後才點回來；做完之前就來的 focus 當成同一次，因為切分頁時 focus 可能比選取晚一點到）。
+ *   不聽視窗失焦事件（blur）：建置檢查（tailwind-guard）把 "blur" 這個字當成不產生 CSS 的類別。
+ *   還做不到的情況（epic-3l C 確認 N7）：「變回看得見」那一刻視窗本來就是選取狀態、而且沒有 focus（例如鎖螢幕再解鎖），之後切到別的
+ *   瀏覽器視窗再點回來只來 focus，會被當成同一次而不確認；以及視窗沒被選取時變得看得見、那一次確認還在路上就切走再點回來。
+ *   兩種都不會送錯人：寫入帶 readAs，後端回 409、跑換人流程。
+ * - 新的一次就算上一次還沒做完也照常確認，而且**重新問一次**「我是誰」（epic-3l C 確認 N1）：上一次的請求還在路上時，
+ *   TanStack 會把新的問題併進那個請求（那是在別的分頁換人之前送出的，答案可能是舊的），所以先取消它（取消後它的回應不寫進快取，
+ *   也不會蓋掉新的答案）再問。上一次的確認改成跟著新的一次的結果（等著它的加入／移出也一樣），不自己收尾、不當成「問不到」。
+ *   上一次已經問到答案（正在清快取或重新掛上）就先等它做完，再問一次（不打斷它清到一半）。
+ * - 確認途中丟例外（清快取、重新掛上失敗）：一律當成「換了人」收尾，等著的加入／移出不送、按鈕回到按之前的樣子
+ *   （#114 收尾 G5：本來確認永遠沒有結果，按鈕一直停在送出中）。當成「換了人」是因為走到那裡時已經知道不是同一位，
+ *   或是沒有人；不能當成同一位送出。
+ * - 問「我是誰」那一步（loadMember）丟例外：世代號（換人就加 1）變了就是「換了人」——loadMember 認出別人、開始清上一位的
+ *   快取時世代號先加 1，之後清快取才失敗；或是問的期間別的流程已經清過。沒變才是「問不到」（epic-3l C 審查 X1）。
+ * 「我是誰」一直沒有回來（不是例外）時確認也一直沒有結果，按鈕會停在送出中：要修只能加計時器，這一輪不做（決定紀錄 C）；
+ * 離開再切回來的那一次會重新問，問到了，上一次等著的也跟著有結果（N1）。
+ */
+export function memberCheckOnReturn(
+  queryClient: QueryClient,
+  actions: { swap: () => void; toLogin: () => Promise<void> | void; reload: () => Promise<void> | void },
+): { confirm: (event: "focus" | "visible", focused?: boolean) => Promise<void>; leave: () => void } {
+  // 這一次切回已經來過的事件（新的一次切回時清掉）。
+  let seen = new Set<"focus" | "visible">();
+  // 這一次切回是「變回看得見、視窗沒有被選取」開始的：那一次的確認做完了沒（N2）。
+  let unfocusedStart: { done: boolean } | undefined;
+  // 最近一次的確認：還沒有結果時，新的一次接手（`next`：新的一次的結果）。
+  type Check = { verdict: Promise<MemberCheckVerdict>; settled: boolean; asked: boolean; next?: Promise<MemberCheckVerdict> };
+  let latest: Check | undefined;
+  const check = async () => {
+    let resolve: (verdict: MemberCheckVerdict) => void = () => {};
+    const mine: Check = { verdict: new Promise<MemberCheckVerdict>((done) => (resolve = done)), settled: false, asked: false };
+    trackMemberCheck(queryClient, mine.verdict);
+    const previous = latest;
+    latest = mine;
+    const settle = (verdict: MemberCheckVerdict) => {
+      if (mine.settled) return;
+      mine.settled = true;
+      resolve(verdict);
+    };
+    try {
+      if (previous !== undefined && !previous.settled) {
+        if (!previous.asked && queryClient.getQueryState(meQuery.queryKey)?.fetchStatus === "fetching") {
+          // 上一次的「我是誰」還在路上：它跟著這一次的結果；取消那個請求（取消後回應不寫進快取），下面重新問（N1）。
+          previous.next = mine.verdict;
+          await queryClient.cancelQueries({ queryKey: meQuery.queryKey, exact: true });
+        } else {
+          // 上一次已經問到答案、正在清快取或重新掛上：等它做完再問（不打斷它清到一半）。
+          await previous.verdict;
+        }
+      }
+      const generation = memberGeneration(queryClient);
+      let member;
+      let failed = false;
+      try {
+        ({ member } = await loadMember(queryClient));
+      } catch {
+        failed = true;
+      }
+      mine.asked = true;
+      // 問的期間又切回來、新的一次接手了：這個答案（或例外）可能是舊的，不照它做（N1）。
+      if (mine.next !== undefined) {
+        settle(await mine.next);
+        return;
+      }
+      if (failed) {
+        settle(memberGeneration(queryClient) === generation ? "unknown" : "changed");
+        return;
+      }
+      if (member !== null && memberGeneration(queryClient) === generation) {
+        settle("same");
+        return;
+      }
+      if (member === null) {
+        // 本來在站內（有暫留列）才會走到這裡，所以是登入過期（和 SearchRoute 的 onSignedOut 一樣）。
+        await clearMemberQueries(queryClient);
+        settle("changed");
+        await actions.toLogin();
+        return;
+      }
+      // 換了人：先同步重畫（重新掛上），再讓等著的加入／移出知道結果，最後才重問導覽列的人。
+      actions.swap();
+      settle("changed");
+      await actions.reload();
+    } finally {
+      // 上面已經有結果時這一行沒有作用。
+      settle("changed");
+    }
+  };
+  return {
+    confirm: async (event, focused = true) => {
+      const afterUnfocusedStart = event === "focus" && unfocusedStart?.done === true;
+      const sameReturn = seen.size > 0 && !seen.has(event) && !afterUnfocusedStart;
+      if (!sameReturn) {
+        seen = new Set();
+        unfocusedStart = undefined;
+      }
+      seen.add(event);
+      if (sameReturn) return;
+      const job = { done: false };
+      if (event === "visible" && !focused) unfocusedStart = job;
+      try {
+        if (queryClient.getQueryCache().findAll({ queryKey: ["paper-list"], type: "active", predicate: hasHeldRows }).length === 0) return;
+        await check();
+      } catch {
+        // 等著的加入／移出已經在 finally 收到結果；這裡只是不讓錯誤留在事件入口（見上面）。
+      } finally {
+        job.done = true;
+      }
+    },
+    leave: () => {
+      seen = new Set();
+      unfocusedStart = undefined;
+    },
+  };
 }
 
 /** 我的文獻庫的網址參數：只有「目前顯示幾篇」（按過「再載入」才有；正整數）。 */
@@ -428,7 +541,8 @@ function PaperWithNames({ page, readAs }: { page: PaperPageData; readAs: ReadAs 
  * 重讀回來之前畫面還是上一位的資料，這時再按一次也要帶上一位（後端回 409，不會寫進下一位的文獻庫；審查 fix1 H2）。
  */
 function usePaperLibrary(page: PaperPageData, readAs: ReadAs): LibraryControl {
-  const change = useLibraryChange(readAs);
+  // 論文頁不套用「舊 409 不重跑」（#114 收尾 R3-3）：背景重讀失敗、畫面停在上一位的資料時，按下去照常跑換人流程。
+  const change = useLibraryChange(readAs, { skipOld409: false });
   const [changed, setChanged] = useState<{ page: PaperPageData; inLibrary: boolean } | null>(null);
   const [busy, setBusy] = useState(false);
   const [focusToken, setFocusToken] = useState(0);
@@ -459,7 +573,7 @@ function usePaperLibrary(page: PaperPageData, readAs: ReadAs): LibraryControl {
 /**
  * 論文頁的修正分類（Story 3.11）：送出帶 `readAs`（同 usePaperLibrary，ADR-0055）。成功之後這一份論文頁資料的分類區塊
  * 換成 API 回的（「◆ 已核對」＋人數，中文重點的標章因此改寫全文）；同 usePaperLibrary，只對按的時候那一份資料有效。
- * 歷史按「有 N 位成員修正過」才讀；讀到 401 照登入過期處理，409 照「發現換人」處理，其他沒讀到就不顯示（沒有設計稿，列給 Kevin）。
+ * 歷史按「N 位成員修正過」才讀；讀到 401 照登入過期處理，409 照「發現換人」處理，其他沒讀到就不顯示（沒有設計稿，列給 Kevin）。
  */
 function useClassificationFix(page: PaperPageData, readAs: ReadAs): { page: PaperPageData; control: ClassificationFixControl } {
   const sendFix = useSendClassificationFix(readAs);
@@ -500,7 +614,7 @@ function useClassificationFix(page: PaperPageData, readAs: ReadAs): { page: Pape
 
 /**
  * 論文頁的回報錯誤（Story 3.12）：送出帶 `readAs`（同 useClassificationFix，ADR-0055）與畫面上那一筆中文重點的
- * `zh_summary_id`（ADR-0064）。成功之後這一份論文頁資料的中文重點區塊換成 API 回的（那一欄多了「有成員回報此欄可能有誤」）；
+ * `zh_summary_id`（ADR-0064）。成功之後這一份論文頁資料的中文重點區塊換成 API 回的（那一欄多了「有成員回報可能有誤」）；
  * 同 usePaperLibrary，只對按的時候那一份資料有效。
  */
 function useSummaryReport(page: PaperPageData, readAs: ReadAs): { zhSummary: PaperPageData["zh_summary"]; control: SummaryReportControl } {

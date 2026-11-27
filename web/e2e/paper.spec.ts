@@ -269,7 +269,7 @@ test("phone width: full text under the classification, open full text in a bar a
   const scrollWidth = await page.evaluate(() => document.documentElement.scrollWidth);
   expect(scrollWidth).toBeLessThanOrEqual(500);
 
-  // 沒有 DOI：沒有底部固定列，一行「這篇沒有 DOI，沒有全文連結」。
+  // 沒有 DOI：沒有底部固定列，一行「沒有全文連結」。
   await page.goto(url("no-doi"));
   await expect(page.locator("[data-full-text='bar']")).toHaveCount(0);
   await expect(page.locator("[data-full-text='mobile']")).toContainText(TEXT["paper:paper.fullText.noDoi"]);

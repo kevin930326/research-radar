@@ -65,7 +65,7 @@ interface OptionProps {
    * （設計稿左邊還有縮寫那一欄，Kevin 2026-11-20 決定先顯示全名，縮寫之後補）。
    */
   detail?: ReactNode;
-  /** 名稱的字級：一般 14px；示範站手機滿版篩選的「只看有摘要的」「只看有完整內容的」是 16px、字距 0.04em（設計稿 papers-demo.html）。 */
+  /** 名稱的字級：一般 14px；示範站手機滿版篩選的「有摘要」「有完整內容」是 16px、字距 0.04em（設計稿 papers-demo.html）。 */
   labelSize?: "default" | "large";
 }
 

@@ -1,6 +1,6 @@
 // 修正分類（Story 3.11；API 是 `GET`／`POST /api/v1/papers/{id}/classification-fixes`）：成員版論文頁用。
 // 寫入的規則照我的文獻庫的加入／移出（ADR-0055），步驟和回報錯誤共用（paper-write.ts：409、401、422、404、換人）：
-// - 沒有成功時回 null，畫面顯示「沒有送出成功。你選的還在，再試一次」。
+// - 沒有成功時回 null，畫面顯示「沒有送出成功，再試一次」。
 // - 成功：回修正後的分類區塊與歷史；快取裡這一篇的論文頁換上新的分類區塊、歷史的查詢換成新的（不用再讀一次）。
 //   回應回來時世代號不同（送出之後換了人）就不改快取、回 null。
 // - 找論文的清單有分類標籤：標成過期，下次打開時重讀（不馬上重讀）。
@@ -23,7 +23,7 @@ export function classificationFixesKey(paperId: string, memberId?: string): Quer
   return ["classification-fixes", paperId, ...(memberId === undefined ? [] : [memberId])];
 }
 
-/** 修正歷史：按「有 N 位成員修正過」才讀；讀過就留著（送出修正時直接換成新的）。 */
+/** 修正歷史：按「N 位成員修正過」才讀；讀過就留著（送出修正時直接換成新的）。 */
 export function classificationFixesQuery(paperId: string, memberId?: string) {
   return queryOptions({
     queryKey: classificationFixesKey(paperId, memberId),

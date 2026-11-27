@@ -11,6 +11,7 @@ import { MEMBERS, gate } from "./api-mock.ts";
 import { axeSourceFor } from "./axe-source.ts";
 import { TEXT } from "./expected.ts";
 import { expect, test } from "./fixtures.ts";
+import { crossWidthAndFocus } from "./focus-elsewhere.ts";
 import { expectValidLanding, recordDocumentResponses } from "./landing.ts";
 import { SITES } from "./pages.ts";
 
@@ -61,6 +62,23 @@ async function markDocument(page: Page): Promise<void> {
 
 async function isSameDocument(page: Page): Promise<boolean> {
   return page.evaluate(() => (window as unknown as { __sameDocument?: boolean }).__sameDocument === true);
+}
+
+/**
+ * 按 Esc 關掉選單，選單還沒拆掉、還沒還焦點的時候把焦點移到頁面上（選單外）第一個符合 `selector` 的元素：模擬關的同時
+ * 點了或聚焦在別的東西上。選單拆掉時不能把焦點拉回打開它的按鈕（epic-3j 6-2，同 FilterMenus.tsx 的 finalFocus）。
+ * 等一個 microtask 再移：手機的滿版選單打開時頁面藏起來，Esc 之後頁面那一次重畫完才看得到、才能聚焦（選單這時還在）。
+ */
+async function escapeAndFocus(page: Page, selector: string): Promise<void> {
+  const moved = await page.evaluate(async (target) => {
+    (document.activeElement ?? document.body).dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+    await Promise.resolve();
+    const outside = [...document.querySelectorAll<HTMLElement>(target)].find((element) => element.closest("[role=dialog], [role=menu]") === null)!;
+    outside.focus();
+    // 選單還在、焦點真的移過去了，這條測試才有測到「拆掉時焦點已經在別處」。
+    return document.querySelector("[role=dialog], [role=menu]") !== null && document.activeElement === outside;
+  }, selector);
+  expect(moved).toBe(true);
 }
 
 async function axeViolations(page: Page): Promise<string[]> {
@@ -140,6 +158,27 @@ test.describe("desktop nav bar", () => {
     await items.last().hover();
     await expect.poll(() => background(1)).toBe(hover);
     await expect.poll(() => background(0)).toBe("rgba(0, 0, 0, 0)");
+  });
+
+  test("focus moved elsewhere while the account menu closes: it stays there, not pulled back to the account button", async ({ page }) => {
+    // epic-3j 6-2：finalFocus 給函式時 Base UI 不再判斷「焦點已經移到別處」，AccountMenu.tsx 自己判斷。
+    await openNotice(page, DESKTOP);
+    await page.getByRole("button", { name: ACCOUNT }).click();
+    await expect(page.getByRole("menu")).toBeVisible();
+    await escapeAndFocus(page, "header a");
+    // 連隱藏的一起算：選單真的拆掉了才看焦點（epic-3l C 審查 X8）。
+    await expect(page.locator("[role=menu]")).toHaveCount(0);
+    await expect(page.locator("header a").first()).toBeFocused();
+  });
+
+  test("focus moved elsewhere while the account menu closes at phone width: it stays there, not handed to the menu button", async ({ page }) => {
+    // epic-3l C 審查 X7：跨寬度關上時也照「焦點已經移到別處就不搶」（AccountMenu.tsx 的 finalFocus）。
+    await openNotice(page, DESKTOP);
+    await page.getByRole("button", { name: ACCOUNT }).click();
+    await expect(page.getByRole("menu")).toBeVisible();
+    await crossWidthAndFocus(page, page.getByRole("button", { name: ACCOUNT }), PHONE, "header a");
+    await expect(page.locator("[role=menu]")).toHaveCount(0);
+    await expect(page.locator("header a").first()).toBeFocused();
   });
 
   test("logout loading: the item says logging out and is disabled", async ({ page, apiMock }) => {
@@ -385,6 +424,29 @@ test.describe("phone menu", () => {
     await page.keyboard.press("Escape");
     await expect(dialog).toBeHidden();
     await expect(open).toBeFocused();
+  });
+
+  test("focus moved elsewhere while the phone menu closes: it stays there, not pulled back to the menu button", async ({ page }) => {
+    // epic-3j 6-2：同帳號選單，MobileMenu.tsx 自己判斷焦點有沒有移到別處。
+    await openNotice(page, PHONE);
+    await page.getByRole("button", { name: MENU }).click();
+    const dialog = page.getByRole("dialog", { name: MENU });
+    await expect(dialog).toBeVisible();
+    await escapeAndFocus(page, "header a");
+    // 連隱藏的一起算：選單真的拆掉了才看焦點（epic-3l C 審查 X8）。
+    await expect(page.locator("[role=dialog]")).toHaveCount(0);
+    await expect(page.locator("header a").first()).toBeFocused();
+  });
+
+  test("focus moved elsewhere while the phone menu closes at desktop width: it stays there, not handed to the account button", async ({ page }) => {
+    // epic-3l C 審查 X7：跨寬度關上時也照「焦點已經移到別處就不搶」（MobileMenu.tsx 的 finalFocus）。
+    await openNotice(page, PHONE);
+    await page.getByRole("button", { name: MENU }).click();
+    await expect(page.getByRole("dialog", { name: MENU })).toBeVisible();
+    // 打開時頁面藏起來，「選單」按鈕要連隱藏的一起找（滿版選單裡也有一個同名的按鈕）。
+    await crossWidthAndFocus(page, page.locator("header button[aria-haspopup='dialog']"), DESKTOP, "header a");
+    await expect(page.locator("[role=dialog]")).toHaveCount(0);
+    await expect(page.locator("header a").first()).toBeFocused();
   });
 
   test("the phone menu has search; it goes there and is marked as the current page", async ({ page }) => {

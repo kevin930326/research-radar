@@ -7,7 +7,7 @@ import { taipeiDate } from "./taipei-date";
 
 // 資料日期列（DESIGN.md Components、EXPERIENCE.md Component Patterns「資料日期列」、FR-40、ADR-0010）：
 // 金色小圓點＋「資料截至 YYYY-MM-DD」＋「· #N」。資料只來自 snapshot（截止時間是 UTC，這裡換成台北的日期）；
-// 沒有快照（還沒發佈過）就整列不顯示。滑過或聚焦在「#N」時，說明框是「第 N 次整理出來的資料」。
+// 沒有快照（還沒發佈過）就整列不顯示。滑過或聚焦在「#N」時，說明框是「第 N 次整理」。
 // 日期連到資料涵蓋範圍（Story 3.15；EXPERIENCE.md「資料日期列」）；在資料涵蓋範圍那一頁上不是連結（連到自己）。
 // 字色不變，滑過或聚焦才出現底線（和讀數的數字連結一樣）。可點範圍往上加 24px、往下 4px（至少 44px 高，ADR-0037；往下少加，才不會疊到下面的標題），用負外距抵掉、不撐高這一列。首頁的日期列照首頁規格不是連結（首頁還沒做）。
 // 樣子照設計稿（docs/ux/reference/screens/paper.html）：DM Mono 12px、字距 0.08em、第二層文字色，「· #N」是第三層，

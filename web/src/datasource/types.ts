@@ -143,7 +143,7 @@ export interface PaperSource {
    */
   fixClassification(paperId: string, body: ClassificationFixBody, expectedMemberId?: string): Promise<ClassificationFixResult>;
   /**
-   * 回報一篇論文的中文重點錯誤（Story 3.12）：畫面上看到的那一筆中文重點（`zh_summary_id`）＋哪一欄＋說明。`expectedMemberId` 同 fixClassification（畫面一律經
+   * 回報一篇論文的中文重點錯誤（Story 3.12）：畫面上看到的那一筆中文重點（`zh_summary_id`）＋欄位＋說明。`expectedMemberId` 同 fixClassification（畫面一律經
    * useSummaryReport 送，一定會帶）。
    */
   reportSummary(paperId: string, body: SummaryReportBody, expectedMemberId?: string): Promise<SummaryReportResult>;

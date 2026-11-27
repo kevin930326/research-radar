@@ -121,7 +121,6 @@ test.describe("demo paper page", () => {
     expect(paper.biblio.demo_eligible).toBe(false);
     const notice = page.locator("[data-block='biblio-only']");
     await expect(notice).toContainText(text("demo:demo.paper.biblioOnly"));
-    await expect(notice).toContainText(text("demo:demo.paper.biblioOnlyDetail"));
     const publisher = notice.getByRole("link", { name: text("paper:paper.noAbstract.publisher") });
     await expect(publisher).toHaveAttribute("href", paper.biblio.biblio.doi_url!);
     await expect(publisher).toHaveAttribute("target", "_blank");
@@ -132,7 +131,7 @@ test.describe("demo paper page", () => {
     await expect(page.locator("[data-block='classification']")).toBeVisible();
     await expectNoMemberFeatures(page);
 
-    // 「看有完整內容的論文」：論文清單、勾好「只看有完整內容的」。
+    // 「看有完整內容的論文」：論文清單、勾好「有完整內容」。
     await notice.getByRole("link", { name: text("demo:demo.paper.fullPapers") }).click();
     await expect(page).toHaveURL(`${demo.baseURL}/papers?full=true`);
     const full = INDEX.has_full_content.filter(Boolean).length;
