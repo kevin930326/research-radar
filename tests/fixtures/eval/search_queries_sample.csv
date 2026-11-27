@@ -1,0 +1,10 @@
+set,query_id,query,relevant_doi,note
+search,q01,平台採用,10.9999/fake.0001,測試資料：自己編的題目
+search,q01,平台採用,https://doi.org/10.9999/FAKE.0002,
+search,q02,online reviews trust,10.9999/fake.0002,
+
+search,q03,數位推力,10.9999/fake.0003,
+search,q03,數位推力,10.9999/fake.0099,對不到論文的 DOI（假的）
+search,q04,區塊鏈治理,10.9999/fake.0001,
+similar,s01,10.9999/fake.0001,10.9999/fake.0002,
+similar,s02,10.9999/fake.0098,10.9999/fake.0001,起點對不到論文（假的）

@@ -126,6 +126,7 @@ from radar.entrypoints.bootstrap import (
 from radar.entrypoints.cli.backup import backup, restore
 from radar.entrypoints.cli.classification import classification_app
 from radar.entrypoints.cli.demo_export import export_demo
+from radar.entrypoints.cli.evaluation import eval_app
 from radar.entrypoints.cli.export_schema import export_demo_schema, export_schema
 from radar.entrypoints.cli.members import members_app
 from radar.entrypoints.cli.summary_reports import summary_reports_app
@@ -208,6 +209,8 @@ batches_app = typer.Typer(help="AI 工作的 Batch（batch_submission）。", no
 app.add_typer(batches_app, name="batches")
 annotations_app = typer.Typer(help="人工標註金標準的試算表。", no_args_is_help=True)
 app.add_typer(annotations_app, name="annotations")
+# 搜尋的評估題組（Story 4.4）。
+app.add_typer(eval_app, name="eval")
 # Ctrl-C 中斷時的退出碼（128 + SIGINT）。
 INTERRUPTED_EXIT_CODE = 130
 

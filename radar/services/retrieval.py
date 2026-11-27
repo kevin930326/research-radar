@@ -24,11 +24,17 @@
   已發佈快照（`RetrievalPage.snapshot`；找相似論文的起點沒有向量時也照樣讀），呼叫端的回應用它，
   不另外重讀（PR B 審查 M3）。
 
+- **同一句查詢、不同的設定重跑（評估用，Story 4.4）**：`embed_retrieval_query` 先把查詢驗過、
+  轉成向量（記帳與額度和搜尋同一條路），回 `SearchQueryVector`；之後把它當 `query_vector` 和同一
+  句 `query` 一起交給 `retrieve`，就不再呼叫 provider（例如 `radar eval search` 用多個相似度下限
+  重跑同一題時，查詢向量只算一次）。`query_vector` 要和這次的 `query`（驗過的字）與
+  `setup.embedding.model_id` 對得上，對不上就丟錯；沒給時行為和原本一樣。
+
 `setup` 由行程啟動時讀好的設定組成（services 不讀設定檔）。
 """
 
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal, overload
@@ -74,6 +80,46 @@ class RetrievalSetup:
     clock: Callable[[], datetime]
 
 
+@dataclass(frozen=True, slots=True)
+class SearchQueryVector:
+    """驗過的查詢字串（去掉頭尾空白）與它的查詢向量（`model_id` 這個模型的）。只由
+    `embed_retrieval_query` 產生；交給 `retrieve(query_vector=…)` 重用，不再呼叫 provider。"""
+
+    text: str
+    model_id: str
+    vector: tuple[float, ...]
+
+
+def embed_retrieval_query(
+    viewer: Viewer, database: Database, setup: RetrievalSetup, query: object
+) -> SearchQueryVector:
+    """把搜尋的查詢驗過、轉成向量（和 `retrieve` 的搜尋同一條路：驗字 → 日誌只記長度與有沒有
+    中文 → `clear_for_cloud` → `services/embeddings.embed_search_query` 記帳、占額度）。
+
+    Raises:
+        InvalidSearchQueryError: 查詢字串不收（不呼叫 provider）。
+        SearchQuotaExhaustedError: Workers AI 今天的額度用完了。
+        SearchEmbeddingUnavailableError: 查詢沒能轉成向量（連不上等）。
+        EmbeddingModelMismatchError: provider 的模型和設定不同。
+    """
+    text = clean_search_query(query, max_length=setup.retrieval.query_max_length)
+    log.info("檢索：查詢向量", **query_log_facts(text))
+    vector = _embed_cleaned_query(viewer, database, setup, text)
+    return SearchQueryVector(
+        text=text, model_id=setup.embedding.model_id, vector=tuple(float(v) for v in vector)
+    )
+
+
+def _embed_cleaned_query(
+    viewer: Viewer, database: Database, setup: RetrievalSetup, text: str
+) -> list[float]:
+    # 驗過的查詢字串照「使用者打的字」放行（空字串在呼叫前已經擋下）。
+    safe = clear_for_cloud(text, ContentSource.USER_QUERY, None, setup.cloud_policy)
+    return embed_search_query(
+        viewer, database, setup.provider, setup.embedding, safe, clock=setup.clock
+    )
+
+
 @overload
 def retrieve(
     viewer: PublicViewer,
@@ -81,6 +127,7 @@ def retrieve(
     setup: RetrievalSetup,
     *,
     query: str | None = None,
+    query_vector: SearchQueryVector | None = None,
     paper_id: uuid.UUID | None = None,
     scope: Literal[RetrievalScope.DEMO],
     filters: PaperListFilters,
@@ -96,6 +143,7 @@ def retrieve(
     setup: RetrievalSetup,
     *,
     query: str | None = None,
+    query_vector: SearchQueryVector | None = None,
     paper_id: uuid.UUID | None = None,
     scope: MemberScope,
     filters: PaperListFilters,
@@ -110,6 +158,7 @@ def retrieve(
     setup: RetrievalSetup,
     *,
     query: str | None = None,
+    query_vector: SearchQueryVector | None = None,
     paper_id: uuid.UUID | None = None,
     scope: RetrievalScope,
     filters: PaperListFilters,
@@ -120,7 +169,8 @@ def retrieve(
     論文 ID 與名次，以及 `total`（見模組說明）。
 
     Raises:
-        ValueError: `query` 與 `paper_id` 不是剛好給一個、`k` 不是正整數或超過
+        ValueError: `query` 與 `paper_id` 不是剛好給一個、給了 `query_vector` 卻沒有 `query`
+            （或它和 `query`、設定的模型對不上）、`k` 不是正整數或超過
             `RetrievalConfig.max_results`、`offset` 不是非負整數，或 `filters.scope` 和 `scope`
             對不上。
         TypeError: `scope` 是 `demo` 但 `viewer` 不是 `PublicViewer`。
@@ -137,6 +187,8 @@ def retrieve(
         raise TypeError(f"demo 範圍只給 PublicViewer（現在是 {type(viewer).__name__}）")
     if (query is None) == (paper_id is None):
         raise ValueError("query 與 paper_id 要剛好給一個")
+    if query_vector is not None and query is None:
+        raise ValueError("query_vector 只能和 query 一起給")
     if type(k) is not int or not 1 <= k <= config.max_results:
         raise ValueError(f"k 要是 1 到 {config.max_results} 的整數")
     if type(offset) is not int or offset < 0:
@@ -148,7 +200,7 @@ def retrieve(
     if paper_id is not None:
         matches, snapshot = _similar(viewer, database, setup, paper_id, scope, filters)
     else:
-        matches, snapshot = _search(viewer, database, setup, query, scope, filters)
+        matches, snapshot = _search(viewer, database, setup, query, query_vector, scope, filters)
     page = matches[offset : offset + k]
     return RetrievalPage(
         hits=tuple(
@@ -172,17 +224,21 @@ def _search(
     database: Database,
     setup: RetrievalSetup,
     query: object,
+    query_vector: SearchQueryVector | None,
     scope: RetrievalScope,
     filters: PaperListFilters,
 ) -> tuple[list[FusedMatch], Snapshot | None]:
     config = setup.retrieval
     text = clean_search_query(query, max_length=config.query_max_length)
     log.info("檢索：搜尋", scope=scope.value, **query_log_facts(text))
-    # 驗過的查詢字串照「使用者打的字」放行（空字串在上面已經擋下）。
-    safe = clear_for_cloud(text, ContentSource.USER_QUERY, None, setup.cloud_policy)
-    vector = embed_search_query(
-        viewer, database, setup.provider, setup.embedding, safe, clock=setup.clock
-    )
+    vector: Sequence[float]
+    if query_vector is None:
+        vector = _embed_cleaned_query(viewer, database, setup, text)
+    else:
+        # 重用先算好的查詢向量（不呼叫 provider、不記帳）：要是同一句查詢、同一個模型的。
+        if query_vector.text != text or query_vector.model_id != setup.embedding.model_id:
+            raise ValueError("query_vector 和這次的 query 或設定的模型對不上")
+        vector = query_vector.vector
     with database.read_only_snapshot_transaction() as connection:
         snapshot = find_latest_published_snapshot(SystemViewer(), connection)
         matches = search_papers(

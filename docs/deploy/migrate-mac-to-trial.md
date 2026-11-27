@@ -109,3 +109,51 @@ Story 3.19 放進 `deploy/`；下面試用主機上的指令以那時的檔案�
 
 還原失敗、資料留著，又決定重來時：由 Kevin 自己以管理者身分刪掉試用主機上的那個資料庫、重建空的
 資料庫與兩個擴充套件（事前準備第 2 步），再從步驟 3 開始。沒有任何指令會替你刪。
+
+## 搜尋要的 Cloudflare 金鑰（Story 4.1）
+
+api 要能搜尋（找論文清單的 `q`），試用主機的 `.env.radar` 要放這兩個變數，和 worker 向量化用的是
+同一組（只寫名稱；值由 Kevin 從 Cloudflare 後台填，不貼到任何地方）：
+
+- `RADAR_CLOUDFLARE_ACCOUNT_ID`
+- `RADAR_CLOUDFLARE_API_TOKEN`
+
+| 放了幾個 | api 會怎樣 |
+|---|---|
+| 兩個都有 | 照常啟動，搜尋照常 |
+| 兩個都沒有 | 照常啟動（日誌有一筆警告）；搜尋回 503（`search_embedding_unavailable`），找相似論文照常 |
+| 只放一個 | **api 不啟動**（日誌只列缺的變數名稱）；兩個要一起放 |
+
+`radar eval search`（下一節）也要這兩個變數。
+
+## 評估題目檔：經 SSH 串流匯入，主機不留檔（Story 4.4，Kevin 手動）
+
+題目檔（CSV、UTF-8；欄位 `set`、`query_id`、`query`、`relevant_doi`、`note`）是 Kevin 自己出的題目，
+只放在 Mac 上 repo 以外的位置，不進 repo、不複製到主機。格式見 `radar/domain/evaluation.py` 的說明，
+範例（假資料）是 `tests/fixtures/eval/search_queries_sample.csv`。
+
+1. **匯入**（在 Mac 上執行；檔案內容經 SSH 的標準輸入串流給主機上的指令，主機的硬碟上不留檔）：
+
+   ```sh
+   ssh <試用主機> 'cd <部署目錄> && docker compose exec -T api radar eval import-queries' \
+     < <題目檔的路徑>.csv
+   ```
+
+   - `-T`：不配置終端機，標準輸入才接得到檔案的內容。
+   - 匯入是**整份取代**：資料庫裡原本的評估題目全部換成這一份（同一個 `query_id` 以這次為準，這次
+     沒有的題目就不再有）。要改題目時改 Mac 上的檔，再整份匯入一次。
+   - 題目檔有任何問題（不是 UTF-8、欄位不對、DOI 看不懂、一題超過 5 篇正解……）：列出每個問題的列號
+     與原因、什麼都不寫、退出碼 1。改好再匯入。
+   - DOI 對不到論文的正解（或找相似論文的起點）會印出來並跳過，其他照常匯入。
+
+2. **量測**（主機上不用放任何檔案）：
+
+   ```sh
+   ssh <試用主機> 'cd <部署目錄> && docker compose exec -T api radar eval search --min-similarity 0.2 --min-similarity 0.3 --min-similarity 0.4'
+   ```
+
+   - 每題的查詢向量只算一次、多個下限共用：Workers AI 的用量是「`search` 的題數」次，和給幾個
+     `--min-similarity` 無關；`similar` 的題不用額度。
+   - 印出每個下限的「只用全文檢索腿／只用向量腿／融合」三組命中率、MRR、「找不到相關的論文」的題數、
+     每題的命中名次，存一筆 `eval_run`。把輸出貼進 PR 說明（只有題目編號與數字，不含查詢內容）。
+   - Workers AI 的額度用完或連不上：退出碼 1、不存 `eval_run`，隔天再跑。

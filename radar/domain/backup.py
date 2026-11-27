@@ -84,6 +84,11 @@ SHARED_TABLES: Mapping[str, str] = {
     "batch_submission": "AI 工作的 Batch 送出紀錄",
     "batch_item": "Batch 裡的每一項",
     "demo_export": "示範站匯出的狀態紀錄（快照與第幾次，沒有成員欄位）",
+    # 評估（Story 4.4）：Kevin 以管理者身分匯入的題目與量測紀錄，是系統資料、沒有成員欄位、不記誰
+    # 匯入；正解存 DOI（換資料庫照樣能用），搬到試用主機時要跟著走（規格寫「共用資料」）。
+    "eval_query": "搜尋的評估題目（題組、題目編號、查詢或起點 DOI；沒有成員欄位，Story 4.4）",
+    "eval_query_relevant": "評估題目的正解（DOI 與備註；沒有成員欄位，Story 4.4）",
+    "eval_run": "評估的執行紀錄（下限、模型、快照、命中率；沒有成員欄位，Story 4.4）",
 }
 
 
