@@ -338,8 +338,8 @@ def _record_failure(
     published: bool = False,
 ) -> None:
     """把那一筆記成 `failed`。`published`（這個行程已經換好 manifest，或換名那一下停下、讀不出
-    manifest 而當成已換）時一律不記：manifest 一換好就算已發佈，之後的檢查失敗或中斷都留在
-    `running`，sweep 補排時 `_recover` 補記（ADR-0061）。
+    manifest 而當成已換，或開始換名後清理還沒確認沒換就又被中斷）時一律不記：manifest 一換好就算
+    已發佈，之後的檢查失敗或中斷都留在 `running`，sweep 補排時 `_recover` 補記（ADR-0061）。
     沒換過但 manifest 已經指向這一次、檔案都完整時也不記（被接手前的同一筆換好的）；manifest 指向
     這一次、檔案卻不完整時照樣記失敗（補記不了，不要每 6 小時重排一次）。記不上（資料庫斷線等）
     只記日誌，原本的例外照樣往上丟。"""
@@ -1116,8 +1116,9 @@ def _clean_up_before_switch(out: _Output, run: DemoExportRun, progress: _Progres
     Ctrl-C）時，manifest 已經指向這一次，補設 `switched`、不刪目錄（已發佈、待補記，ADR-0061）；讀不
     出 manifest 時不知道讀者看不看得到，一樣補設 `switched`、目錄留著，當成已發佈、留在 `running` 讓
     補排處理（Kevin 2026-11-26 決定）；`replacing` 設好到換名的系統呼叫之間那一下停下也算在這裡
-    （分不出來）。確定 manifest 沒有指向這一次時（還沒開始換名，或重讀確認沒換）才依身分刪這次寫
-    的目錄（`_discard_export_dir`）。"""
+    （分不出來）。確定 manifest 沒有指向這一次時（還沒開始換名，或重讀確認沒換）先清掉 `replacing`，
+    再依身分刪這次寫的目錄（`_discard_export_dir`）；這裡途中又被中斷、`replacing` 還在時，記失敗
+    那一步當成已發佈。"""
     if progress.switched:
         return
     points_here = _manifest_points_here(out, run) if progress.replacing else False
