@@ -155,7 +155,12 @@ export function FilterSheet({ count, total, sections, extra, clear, children, ro
           className="fixed inset-[0px] z-10 overflow-y-auto bg-background leading-normal tracking-0 text-text-primary transition-transform duration-250 data-[ending-style]:translate-y-full data-[starting-style]:translate-y-full split:hidden"
         >
           <div className="mx-auto flex min-h-full w-full max-w-[430px] flex-col">
-            <div className="flex items-center justify-between border-b border-hairline py-[10px] pr-2 pl-[20px]">
+            {/* 頂部（「篩選」與關閉）固定在上面，捲動時只有中間的選項動（底部那一列本來就固定；epic-3k 量到、epic-3l PR E 修）。
+                z-10：選項是 relative，排在後面會畫到固定的頂部上面。 */}
+            <div
+              data-sheet-head
+              className="sticky top-[0px] z-10 flex items-center justify-between border-b border-hairline bg-background py-[10px] pr-2 pl-[20px]"
+            >
               <Dialog.Title className="font-title-zh text-section-title-zh text-s22 leading-normal text-text-primary">
                 {t("search.mobile.filter")}
               </Dialog.Title>

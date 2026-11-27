@@ -330,13 +330,14 @@ function DesktopMenus({ state, params, unclassified }: { state: FilterState; par
       <FilterMenu
         label={t("search.filter.topic")}
         value={values.topic}
-        width="narrow"
+        width="wide"
         clear={clearOf("topic")}
         footerStart={
           hasMatchSwitch(state, "topic") ? <MatchSwitch state={state} field="topic" label={t("search.filter.topic")} size="menu" /> : undefined
         }
       >
-        <TopicOptions state={state} size="menu" />
+        {/* 示範站的主題有 19 個：490px 兩欄（設計稿 filter-match-mode.html 示範站桌機、papers-demo.html）。 */}
+        <TopicOptions state={state} size="menu" twoColumns />
       </FilterMenu>
       <FilterMenu
         label={tp("paper.classification.method")}

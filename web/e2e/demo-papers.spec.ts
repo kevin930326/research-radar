@@ -653,6 +653,80 @@ test.describe("demo paper list: any or all (Story 3.20)", () => {
   });
 });
 
+// 篩選選單早就有的畫面問題（epic-3k 量到、epic-3l PR E 修；設計稿 filter-match-mode.html 示範站桌機與手機、papers-demo.html）。
+test.describe("demo paper list: filter menu layout", () => {
+  /** 打開的選單（Base UI Popover 的 popup）與它的標籤看得到的那一塊（按鈕本身比它上下各多 6px）。 */
+  async function openTopicMenu(page: Page) {
+    await open(page, "?topic=erp");
+    const chip = page.locator("[data-filter-chip]").filter({ hasText: text("search:search.filter.topic") });
+    await chip.click();
+    const menu = page.getByRole("dialog");
+    // 整列是 label，點在 label 上（輸入框上面蓋著選項的字；同上面的年份）。
+    await menu.locator("label").filter({ has: page.getByRole("checkbox", { name: name(NAMES.topics, "knowledge_collaboration"), exact: true }) }).click();
+    await expect(page).toHaveURL(/[?&]topic=erp(%2C|,)knowledge_collaboration/);
+    // 選單淡入的動畫走完才量位置。
+    await page.evaluate(() => Promise.all(document.getAnimations().map((animation) => animation.finished.catch(() => undefined))));
+    return { menu, chip: chip.locator(":scope > span") };
+  }
+
+  test("desktop: the topic menu opens below the chip, 490px wide in two columns, not over the heading", async ({ page }) => {
+    const { menu, chip } = await openTopicMenu(page);
+    const menuBox = (await menu.boundingBox())!;
+    const chipBox = (await chip.boundingBox())!;
+    const headingBox = (await page.locator("h1").boundingBox())!;
+    // 從篩選鈕下方展開（設計稿 .menu.fl top: 40px，標籤 32px 高），左邊和標籤對齊；不蓋到標題。
+    expect(menuBox.y).toBeGreaterThanOrEqual(chipBox.y + chipBox.height);
+    expect(Math.round(menuBox.y - chipBox.y)).toBe(40);
+    expect(Math.round(menuBox.x)).toBe(Math.round(chipBox.x));
+    expect(menuBox.y).toBeGreaterThan(headingBox.y + headingBox.height);
+    expect(Math.round(menuBox.width)).toBe(490);
+    // 19 個主題排成兩欄；「未分類」在兩欄下面。
+    const unclassified = text("paper:paper.classification.unclassified");
+    const topicBoxes = await Promise.all(
+      NAMES.topics.map(({ name: topicName }) => menu.getByRole("checkbox", { name: topicName, exact: true }).locator("xpath=ancestor::label[1]").boundingBox()),
+    );
+    const columns = new Set(topicBoxes.map((box) => Math.round(box!.x)));
+    expect(columns.size).toBe(2);
+    const lowest = Math.max(...topicBoxes.map((box) => box!.y + box!.height));
+    const other = (await menu.getByRole("checkbox", { name: unclassified, exact: true }).locator("xpath=ancestor::label[1]").boundingBox())!;
+    expect(other.y).toBeGreaterThanOrEqual(lowest);
+  });
+
+  test("desktop: the menu background is opaque (no text shows through)", async ({ page }) => {
+    const { menu } = await openTopicMenu(page);
+    const alpha = await menu.evaluate((element) => {
+      const color = getComputedStyle(element).backgroundColor;
+      const parts = color.match(/[\d.]+/g)!.map(Number);
+      return parts.length === 4 ? parts[3] : 1;
+    });
+    expect(alpha).toBe(1);
+  });
+
+  test("phone: scrolled to the bottom, the sheet's title and close button stay on screen; unclassified has a hairline above it", async ({ page }) => {
+    await open(page, "?topic=erp", PHONE);
+    await page.getByRole("button", { name: fill(text("search:search.mobile.filterCount"), { count: 1 }), exact: true }).click();
+    const sheet = page.getByRole("dialog");
+    await sheet.getByRole("button", { name: text("search:search.filter.topic") }).click();
+    const unclassified = sheet.getByRole("checkbox", { name: text("paper:paper.classification.unclassified"), exact: true });
+    await expect(unclassified).toBeAttached();
+    // 「未分類」上面一條髮線（設計稿 optsOf：手機與桌機同一段）。
+    const hairline = await unclassified.locator("xpath=ancestor::label[1]/..").evaluate((element) => getComputedStyle(element).borderTopWidth);
+    expect(hairline).toBe("1px");
+    await page.evaluate(() => Promise.all(document.getAnimations().map((animation) => animation.finished.catch(() => undefined))));
+    const scrolled = await sheet.evaluate((element) => {
+      element.scrollTop = element.scrollHeight;
+      return element.scrollTop;
+    });
+    // 真的捲動了，這條測試才有測到。
+    expect(scrolled).toBeGreaterThan(0);
+    for (const target of [sheet.getByRole("heading", { name: text("search:search.mobile.filter") }), sheet.getByRole("button", { name: text("search:search.mobile.close") })]) {
+      const box = (await target.boundingBox())!;
+      expect(box.y).toBeGreaterThanOrEqual(0);
+      expect(box.y + box.height).toBeLessThanOrEqual(PHONE.height);
+    }
+  });
+});
+
 for (const width of [1440, 1000, 500]) {
   test(`demo paper list screenshot at ${width}px`, async ({ page, browserName }) => {
     test.skip(browserName !== "chromium", "screenshots are taken in chromium only");

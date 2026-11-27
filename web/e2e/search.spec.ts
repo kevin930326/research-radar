@@ -1135,6 +1135,25 @@ test.describe("search: any or all topics (Story 3.20)", () => {
   });
 });
 
+// 篩選選單的外框（epic-3l PR E）：和示範站同一個選單元件。找論文的主題選單照設計稿是 260px 一欄（不改兩欄），
+// 一樣從標籤下方展開、底色不透明。
+test("desktop: the topic menu opens below its chip in one 260px column with an opaque background", async ({ page }) => {
+  await openSearch(page, "?topic=erp");
+  const topicChip = chip(page, "search:search.filter.topic");
+  await topicChip.click();
+  const menu = page.getByRole("dialog");
+  await expect(menu).toBeVisible();
+  await page.evaluate(() => Promise.all(document.getAnimations().map((animation) => animation.finished.catch(() => undefined))));
+  const menuBox = (await menu.boundingBox())!;
+  const chipBox = (await topicChip.locator(":scope > span").boundingBox())!;
+  expect(Math.round(menuBox.y - chipBox.y)).toBe(40);
+  expect(Math.round(menuBox.width)).toBe(260);
+  const lefts = await menu.locator("label").evaluateAll((labels) => [...new Set(labels.map((label) => Math.round(label.getBoundingClientRect().x)))]);
+  expect(lefts).toHaveLength(1);
+  const color = await menu.evaluate((element) => getComputedStyle(element).backgroundColor);
+  expect(color).toBe("rgb(5, 6, 9)");
+});
+
 for (const width of [1440, 1000, 500]) {
   test(`search screenshot at ${width}px`, async ({ page, browserName }) => {
     test.skip(browserName !== "chromium", "screenshots are taken in chromium only");

@@ -17,7 +17,10 @@ import { Caret } from "./parts";
 // 有選的時候標籤變暖白底、後面接「· 選了什麼」；期刊與主題有選時選單底部才出現「清除」（年份選單沒有底部）。
 // 和設計稿不同的地方（ADR-0037、Kevin 的決定）：
 // - 標籤看得到的高度 32px，按鈕本身 44px 高（透明），用負外距讓這一排的高度和設計稿一樣。
-// - 選單沒有背景模糊（DESIGN.md「不用毛玻璃」，Kevin 2026-11-16 決定）。
+// - 選單沒有背景模糊（DESIGN.md「不用毛玻璃」，Kevin 2026-11-16 決定）。設計稿的底色是 92% 不透明＋模糊，後面的字被模糊掉；
+//   不模糊時 92% 會讓後面的字透出來，所以底色用完全不透明的頁面底色 background（epic-3l PR E，Kevin 2026-11-27 決定修）。
+// - 選單一律在標籤下方展開，下面放不下也不翻到上面或旁邊（設計稿 .menu.fl 固定 top: 40px；
+//   翻到旁邊時會蓋住標題與旁邊的標籤，epic-3k 量到、epic-3l PR E 修）。放不下時頁面往下捲得到。
 // - 期刊選項只有全名，沒有左邊的縮寫那一欄（Kevin 2026-11-20 決定先顯示全名，縮寫之後補）；
 //   標籤上只選一本時寫全名，太長時單行截斷加省略號（設計稿沒有截斷的規則）。
 
@@ -35,7 +38,7 @@ export interface ClearTarget {
 interface MenuProps {
   label: string;
   value: string | null;
-  /** 選單寬度（設計稿：期刊 490、年份與主題 260）。 */
+  /** 選單寬度（設計稿：期刊 490、年份與主題 260；示範站的主題 490、兩欄）。 */
   width: "wide" | "narrow";
   /**
    * 期刊與主題有選時底部「清除」連到的網址（找論文是 /search、示範站論文清單是 /papers，加上拿掉這個篩選的條件）；
@@ -95,6 +98,7 @@ export function FilterMenu({ label, value, width, clear, footerStart, children }
           side="bottom"
           align="start"
           sideOffset={MENU_TOP - (CHIP_HEIGHT + TAP_EXTRA)}
+          collisionAvoidance={{ side: "none", fallbackAxisSide: "none" }}
           className="z-10"
         >
           <Popover.Popup
@@ -113,7 +117,7 @@ export function FilterMenu({ label, value, width, clear, footerStart, children }
               const active = document.activeElement;
               return active === null || active === document.body || popupRef.current?.contains(active) === true;
             }}
-            className={`box-border max-w-[calc(100vw-40px)] border border-border bg-popover-surface leading-normal tracking-0 text-text-primary transition-[opacity,transform] duration-200 data-[ending-style]:-translate-y-1 data-[ending-style]:opacity-0 data-[starting-style]:-translate-y-1 data-[starting-style]:opacity-0 ${
+            className={`box-border max-w-[calc(100vw-40px)] border border-border bg-background leading-normal tracking-0 text-text-primary transition-[opacity,transform] duration-200 data-[ending-style]:-translate-y-1 data-[ending-style]:opacity-0 data-[starting-style]:-translate-y-1 data-[starting-style]:opacity-0 ${
               width === "wide" ? "w-[490px]" : "w-[260px]"
             }`}
           >
