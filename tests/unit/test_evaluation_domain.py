@@ -12,6 +12,7 @@
 """
 
 import uuid
+from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from fractions import Fraction
@@ -42,6 +43,7 @@ from radar.domain.evaluation import (
     plan_eval_import,
     question_outcome,
     render_eval_import,
+    render_eval_skips,
     render_search_eval,
     summarize_leg,
 )
@@ -126,8 +128,13 @@ def test_file_over_the_size_limit_is_refused() -> None:
         ),
         ("set,query_id,query,relevant_doi,set\n", ["第 1 列：欄位 set 寫了兩次"]),
         ("\n", ["第 1 列要是欄位名稱"]),
+        (
+            # 帶引號的定位字元：先看原始的格子，不 strip 掉（審查 M8）。
+            '"set\t",query_id,query,relevant_doi,note\n',
+            ["第 1 列：第 1 欄的欄位名稱有控制字元或看不見的格式字元", "第 1 列：少了欄位 set"],
+        ),
     ],
-    ids=["missing", "extra", "twice", "empty"],
+    ids=["missing", "extra", "twice", "empty", "quoted-tab"],
 )
 def test_header_problems(header: str, expected: list[str]) -> None:
     found = problems(header + "search,q1,平台,10.9999/fake.0001,\n")
@@ -193,6 +200,15 @@ def test_file_with_only_a_header_has_no_questions() -> None:
             "第 2 列：找相似論文的正解不能是起點自己",
         ),
         ('search,q1,"平台,10.9999/fake.0001,\n', "第 2 列：CSV 格式不對"),
+        # 帶引號的定位字元（審查 M8：先看原始的格子，再去空白、正規化 DOI）。
+        ('"search\t",q1,平台,10.9999/fake.0001,\n', "第 2 列：set 有控制字元"),
+        ('" search",q1,平台,10.9999/fake.0001,\n', None),
+        ('search,q1,平台,"10.9999/fake.0001\t",\n', "第 2 列：relevant_doi 有控制字元"),
+        ('search,q1,平台,"\t10.9999/fake.0001",\n', "第 2 列：relevant_doi 有控制字元"),
+        (
+            'similar,s1,"\t10.9999/fake.0002",10.9999/fake.0001,\n',
+            "第 2 列：similar 的 query 有控制字元",
+        ),
     ],
     ids=[
         "too-few-cells",
@@ -211,9 +227,18 @@ def test_file_with_only_a_header_has_no_questions() -> None:
         "note-control",
         "similar-self",
         "broken-quote",
+        "set-quoted-tab",
+        "set-leading-space-is-fine",
+        "doi-trailing-tab",
+        "doi-leading-tab",
+        "similar-query-tab",
     ],
 )
-def test_bad_rows_are_refused_without_echoing_the_cell(row: str, expected: str) -> None:
+def test_bad_rows_are_refused_without_echoing_the_cell(row: str, expected: str | None) -> None:
+    if expected is None:
+        # 一般的空白照樣去掉（只有控制字元不收）。
+        assert parse(row)[0].query_set is EvalQuerySet.SEARCH
+        return
     found = problems(HEADER + row)
 
     assert any(problem.startswith(expected) for problem in found), found
@@ -250,7 +275,8 @@ def test_same_question_must_keep_the_same_query() -> None:
         HEADER + "search,q1,平台,10.9999/fake.0001,\nsearch,q1,平台採用,10.9999/fake.0002,\n"
     )
 
-    assert found == ("第 3 列：同一題（search q1）的 query 和第 2 列不一樣",)
+    # 用列號定位，不印 query_id（格子的內容；審查 L1）。
+    assert found == ("第 3 列：和第 2 列是同一題（set 與 query_id 相同），但 query 不一樣",)
 
 
 def test_same_query_id_in_both_sets_are_two_questions() -> None:
@@ -269,7 +295,9 @@ def test_one_to_five_relevant_papers_per_question() -> None:
     assert len(parse(five)[0].relevant) == 5
 
     six = five + "search,q1,平台,10.9999/fake.0006,\n"
-    assert problems(HEADER + six) == ("第 2 列起的那一題（search q1）有 6 篇正解，最多 5 篇",)
+    assert problems(HEADER + six) == (
+        "第 2 列起的那一題有 6 篇正解（第 2、3、4、5、6、7 列），最多 5 篇",
+    )
 
 
 def test_question_shape_is_checked() -> None:
@@ -400,6 +428,29 @@ def test_rankings_and_hits_only_look_at_the_top_10() -> None:
     assert first_hit_rank(rankings[EvalLeg.FUSED], [papers[10], papers[3]]) == 4
 
 
+def test_single_leg_rank_10_counts_even_when_the_fused_rank_is_11() -> None:
+    # 審查 M5：正解在向量腿第 10 名，但融合後排第 11 名（前面 10 篇都在兩條腿裡、融合分數較高）。
+    papers = ids(11)
+    relevant = papers[10]
+    hits = [
+        RetrievalHit(
+            paper_id=paper, rank=n + 1, vector_rank=n + 1 if n < 9 else n + 2, text_rank=n + 1
+        )
+        for n, paper in enumerate(papers[:10])
+    ] + [RetrievalHit(paper_id=relevant, rank=11, vector_rank=10, text_rank=None)]
+
+    outcome = question_outcome(
+        "q1", hits, [relevant], (EvalLeg.TEXT, EvalLeg.VECTOR, EvalLeg.FUSED)
+    )
+
+    assert leg_rankings(hits)[EvalLeg.VECTOR][9] == relevant
+    assert outcome.legs[EvalLeg.VECTOR].rank == 10
+    assert outcome.legs[EvalLeg.FUSED].rank is None
+    assert outcome.legs[EvalLeg.TEXT].rank is None
+    assert summarize_leg([outcome], EvalLeg.VECTOR).mrr == Fraction(1, 10)
+    assert summarize_leg([outcome], EvalLeg.FUSED).hits == 0
+
+
 def test_three_groups_are_summarised_separately() -> None:
     a, b, c, d = ids(4)
     one = question_outcome(
@@ -481,6 +532,7 @@ def _report() -> SearchEvalReport:
         snapshot_number=3,
         snapshot_changed=False,
         query_count=3,
+        cjk_search_questions=0,
         floors=(EvalFloorResult(Decimal("0.2"), (search, similar)),),
         skips=(
             EvalSkip(
@@ -543,14 +595,50 @@ def test_report_prints_settings_three_groups_and_each_question() -> None:
     assert "  只用全文檢索腿：命中 1/2（50.0%），MRR 0.500，找不到相關的論文 1 題" in lines
     assert "  只用向量腿：命中 0/2（0.0%），MRR 0.000，找不到相關的論文 2 題" in lines
     assert "  融合：命中 1/2（50.0%），MRR 0.500，找不到相關的論文 1 題" in lines
-    assert "    q1：只用全文檢索腿 第 1 名；只用向量腿 沒有結果；融合 第 1 名" in lines
-    assert "    s1：只用向量腿 沒命中" in lines
+    # 每題每組都印命中（0／1）與倒數名次（沒命中是 0；審查 M2）。
+    assert (
+        "    q1：只用全文檢索腿 第 1 名（命中 1，倒數名次 1.000）；"
+        "只用向量腿 沒有結果（命中 0，倒數名次 0）；融合 第 1 名（命中 1，倒數名次 1.000）"
+    ) in lines
+    assert "    s1：只用向量腿 沒命中（命中 0，倒數名次 0）" in lines
     assert "  search q9 10.9999/fake.0099：正解的 DOI 對不到論文，這一篇跳過" in lines
 
 
-def test_report_marks_a_changed_snapshot_and_escapes_data_text() -> None:
-    from dataclasses import replace
+def test_report_prints_the_reciprocal_rank_of_each_question() -> None:
+    a, b, c = ids(3)
+    legs = (EvalLeg.VECTOR,)
+    hits = [
+        RetrievalHit(paper_id=a, rank=1, vector_rank=1, text_rank=None),
+        RetrievalHit(paper_id=b, rank=2, vector_rank=2, text_rank=None),
+        RetrievalHit(paper_id=c, rank=3, vector_rank=3, text_rank=None),
+    ]
+    similar = EvalSetResult(EvalQuerySet.SIMILAR, (question_outcome("s1", hits, [c], legs),))
+    report = replace(_report(), floors=(EvalFloorResult(Decimal("0.2"), (similar,)),))
 
+    assert "    s1：只用向量腿 第 3 名（命中 1，倒數名次 0.333）" in render_search_eval(report)
+
+
+def test_report_warns_when_there_are_fewer_than_10_chinese_search_questions() -> None:
+    warning = "注意：中文搜尋題只有 9 題（規格要至少 10 題），這次的數字只能參考"
+
+    assert warning in render_search_eval(replace(_report(), cjk_search_questions=9))
+    enough = render_search_eval(replace(_report(), cjk_search_questions=10))
+    assert not any(line.startswith("注意：中文搜尋題") for line in enough)
+
+
+def test_skips_are_rendered_one_per_line() -> None:
+    skips = (
+        EvalSkip(
+            EvalQuerySet.SIMILAR, "s1", "10.9999/fake.0001", EvalSkipReason.ANCHOR_NOT_TRACKED
+        ),
+    )
+
+    assert render_eval_skips(skips, label=lambda value: f"<{value}>") == [
+        "  similar <s1> <10.9999/fake.0001>：起點論文不在追蹤範圍（tracked），整題跳過"
+    ]
+
+
+def test_report_marks_a_changed_snapshot_and_escapes_data_text() -> None:
     report = replace(_report(), snapshot_changed=True, snapshot_number=None)
 
     lines = render_search_eval(report, label=lambda value: f"<{value}>")

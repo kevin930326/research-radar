@@ -145,6 +145,17 @@ def test_downgrade_to_0023_drops_the_tables_and_upgrade_restores_them(db: TestDa
             "ck_eval_run_min_similarities",
         ),
         (
+            # 有合法值也有 NULL 元素（`ALL` 是未知，只靠範圍條件會放行；審查 M7）。
+            f"INSERT INTO eval_run ({RUN_COLUMNS})"
+            " VALUES ('search', '{search}', '{0.2,NULL}', 'm', 1, '{}', now(), now())",
+            "ck_eval_run_min_similarities",
+        ),
+        (
+            f"INSERT INTO eval_run ({RUN_COLUMNS})"
+            " VALUES ('search', '{search}', '{NULL}', 'm', 1, '{}', now(), now())",
+            "ck_eval_run_min_similarities",
+        ),
+        (
             f"INSERT INTO eval_run ({RUN_COLUMNS})"
             " VALUES ('search', '{search}', '{0.2}', 'm', -1, '{}', now(), now())",
             "ck_eval_run_query_count_not_negative",
@@ -166,6 +177,8 @@ def test_downgrade_to_0023_drops_the_tables_and_upgrade_restores_them(db: TestDa
         "no-floors",
         "floor-one",
         "floor-negative",
+        "floor-null-with-valid",
+        "floor-only-null",
         "negative-count",
         "finished-before-started",
     ],

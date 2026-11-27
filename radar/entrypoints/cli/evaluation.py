@@ -37,6 +37,7 @@ from radar.domain.evaluation import (
     parse_eval_queries_csv,
     parse_min_similarities,
     render_eval_import,
+    render_eval_skips,
     render_search_eval,
 )
 from radar.domain.retrieval import SearchEmbeddingUnavailableError, SearchQuotaExhaustedError
@@ -45,6 +46,8 @@ from radar.entrypoints.bootstrap import build_database, build_embedding_provider
 from radar.entrypoints.logging_config import configure_logging
 from radar.services.embeddings import EmbeddingModelMismatchError
 from radar.services.evaluation import (
+    EvalImportNothingKeptError,
+    EvalNothingToRunError,
     EvalQueriesMissingError,
     import_eval_queries,
     run_search_eval,
@@ -92,7 +95,8 @@ def import_queries(
 
     欄位：set（search／similar）、query_id、query（search 是查詢，similar 是起點論文的 DOI）、
     relevant_doi、note（選填）；一列一個「查詢＋一篇正解」，每題 1～5 篇正解。題目檔有問題：列出
-    問題、什麼都不寫、退出碼 1。DOI 對不到論文的列印出來並跳過。
+    問題（最多列前 50 個）、什麼都不寫、退出碼 1。DOI 對不到論文的列印出來並跳過；一題都匯不進去時
+    原本的題目不動、退出碼 1。
     """
     configure_logging()
     data = _read_input(file)
@@ -112,6 +116,11 @@ def import_queries(
     try:
         database = build_database(settings, pool_size=database_pool_size(settings, "cli"))
         result = import_eval_queries(SystemViewer(), database, parsed)
+    except EvalImportNothingKeptError as exc:
+        _fail(
+            "沒有任何一題可以匯入（DOI 都對不到論文），原本的評估題目沒有動：",
+            render_eval_skips(exc.skips, label=terminal_text),
+        )
     except Exception as exc:
         # 例外訊息可能含主機與帳號，只記類別名稱。
         log.error("匯入評估題目失敗", error_type=type(exc).__name__)
@@ -132,8 +141,9 @@ def search(
 ) -> None:
     """跑全部評估題目，印命中率與 MRR（三組分開），存一筆 eval_run。
 
-    還沒有題目、設定錯誤、缺 Cloudflare 金鑰、Workers AI 額度用完或連不上：退出碼 1，不存
-    eval_run。錯誤只印類別或代碼，不印金鑰、帳號或連線字串。
+    還沒有題目、一題都跑不了、設定錯誤、缺 Cloudflare 金鑰、Workers AI 額度用完或連不上：退出碼 1，
+    不存 eval_run。錯誤只印類別或代碼，不印金鑰、帳號或連線字串。用系統的 viewer 跑（這是主機上的
+    維運指令、不登入；候選與起點都限 tracked 範圍）。
     """
     configure_logging()
     try:
@@ -163,6 +173,11 @@ def search(
         _fail("設定錯誤，沒有評估：", exc.problems)
     except EvalQueriesMissingError:
         _fail("還沒有評估題目：先用 radar eval import-queries 匯入")
+    except EvalNothingToRunError as exc:
+        _fail(
+            "沒有任何一題可以跑（全部跳過），沒有存這次的評估：",
+            render_eval_skips(exc.skips, label=terminal_text),
+        )
     except SearchQuotaExhaustedError:
         _fail("Workers AI 今天的額度用完了，沒有存這次的評估（明天再跑）")
     except SearchEmbeddingUnavailableError:

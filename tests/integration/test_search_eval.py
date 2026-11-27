@@ -16,9 +16,12 @@
 不連網路。論文標題、DOI（`10.9999/fake.*`）、查詢都是測試自己編的。
 """
 
+import dataclasses
 import logging
 import math
 import shutil
+import threading
+import time
 import uuid
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
@@ -28,19 +31,37 @@ from types import TracebackType
 from typing import Any
 
 import pytest
+import sqlalchemy.exc
 from typer.testing import CliRunner, Result
 
 import radar.entrypoints.cli as cli
 import radar.entrypoints.cli.evaluation as cli_evaluation
 from radar.domain.embeddings import EmbeddingTransientError
+from radar.domain.evaluation import (
+    EVAL_QUERIES_LOCK_KEY,
+    EvalLeg,
+    EvalQuerySet,
+    EvalQuestion,
+    EvalRelevant,
+    EvalSkipReason,
+    ParsedEvalQueries,
+    parse_eval_queries_csv,
+)
 from radar.domain.paper_list import PaperListFilters
 from radar.domain.papers import PaperOrigin, ParsedPaper
 from radar.domain.policy import CloudPolicy, CloudSafeText, cloud_text
 from radar.domain.retrieval import RetrievalScope
 from radar.domain.viewer import SystemViewer
 from radar.repo.db import Database
+from radar.repo.evaluation import create_eval_queries
 from radar.repo.papers import upsert_by_external_id
-from radar.services.retrieval import RetrievalSetup, embed_retrieval_query, retrieve
+from radar.services.evaluation import import_eval_queries, run_search_eval
+from radar.services.retrieval import (
+    RetrievalSetup,
+    SearchQueryVector,
+    embed_retrieval_query,
+    retrieve,
+)
 from tests.database import ROOT, TestDatabase, migrate
 from tests.integration.test_embeddings import CONFIG, MODEL
 from tests.integration.test_paper_list_api import FETCHED_AT, MISQ, SCOPE, make_snapshot
@@ -51,6 +72,11 @@ runner = CliRunner()
 SAMPLE = ROOT / "tests" / "fixtures" / "eval" / "search_queries_sample.csv"
 NOW = datetime(2026, 11, 28, 2, 0, tzinfo=UTC)
 NUDGE = (0.5, math.sqrt(0.75), 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+# 報告裡一題一組的結果（名次、命中、倒數名次）。
+FIRST = "第 1 名（命中 1，倒數名次 1.000）"
+SECOND = "第 2 名（命中 1，倒數名次 0.500）"
+MISS = "沒命中（命中 0，倒數名次 0）"
+NONE = "沒有結果（命中 0，倒數名次 0）"
 # 範例檔每句查詢的假向量（假 provider 照這張表回）。
 QUERY_VECTORS: Mapping[str, Sequence[float]] = {
     "平台採用": QUERY,
@@ -330,6 +356,8 @@ def test_eval_search_reports_three_groups_per_floor_and_saves_one_run(
         "相似度下限：0.2、0.9",
         "題數：5（範圍 tracked；看前 10 名）",
     ]
+    # 範例檔只有 3 題中文搜尋題（規格要至少 10 題）：照跑、印警告（審查 M3）。
+    assert "注意：中文搜尋題只有 3 題（規格要至少 10 題），這次的數字只能參考" in sections["head"]
     low = sections["0.2"]
     assert low[: low.index("[找相似論文（similar，只有向量腿）] 1 題")] == [
         "[搜尋（search）] 4 題",
@@ -338,16 +366,17 @@ def test_eval_search_reports_three_groups_per_floor_and_saves_one_run(
         "  融合：命中 3/4（75.0%），MRR 0.750，找不到相關的論文 0 題",
         "  每題：",
         # 中文查詢全文檢索腿找不到東西；不在追蹤範圍、向量一模一樣的 fake.0005 沒有擠掉第 1 名。
-        "    q01：只用全文檢索腿 沒有結果；只用向量腿 第 1 名；融合 第 1 名",
-        "    q02：只用全文檢索腿 第 1 名；只用向量腿 第 2 名；融合 第 1 名",
-        "    q03：只用全文檢索腿 沒有結果；只用向量腿 第 1 名；融合 第 1 名",
-        "    q04：只用全文檢索腿 沒有結果；只用向量腿 沒命中；融合 沒命中",
+        # 每題每組都印命中（0／1）與倒數名次（審查 M2）。
+        f"    q01：只用全文檢索腿 {NONE}；只用向量腿 {FIRST}；融合 {FIRST}",
+        f"    q02：只用全文檢索腿 {FIRST}；只用向量腿 {SECOND}；融合 {FIRST}",
+        f"    q03：只用全文檢索腿 {NONE}；只用向量腿 {FIRST}；融合 {FIRST}",
+        f"    q04：只用全文檢索腿 {NONE}；只用向量腿 {MISS}；融合 {MISS}",
     ]
     assert low[low.index("[找相似論文（similar，只有向量腿）] 1 題") :][:4] == [
         "[找相似論文（similar，只有向量腿）] 1 題",
         "  只用向量腿：命中 1/1（100.0%），MRR 0.500，找不到相關的論文 0 題",
         "  每題：",
-        "    s01：只用向量腿 第 2 名",
+        f"    s01：只用向量腿 {SECOND}",
     ]
     high = sections["0.9"]
     assert high[:9] == [
@@ -356,12 +385,12 @@ def test_eval_search_reports_three_groups_per_floor_and_saves_one_run(
         "  只用向量腿：命中 2/4（50.0%），MRR 0.500，找不到相關的論文 2 題",
         "  融合：命中 3/4（75.0%），MRR 0.750，找不到相關的論文 1 題",
         "  每題：",
-        "    q01：只用全文檢索腿 沒有結果；只用向量腿 第 1 名；融合 第 1 名",
-        "    q02：只用全文檢索腿 第 1 名；只用向量腿 沒有結果；融合 第 1 名",
-        "    q03：只用全文檢索腿 沒有結果；只用向量腿 第 1 名；融合 第 1 名",
-        "    q04：只用全文檢索腿 沒有結果；只用向量腿 沒有結果；融合 沒有結果",
+        f"    q01：只用全文檢索腿 {NONE}；只用向量腿 {FIRST}；融合 {FIRST}",
+        f"    q02：只用全文檢索腿 {FIRST}；只用向量腿 {NONE}；融合 {FIRST}",
+        f"    q03：只用全文檢索腿 {NONE}；只用向量腿 {FIRST}；融合 {FIRST}",
+        f"    q04：只用全文檢索腿 {NONE}；只用向量腿 {NONE}；融合 {NONE}",
     ]
-    assert "    s01：只用向量腿 沒命中" in high
+    assert f"    s01：只用向量腿 {MISS}" in high
 
     # 每題的查詢向量只算一次：兩個下限共用，provider 與帳本都只有題數次。
     assert sorted(provider.queries) == sorted(QUERY_VECTORS)
@@ -410,12 +439,20 @@ def test_default_floor_comes_from_the_config(
 ) -> None:
     assert _invoke("import-queries", input=SAMPLE.read_bytes()).exit_code == 0
     _provider(monkeypatch, FakeQueries())
+    # 暫存設定檔換成另一個合法值，分得出「讀設定」和「寫死 0.2」（審查 M9）。
+    path = env / "retrieval.yaml"
+    text = path.read_text(encoding="utf-8")
+    assert 'vector_min_similarity: "0.2"' in text
+    path.write_text(
+        text.replace('vector_min_similarity: "0.2"', 'vector_min_similarity: "0.35"'),
+        encoding="utf-8",
+    )
 
     result = _invoke("search")
 
     assert result.exit_code == 0, result.output
-    assert "相似度下限：0.2" in _lines(result.output)
-    assert execute(db, "SELECT min_similarities FROM eval_run") == [([Decimal("0.2")],)]
+    assert "相似度下限：0.35" in _lines(result.output)
+    assert execute(db, "SELECT min_similarities FROM eval_run") == [([Decimal("0.35")],)]
 
 
 def test_unreachable_workers_ai_saves_no_run(
@@ -545,3 +582,261 @@ def test_query_vector_must_match_the_query_and_the_model(
     with pytest.raises(ValueError, match="只能和 query 一起給"):
         retrieve(viewer, database, setup, paper_id=papers[1], query_vector=vector, **common)
     assert provider.queries == ["平台採用"]
+
+
+def test_forged_or_altered_query_vectors_are_refused(
+    db: TestDatabase, database: Database, papers: dict[int, uuid.UUID]
+) -> None:
+    # 審查 H1：只收 `embed_retrieval_query` 算出來的向量；自己建的、換過向量或查詢字的都不收。
+    provider = FakeQueries()
+    setup = _setup(provider)
+    viewer = SystemViewer()
+    real = embed_retrieval_query(viewer, database, setup, "平台採用")
+    forged = SearchQueryVector(
+        text="平台採用", model_id=MODEL, vector=tuple(QUERY), seal=bytes(len(real.seal))
+    )
+    common: dict[str, Any] = {
+        "scope": RetrievalScope.TRACKED,
+        "filters": PaperListFilters(),
+        "k": 20,
+    }
+
+    for bad in (
+        forged,
+        dataclasses.replace(real, vector=tuple(FAR)),
+        dataclasses.replace(real, text="數位推力"),
+        dataclasses.replace(real, model_id="fake-embedding-b"),
+    ):
+        query = bad.text
+        with pytest.raises(ValueError, match="不是 embed_retrieval_query 算出來的"):
+            retrieve(viewer, database, setup, query=query, query_vector=bad, **common)
+    assert provider.queries == ["平台採用"]
+    assert execute(db, "SELECT count(*) FROM api_call") == [(1,)]
+
+
+def test_search_inside_a_callers_transaction_needs_a_query_vector(
+    db: TestDatabase, database: Database, papers: dict[int, uuid.UUID]
+) -> None:
+    provider = FakeQueries()
+    setup = _setup(provider)
+
+    with (
+        database.read_only_snapshot_transaction() as connection,
+        pytest.raises(ValueError, match="要同時給 query_vector"),
+    ):
+        retrieve(
+            SystemViewer(),
+            database,
+            setup,
+            query="平台採用",
+            scope=RetrievalScope.TRACKED,
+            filters=PaperListFilters(),
+            k=20,
+            connection=connection,
+        )
+    assert provider.queries == []
+
+
+# --- 審查修正：同一份資料、匯入排隊、零題不動舊題組、寫到一半回滾、起點範圍 ---------------------
+
+
+def _parsed(text: str) -> ParsedEvalQueries:
+    return parse_eval_queries_csv(text.encode("utf-8"), query_max_length=500)
+
+
+def test_every_floor_of_a_question_reads_the_same_data(
+    db: TestDatabase,
+    database: Database,
+    papers: dict[int, uuid.UUID],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # 審查 H2：第一個下限跑完、第二個下限還沒跑之前，另一條連線把正解排除（commit）；同一題的
+    # 兩個下限仍讀同一份資料，所以兩個下限的數字一樣。
+    import_eval_queries(
+        SystemViewer(),
+        database,
+        _parsed("set,query_id,query,relevant_doi\nsearch,q01,平台採用,10.9999/fake.0001\n"),
+    )
+    real_retrieve = retrieve
+    calls: list[int] = []
+
+    def retrieve_then_write(*args: Any, **kwargs: Any) -> Any:
+        page = real_retrieve(*args, **kwargs)
+        calls.append(1)
+        if len(calls) == 1:
+            execute(db, "UPDATE paper SET excluded_reason = 'erratum' WHERE id = %s", papers[1])
+        return page
+
+    monkeypatch.setattr("radar.services.evaluation.retrieve", retrieve_then_write)
+    setup = _setup(FakeQueries())
+    floors = (Decimal("0.2"), Decimal("0.3"))
+
+    report = run_search_eval(SystemViewer(), database, setup, min_similarities=floors)
+
+    assert len(calls) == 2
+    ranks = [floor.sets[0].outcomes[0].legs[EvalLeg.FUSED].rank for floor in report.floors]
+    assert ranks == [1, 1]
+    # 寫入真的生效了：之後再跑一次，正解已經不在結果裡。
+    monkeypatch.setattr("radar.services.evaluation.retrieve", real_retrieve)
+    again = run_search_eval(SystemViewer(), database, setup, min_similarities=floors)
+    assert [f.sets[0].outcomes[0].legs[EvalLeg.FUSED].rank for f in again.floors] == [None, None]
+
+
+def _waiting_for(db: TestDatabase, key: int) -> bool:
+    """這個測試資料庫裡有沒有連線正在等 `key` 這把 advisory lock（`pg_locks` 沒拿到的列）。"""
+    unsigned = key & 0xFFFF_FFFF_FFFF_FFFF
+    ((waiting,),) = execute(
+        db,
+        "SELECT count(*) FROM pg_locks"
+        " WHERE locktype = 'advisory' AND NOT granted AND objsubid = 1"
+        " AND database = (SELECT oid FROM pg_database WHERE datname = current_database())"
+        " AND classid = %s::bigint::oid AND objid = %s::bigint::oid",
+        unsigned >> 32,
+        unsigned & 0xFFFF_FFFF,
+    )
+    return bool(waiting)
+
+
+def test_two_imports_at_once_leave_exactly_one_file(
+    db: TestDatabase,
+    database: Database,
+    papers: dict[int, uuid.UUID],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # 審查 H3：A 寫完題目、還沒 commit 時停住（同步訊號）；B 這時開始，要卡在匯入的鎖上
+    # （看 pg_locks，不猜時間）。放開 A 之後 B 才做，最後只剩 B 的題目。
+    first = _parsed("set,query_id,query,relevant_doi\nsearch,a1,平台採用,10.9999/fake.0001\n")
+    second = _parsed("set,query_id,query,relevant_doi\nsearch,b1,數位推力,10.9999/fake.0003\n")
+    real_create = create_eval_queries
+    inside = threading.Event()
+    release = threading.Event()
+
+    def create_then_wait(connection: Any, questions: Any) -> None:
+        real_create(connection, questions)
+        if questions[0].query_id == "a1":
+            inside.set()
+            assert release.wait(10)
+
+    monkeypatch.setattr("radar.services.evaluation.create_eval_queries", create_then_wait)
+    results: dict[str, Any] = {}
+
+    def run(name: str, parsed: ParsedEvalQueries) -> None:
+        try:
+            results[name] = import_eval_queries(SystemViewer(), database, parsed)
+        except Exception as exc:  # 交給主執行緒斷言
+            results[name] = exc
+
+    a = threading.Thread(target=run, args=("a", first))
+    b = threading.Thread(target=run, args=("b", second))
+    a.start()
+    assert inside.wait(10), "A 沒有走到寫入"
+    b.start()
+    deadline = time.monotonic() + 4
+    try:
+        while not _waiting_for(db, EVAL_QUERIES_LOCK_KEY):
+            assert time.monotonic() < deadline, "B 沒有在等匯入的鎖"
+        assert b.is_alive()
+        assert "b" not in results
+    finally:
+        release.set()
+        a.join(timeout=10)
+        b.join(timeout=10)
+
+    assert not a.is_alive()
+    assert not b.is_alive()
+    assert results["a"].replaced == 0
+    assert results["b"].replaced == 1
+    assert _questions(db) == [("search", "b1", "數位推力", "10.9999/fake.0003", None)]
+
+
+def test_import_with_no_question_left_keeps_the_old_questions(
+    db: TestDatabase, env: Path, papers: dict[int, uuid.UUID]
+) -> None:
+    # 審查 H4：題目檔格式對，但 DOI 全部對不到（例如匯到錯的環境）：列出原因、舊題組不動、退出碼 1。
+    assert _invoke("import-queries", input=SAMPLE.read_bytes()).exit_code == 0
+    before = _questions(db)
+    wrong = (
+        "set,query_id,query,relevant_doi\n"
+        "search,q09,平台,10.9999/fake.0097\n"
+        "similar,s09,10.9999/fake.0096,10.9999/fake.0001\n"
+    )
+
+    result = _invoke("import-queries", input=wrong.encode("utf-8"))
+
+    assert result.exit_code == 1
+    assert _lines(result.output) == [
+        "沒有任何一題可以匯入（DOI 都對不到論文），原本的評估題目沒有動：",
+        "-   第 2 列 search q09 10.9999/fake.0097：正解的 DOI 對不到論文，這一篇跳過",
+        "-   第 2 列 search q09：正解都對不到論文，整題跳過",
+        "-   第 3 列 similar s09 10.9999/fake.0096：起點論文的 DOI 對不到論文，整題跳過",
+    ]
+    assert _questions(db) == before
+
+
+def test_failure_halfway_through_writing_rolls_back_everything(
+    db: TestDatabase, database: Database, env: Path, papers: dict[int, uuid.UUID]
+) -> None:
+    # 審查 M6：第二題違反資料庫的長度約束（繞過題目檔的驗證直接給服務）：舊題組完整、
+    # 新題一題都沒留。
+    assert _invoke("import-queries", input=SAMPLE.read_bytes()).exit_code == 0
+    before = _questions(db)
+    good = EvalQuestion(
+        EvalQuerySet.SEARCH, "n1", "新的題目", (EvalRelevant("10.9999/fake.0001", None),)
+    )
+    too_long = EvalQuestion(
+        EvalQuerySet.SEARCH, "n2", "字" * 2001, (EvalRelevant("10.9999/fake.0002", None),)
+    )
+
+    with pytest.raises(sqlalchemy.exc.IntegrityError, match="ck_eval_query_query_text_length"):
+        import_eval_queries(
+            SystemViewer(), database, ParsedEvalQueries(questions=(good, too_long), blank_lines=0)
+        )
+
+    assert _questions(db) == before
+    assert execute(db, "SELECT count(*) FROM eval_query WHERE query_key IN ('n1', 'n2')") == [(0,)]
+
+
+def test_similar_anchor_outside_the_tracked_scope_is_skipped(
+    db: TestDatabase, env: Path, papers: dict[int, uuid.UUID], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 審查 M1：fake.0005 看得到（匯得進去），但不在 tracked 範圍（沒進快照）：跑題時整題跳過。
+    extra = SAMPLE.read_bytes() + b"similar,s09,10.9999/fake.0005,10.9999/fake.0001,\n"
+    assert _invoke("import-queries", input=extra).exit_code == 0
+    assert ("similar", "s09", "10.9999/fake.0005", "10.9999/fake.0001", None) in _questions(db)
+    _provider(monkeypatch, FakeQueries())
+
+    result = _invoke("search")
+
+    assert result.exit_code == 0, result.output
+    lines = _lines(result.output)
+    assert "題數：5（範圍 tracked；看前 10 名）" in lines
+    assert "  similar s09 10.9999/fake.0005：起點論文不在追蹤範圍（tracked），整題跳過" in lines
+    assert not any(line.startswith("    s09：") for line in lines)
+    [(results,)] = execute(db, "SELECT results FROM eval_run")
+    assert {
+        "set": "similar",
+        "query_id": "s09",
+        "doi": "10.9999/fake.0005",
+        "reason": EvalSkipReason.ANCHOR_NOT_TRACKED.value,
+    } in results["skips"]
+
+
+def test_nothing_to_run_saves_no_run(
+    db: TestDatabase, env: Path, papers: dict[int, uuid.UUID], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 審查 M3：有題目但全部跳過（唯一一題的起點被排除）：列出原因、不存 eval_run、退出碼 1。
+    only_similar = (
+        "set,query_id,query,relevant_doi\nsimilar,s01,10.9999/fake.0001,10.9999/fake.0002\n"
+    )
+    assert _invoke("import-queries", input=only_similar.encode("utf-8")).exit_code == 0
+    execute(db, "UPDATE paper SET excluded_reason = 'erratum' WHERE id = %s", papers[1])
+    _provider(monkeypatch, FakeQueries())
+
+    result = _invoke("search")
+
+    assert result.exit_code == 1
+    assert _lines(result.output) == [
+        "沒有任何一題可以跑（全部跳過），沒有存這次的評估：",
+        "-   similar s01 10.9999/fake.0001：起點論文被排除或看不到，整題跳過",
+    ]
+    assert execute(db, "SELECT count(*) FROM eval_run") == [(0,)]

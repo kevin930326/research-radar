@@ -97,8 +97,8 @@ eval_run_table = Table(
         name="query_sets",
     ),
     CheckConstraint(
-        "cardinality(min_similarities) >= 1 AND 0 <= ALL (min_similarities)"
-        " AND 1 > ALL (min_similarities)",
+        "cardinality(min_similarities) >= 1 AND array_position(min_similarities, NULL) IS NULL"
+        " AND 0 <= ALL (min_similarities) AND 1 > ALL (min_similarities)",
         name="min_similarities",
     ),
     CheckConstraint("query_count >= 0", name="query_count_not_negative"),

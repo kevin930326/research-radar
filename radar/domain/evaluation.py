@@ -21,6 +21,8 @@
   `similar` 的正解不能是起點自己；每題的正解最多 5 篇（FR-26：標太多會讓命中變得太容易）。每列都有
   一篇正解，所以驗完的題目一定至少 1 篇；匯入時 DOI 對不到論文的正解跳過，跳到一篇都不剩的題目整題
   不匯入（`plan_eval_import`）。
+- 控制字元與看不見的格式字元一律先看**原始的格子**（欄位名稱、`set`、`query`、`relevant_doi`、
+  `query_id`、`note`），再去空白或正規化：前後帶引號的定位字元不會被默默去掉（審查 M8）。
 - 公式開頭的字（`=`、`+`、`-`、`@`）不特別處理：格子只當文字存、比對、印出來，任何地方都不執行、
   不求值。
 
@@ -33,7 +35,8 @@
 
 `retrieve` 回的是兩條腿各自前 N 名的聯集（每篇帶著兩條腿的名次），所以「只用一條腿」的前 10 名就是
 那條腿名次 1～10 的論文，和那條腿單獨跑一樣，不用另外的查詢。命中＝前 10 名裡至少有一篇正解；命中
-名次是第一篇正解的名次；MRR＝每題「1 ÷ 命中名次」（沒命中算 0）的平均。三組分開報，不合成一個分數。
+名次是第一篇正解的名次；MRR＝每題「1 ÷ 命中名次」（倒數名次，沒命中算 0）的平均。三組分開報，不合成
+一個分數；每題每組都印名次、命中（0／1）與倒數名次。
 `similar` 題組只有向量腿（找相似論文只用向量），只報 `vector`。「找不到相關的論文」的題數＝那一組
 一篇結果都沒有的題數（成員看到的就是「找不到相關的論文」）。
 """
@@ -49,6 +52,7 @@ from enum import StrEnum
 from fractions import Fraction
 from typing import Final
 
+from radar.domain.fingerprints import named_lock_key
 from radar.domain.identifiers import InvalidIdentifierError, normalize_doi
 from radar.domain.member_text_characters import is_rejected_character
 from radar.domain.retrieval import InvalidSearchQueryError, RetrievalHit, clean_search_query
@@ -68,6 +72,11 @@ MAX_MIN_SIMILARITIES: Final = 10
 MAX_PROBLEMS_SHOWN: Final = 50
 # `eval_run.results` 的格式版本（Epic 8 擴充時加版本，不改舊的意思）。
 RESULTS_FORMAT_VERSION: Final = 1
+# 規格要至少幾題中文搜尋題（Story 4.4）；不夠時報告印警告，不擋。
+MIN_CJK_SEARCH_QUESTIONS: Final = 10
+# 匯入題目的交易級 advisory lock 鍵（PR C 審查 H3）：兩個匯入同時跑時排隊，不會留下兩份題目檔
+# 混在一起的題組。
+EVAL_QUERIES_LOCK_KEY: Final = named_lock_key("eval_queries_import")
 
 REQUIRED_COLUMNS: Final = ("set", "query_id", "query", "relevant_doi")
 OPTIONAL_COLUMNS: Final = ("note",)
@@ -189,7 +198,10 @@ def _header(row: Sequence[str]) -> tuple[dict[str, int], list[str]]:
     known = set(REQUIRED_COLUMNS) | set(OPTIONAL_COLUMNS)
     for index, raw in enumerate(row):
         name = raw.strip()
-        if name not in known:
+        if _has_rejected_character(raw):
+            # 先看原始的格子再去空白（前後的定位字元也不收，PR C 審查 M8）。
+            problems.append(f"第 1 列：第 {index + 1} 欄的欄位名稱有控制字元或看不見的格式字元")
+        elif name not in known:
             problems.append(f"第 1 列：第 {index + 1} 欄的欄位名稱不認得（只收 {_column_list()}）")
         elif name in positions:
             problems.append(f"第 1 列：欄位 {name} 寫了兩次")
@@ -216,12 +228,20 @@ def _parse_row(
     line: int, cells: Mapping[str, str], *, query_max_length: int
 ) -> tuple[EvalQuerySet, str, str, EvalRelevant] | list[str]:
     problems: list[str] = []
+    # 欄位先看原始的格子有沒有控制字元，再去空白、正規化（PR C 審查 M8：前後的定位字元不能被
+    # strip 或 DOI 的正規化默默吃掉）。`search` 的 query 由 `clean_search_query` 先看原始的字。
+    raw_rejected = {
+        name: _has_rejected_character(cells[name]) for name in ("set", "query", "relevant_doi")
+    }
     set_text = cells["set"].strip()
     query_set: EvalQuerySet | None = None
-    try:
-        query_set = EvalQuerySet(set_text)
-    except ValueError:
-        problems.append(f"第 {line} 列：set 只能是 search 或 similar")
+    if raw_rejected["set"]:
+        problems.append(f"第 {line} 列：set 有控制字元或看不見的格式字元")
+    else:
+        try:
+            query_set = EvalQuerySet(set_text)
+        except ValueError:
+            problems.append(f"第 {line} 列：set 只能是 search 或 similar")
 
     query_id = cells["query_id"].strip()
     if _has_rejected_character(cells["query_id"]):
@@ -238,16 +258,22 @@ def _parse_row(
         except InvalidSearchQueryError as exc:
             problems.append(f"第 {line} 列：query 不收（{exc.problem.value}）")
     elif query_set is EvalQuerySet.SIMILAR:
-        try:
-            query = normalize_doi(cells["query"])
-        except InvalidIdentifierError:
-            problems.append(f"第 {line} 列：similar 的 query 要是起點論文的 DOI，這個看不懂")
+        if raw_rejected["query"]:
+            problems.append(f"第 {line} 列：similar 的 query 有控制字元或看不見的格式字元")
+        else:
+            try:
+                query = normalize_doi(cells["query"])
+            except InvalidIdentifierError:
+                problems.append(f"第 {line} 列：similar 的 query 要是起點論文的 DOI，這個看不懂")
 
     doi = ""
-    try:
-        doi = normalize_doi(cells["relevant_doi"])
-    except InvalidIdentifierError:
-        problems.append(f"第 {line} 列：relevant_doi 看不懂（要是 DOI）")
+    if raw_rejected["relevant_doi"]:
+        problems.append(f"第 {line} 列：relevant_doi 有控制字元或看不見的格式字元")
+    else:
+        try:
+            doi = normalize_doi(cells["relevant_doi"])
+        except InvalidIdentifierError:
+            problems.append(f"第 {line} 列：relevant_doi 看不懂（要是 DOI）")
 
     raw_note = cells.get("note", "")
     note = raw_note.strip()
@@ -310,8 +336,8 @@ def parse_eval_queries_csv(data: bytes, *, query_max_length: int) -> ParsedEvalQ
                 draft = drafts[key] = _Draft(query_set, query_id, query, first_line=line)
             elif draft.query != query:
                 problems.append(
-                    f"第 {line} 列：同一題（{query_set.value} {query_id}）的 query 和第"
-                    f" {draft.first_line} 列不一樣"
+                    f"第 {line} 列：和第 {draft.first_line} 列是同一題（set 與 query_id 相同），"
+                    "但 query 不一樣"
                 )
                 continue
             if (earlier := seen.get((query_set, query_id, relevant.doi))) is not None:
@@ -327,9 +353,10 @@ def parse_eval_queries_csv(data: bytes, *, query_max_length: int) -> ParsedEvalQ
 
     for draft in drafts.values():
         if len(draft.relevant) > MAX_RELEVANT_PER_QUERY:
+            lines = "、".join(str(item.line) for item in draft.relevant)
             problems.append(
-                f"第 {draft.first_line} 列起的那一題（{draft.query_set.value} {draft.query_id}）"
-                f"有 {len(draft.relevant)} 篇正解，最多 {MAX_RELEVANT_PER_QUERY} 篇"
+                f"第 {draft.first_line} 列起的那一題有 {len(draft.relevant)} 篇正解"
+                f"（第 {lines} 列），最多 {MAX_RELEVANT_PER_QUERY} 篇"
             )
     if not problems and not drafts:
         problems.append("題目檔沒有任何題目")
@@ -354,6 +381,7 @@ class EvalSkipReason(StrEnum):
     ANCHOR_NOT_FOUND = "anchor_not_found"  # 找相似論文的起點 DOI 對不到論文（整題跳過）
     NO_RELEVANT_LEFT = "no_relevant_left"  # 正解都對不到論文（整題跳過）
     ANCHOR_UNAVAILABLE = "anchor_unavailable"  # 跑題時起點看不到或被排除了（整題跳過）
+    ANCHOR_NOT_TRACKED = "anchor_not_tracked"  # 跑題時起點不在 tracked 範圍（整題跳過）
 
 
 SKIP_LABELS: Final[Mapping[EvalSkipReason, str]] = {
@@ -361,6 +389,7 @@ SKIP_LABELS: Final[Mapping[EvalSkipReason, str]] = {
     EvalSkipReason.ANCHOR_NOT_FOUND: "起點論文的 DOI 對不到論文，整題跳過",
     EvalSkipReason.NO_RELEVANT_LEFT: "正解都對不到論文，整題跳過",
     EvalSkipReason.ANCHOR_UNAVAILABLE: "起點論文被排除或看不到，整題跳過",
+    EvalSkipReason.ANCHOR_NOT_TRACKED: "起點論文不在追蹤範圍（tracked），整題跳過",
 }
 
 
@@ -597,6 +626,8 @@ class SearchEvalReport:
     - `snapshot_number`／`snapshot_id`：第一題排名時讀到的已發佈快照（還沒有快照是 None）；跑到一半
       換了快照時 `snapshot_changed` 是 True（這次的數字混了兩個快照，要重跑）。
     - `query_count`：實際跑的題數（兩組加起來，不含整題跳過的）。
+    - `cjk_search_questions`：實際跑的 `search` 題裡有中文字的題數（少於
+      `MIN_CJK_SEARCH_QUESTIONS` 時報告印警告）。
     """
 
     eval_run_id: uuid.UUID
@@ -605,6 +636,7 @@ class SearchEvalReport:
     snapshot_number: int | None
     snapshot_changed: bool
     query_count: int
+    cjk_search_questions: int
     floors: tuple[EvalFloorResult, ...]
     skips: tuple[EvalSkip, ...]
     started_at: datetime
@@ -675,9 +707,10 @@ def _percent(value: Fraction) -> str:
 
 
 def _rank_text(outcome: EvalLegOutcome) -> str:
+    """一題一組的結果：名次、命中（0／1）、倒數名次（沒命中是 0；PR C 審查 M2）。"""
     if outcome.rank is not None:
-        return f"第 {outcome.rank} 名"
-    return "沒命中" if outcome.has_results else "沒有結果"
+        return f"第 {outcome.rank} 名（命中 1，倒數名次 {1 / outcome.rank:.3f}）"
+    return f"{'沒命中' if outcome.has_results else '沒有結果'}（命中 0，倒數名次 0）"
 
 
 def render_search_eval(report: SearchEvalReport, *, label: Callable[[str], str] = str) -> list[str]:
@@ -697,6 +730,11 @@ def render_search_eval(report: SearchEvalReport, *, label: Callable[[str], str] 
     ]
     if report.snapshot_changed:
         lines.append("注意：跑到一半換了快照，這次的數字混了兩個快照，請重跑")
+    if report.cjk_search_questions < MIN_CJK_SEARCH_QUESTIONS:
+        lines.append(
+            f"注意：中文搜尋題只有 {report.cjk_search_questions} 題（規格要至少"
+            f" {MIN_CJK_SEARCH_QUESTIONS} 題），這次的數字只能參考"
+        )
     for floor in report.floors:
         lines += ["", f"== 相似度下限 {floor.min_similarity} =="]
         for result in floor.sets:
@@ -718,6 +756,11 @@ def render_search_eval(report: SearchEvalReport, *, label: Callable[[str], str] 
         lines += ["", "跳過的："]
         lines += [_skip_line(skip, label) for skip in report.skips]
     return lines
+
+
+def render_eval_skips(skips: Sequence[EvalSkip], *, label: Callable[[str], str] = str) -> list[str]:
+    """跳過的正解與題目，一筆一行（`label` 同 `render_search_eval`）。"""
+    return [_skip_line(skip, label) for skip in skips]
 
 
 def _skip_line(skip: EvalSkip, show: Callable[[str], str]) -> str:

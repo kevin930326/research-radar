@@ -473,6 +473,31 @@ def find_paper_ids_by_dois(
     return {value_norm: uuid.UUID(str(paper_id)) for value_norm, paper_id in rows}
 
 
+def find_counted_paper_ids(
+    viewer: SystemViewer, connection: Connection, paper_ids: Iterable[uuid.UUID]
+) -> frozenset[uuid.UUID]:
+    """這些論文裡在 view `counted_paper`（`tracked` 範圍：追蹤範圍內、沒被排除、在已發佈的快照）的
+    那些。不做彙總。`radar eval search` 確認找相似論文的起點在 `tracked` 範圍時用（Story 4.4
+    審查 M1）。
+
+    Raises:
+        TypeError: `viewer` 不是 `SystemViewer`。
+    """
+    visible_to_system_only(viewer)
+    visible = visible_papers(viewer, alias="c")
+    wanted = sorted(set(paper_ids))
+    if not wanted:
+        return frozenset()
+    rows = connection.execute(
+        text(
+            "SELECT c.id FROM counted_paper AS c"
+            f" WHERE c.id = ANY(CAST(:ids AS uuid[])) AND {visible}"
+        ),
+        {"ids": wanted},
+    )
+    return frozenset(uuid.UUID(str(paper_id)) for (paper_id,) in rows)
+
+
 def list_paper_dois(
     viewer: Viewer, connection: Connection, paper_ids: Iterable[uuid.UUID]
 ) -> dict[uuid.UUID, tuple[str, ...]]:

@@ -9,15 +9,17 @@ FR-27、FR-41、Conventions「評估」）。
   的索引）。
 - `eval_run`：一次評估。`kind`（CHECK 現在只有 `search`；Epic 8 加 AI 產出的評估時放寬）、
   `query_sets`（`text[]`，至少一個、只能是 `search`／`similar`）、`min_similarities`（`numeric[]`，
-  至少一個、每個在 0（含）到 1（不含））、`embedding_model_id`、`snapshot_id`（外鍵到 `snapshot`，
-  可以是 NULL，有索引）、`query_count`（≥ 0）、`results`（jsonb）、`started_at`、`finished_at`
-  （不早於開始）。應用程式角色收回 UPDATE、DELETE（紀錄只新增）。
+  至少一個、不可有 NULL 元素（`ALL` 遇到 NULL 是未知、CHECK 會放行，所以另外用
+  `array_position` 擋）、每個在 0（含）到 1（不含））、`embedding_model_id`、`snapshot_id`（外鍵到
+  `snapshot`，可以是 NULL，有索引）、`query_count`（≥ 0）、`results`（jsonb）、`started_at`、
+  `finished_at`（不早於開始）。應用程式角色收回 UPDATE、DELETE（紀錄只新增）。
 - `derivation_run.eval_run_id`（0010）**不在這裡補外鍵**：Story 4.4 先不動，列給 Kevin 決定。
 - 只建新表，不改任何既有的表。
 
 和 `radar/repo/evaluation.py` 的表定義一致（`alembic check` 比對）；CHECK 約束 autogenerate 不比，
 這裡照抄同一份條件。可降版（降版會丟掉三張表與裡面的題目、評估紀錄；題目檔在 Kevin 的 Mac 上，重新
-匯入即可）。
+匯入即可恢復題目，但**評估紀錄（`eval_run`）丟了就回不來**：當時的模型、快照與每題的名次無法從
+CSV 重建。降版和其他遷移一樣只在開發時用；真的要降版前先用 `radar backup` 留一份）。
 
 版本：0024
 上一版：0023
@@ -104,8 +106,9 @@ def upgrade() -> None:
             name="query_sets",
         ),
         sa.CheckConstraint(
-            "cardinality(min_similarities) >= 1 AND 0 <= ALL (min_similarities)"
-            " AND 1 > ALL (min_similarities)",
+            "cardinality(min_similarities) >= 1"
+            " AND array_position(min_similarities, NULL) IS NULL"
+            " AND 0 <= ALL (min_similarities) AND 1 > ALL (min_similarities)",
             name="min_similarities",
         ),
         sa.CheckConstraint("query_count >= 0", name="query_count_not_negative"),
