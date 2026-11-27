@@ -204,6 +204,8 @@ test("small clickables are at least 44×44; form tags look 32px high with 12px b
   await page.setViewportSize(DESKTOP);
   await page.goto(url("reported"));
   const atLeast = async (selector: string) => {
+    // evaluateAll 不會等元素出現：剛打開頁面或剛點開表單時先等第一個看得到（epic-3j：CI 上量到 0 個）。
+    await expect(area(page).locator(selector).first()).toBeVisible();
     const boxes = await area(page).locator(selector).evaluateAll((elements) => elements.map((element) => element.getBoundingClientRect().toJSON() as DOMRect));
     // 選擇器找不到東西時迴圈會直接跳過：先斷言至少有一個。
     expect(boxes.length, selector).toBeGreaterThan(0);
