@@ -29,7 +29,7 @@ from radar.repo.db import Database
 from radar.services.members import allow_member
 from tests.database import TestDatabase, migrate
 from tests.llm_support import execute, library_routes, paper_list_routes, paper_routes
-from tests.permissions.cases import REGISTRY
+from tests.permissions.cases import PARAMETER_CASES, REGISTRY
 from tests.permissions.framework import (
     CANARY_EMAIL,
     EndpointCase,
@@ -45,6 +45,9 @@ OTHER_EMAIL = "other.member@example.com"
 
 CASES = sorted(REGISTRY.cases.values(), key=lambda case: case.endpoint)
 CROSS_MEMBER_CASES = [case for case in CASES if case.exempt_reason is None]
+# 同一個端點換參數走另一條讀資料的路（Story 4.1 PR B：`q`、`similar_to`）：跑同一套換人與
+# 金絲雀測試。
+PARAMETER_CASE_NAMES = sorted(PARAMETER_CASES)
 
 
 def _case_id(case: EndpointCase) -> str:
@@ -134,3 +137,33 @@ def test_other_member_session_is_really_the_other_member(context: PermissionCont
     assert me.status_code == 200
     assert uuid.UUID(me.json()["member_id"]) == uuid.UUID(context.other.member_id)
     assert context.other.member_id != context.owner.member_id
+
+
+@pytest.mark.parametrize("name", PARAMETER_CASE_NAMES)
+def test_other_member_never_sees_the_canary_with_other_parameters(
+    name: str,
+    context: PermissionContext,
+    db: TestDatabase,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # 和上面的金絲雀測試一樣（含在測試本體裡重新設定日誌的理由），只是換一組參數。
+    case = PARAMETER_CASES[name]
+    assert case.endpoint in REGISTRY.cases  # 只是已登記端點的另一組參數
+    emails = {row[0] for row in execute(db, "SELECT email FROM allowed_email")}
+    assert CANARY_EMAIL in emails
+    configure_logging()
+
+    def read_logs() -> str:
+        captured = capsys.readouterr()
+        return captured.out + captured.err
+
+    run_canary_case(case, context, read_logs)
+
+
+@pytest.mark.parametrize("name", PARAMETER_CASE_NAMES)
+def test_other_member_gets_404_or_an_empty_list_with_other_parameters(
+    name: str, context: PermissionContext
+) -> None:
+    case = PARAMETER_CASES[name]
+    assert case.exempt_reason is None
+    run_cross_member_case(case, context)

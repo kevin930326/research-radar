@@ -13,11 +13,14 @@ from fastapi import FastAPI
 from radar.config import (
     ConfigError,
     database_pool_size,
+    env_name,
     load_auth_settings,
     load_budget_config,
     load_context_values,
     load_domain_config,
+    load_embedding_config,
     load_models_config,
+    load_retrieval_config,
     load_settings,
     load_taxonomy,
     load_trend_config,
@@ -32,6 +35,7 @@ from radar.entrypoints.api.library import (
 )
 from radar.entrypoints.api.paper_list import (
     PaperListRoutes,
+    PaperSearchSetup,
     build_paper_list_routes,
     install_paper_list_routes,
 )
@@ -39,6 +43,7 @@ from radar.entrypoints.api.papers import PaperRoutes, build_paper_routes, instal
 from radar.entrypoints.api.web import mount_web
 from radar.entrypoints.bootstrap import (
     MigrationsNotFoundError,
+    build_embedding_provider,
     build_fake_login_confirm,
     build_readiness_probes,
 )
@@ -101,6 +106,27 @@ def main() -> int:
         auth_settings = load_auth_settings()
         # 計數方塊的 params（Story 3.15、ADR-0062）：分界日、每組幾年、低覆蓋率門檻等。
         trend_config = load_trend_config()
+        # 搜尋與找相似論文（Story 4.1 PR B）：檢索的數字、查詢向量的模型、額度與時限。查詢向量
+        # 一定要有自己較短的時限（embeddings.yaml 的 query_request），否則搜尋最久要等 8 分鐘。
+        retrieval_config = load_retrieval_config()
+        embedding_config = load_embedding_config()
+        if embedding_config.query_request is None:
+            raise ConfigError(["embeddings.yaml：query_request：api 行程要有查詢向量自己的時限"])
+        embedding_provider = None
+        if settings.cloudflare_account_id is None or settings.cloudflare_api_token is None:
+            # 不擋啟動（本機開發、CI、只看論文的部署都沒有金鑰）；搜尋回
+            # search_embedding_unavailable，找相似論文照常。
+            log.warning(
+                "沒有 Cloudflare 金鑰，搜尋會回 search_embedding_unavailable",
+                service="api",
+                missing=[
+                    env_name(field)
+                    for field in ("cloudflare_account_id", "cloudflare_api_token")
+                    if getattr(settings, field) is None
+                ],
+            )
+        else:
+            embedding_provider = build_embedding_provider(settings, embedding_config)
     except ConfigError as exc:
         log.error("設定錯誤，無法啟動", service="api", problems=exc.problems)
         return 1
@@ -134,6 +160,13 @@ def main() -> int:
             paper_setup.journals,
             taxonomy,
             build_trend_params(trend_config, paper_setup.journals),
+            PaperSearchSetup(
+                embedding=embedding_config,
+                retrieval=retrieval_config,
+                cloud_policy=settings.cloud_policy,
+                provider=embedding_provider,
+                clock=_utc_now,
+            ),
         ),
     )
     # 頁面殼另外掛、不經 create_app 的 web_dist 參數：關機的整合測試會把 create_app 換成只收

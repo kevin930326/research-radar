@@ -10,8 +10,13 @@
   （`domain/member_text_characters` 的共用清單）、去掉頭尾空白後是空的、超過長度上限都不收
   （`InvalidSearchQueryError`，訊息只有原因代號，不含查詢內容）。
 - 日誌不記查詢內容，只記長度與有沒有中文（`query_log_facts`）。
+- 找論文清單 API 的搜尋與找相似論文（`GET /api/v1/papers` 的 `q`、`similar_to`，Story 4.1 PR B、
+  ADR-0050 的 2026-11 更新）：下一頁的位置是融合後名次的位移（`RetrievalCursor`，和清單的 keyset
+  位置是兩種寫法，互相不收）；一頁的形狀是 `PaperSearchPage`。
 """
 
+import base64
+import binascii
 import uuid
 from dataclasses import dataclass
 from decimal import Decimal
@@ -23,6 +28,8 @@ from pydantic import BaseModel, ConfigDict, Field
 from radar.domain.errors import ErrorCode
 from radar.domain.member_text_characters import ZERO_WIDTH_JOINER, is_rejected_character
 from radar.domain.paper_list import PaperListScope
+from radar.domain.paper_rows import PaperRowFacts
+from radar.domain.snapshot import Snapshot, SnapshotStatus
 
 # 查詢字串長度上限的上限（設定檔寫錯成很大的數字時擋下）。
 MAX_QUERY_LENGTH_LIMIT: Final = 2000
@@ -206,3 +213,94 @@ class RetrievalAnchorNotFoundError(LookupError):
 
     def __init__(self) -> None:
         super().__init__("找不到這篇論文")
+
+
+# --- 找論文清單 API 的搜尋與找相似論文（Story 4.1 PR B）-----------------------------------------
+
+# 位移的上限：`RetrievalConfig.max_results` 最大是 2 × 1000（`leg_limit` 的上限）；超過的一定不是
+# 我們產生的。
+MAX_RETRIEVAL_OFFSET: Final = 2 * 1000
+# 位置字串的長度上限（正常的長度約 12 個字元；太長的直接當格式錯）。
+_RETRIEVAL_CURSOR_MAX_LENGTH: Final = 40
+_RETRIEVAL_CURSOR_SEPARATOR: Final = ":"
+
+
+class RetrievalMode(StrEnum):
+    """這一頁是哪一種檢索：搜尋（`q`）或找相似論文（`similar_to`）。寫進下一頁的位置，拿搜尋的位置
+    去翻找相似論文（或反過來）就不收。"""
+
+    SEARCH = "search"
+    SIMILAR = "similar"
+
+
+@dataclass(frozen=True, slots=True)
+class RetrievalCursor:
+    """檢索的下一頁從哪裡開始：哪一種檢索、融合後名次的位移（下一頁第一篇是第 `offset + 1` 名）。
+
+    Raises:
+        ValueError: `offset` 不是 1 到 `MAX_RETRIEVAL_OFFSET` 的整數（第一頁沒有位置）。
+    """
+
+    mode: RetrievalMode
+    offset: int
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "mode", RetrievalMode(self.mode))
+        if type(self.offset) is not int or not 1 <= self.offset <= MAX_RETRIEVAL_OFFSET:
+            raise ValueError(f"offset 要是 1 到 {MAX_RETRIEVAL_OFFSET} 的整數")
+
+
+def encode_retrieval_cursor(cursor: RetrievalCursor) -> str:
+    """位置 → 不透明的字串（URL 安全的 base64、沒有 `=`；和清單的 keyset 位置用不同的分隔符號）。"""
+    plain = f"{cursor.mode.value}{_RETRIEVAL_CURSOR_SEPARATOR}{cursor.offset}"
+    return base64.urlsafe_b64encode(plain.encode("ascii")).decode("ascii").rstrip("=")
+
+
+def decode_retrieval_cursor(value: str, *, mode: RetrievalMode) -> RetrievalCursor:
+    """`encode_retrieval_cursor` 的反向；只收它產生的寫法（重新編碼要一模一樣），而且要是 `mode`
+    這一種檢索的位置。清單的 keyset 位置（`domain/paper_list.encode_paper_list_cursor`）一定不收。
+
+    Raises:
+        ValueError: 不是 `encode_retrieval_cursor` 產生的字串，或是另一種檢索的位置。
+    """
+    if not isinstance(value, str) or not 0 < len(value) <= _RETRIEVAL_CURSOR_MAX_LENGTH:
+        raise ValueError("下一頁的位置格式不對")
+    try:
+        padded = value + "=" * (-len(value) % 4)
+        plain = base64.urlsafe_b64decode(padded.encode("ascii")).decode("ascii")
+        mode_text, offset_text = plain.split(_RETRIEVAL_CURSOR_SEPARATOR)
+        if not offset_text.isdigit() or not offset_text.isascii():
+            raise ValueError("位移不是數字")
+        cursor = RetrievalCursor(mode=RetrievalMode(mode_text), offset=int(offset_text))
+        same = encode_retrieval_cursor(cursor) == value
+    except (UnicodeError, binascii.Error, ValueError) as exc:
+        raise ValueError("下一頁的位置格式不對") from exc
+    if not same or cursor.mode is not RetrievalMode(mode):
+        raise ValueError("下一頁的位置格式不對")
+    return cursor
+
+
+@dataclass(frozen=True, slots=True)
+class PaperSearchPage:
+    """搜尋或找相似論文的一頁（照融合後的名次）：這一頁的論文列、下一頁的位置（沒有下一頁是 None）、
+    `total`（`RetrievalPage.total`，算得上結果的篇數）、目前已發佈的快照（一個都還沒有是 None）。
+
+    論文列和名次是兩個交易讀的（中間有一篇被排除時那一篇讀不到、跳過），所以不檢查篇數對得上
+    `total`。
+
+    Raises:
+        ValueError: `total` 不是非負整數、快照還沒發佈。
+    """
+
+    rows: tuple[PaperRowFacts, ...]
+    next_cursor: str | None
+    total: int
+    snapshot: Snapshot | None
+
+    def __post_init__(self) -> None:
+        if type(self.total) is not int or self.total < 0:
+            raise ValueError("total 要是非負整數")
+        if self.snapshot is not None and (
+            self.snapshot.status is not SnapshotStatus.PUBLISHED or self.snapshot.as_of is None
+        ):
+            raise ValueError("快照要是已發佈的")

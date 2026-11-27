@@ -596,7 +596,7 @@
     "/api/v1/papers": {
       "get": {
         "summary": "List Papers",
-        "description": "依條件列出論文的一頁（一頁的篇數見 `client-config`）。期刊、年份給多個值是「或」；主題、\n方法給多個值預設是「或」，`topic_match`／`method_match` 是 `all` 時是「且」；不同欄位之間是\n「且」；`cursor` 是上一頁的 `next_cursor`。條件不合法\n422，沒登入 401；`X-Radar-Expected-Member` 和登入的成員不同 409 `member_changed`、格式\n不對 400 `expected_member_invalid`（每一列含 `in_my_library`，ADR-0055）。",
+        "description": "依條件列出論文的一頁（一頁的篇數見 `client-config`）。期刊、年份給多個值是「或」；主題、\n方法給多個值預設是「或」，`topic_match`／`method_match` 是 `all` 時是「且」；不同欄位之間是\n「且」；`cursor` 是上一頁的 `next_cursor`。條件不合法\n422，沒登入 401；`X-Radar-Expected-Member` 和登入的成員不同 409 `member_changed`、格式\n不對 400 `expected_member_invalid`（每一列含 `in_my_library`，ADR-0055）。\n\n`q`（一句話搜尋）或 `similar_to`（找和這篇相似的論文，不含它自己）有其中一個時照相關度排，\n篩選與範圍照常；兩個都給 422。`q` 不收的字 422；`similar_to` 的論文不存在或看不到 404；\nWorkers AI 今天的額度用完 503 `search_quota_exhausted`、連不上 503\n`search_embedding_unavailable`（都不降級成只用關鍵字）。",
         "operationId": "list_papers",
         "parameters": [
           {
@@ -714,6 +714,39 @@
                 }
               ],
               "title": "Cursor"
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Q"
+            }
+          },
+          {
+            "name": "similar_to",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Similar To"
             }
           }
         ],
@@ -1919,7 +1952,7 @@
           "snapshot"
         ],
         "title": "PaperListResponse",
-        "description": "找論文清單的一頁（照出版年新到舊，沒有出版年的在最後）：這一頁的論文列、下一頁的位置（沒有\n下一頁是 null）、符合條件的總篇數、目前已發佈的快照（一個都還沒發佈時是 null）。"
+        "description": "找論文清單的一頁（照出版年新到舊，沒有出版年的在最後；搜尋與找相似論文時照相關度）：這一頁的\n論文列、下一頁的位置（沒有下一頁是 null）、符合條件的總篇數（搜尋與找相似論文時是算得上結果的\n篇數）、目前已發佈的快照（一個都還沒發佈時是 null）。"
       },
       "PaperListScope": {
         "type": "string",
@@ -2148,6 +2181,8 @@
               "origin_rejected",
               "request_invalid",
               "request_rejected",
+              "search_embedding_unavailable",
+              "search_quota_exhausted",
               "summary_changed"
             ],
             "title": "Code"

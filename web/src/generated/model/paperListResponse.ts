@@ -8,8 +8,9 @@ import type { PaperRow } from './paperRow.ts';
 import type { SnapshotRef } from './snapshotRef.ts';
 
 /**
- * 找論文清單的一頁（照出版年新到舊，沒有出版年的在最後）：這一頁的論文列、下一頁的位置（沒有
- * 下一頁是 null）、符合條件的總篇數、目前已發佈的快照（一個都還沒發佈時是 null）。
+ * 找論文清單的一頁（照出版年新到舊，沒有出版年的在最後；搜尋與找相似論文時照相關度）：這一頁的
+ * 論文列、下一頁的位置（沒有下一頁是 null）、符合條件的總篇數（搜尋與找相似論文時是算得上結果的
+ * 篇數）、目前已發佈的快照（一個都還沒發佈時是 null）。
  */
 export interface PaperListResponse {
   items: PaperRow[];

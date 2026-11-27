@@ -149,3 +149,62 @@
 找論文的前端（Story 3.14）也用到追蹤起始年：年份選單的「不限」範圍、自訂年份的下限與「追蹤範圍從 2016 年開始」的提示。它寫成一個有名字的常數 `TRACKING_START_YEAR`（`web/src/pages/search-filters.ts`），不是從 API 讀（Kevin 2026-11-20 決定）。
 
 要改追蹤起始年時，**兩個地方要一起改**：這個常數，和 `config/journals.yaml` 的 `start_year`。只改一邊的話，前端允許的年份和後端的 422 規則會對不上。
+
+## 2026-11 更新：搜尋與找相似論文
+
+Story 4.1 PR B（epic-4a）：搜尋與找相似論文走同一個 `GET /api/v1/papers`（Kevin 2026-11-27 晚「都照建議」，`docs/runs/epic-4a/TASK.md`「Kevin 的回覆」第 4 項）。上面的決定都不變；沒帶下面兩個參數時，回應、分頁、錯誤、SQL 都和原本一樣（同一段程式，整合測試用同一組資料逐欄比對）。
+
+**1. 兩個新參數，互斥**
+- `q`：一句話搜尋（混合檢索，ADR-0005）。`similar_to`：一篇論文的 ID，找和它相似的論文（只用向量腿、用它存好的向量、不呼叫 Workers AI、不含它自己）。
+- 有其中一個時改走 `services/retrieval.retrieve`，照融合後的名次（相關度）排；兩個都給 422 `request_invalid`。
+- 篩選（期刊、年份、主題、方法、`has_abstract`、`this_week`、`*_match`）與範圍照常，語意和清單同一套（ADR-0005 更新第 4 點）。範圍只有清單的三種：`demo` 不從這個端點開放（`scope=demo` 和其他不認得的值一樣是 422；示範站是靜態站，沒有搜尋）。
+- `q` 當使用者輸入驗（`domain/retrieval.clean_search_query`）：空的、只有空白、太長、控制字元、看不見的格式字元 → 422 `request_invalid`，在呼叫 Workers AI、記帳之前就擋。
+
+**2. 回應：同一個形狀，不多加欄位**
+
+**選項**
+- **a. 加 `order`（排序方式）與 `anchor`（起點論文的標題，給「相似：〈標題〉」用）。**
+- **b. 不加。** 回應照舊只有 `items`（同一個 `PaperRow`）、`next_cursor`、`total`、`snapshot`。
+
+**決定：b。** 理由：
+- 換人測試框架（ADR-0047）要求成員 B 拿到的空清單「只能有 `items`、`next_cursor`、`total`、`snapshot`」，多一個欄位就算洩漏；要加欄位就得放寬這條守衛，不准。
+- 前端本來就知道自己送了 `q` 還是 `similar_to`，「依相關度排序」不用後端說。
+- 「相似：〈標題〉」的標題：前端從論文頁按「找相似論文」過來，手上已經有這篇的標題；重新整理時用 `GET /api/v1/papers/{paper_id}` 拿（看不到一樣 404，和這裡一致）。
+- `total`：算得上結果的篇數（融合後，最多 2 × `leg_limit`，預設 200；ADR-0005 更新第 6 點），和翻得到的篇數一致。
+
+**3. 分頁：同一個 `next_cursor` 欄位，兩種寫法互相不收**
+
+**選項**
+- **a. 同一個欄位、不同編碼**：清單是（出版年, id）的 keyset 位置（決定 5），檢索是「哪一種檢索＋融合後名次的位移」（`domain/retrieval.RetrievalCursor`，`search:20`、`similar:20` 編成 URL 安全的 base64）。
+- **b. 另開 `offset` 參數。** 前端要分兩種翻頁寫法；`offset` 和 `cursor` 同時給又是一種要擋的組合。
+
+**決定：a。** 前端一律「把上一頁的 `next_cursor` 原樣帶回去」。兩種寫法的分隔符號不同（`,` 與 `:`），而且都只收「重新編碼要一模一樣」的字串，所以：
+- 清單的位置拿去搜尋或找相似論文、檢索的位置拿去翻清單、搜尋的位置拿去翻找相似論文（或反過來）→ 422 `request_invalid`（不是 500）。位置不對時不送查詢、不記帳。
+- 位移 1 到 2,000（`leg_limit` 上限 1,000 的兩倍）；超過 `total` 的位移是空的一頁、沒有下一頁。
+- 位置沒有綁定查詢內容：換了 `q` 卻沿用舊的位置，會從新查詢的那個名次接著給，不報錯（和清單的 cursor 沒綁條件一樣，見「已知限制」）。前端換查詢時要清掉位置。
+- 每翻一頁都重跑一次檢索（含一次查詢向量、一筆 `api_call`）；兩頁之間資料變了名次可能移動（ADR-0005 更新第 6 點的取捨）。
+
+**4. 錯誤（RFC 9457，代碼在 `domain/errors.py`、狀態在 `problems.py`，都帶 `no-store`）**
+
+| 情況 | 狀態 | `code` |
+|---|---|---|
+| `q`、`similar_to` 都給；`q` 不收；位置不對；篩選不對；`similar_to` 不是 UUID | 422 | `request_invalid` |
+| `similar_to` 的論文不存在、看不到（例如別人的私人論文）、被排除 | 404 | `not_found`（同一個回應，不分原因） |
+| Workers AI 今天的額度用完（沒有送出；`api_call` 記 `quota_exhausted`） | 503 | `search_quota_exhausted` |
+| Workers AI 連不上、回了錯、逾時、等額度鎖逾時；api 沒有 Cloudflare 金鑰 | 503 | `search_embedding_unavailable` |
+
+兩種失敗都不降級成只用關鍵字（ADR-0005）。狀態碼的選項：429（Too Many Requests）的意思是「這位使用者送太多」，但額度是全站共用的、不是這位成員的速率，所以兩種都用 503，分得出是哪一種的是 `code`。沒有帶 `Retry-After`（額度用完要等到 UTC 午夜，連不上不知道要等多久）。前端照 Story 4.2 的「搜尋沒有成功」＋「重試」（`errors.<code>` 還沒有專屬句子時落到共用句）。
+
+**5. 查詢向量的時限比背景短**
+
+背景向量化的 adapter 總時限是 480 秒、最多 5 次（為整批文件設的），搜尋這樣等太久（NFR-19 的 2 秒）。`config/embeddings.yaml` 新增 `query_request`（逾時 2 秒、總時限 3 秒、最多 2 次；對方正常回標頭時一次查詢最久 7 秒），讀檔時核對三個數字只能比 `api` 的同名數字短或少；api 行程啟動時沒有這一段就不啟動。adapter 的 `embed_query` 用它（建構時多一個參數 `query_api`，沒給時沿用 `api`），`embed_documents` 照舊；背景向量化的數字一個都沒改。逾時一樣是 `search_embedding_unavailable`，照常記帳（送出後逾時記 `unreachable`，送出前就到時限記 `not_sent`）。
+
+**6. api 啟動**
+
+api 行程啟動時讀 `retrieval.yaml`（`load_retrieval_config`）與 `embeddings.yaml`，錯了就不啟動（AD-18）。Cloudflare 金鑰（`RADAR_CLOUDFLARE_ACCOUNT_ID`、`RADAR_CLOUDFLARE_API_TOKEN`）**沒有也照常啟動**：本機開發、CI、關機測試都沒有金鑰，正式環境預設也沒有；這時寫一筆警告，搜尋回 `search_embedding_unavailable`（先照常驗 `q`，不送、不記帳），找相似論文照常（不需要 Workers AI）。要搜尋的主機要在 api 的 `.env.radar` 放這兩個金鑰（和 worker 同一組）。
+
+**7. 沒有做的**
+- **限速**：同一位成員短時間大量搜尋會把每日額度用光；這次不做，列給 Kevin 決定（用量估算在 `docs/runs/epic-4a/reviews/B-decisions.md`）。
+- 被引用次數排序（Kevin 的回覆第 1 項）。
+
+**換人與金絲雀**：`tests/permissions/cases.py` 的 `PARAMETER_CASES` 多登記兩組參數：`q`＋`personal`（B 是空清單）、`similar_to`＝A 的私人論文（B 是 404），和登記表跑同一套換人與金絲雀測試。

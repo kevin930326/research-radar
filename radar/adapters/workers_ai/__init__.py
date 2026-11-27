@@ -29,6 +29,9 @@ Story 2.8）。
   嘗試後 `after(EmbeddingAttempt)`（送出與否、狀態碼、會不會計費）。嘗試前發現總時限已到時
   不呼叫 `before()`、直接 `after(sent=False)`，讓服務放掉沿用的占用、不記用量。
   不在服務的區塊裡呼叫時照常送。
+- 查詢（`embed_query`）可以用自己的 `query_api`（較短的逾時、總時限與嘗試次數；建構時給，沒給時
+  沿用 `api`）：背景向量化的總時限是為整批文件設的，搜尋的人在等（Story 4.1 PR B）。兩者只差這三個
+  數字，送出、重試、記帳的做法完全一樣。
 - token 與 account id 以 `SecretStr` 存在這個物件的私有欄位，送出前才取值：`repr`、錯誤訊息
   都不含它們，也不含完整網址
   （網址裡有 account id；stamina 重試時會把例外寫進日誌）。httpx 的例外不串在我們的例外後面。
@@ -94,10 +97,12 @@ class WorkersAiEmbeddingProvider:
         model_id: str,
         dimensions: int,
         query_instruction: str | None = None,
+        query_api: WorkersAiApi | None = None,
         transport: httpx2.BaseTransport | None = None,
         monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
-        """`monotonic`：算總時限用的時鐘（秒）；測試換成假的，不必真的等。"""
+        """`query_api`：`embed_query` 用的端點與時限（None＝和 `api` 一樣）；`base_url` 要和 `api`
+        相同。`monotonic`：算總時限用的時鐘（秒）；測試換成假的，不必真的等。"""
         if not isinstance(account_id, SecretStr) or not account_id.get_secret_value():
             raise ValueError("account_id 要是不是空的 SecretStr")
         if not isinstance(api_token, SecretStr) or not api_token.get_secret_value():
@@ -106,9 +111,12 @@ class WorkersAiEmbeddingProvider:
             raise ValueError("model_id 不能是空的")
         if type(dimensions) is not int or dimensions < 1:
             raise ValueError("dimensions 要是正整數")
+        if query_api is not None and query_api.base_url != api.base_url:
+            raise ValueError("query_api 的 base_url 要和 api 相同")
         self.__account_id = account_id
         self.__api_token = api_token
         self._api = api
+        self._query_api = api if query_api is None else query_api
         self._model_id = model_id
         self._dimensions = dimensions
         self._query_instruction = query_instruction
@@ -157,7 +165,7 @@ class WorkersAiEmbeddingProvider:
             return []
         body = {"documents": [cloud_text(text) for text in checked]}
         # 全 0 的向量照樣回傳：服務逐篇判斷，只讓那一篇失敗。
-        return self._run(body, count=len(checked), allow_zero=True)
+        return self._run(body, self._api, count=len(checked), allow_zero=True)
 
     def embed_query(self, text: CloudSafeText) -> list[float]:
         """把查詢文字轉成向量（`queries`，設定有指示文字時帶 `instruction`）。
@@ -171,21 +179,25 @@ class WorkersAiEmbeddingProvider:
         body: dict[str, Any] = {"queries": [cloud_text(checked)]}
         if self._query_instruction is not None:
             body["instruction"] = self._query_instruction
-        return self._run(body, count=1, allow_zero=False)[0]
+        return self._run(body, self._query_api, count=1, allow_zero=False)[0]
 
     # --- 送出與重試 -----------------------------------------------------------------------------
 
-    def _run(self, body: dict[str, Any], *, count: int, allow_zero: bool) -> list[list[float]]:
-        retry = self._api.retry
+    def _run(
+        self, body: dict[str, Any], api: WorkersAiApi, *, count: int, allow_zero: bool
+    ) -> list[list[float]]:
+        """送一次請求（含重試）；逾時、總時限、嘗試次數照 `api`（文件用 `self._api`、查詢用
+        `self._query_api`）。"""
+        retry = api.retry
         hooks = current_attempt_hooks()
-        deadline = self._monotonic() + self._api.total_timeout_seconds
+        deadline = self._monotonic() + api.total_timeout_seconds
         attempts = 0
 
         def backoff(error: Exception) -> bool | float:
             """stamina 的退避判斷：不重試回 False；要重試回要等的秒數（不會等過總時限）。"""
             if not isinstance(error, _RetryableWorkersAiError):
                 return False
-            if self._retry_after_too_long(error):
+            if self._retry_after_too_long(error, api):
                 return False
             wait = error.retry_after
             if wait is None:
@@ -210,9 +222,9 @@ class WorkersAiEmbeddingProvider:
             ):
                 with attempt:
                     attempts += 1
-                    content = self._attempt(body, deadline, hooks)
+                    content = self._attempt(body, api, deadline, hooks)
         except _RetryableWorkersAiError as exc:
-            if self._retry_after_too_long(exc):
+            if self._retry_after_too_long(exc, api):
                 raise EmbeddingTransientError(
                     f"{exc.reason}；對方要求等 {exc.retry_after:g} 秒，超過上限"
                     f" {retry.retry_after_max_seconds:g} 秒",
@@ -220,8 +232,7 @@ class WorkersAiEmbeddingProvider:
                 ) from None
             if exc.deadline_reached:
                 raise EmbeddingTransientError(
-                    f"{exc.reason}；再等就超過總時限"
-                    f" {self._api.total_timeout_seconds:g} 秒，不再重試",
+                    f"{exc.reason}；再等就超過總時限 {api.total_timeout_seconds:g} 秒，不再重試",
                     http_status=exc.http_status,
                 ) from None
             raise EmbeddingTransientError(
@@ -231,37 +242,40 @@ class WorkersAiEmbeddingProvider:
             content, count=count, dimensions=self._dimensions, allow_zero=allow_zero
         )
 
-    def _retry_after_too_long(self, error: _RetryableWorkersAiError) -> bool:
+    @staticmethod
+    def _retry_after_too_long(error: _RetryableWorkersAiError, api: WorkersAiApi) -> bool:
         return (
-            error.retry_after is not None
-            and error.retry_after > self._api.retry.retry_after_max_seconds
+            error.retry_after is not None and error.retry_after > api.retry.retry_after_max_seconds
         )
 
-    def _deadline_error(self) -> EmbeddingTransientError:
-        return EmbeddingTransientError(
-            f"超過總時限 {self._api.total_timeout_seconds:g} 秒，不再嘗試"
-        )
+    @staticmethod
+    def _deadline_error(api: WorkersAiApi) -> EmbeddingTransientError:
+        return EmbeddingTransientError(f"超過總時限 {api.total_timeout_seconds:g} 秒，不再嘗試")
 
-    def _attempt(self, body: dict[str, Any], deadline: float, hooks: AttemptHooks | None) -> bytes:
+    def _attempt(
+        self,
+        body: dict[str, Any],
+        api: WorkersAiApi,
+        deadline: float,
+        hooks: AttemptHooks | None,
+    ) -> bytes:
         """一次 HTTP 嘗試，前後呼叫 `hooks`；回 200 的回應內容。"""
         if self._monotonic() >= deadline:
             # 還沒呼叫 before() 就到總時限：沒有送出，明確告訴服務（放掉沿用的占用、不記用量）。
             if hooks is not None:
                 hooks.after(EmbeddingAttempt(sent=False, http_status=None, billable=False))
-            raise self._deadline_error()
+            raise self._deadline_error(api)
         if hooks is not None:
             hooks.before()  # 額度放不下時丟 EmbeddingQuotaReachedError：不送、不再重試
         remaining = deadline - self._monotonic()
         if remaining <= 0:
             if hooks is not None:
                 hooks.after(EmbeddingAttempt(sent=False, http_status=None, billable=False))
-            raise self._deadline_error()
+            raise self._deadline_error(api)
         status: int | None = None
         billable = True
         try:
-            status, content = self._post_once(
-                body, min(self._api.timeout_seconds, remaining), deadline
-            )
+            status, content = self._post_once(body, min(api.timeout_seconds, remaining), deadline)
         except _RetryableWorkersAiError as exc:
             status = exc.http_status
             raise

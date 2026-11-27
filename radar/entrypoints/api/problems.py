@@ -43,6 +43,11 @@ PROBLEM_STATUS: Final[Mapping[ErrorCode, HTTPStatus]] = MappingProxyType(
         ErrorCode.SUMMARY_CHANGED: HTTPStatus.CONFLICT,
         ErrorCode.METHOD_NOT_ALLOWED: HTTPStatus.METHOD_NOT_ALLOWED,
         ErrorCode.INTERNAL_ERROR: HTTPStatus.INTERNAL_SERVER_ERROR,
+        # 搜尋（`GET /api/v1/papers?q=`，Story 4.1 PR B、ADR-0005）：查詢沒能轉成向量。兩種都是
+        # 「伺服器這邊暫時做不到」，不是請求寫錯，也不是這位成員送太多（額度是全站共用的），所以都是
+        # 503；分得出是哪一種的是 `code`。不降級成只用關鍵字。
+        ErrorCode.SEARCH_QUOTA_EXHAUSTED: HTTPStatus.SERVICE_UNAVAILABLE,
+        ErrorCode.SEARCH_EMBEDDING_UNAVAILABLE: HTTPStatus.SERVICE_UNAVAILABLE,
     }
 )
 
@@ -72,6 +77,8 @@ ProblemCode = Literal[
     "origin_rejected",
     "request_invalid",
     "request_rejected",
+    "search_embedding_unavailable",
+    "search_quota_exhausted",
     "summary_changed",
 ]
 
