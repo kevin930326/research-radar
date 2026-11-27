@@ -70,7 +70,7 @@ Story 2.7 已經有寫入人工判斷的函式（`repo/judgments.create_judgment
   這類看不見、卻會改變顯示或比對的字，和回報中文重點的說明（ADR-0064）一樣擋；只有零寬連接 U+200D 放行（組合
   emoji 要用它）。原本的控制字元、U+2028、U+2029、存不進資料庫的字照舊擋。錯誤代碼仍是 `reason_invalid_character`，
   API 的回應形狀不變，前端不用改（422 本來就不分原因）。
-- **擋哪些、放行哪些只有一份**：`radar/domain/one_line_text.py`（`is_rejected_character`），理由與說明都用它。
+- **擋哪些、放行哪些只有一份**：`radar/domain/member_text_characters.py`（`is_rejected_character`），理由與說明都用它。
   這是第二種用法才抽出來；說明的行為不變（既有測試一條沒改）。
 - **沒做的**：NFC 正規化（Kevin 決定不做）；只有零寬連接、看起來是空的理由仍會存成那個字（說明會當成沒寫；理由
   是選填，這一輪不改，列給 Kevin）。

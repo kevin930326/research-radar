@@ -7,13 +7,15 @@
 - 放行：零寬連接 U+200D（組合 emoji 要用它，它本身不改變文字方向）。
 
 存不進資料庫的字（`check_storable_text`）、字數上限與「去掉空白後是空的」由各自的模組判斷。
+LLM 輸出的檢查（`radar/domain/validators/text_checks.py` 的 `BIDI_OR_TAG` 等）是另一套規則，管的是
+模型寫的字，不在這裡。
 """
 
 import unicodedata
 from typing import Final
 
 REJECTED_CATEGORIES: Final = frozenset({"Cc", "Cs", "Zl", "Zp", "Cf"})
-ZERO_WIDTH_JOINER: Final = "‍"
+ZERO_WIDTH_JOINER: Final = "\u200d"
 ALLOWED_FORMAT_CHARACTERS: Final = frozenset({ZERO_WIDTH_JOINER})
 
 

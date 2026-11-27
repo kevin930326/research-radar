@@ -7,7 +7,7 @@
   code point，不是位元組也不是 UTF-16 單位；前端同一種算法）；不能含控制字元（一行的輸入框打不出來；
   NUL、換行、Tab 都算）、行分隔符 U+2028、段落分隔符 U+2029、格式字元（零寬空白、BOM、雙向覆寫
   這類看不見的字；零寬連接 U+200D 放行）與存不進資料庫的字。擋哪些、放行哪些和回報中文重點的說明
-  共用 `one_line_text` 同一份（epic-3m，Kevin 2026-11-26 決定 D14；NFC 正規化不做）。
+  共用 `member_text_characters` 同一份（epic-3m，Kevin 2026-11-26 決定 D14；NFC 正規化不做）。
 - **分類沒有成功的論文先不收**（`NO_AI_CLASSIFICATION`）：能不能修正等 Kevin 決定（TASK 第 6 部分
   第 8 點），決定前後端拒收，和畫面不給入口一致。
 - 成員送來的值一律當使用者輸入驗（AGENTS.md），前端的檢查不算數。錯誤只帶原因代號
@@ -27,7 +27,7 @@ from typing import Final, Self
 
 from radar.domain.ai_blocks import AiBlock, AiBlockState, AiProduct, ClassificationValue
 from radar.domain.fingerprints import named_lock_key
-from radar.domain.one_line_text import is_rejected_character
+from radar.domain.member_text_characters import is_rejected_character
 from radar.domain.papers import check_storable_text
 from radar.domain.taxonomy import Taxonomy, TaxonomyField
 

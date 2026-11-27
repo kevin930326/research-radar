@@ -9,7 +9,7 @@ EXPERIENCE.md 畫面 8 第 3 點、
   行分隔符 U+2028（Zl）、段落分隔符 U+2029（Zp）、格式字元（Cf：零寬空白 U+200B、
   BOM U+FEFF、雙向覆寫 U+202A～U+202E、U+2066～U+2069 等，看不見卻會改變顯示或比對）
   與存不進資料庫的字。只有零寬連接 U+200D 放行：組合 emoji 要用它，它本身不改變文字方向。
-  擋哪些、放行哪些在 `one_line_text`，和修正分類的理由（Story 3.11 的 `_check_reason`）共用
+  擋哪些、放行哪些在 `member_text_characters`，和修正分類的理由（Story 3.11 的 `_check_reason`）共用
   同一份（epic-3m 起理由也擋格式字元）。
 - **只回報成員看到的、而且現在有效的那一筆中文重點**：中文重點是 `ready`（有內容）才收；成員送來
   畫面上那一筆的 `zh_summary_id`，和鎖裡讀到的有效那一筆不同（送出前重新產生了）就不收
@@ -31,7 +31,7 @@ from typing import Final
 from radar.domain.ai_blocks import AiBlock, AiBlockState, AiProduct, ZhSummaryValue
 from radar.domain.fingerprints import named_lock_key
 from radar.domain.judgments import SummaryField
-from radar.domain.one_line_text import ZERO_WIDTH_JOINER, is_rejected_character
+from radar.domain.member_text_characters import ZERO_WIDTH_JOINER, is_rejected_character
 from radar.domain.papers import check_storable_text
 
 # 說明的上限（EXPERIENCE.md 決定第 98 項：理由與說明上限 100 字）。
