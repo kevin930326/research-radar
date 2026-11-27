@@ -320,7 +320,9 @@ function useMemberCheckWhileHolding(): number {
  * - 新的一次就算上一次還沒做完也照常確認，而且**重新問一次**「我是誰」（epic-3l C 確認 N1）：上一次的請求還在路上時，
  *   TanStack 會把新的問題併進那個請求（那是在別的分頁換人之前送出的，答案可能是舊的），所以先取消它（取消後它的回應不寫進快取，
  *   也不會蓋掉新的答案）再問。上一次的確認改成跟著新的一次的結果（等著它的加入／移出也一樣），不自己收尾、不當成「問不到」。
- *   上一次已經問到答案（正在清快取或重新掛上）就先等它做完，再問一次（不打斷它清到一半）。
+ *   只有上一次自己正在問時才接手（上一次在等更早的一次時，路上的請求不是它的）。其他情況（上一次已經問到答案、正在清快取或
+ *   重新掛上，或請求因為離線暫停）先等它做完：它認出換了人、也把換畫面或回登入頁做完了，這一次就沿用「換了人」、不再問
+ *   （epic-3n C-5）；它的結果是同一位或問不到，或換人那一步中途失敗，才再問一次（後者等著的寫入一律不送）。
  * - 確認途中丟例外（清快取、重新掛上失敗）：一律當成「換了人」收尾，等著的加入／移出不送、按鈕回到按之前的樣子
  *   （#114 收尾 G5：本來確認永遠沒有結果，按鈕一直停在送出中）。當成「換了人」是因為走到那裡時已經知道不是同一位，
  *   或是沒有人；不能當成同一位送出。
@@ -338,11 +340,25 @@ export function memberCheckOnReturn(
   // 這一次切回是「變回看得見、視窗沒有被選取」開始的：那一次的確認做完了沒（N2）。
   let unfocusedStart: { done: boolean } | undefined;
   // 最近一次的確認：還沒有結果時，新的一次接手（`next`：新的一次的結果）。
-  type Check = { verdict: Promise<MemberCheckVerdict>; settled: boolean; asked: boolean; next?: Promise<MemberCheckVerdict> };
+  // `asking`：正在問「我是誰」（loadMember 還沒回來）；`handled`：認出換人或登入過期之後，換畫面或回登入頁已經做完。
+  type Check = {
+    verdict: Promise<MemberCheckVerdict>;
+    settled: boolean;
+    asking: boolean;
+    asked: boolean;
+    handled: boolean;
+    next?: Promise<MemberCheckVerdict>;
+  };
   let latest: Check | undefined;
   const check = async () => {
     let resolve: (verdict: MemberCheckVerdict) => void = () => {};
-    const mine: Check = { verdict: new Promise<MemberCheckVerdict>((done) => (resolve = done)), settled: false, asked: false };
+    const mine: Check = {
+      verdict: new Promise<MemberCheckVerdict>((done) => (resolve = done)),
+      settled: false,
+      asking: false,
+      asked: false,
+      handled: false,
+    };
     trackMemberCheck(queryClient, mine.verdict);
     const previous = latest;
     latest = mine;
@@ -351,9 +367,14 @@ export function memberCheckOnReturn(
       mine.settled = true;
       resolve(verdict);
     };
+    // 上一次認出換了人、但換畫面或回登入頁沒做完（中途丟例外）：這一次照樣再問、把沒做完的做完，
+    // 不過等著的寫入一律當成「換了人」，不送（epic-3n PR D，Codex 審查中 1）。
+    let carriedChange = false;
     try {
       if (previous !== undefined && !previous.settled) {
-        if (!previous.asked && queryClient.getQueryState(meQuery.queryKey)?.fetchStatus === "fetching") {
+        // 只有上一次「自己」正在問、請求還在路上才接手：上一次如果是在等更早的那一次，路上的請求是更早那一次的，
+        // 取消它會讓更早那一次問不到答案、提早放行它等著的寫入（epic-3n PR D，Codex 審查中 2）。
+        if (previous.asking && !previous.asked && queryClient.getQueryState(meQuery.queryKey)?.fetchStatus === "fetching") {
           // 上一次的「我是誰」還在路上：它跟著這一次的結果；取消那個請求（取消後回應不寫進快取），下面重新問（N1）。
           previous.next = mine.verdict;
           await queryClient.cancelQueries({ queryKey: meQuery.queryKey, exact: true });
@@ -362,14 +383,18 @@ export function memberCheckOnReturn(
           // 它認出換了人（或登入過期）時，這一次就是同一個結果，不再問：再問一次會因為快取已經是新的人而判成「同一個人」，
           // 讓等著的寫入照舊帶上一個人送出（epic-3n C-5）；登入過期時也不會再回登入頁一次。
           if ((await previous.verdict) === "changed") {
-            settle("changed");
-            return;
+            if (previous.handled) {
+              settle("changed");
+              return;
+            }
+            carriedChange = true;
           }
         }
       }
       const generation = memberGeneration(queryClient);
       let member;
       let failed = false;
+      mine.asking = true;
       try {
         ({ member } = await loadMember(queryClient));
       } catch {
@@ -378,26 +403,30 @@ export function memberCheckOnReturn(
       mine.asked = true;
       // 問的期間又切回來、新的一次接手了：這個答案（或例外）可能是舊的，不照它做（N1）。
       if (mine.next !== undefined) {
-        settle(await mine.next);
+        const verdict = await mine.next;
+        settle(carriedChange ? "changed" : verdict);
         return;
       }
       if (failed) {
-        settle(memberGeneration(queryClient) === generation ? "unknown" : "changed");
+        settle(carriedChange || memberGeneration(queryClient) !== generation ? "changed" : "unknown");
         return;
       }
       if (member !== null && memberGeneration(queryClient) === generation) {
-        settle("same");
+        settle(carriedChange ? "changed" : "same");
         return;
       }
       if (member === null) {
         // 本來在站內（有暫留列）才會走到這裡，所以是登入過期（和 SearchRoute 的 onSignedOut 一樣）。
         await clearMemberQueries(queryClient);
+        // 先記「已經處理」再結算：等著這一次的下一次一醒來就看得到（回登入頁這一步本身不會失敗到需要重做）。
+        mine.handled = true;
         settle("changed");
         await actions.toLogin();
         return;
       }
       // 換了人：先同步重畫（重新掛上），再讓等著的加入／移出知道結果，最後才重問導覽列的人。
       actions.swap();
+      mine.handled = true;
       settle("changed");
       await actions.reload();
     } finally {
