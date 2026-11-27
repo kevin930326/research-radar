@@ -218,6 +218,7 @@ development_status:
   3-17-加入-移出與我的文獻庫-基本版: done  # PR 110 已合併
   3-18-備份與還原指令: done  # PR 100 已合併
   3-19-部署到-oracle-試用主機-只有-kevin-連得進去: backlog
+  3-20-主題-方法多選可以選任一個或同時符合: in-progress  # 2026-11-27 新增（Kevin 2026-11-26 決定）；估計 3 h，後端 PR A、前端 PR B 一起看
   epic-3-retrospective: optional
 
   epic-4: backlog

@@ -4,6 +4,7 @@
  * Research Radar
  * OpenAPI spec version: 0.1.0
  */
+import type { MatchMode } from './matchMode.ts';
 import type { PaperListScope } from './paperListScope.ts';
 
 export type ListPapersParams = {
@@ -14,5 +15,7 @@ export type ListPapersParams = {
   has_abstract?: boolean | null;
   this_week?: boolean;
   scope?: PaperListScope;
+  topic_match?: MatchMode;
+  method_match?: MatchMode;
   cursor?: string | null;
 };

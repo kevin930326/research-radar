@@ -4,9 +4,9 @@ I/O 表每一列（「點得回去」在 `test_paper_list_click_back.py`）。
 - 預設：`tracked`，算數的論文依出版年新到舊，一頁 20 篇＋`next_cursor`、`total`、`snapshot`。
 - 翻頁：45 篇、同一年多篇，照 `next_cursor` 翻到底是 20／20／5，合起來剛好 45 個不同 id、順序和一次
   全查一樣；`lab` 裡出版年是 NULL 的那一段也翻得過去。
-- 期刊、年份多值是「或」；主題、方法多值是「且」；人修正過的主題以修正後的為準；`unclassified`
-  查得到；`has_abstract` 只看目前的摘要；`this_week` 只看目前已發佈的快照（沒有已發佈的快照時沒有
-  結果）。
+- 期刊、年份多值是「或」；主題、方法多值預設是「或」、`*_match=all` 時是「且」（Story 3.20）；
+  人修正過的主題以修正後的為準；`unclassified` 查得到；`has_abstract` 只看目前的摘要；
+  `this_week` 只看目前已發佈的快照（沒有已發佈的快照時沒有結果）。
 - 範圍：`tracked` 不含被排除、範圍外、快照建立中、還沒有快照的；`lab` 含範圍外但全實驗室看得到的與
   快照還沒發佈的、不含被排除的與別人的私人論文；`personal` 只有自己的文獻庫（不含被排除的），B 的是
   空清單（`total` 0、`snapshot` 照常）。
@@ -376,7 +376,7 @@ def test_journals_and_years_are_or_within_and_across(
     assert api.ids([("journal", "isr"), ("journal", "isr")]) == {isr_2020}
 
 
-def test_topics_and_methods_are_and(db: TestDatabase, database: Database, api: Api) -> None:
+def test_topics_and_methods_all_is_and(db: TestDatabase, database: Database, api: Api) -> None:
     published = make_snapshot(db, 1)
     both = make_paper(database, db, 1, snapshot_id=published)
     only_erp = make_paper(database, db, 2, snapshot_id=published)
@@ -384,13 +384,156 @@ def test_topics_and_methods_are_and(db: TestDatabase, database: Database, api: A
     insert_classification(db, both, ["erp", "health_it"], ["experiment", "survey_sem"])
     insert_classification(db, only_erp, ["erp"], ["survey_sem"])
 
-    assert api.ids([("topic", "erp"), ("topic", "health_it")]) == {both}
+    # Story 3.20：多個值的「且」要明確帶 `*_match=all`（預設改成「或」，見下一個測試）。
+    assert api.ids([("topic", "erp"), ("topic", "health_it"), ("topic_match", "all")]) == {both}
     assert api.ids([("topic", "erp")]) == {both, only_erp}
-    assert api.ids([("method", "survey_sem"), ("method", "experiment")]) == {both}
+    assert api.ids(
+        [("method", "survey_sem"), ("method", "experiment"), ("method_match", "all")]
+    ) == {both}
     assert api.ids([("method", "survey_sem")]) == {both, only_erp}
     assert api.ids([("topic", "erp"), ("method", "experiment")]) == {both}
     # 沒有分類的那一篇不在上面任何一個結果裡，但不篩選時照列。
     assert api.ids() == {both, only_erp, none}
+
+
+def test_topics_and_methods_default_to_any(db: TestDatabase, database: Database, api: Api) -> None:
+    # Story 3.20、ADR-0011 的 2026-11-27 更新：沒帶 `*_match` 時多個值是「或」。
+    published = make_snapshot(db, 1)
+    both = make_paper(database, db, 1, snapshot_id=published)
+    only_erp = make_paper(database, db, 2, snapshot_id=published)
+    only_health = make_paper(database, db, 3, snapshot_id=published)
+    none = make_paper(database, db, 4, snapshot_id=published)
+    insert_classification(db, both, ["erp", "health_it"], ["experiment", "survey_sem"])
+    insert_classification(db, only_erp, ["erp"], ["survey_sem"])
+    insert_classification(db, only_health, ["health_it"], ["experiment"])
+
+    two_topics = [("topic", "erp"), ("topic", "health_it")]
+    two_methods = [("method", "survey_sem"), ("method", "experiment")]
+    assert api.ids(two_topics) == {both, only_erp, only_health}
+    assert api.ids([*two_topics, ("topic_match", "any")]) == {both, only_erp, only_health}
+    assert api.ids([*two_topics, ("topic_match", "all")]) == {both}
+    assert api.ids(two_methods) == {both, only_erp, only_health}
+    assert api.ids([*two_methods, ("method_match", "any")]) == {both, only_erp, only_health}
+    assert api.ids([*two_methods, ("method_match", "all")]) == {both}
+    # `total` 和列出來的一樣（同一個條件組）。
+    assert api.ok(two_topics)["total"] == 3
+    assert api.ok([*two_topics, ("topic_match", "all")])["total"] == 1
+    # 重複的 key 去重之後才數個數：`all` 和只給一個時一樣（審查 A-5）。
+    assert api.ids([("topic", "erp"), ("topic", "erp"), ("topic_match", "all")]) == {
+        both,
+        only_erp,
+    }
+    assert none in api.ids()  # 沒分類的那篇只在不篩選時出現
+
+
+@pytest.mark.parametrize("match", ["any", "all"])
+def test_one_key_is_the_same_either_way(
+    db: TestDatabase, database: Database, api: Api, match: str
+) -> None:
+    published = make_snapshot(db, 1)
+    both = make_paper(database, db, 1, snapshot_id=published)
+    only_erp = make_paper(database, db, 2, snapshot_id=published)
+    make_paper(database, db, 3, snapshot_id=published)
+    insert_classification(db, both, ["erp", "health_it"], ["experiment", "survey_sem"])
+    insert_classification(db, only_erp, ["erp"], ["survey_sem"])
+
+    assert api.ids([("topic", "erp"), ("topic_match", match)]) == {both, only_erp}
+    assert api.ids([("method", "survey_sem"), ("method_match", match)]) == {both, only_erp}
+    # 沒有給 key 時 `*_match` 不影響結果。
+    assert len(api.ids([("topic_match", match), ("method_match", match)])) == 3
+
+
+def test_topic_and_method_match_are_independent(
+    db: TestDatabase, database: Database, api: Api
+) -> None:
+    published = make_snapshot(db, 1)
+    both = make_paper(database, db, 1, snapshot_id=published)
+    erp_survey = make_paper(database, db, 2, snapshot_id=published)
+    health_experiment = make_paper(database, db, 3, snapshot_id=published)
+    erp_both_methods = make_paper(database, db, 4, snapshot_id=published)
+    insert_classification(db, both, ["erp", "health_it"], ["experiment", "survey_sem"])
+    insert_classification(db, erp_survey, ["erp"], ["survey_sem"])
+    insert_classification(db, health_experiment, ["health_it"], ["experiment"])
+    insert_classification(db, erp_both_methods, ["erp"], ["experiment", "survey_sem"])
+    params = [
+        ("topic", "erp"),
+        ("topic", "health_it"),
+        ("method", "experiment"),
+        ("method", "survey_sem"),
+    ]
+
+    # 主題任一個、方法同時符合：方法兩個都有的才算，主題有一個就好。
+    assert api.ids([*params, ("method_match", "all")]) == {both, erp_both_methods}
+    # 主題同時符合、方法任一個。
+    assert api.ids([*params, ("topic_match", "all")]) == {both}
+    # 兩個都同時符合、兩個都任一個。
+    assert api.ids([*params, ("topic_match", "all"), ("method_match", "all")]) == {both}
+    assert api.ids(params) == {both, erp_survey, health_experiment, erp_both_methods}
+
+
+def test_any_match_respects_scope_visibility_and_pages(
+    db: TestDatabase, database: Database, api: Api
+) -> None:
+    # 審查 A-4：「或」的新查法和三種範圍、換人、翻頁一起跑。
+    published = make_snapshot(db, 1)
+    counted = make_paper(database, db, 1, snapshot_id=published)
+    expansion = make_paper(
+        database, db, 2, snapshot_id=published, issn_l=OUTSIDE, origin=PaperOrigin.EXPANSION
+    )
+    private = make_paper(
+        database,
+        db,
+        3,
+        snapshot_id=None,
+        issn_l=OUTSIDE,
+        origin=PaperOrigin.IMPORT,
+        title="A made-up private study",
+    )
+    excluded = make_paper(
+        database, db, 4, snapshot_id=published, excluded_reason="editors_comments"
+    )
+    insert_classification(db, counted, ["erp"])
+    insert_classification(db, expansion, ["health_it"])
+    insert_classification(db, private, ["erp", "health_it"])
+    insert_classification(db, excluded, ["erp"])
+    put_in_library(database, api.owner_id, private)
+    put_in_library(database, api.owner_id, counted)
+    two_topics = [("topic", "erp"), ("topic", "health_it")]
+
+    for token in (api.owner_token, api.other_token):
+        assert api.ids(two_topics, token=token) == {counted}
+        assert api.ids([*two_topics, ("scope", "lab")], token=token) == {counted, expansion}
+    # A 的私人論文只在 A 的文獻庫；B 用「或」也帶不出來。
+    assert api.ids([*two_topics, ("scope", "personal")]) == {private, counted}
+    assert api.ids([*two_topics, ("scope", "personal")], token=api.other_token) == set()
+    both = [*two_topics, ("scope", "personal"), ("topic_match", "all")]
+    assert api.ids(both) == {private}
+
+    # 超過一頁：照 `next_cursor` 翻到底，每篇只出現一次、合起來等於 `total`。
+    many = {counted}
+    for number in range(10, 35):
+        paper_id = make_paper(database, db, number, snapshot_id=published, year=2016 + number % 5)
+        insert_classification(db, paper_id, ["erp"] if number % 2 else ["health_it"])
+        many.add(paper_id)
+    pages = api.walk(two_topics)
+    seen = [uuid.UUID(item["id"]) for page in pages for item in page["items"]]
+    assert len(pages) == 2
+    assert len(seen) == len(set(seen)) == pages[0]["total"] == len(many)
+    assert set(seen) == many
+
+
+def test_unclassified_with_another_topic(db: TestDatabase, database: Database, api: Api) -> None:
+    # Kevin 2026-11-27 決定：「未分類」和別的一起給、又是 `all` 時不特別處理（照樣是「且」）。
+    published = make_snapshot(db, 1)
+    erp = make_paper(database, db, 1, snapshot_id=published)
+    unclassified = make_paper(database, db, 2, snapshot_id=published)
+    insert_classification(db, erp, ["erp"])
+    insert_classification(db, unclassified, ["unclassified"])
+    params = [("topic", "erp"), ("topic", "unclassified")]
+
+    assert api.ids(params) == {erp, unclassified}
+    assert api.ids([*params, ("topic_match", "all")]) == set()
+    assert api.ok([*params, ("topic_match", "all")])["total"] == 0
 
 
 def test_human_fix_wins_and_unclassified_is_a_topic(
@@ -555,6 +698,12 @@ def test_scopes(db: TestDatabase, database: Database, api: Api) -> None:
         [("year", "")],
         [("scope", "")],
         [("has_abstract", "maybe")],
+        # Story 3.20：`*_match` 只收 `any`、`all`。
+        [("topic_match", "or")],
+        [("topic_match", "")],
+        [("topic_match", "ALL")],
+        [("method_match", "and")],
+        [("method_match", "")],
     ],
 )
 def test_invalid_values_are_422(api: Api, params: list[tuple[str, str]]) -> None:

@@ -34,6 +34,7 @@ export * from './libraryItemResponse.ts';
 export * from './libraryPageResponse.ts';
 export * from './listLibraryParams.ts';
 export * from './listPapersParams.ts';
+export * from './matchMode.ts';
 export * from './memberResponse.ts';
 export * from './paperAbstract.ts';
 export * from './paperBiblio.ts';

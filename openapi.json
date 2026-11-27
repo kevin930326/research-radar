@@ -596,7 +596,7 @@
     "/api/v1/papers": {
       "get": {
         "summary": "List Papers",
-        "description": "依條件列出論文的一頁（一頁的篇數見 `client-config`）。期刊、年份給多個值是「或」，主題、\n方法給多個值是「且」，不同欄位之間是「且」；`cursor` 是上一頁的 `next_cursor`。條件不合法\n422，沒登入 401；`X-Radar-Expected-Member` 和登入的成員不同 409 `member_changed`、格式\n不對 400 `expected_member_invalid`（每一列含 `in_my_library`，ADR-0055）。",
+        "description": "依條件列出論文的一頁（一頁的篇數見 `client-config`）。期刊、年份給多個值是「或」；主題、\n方法給多個值預設是「或」，`topic_match`／`method_match` 是 `all` 時是「且」；不同欄位之間是\n「且」；`cursor` 是上一頁的 `next_cursor`。條件不合法\n422，沒登入 401；`X-Radar-Expected-Member` 和登入的成員不同 409 `member_changed`、格式\n不對 400 `expected_member_invalid`（每一列含 `in_my_library`，ADR-0055）。",
         "operationId": "list_papers",
         "parameters": [
           {
@@ -680,6 +680,24 @@
             "schema": {
               "$ref": "#/components/schemas/PaperListScope",
               "default": "tracked"
+            }
+          },
+          {
+            "name": "topic_match",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/MatchMode",
+              "default": "any"
+            }
+          },
+          {
+            "name": "method_match",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/MatchMode",
+              "default": "any"
             }
           },
           {
@@ -1612,6 +1630,15 @@
         ],
         "title": "LibraryPageResponse",
         "description": "文獻庫的一頁（照加入時間新到舊）：這一頁的筆、下一頁的位置（沒有下一頁是 null）、總篇數。"
+      },
+      "MatchMode": {
+        "type": "string",
+        "enum": [
+          "any",
+          "all"
+        ],
+        "title": "MatchMode",
+        "description": "主題或方法給多個值時怎麼合（只給一個值時兩種一樣）。"
       },
       "MemberResponse": {
         "properties": {
