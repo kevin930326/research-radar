@@ -126,7 +126,8 @@ test("display names failing: the page shows, only the classification line has a 
   await expect(page.locator("[data-block='classification']")).toHaveCount(0);
   await expect(page.locator("[data-block='zh_summary']")).toContainText(data.zh_summary.value!.research_question!);
   await expect(page.locator("[data-block='research_model'] [data-construct]").first()).toBeVisible();
-  await expect(page.getByText(LOAD_FAILED, { exact: true })).toHaveCount(0);
+  // 整頁的載入失敗（LoadFailed：訊息條的那句就是 h1）不存在。不用字找：「沒有載入成功」和分類那一行的訊息同字。
+  await expect(page.getByRole("alert").filter({ has: page.locator("h1") })).toHaveCount(0);
 
   // 按「重試」：這次讀到了，分類那一行回來，訊息條消失；論文不重讀。
   apiMock.displayNames = "ok";

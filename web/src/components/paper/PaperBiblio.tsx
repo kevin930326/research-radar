@@ -12,7 +12,7 @@ import { PaperTitle } from "../PaperText";
 import { TEXT_LINK_CLASS } from "../TextLink";
 import { taipeiDate } from "../taipei-date";
 import { journalName } from "./citation";
-import { MONO_LABEL_CLASS, NoteLine, badgeProvenance, useFailedText, usePaperSite } from "./parts";
+import { MONO_LABEL_CLASS, NoteLine, badgeProvenance, useFailedText, usePaperSite, type FailedText } from "./parts";
 
 // 論文頁的書目（EXPERIENCE.md 畫面 8 第 1、2 點；設計稿 paper.html 的第一塊）：資料日期列、英文標題（h1）、作者、
 // 期刊 · 年份 · 卷期頁碼、DOI 與 OpenAlex 連結、被引用次數與有沒有摘要，最後一行是分類（不是獨立的區塊）。
@@ -165,13 +165,25 @@ function TagGroup({
 }
 
 /** 分類沒有內容時的那一行（paper-ai-failed.html）：「分類」＋一句狀態。 */
-function ClassificationStateLine({ state, text, provenance }: { state: string; text: string; provenance?: "missing" }) {
+function ClassificationStateLine({
+  state,
+  text,
+  provenance,
+  textKey,
+}: {
+  state: string;
+  text: string;
+  provenance?: "missing";
+  /** 「沒有產生成功」那一行用的 key（見 useFailedText），給測試認。 */
+  textKey?: FailedText["key"];
+}) {
   const { t } = useTranslation("paper");
   return (
     <div
       data-block="classification"
       data-block-state={state}
       data-provenance={provenance}
+      data-text-key={textKey}
       className="mt-[22px] flex flex-wrap items-baseline gap-x-[14px] gap-y-1"
     >
       <span className={MONO_LABEL_CLASS}>{t("paper.classification.label")}</span>
@@ -246,11 +258,11 @@ export function ClassificationLine({ block, names, firstBadge, fix }: Classifica
   // 有內容卻沒有來歷：不顯示內容（ADR-0010 第 8 點、ADR-0015），顯示「沒有產生成功」那一行（Codex 審查 3.8 中 1；
   // 資料壞了不會自己好，所以不寫「還在產生」，Kevin 2026-11-17 決定）。
   if (block.state === "ready" && block.provenance === null) {
-    return <ClassificationStateLine state={block.state} text={failedText} provenance="missing" />;
+    return <ClassificationStateLine state={block.state} text={failedText.text} textKey={failedText.key} provenance="missing" />;
   }
   switch (block.state) {
     case "failed":
-      return <ClassificationStateLine state={block.state} text={failedText} />;
+      return <ClassificationStateLine state={block.state} text={failedText.text} textKey={failedText.key} />;
     case "pending_interactive":
     case "pending_batch":
       return <ClassificationStateLine state={block.state} text={t("paper.state.pending")} />;

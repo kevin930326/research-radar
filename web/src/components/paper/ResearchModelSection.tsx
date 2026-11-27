@@ -141,16 +141,16 @@ export function ResearchModelSection({ block, firstBadge }: ResearchModelSection
   let line: string | null;
   switch (block.state) {
     case "ready":
-      line = withoutProvenance ? failedText : noConstructs ? t("paper.model.empty") : null;
+      line = withoutProvenance ? failedText.text : noConstructs ? t("paper.model.empty") : null;
       break;
     case "empty":
-      line = withoutProvenance ? failedText : t("paper.model.empty");
+      line = withoutProvenance ? failedText.text : t("paper.model.empty");
       break;
     case "no_input":
       line = t("paper.model.noAbstract");
       break;
     case "failed":
-      line = failedText;
+      line = failedText.text;
       break;
     case "pending_interactive":
     case "pending_batch":
@@ -181,7 +181,11 @@ export function ResearchModelSection({ block, firstBadge }: ResearchModelSection
         ) : (
           heading
         )}
-        <BlockLine state={block.state} provenance={withoutProvenance ? "missing" : undefined}>
+        <BlockLine
+          state={block.state}
+          provenance={withoutProvenance ? "missing" : undefined}
+          textKey={withoutProvenance || block.state === "failed" ? failedText.key : undefined}
+        >
           {line}
         </BlockLine>
       </section>

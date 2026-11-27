@@ -71,7 +71,7 @@ export function More({
   );
 }
 
-/** 錯誤（State Patterns「12. 找論文」）：「沒有載入成功。重新整理後再試」＋「重新整理」（重讀，條件留著）。 */
+/** 錯誤（State Patterns「12. 找論文」）：「沒有載入成功」＋「重新整理」（重讀，條件留著）。 */
 export function ErrorBar({ message, action, onRetry }: { message: string; action: string; onRetry: () => void }) {
   return (
     <div role="alert" data-state="error" className="mt-[36px] flex max-w-reading-width flex-wrap items-center gap-x-[14px] gap-y-[10px] split:mt-12">

@@ -19,21 +19,24 @@ export const MONO_LABEL_CLASS = "font-mono text-s13 tracking-006 text-text-secon
 export const RAIL_LABEL_CLASS = "font-mono text-s13 tracking-008 text-text-secondary";
 
 /**
- * 區塊裡的一行狀態（paper-ai-failed.html 的「沒有產生成功，可以請管理者重跑」、paper.html 的「沒有摘要」）：
+ * 區塊裡的一行狀態（paper-ai-failed.html 的「沒有產生成功」、paper.html 的「沒有摘要」）：
  * 標題下 16px、16px、行高 1.9、第二層文字色。設計稿沒畫的「還在產生」「額度用完」「研究模型是空的」沿用同一行。
  */
 export function BlockLine({
   children,
   state,
   provenance,
+  textKey,
 }: {
   children: ReactNode;
   state: string;
   /** 有內容的狀態卻沒有來歷（不顯示內容）時是 "missing"，給測試認。 */
   provenance?: "missing";
+  /** 「沒有產生成功」那一行用的 key（見 useFailedText），給測試認。 */
+  textKey?: FailedText["key"];
 }) {
   return (
-    <div data-block-state={state} data-provenance={provenance} className="mt-4 text-s16 leading-190 text-text-secondary">
+    <div data-block-state={state} data-provenance={provenance} data-text-key={textKey} className="mt-4 text-s16 leading-190 text-text-secondary">
       {children}
     </div>
   );
@@ -92,8 +95,9 @@ export function badgeProvenance(provenance: Provenance | null): BadgeProvenance 
 
 /**
  * 論文頁在哪一個站（Story 3.9）：共用的區塊只有兩處不同，由外層用 PaperSiteContext 告訴它們。
- * - 「沒有產生成功」那一行：成員版「沒有產生成功，可以請管理者重跑」；示範站只寫「沒有產生成功」
- *   （EXPERIENCE.md State Patterns「8. 論文頁」：訪客找不到管理者；設計稿 paper-demo.html「沒有產生成功」）。
+ * - 「沒有產生成功」那一行：成員版用 paper.state.failed、示範站用 demo.paper.failed（EXPERIENCE.md State Patterns「8. 論文頁」；
+ *   設計稿 paper-ai-failed.html、paper-demo.html）。兩句現在同字（55 條第 31 條，Kevin 2026-11-27 決定），
+ *   所以那一行另外標 data-text-key，測試靠它分辨示範站有沒有誤用成員版的字。
  * - 分類標籤連到哪裡：成員版到找論文（/search），示範站到論文清單（/papers；EXPERIENCE.md 畫面 8 第 2 點）。
  * 沒有包的時候是成員版（成員版的頁面與既有測試都不用改）。
  * 之後在共用區塊（書目、分類、中文重點、研究模型等）加成員才有的功能（回報錯誤、修正分類…），示範站也會帶到：
@@ -107,8 +111,15 @@ export function usePaperSite(): PaperSite {
   return useContext(PaperSiteContext);
 }
 
-/** 「沒有產生成功」那一行的字（見 PaperSite）。 */
-export function useFailedText(): string {
+/** 「沒有產生成功」那一行的字與它的 key（見 PaperSite）；key 畫在那一行的 data-text-key。 */
+export interface FailedText {
+  text: string;
+  key: "demo:demo.paper.failed" | "paper:paper.state.failed";
+}
+
+export function useFailedText(): FailedText {
   const { t } = useTranslation(["paper", "demo"]);
-  return usePaperSite() === "demo" ? t("demo:demo.paper.failed") : t("paper:paper.state.failed");
+  return usePaperSite() === "demo"
+    ? { text: t("demo:demo.paper.failed"), key: "demo:demo.paper.failed" }
+    : { text: t("paper:paper.state.failed"), key: "paper:paper.state.failed" };
 }
