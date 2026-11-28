@@ -122,7 +122,7 @@ Story 4.1 實作時補上的決定。上面的九點不變。
 
 `domain/retrieval.RetrievalScope` 有四種，清單的 `PaperListScope` 維持三種（清單 API 不收 `demo`）。前三種同名同義，篩選條件共用 `repo/paper_filters.py`（從 `paper_list.py` 搬過來的那一段，行為不變）。`demo` 只給 `PublicViewer`：`retrieve` 的型別簽名擋（成員的 viewer 傳 `demo` 型別檢查不過）；執行時 `retrieve` 一進來、送查詢向量或讀起點之前就擋（審查後改：原本到組 SQL 時才擋，非 `PublicViewer` 的搜尋已經送出查詢、占了額度），`visibility.visible_demo_papers` 組條件時再擋一次。
 
-**`lab` 的定義照 ADR-0050，和上面第 2 點的表格不同**（列給 Kevin 確認）：第 2 點的表格把「自己的私人論文」算進 `lab`；後來的 ADR-0050 定 `lab` 就是全實驗室看得到的論文（`lab_visible`），找論文清單照它做，Story 4.1 又要求檢索和清單同一套篩選。所以實作的 `lab` 不含自己的私人論文（要找自己的私人論文用 `personal`），測試也這樣寫。要改成第 2 點的定義，清單與檢索要一起改。
+**`lab` 的定義照 ADR-0050，和上面第 2 點的表格不同**（Kevin 2026-11-28 決定以 ADR-0050 為準；第 2 點表格的原文保留不改，以這一段為準）：第 2 點的表格把「自己的私人論文」算進 `lab`；後來的 ADR-0050 定 `lab` 就是全實驗室看得到的論文（`lab_visible`），找論文清單照它做，Story 4.1 又要求檢索和清單同一套篩選。所以實作的 `lab` 不含自己的私人論文（要找自己的私人論文用 `personal`），測試也這樣寫。要改成第 2 點的定義，清單與檢索要一起改。
 
 **放棄**：把 `demo` 加進 `PaperListScope`。那樣清單 API 要在每個地方多擋一種值，擋漏了就是權限問題。
 

@@ -23,6 +23,8 @@
 - `trial_sample_sha256`：試跑抽樣的排序鍵（seed, 正規化後的 DOI）（`domain/trial_runs.py`）。
 - `annotation_sample_sha256`：標註試算表抽樣的排序鍵（seed, 用途, DOI 或分層）
   （`domain/annotations.py`、Story 2.13、ADR-0045）。
+- `query_vector_seal`：查詢向量的封條（HMAC-SHA256，`services/retrieval.py` 用行程內的亂數蓋，
+  `retrieve` 只收封條對得上的向量；Story 4.4 審查 H1）。
 
 ## source_hash
 
@@ -36,7 +38,9 @@
 """
 
 import hashlib
+import hmac
 import json
+import struct
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Final
 
@@ -397,3 +401,14 @@ def session_token_sha256(token: str) -> bytes:
     格式由呼叫端（`domain/auth.token_sha256`）先驗；這裡只算雜湊。
     """
     return hashlib.sha256(token.encode("ascii")).digest()
+
+
+def query_vector_seal(salt: bytes, text: str, model_id: str, vector: Sequence[float]) -> bytes:
+    """查詢向量的封條：以 `salt` 為鍵，對（查詢字、模型、向量）算 HMAC-SHA256（每段前面加長度，
+    向量照 IEEE 754 雙精度大端序）。`salt` 由呼叫端保管、不存不印。"""
+    mac = hmac.new(salt, digestmod=hashlib.sha256)
+    for part in (text.encode("utf-8"), model_id.encode("utf-8")):
+        mac.update(len(part).to_bytes(8, "big"))
+        mac.update(part)
+    mac.update(struct.pack(f">{len(vector)}d", *vector))
+    return mac.digest()
