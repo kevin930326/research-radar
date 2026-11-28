@@ -26,7 +26,7 @@ const TAP_TARGET = 44;
 /** 次像素的誤差。 */
 const EPSILON = 0.5;
 /** Tab 最多按幾次（防止無限迴圈；頁面上的可聚焦元素不會超過這個數）。 */
-const MAX_TABS = 200;
+const MAX_TABS = 230;
 
 /** 可以操作的元素（Tab 走訪與 44×44 用同一組）。 */
 const INTERACTIVE = "a[href], button, [role=button], summary, input, select, textarea";

@@ -341,6 +341,24 @@ describe("review fixes", () => {
     expect(block(emptyHtml, "research_model")).not.toContain("data-ai-badge=");
   });
 
+  it("the 'not generated' line in all three blocks is tagged with the member key (data-text-key)", () => {
+    // 成員版與示範站同字（55 條第 31 條），示範站的測試靠這個 key 分辨；這裡確認成員版標的是成員版的 key。
+    const KEY = 'data-text-key="paper:paper.state.failed"';
+    const failed = render(fixture("all-failed"));
+    const page = fixture("normal");
+    page.zh_summary.provenance = null;
+    page.research_model.provenance = null;
+    page.classification.provenance = null;
+    const missing = render(page);
+    for (const [label, html] of [["all-failed", failed], ["no provenance", missing]] as const) {
+      for (const name of ["zh_summary", "research_model", "classification"]) {
+        expect(block(html, name), `${label} ${name}`).toContain(KEY);
+      }
+      expect(count(html, KEY), label).toBe(3);
+      expect(html, label).not.toContain('data-text-key="demo:demo.paper.failed"');
+    }
+  });
+
   it("empty never reads its value, even when one comes along", () => {
     const page = fixture("empty");
     page.zh_summary.value = {
