@@ -131,11 +131,15 @@ test.describe("demo paper list", () => {
     await expect(rows(page)).toHaveCount(TOTAL);
   });
 
-  test("row titles are not links yet; open full text goes to the DOI; tags filter the list", async ({ page }) => {
+  test("each row title links to that paper; open full text goes to the DOI; tags filter the list", async ({ page }) => {
     await open(page);
     await expect(rows(page)).toHaveCount(PAGE_SIZE);
-    // 論文頁（Story 3.9）還沒做（AR-67）：標題不是連結。
-    await expect(page.locator("[data-paper-row] h3 a")).toHaveCount(0);
+    // 每一列的標題都是連到那一篇論文頁（/papers/<那一列的 ID>）的連結（epic-3l D9）。先確認比到的列數（不能空跑）。
+    const titleLinks = await rows(page).evaluateAll((items) =>
+      items.map((item) => ({ id: item.getAttribute("data-paper-row"), href: item.querySelector("h3 a")?.getAttribute("href") ?? null })),
+    );
+    expect(titleLinks).toHaveLength(PAGE_SIZE);
+    for (const { id, href } of titleLinks) expect(href).toBe(`/papers/${id}`);
     // 開啟全文的連結和分片裡後端寫的 doi_url 一樣、開新分頁。只比畫面上有的列；先確認比到的篇數（不能空跑）。
     const onPage = new Set(await rows(page).evaluateAll((items) => items.map((item) => item.getAttribute("data-paper-row")!)));
     const checked = SHARD.filter((paper) => onPage.has(paper.biblio.biblio.id));
@@ -651,6 +655,196 @@ test.describe("demo paper list: any or all (Story 3.20)", () => {
     await expectCount(page, methodAny);
     await expect(page.locator("h1")).toBeFocused();
   });
+});
+
+// 篩選選單早就有的畫面問題（epic-3k 量到、epic-3l PR E 修；設計稿 filter-match-mode.html 示範站桌機與手機、papers-demo.html）。
+test.describe("demo paper list: filter menu layout", () => {
+  /** 打開的選單（Base UI Popover 的 popup）與它的標籤看得到的那一塊（按鈕本身比它上下各多 6px）。 */
+  async function openTopicMenu(page: Page) {
+    await open(page, "?topic=erp");
+    const chip = page.locator("[data-filter-chip]").filter({ hasText: text("search:search.filter.topic") });
+    await chip.click();
+    const menu = page.getByRole("dialog");
+    // 整列是 label，點在 label 上（輸入框上面蓋著選項的字；同上面的年份）。
+    await menu.locator("label").filter({ has: page.getByRole("checkbox", { name: name(NAMES.topics, "knowledge_collaboration"), exact: true }) }).click();
+    await expect(page).toHaveURL(/[?&]topic=erp(%2C|,)knowledge_collaboration/);
+    // 選單淡入的動畫走完才量位置。
+    await page.evaluate(() => Promise.all(document.getAnimations().map((animation) => animation.finished.catch(() => undefined))));
+    return { menu, chip: chip.locator(":scope > span") };
+  }
+
+  test("desktop: the topic menu opens below the chip, 490px wide in two columns, not over the heading", async ({ page }) => {
+    const { menu, chip } = await openTopicMenu(page);
+    const menuBox = (await menu.boundingBox())!;
+    const chipBox = (await chip.boundingBox())!;
+    const headingBox = (await page.locator("h1").boundingBox())!;
+    // 從篩選鈕下方展開（設計稿 .menu.fl top: 40px，標籤 32px 高），左邊和標籤對齊；不蓋到標題。
+    expect(menuBox.y).toBeGreaterThanOrEqual(chipBox.y + chipBox.height);
+    expect(Math.round(menuBox.y - chipBox.y)).toBe(40);
+    expect(Math.round(menuBox.x)).toBe(Math.round(chipBox.x));
+    expect(menuBox.y).toBeGreaterThan(headingBox.y + headingBox.height);
+    expect(Math.round(menuBox.width)).toBe(490);
+    // 19 個主題排成兩欄；「未分類」在兩欄下面。
+    const unclassified = text("paper:paper.classification.unclassified");
+    const topicBoxes = await Promise.all(
+      NAMES.topics.map(({ name: topicName }) => menu.getByRole("checkbox", { name: topicName, exact: true }).locator("xpath=ancestor::label[1]").boundingBox()),
+    );
+    const columns = new Set(topicBoxes.map((box) => Math.round(box!.x)));
+    expect(columns.size).toBe(2);
+    const lowest = Math.max(...topicBoxes.map((box) => box!.y + box!.height));
+    const other = (await menu.getByRole("checkbox", { name: unclassified, exact: true }).locator("xpath=ancestor::label[1]").boundingBox())!;
+    expect(other.y).toBeGreaterThanOrEqual(lowest);
+  });
+
+  test("desktop: the menu background is opaque (no text shows through)", async ({ page }) => {
+    const { menu } = await openTopicMenu(page);
+    const alpha = await menu.evaluate((element) => {
+      const color = getComputedStyle(element).backgroundColor;
+      const parts = color.match(/[\d.]+/g)!.map(Number);
+      return parts.length === 4 ? parts[3] : 1;
+    });
+    expect(alpha).toBe(1);
+  });
+
+  test("phone: scrolled to the bottom, the sheet's title and close button stay on screen; unclassified has a hairline above it", async ({ page }) => {
+    await open(page, "?topic=erp", PHONE);
+    await page.getByRole("button", { name: fill(text("search:search.mobile.filterCount"), { count: 1 }), exact: true }).click();
+    const sheet = page.getByRole("dialog");
+    await sheet.getByRole("button", { name: text("search:search.filter.topic") }).click();
+    const unclassified = sheet.getByRole("checkbox", { name: text("paper:paper.classification.unclassified"), exact: true });
+    await expect(unclassified).toBeAttached();
+    // 「未分類」上面一條髮線（設計稿 optsOf：手機與桌機同一段）。
+    const hairline = await unclassified.locator("xpath=ancestor::label[1]/..").evaluate((element) => getComputedStyle(element).borderTopWidth);
+    expect(hairline).toBe("1px");
+    await page.evaluate(() => Promise.all(document.getAnimations().map((animation) => animation.finished.catch(() => undefined))));
+    const scrolled = await sheet.evaluate((element) => {
+      element.scrollTop = element.scrollHeight;
+      return element.scrollTop;
+    });
+    // 真的捲動了，這條測試才有測到。
+    expect(scrolled).toBeGreaterThan(0);
+    for (const target of [sheet.getByRole("heading", { name: text("search:search.mobile.filter") }), sheet.getByRole("button", { name: text("search:search.mobile.close") })]) {
+      const box = (await target.boundingBox())!;
+      expect(box.y).toBeGreaterThanOrEqual(0);
+      expect(box.y + box.height).toBeLessThanOrEqual(PHONE.height);
+    }
+  });
+
+  test("desktop: a menu too tall for the window still opens below its chip, not beside it", async ({ page }) => {
+    // 期刊選單 490px 一欄、14 本，在 1280×900 放不下；沒有「一律在下方」的設定時會翻到旁邊、蓋住別的標籤（epic-3l PR E 審查 Y2）。
+    await open(page);
+    const chip = page.locator("[data-filter-chip]").filter({ hasText: text("search:search.filter.journal") });
+    await chip.click();
+    const menu = page.getByRole("dialog");
+    await expect(menu).toBeVisible();
+    await page.evaluate(() => Promise.all(document.getAnimations().map((animation) => animation.finished.catch(() => undefined))));
+    const menuBox = (await menu.boundingBox())!;
+    const chipBox = (await chip.locator(":scope > span").boundingBox())!;
+    // 放在標籤下方 40px 時真的放不下，這條測試才有測到（和選單實際放在哪裡無關）。
+    expect(chipBox.y + 40 + menuBox.height).toBeGreaterThan(DESKTOP.height);
+    expect(Math.round(menuBox.y - chipBox.y)).toBe(40);
+    expect(Math.round(menuBox.x)).toBe(Math.round(chipBox.x));
+  });
+
+  test("phone: moving through the sheet with Tab, the focused control is never hidden under the fixed top or bottom bar", async ({ page, browserName }) => {
+    // webkit 的 Tab 預設只走表單元件，Alt+Tab 才走全部（同 a11y-floor.spec.ts）。
+    const forward = browserName === "webkit" ? "Alt+Tab" : "Tab";
+    const backward = browserName === "webkit" ? "Alt+Shift+Tab" : "Shift+Tab";
+    await open(page, "?topic=erp", PHONE);
+    await page.getByRole("button", { name: fill(text("search:search.mobile.filterCount"), { count: 1 }), exact: true }).click();
+    const sheet = page.getByRole("dialog");
+    await sheet.getByRole("button", { name: text("search:search.filter.topic") }).click();
+    await expect(sheet.getByRole("checkbox", { name: text("paper:paper.classification.unclassified"), exact: true })).toBeAttached();
+    await page.evaluate(() => Promise.all(document.getAnimations().map((animation) => animation.finished.catch(() => undefined))));
+    const first = sheet.getByRole("button", { name: text("search:search.filter.journal") });
+    const last = sheet.getByRole("button", { name: fill(text("search:search.mobile.apply"), { count: count((at) => INDEX.topics[at]?.includes("erp") === true) }) });
+    /** 焦點所在的元件被固定的頂部或底部那一列蓋住多少（頂部、底部裡面的元件不算）；回傳 null 是沒被蓋住。 */
+    const covered = () =>
+      page.evaluate(() => {
+        const active = document.activeElement as HTMLElement;
+        const popup = active.closest<HTMLElement>("[role=dialog]")!;
+        const bars = [...popup.querySelectorAll<HTMLElement>("*")].filter((element) => getComputedStyle(element).position === "sticky");
+        const head = bars[0]!;
+        const foot = bars[bars.length - 1]!;
+        if (head.contains(active) || foot.contains(active)) return null;
+        const box = active.getBoundingClientRect();
+        const top = head.getBoundingClientRect().bottom;
+        const bottom = foot.getBoundingClientRect().top;
+        if (box.top >= top - 0.5 && box.bottom <= bottom + 0.5) return null;
+        const label = (active.closest("label") ?? active).textContent?.trim() || active.getAttribute("aria-label");
+        return `${label} ${Math.round(box.top)}-${Math.round(box.bottom)} (visible ${Math.round(top)}-${Math.round(bottom)}, scrollTop ${popup.scrollTop})`;
+      });
+    const hidden: string[] = [];
+    let scrolled = 0;
+    await first.focus();
+    for (const [key, end] of [
+      [forward, last],
+      [backward, first],
+    ] as const) {
+      for (let step = 0; step < 100; step += 1) {
+        await page.keyboard.press(key);
+        const where = await covered();
+        if (where !== null) hidden.push(`${key}: ${where}`);
+        scrolled = Math.max(scrolled, await sheet.evaluate((element) => element.scrollTop));
+        if (await end.evaluate((element) => element === document.activeElement)) break;
+      }
+      await expect(end).toBeFocused();
+    }
+    // 真的捲動了，這條測試才有測到。
+    expect(scrolled).toBeGreaterThan(0);
+    expect(hidden).toEqual([]);
+  });
+
+  for (const edge of ["top", "bottom"] as const) {
+    test(`phone: Tab onto a control that is partly under the fixed ${edge} bar scrolls it fully into view`, async ({ page, browserName }) => {
+      // epic-3n PR A（epic-3l E-4）：firefox 在焦點元件「一部分看得到」時不照捲動留白捲動，被固定的那一列蓋住一截
+      //（CI 量到「主題」上半部被蓋 35px）。上面那條照順序按 Tab，蓋到多少要看字型與版面，不一定碰得到；
+      // 這條先把捲動位置擺成剛好蓋住 10px，再從旁邊那一個按一次 Tab／Shift+Tab 移過去，一定碰得到。
+      const key = edge === "top" ? (browserName === "webkit" ? "Alt+Shift+Tab" : "Shift+Tab") : browserName === "webkit" ? "Alt+Tab" : "Tab";
+      await open(page, "?topic=erp", PHONE);
+      await page.getByRole("button", { name: fill(text("search:search.mobile.filterCount"), { count: 1 }), exact: true }).click();
+      const sheet = page.getByRole("dialog");
+      await sheet.getByRole("button", { name: text("search:search.filter.topic") }).click();
+      await expect(sheet.getByRole("checkbox", { name: text("paper:paper.classification.unclassified"), exact: true })).toBeAttached();
+      await page.evaluate(() => Promise.all(document.getAnimations().map((animation) => animation.finished.catch(() => undefined))));
+      // 目標：頂部是「主題」那一列（從它的下一個可以按的元件往回按）；底部是捲動區最後一個可以按的元件（從前一個往下按）。
+      const placed = await sheet.evaluate((popup, which) => {
+        const bars = [...popup.querySelectorAll<HTMLElement>("*")].filter((element) => getComputedStyle(element).position === "sticky");
+        const head = bars[0]!;
+        const foot = bars[bars.length - 1]!;
+        const controls = [...popup.querySelectorAll<HTMLElement>("button, input, a[href]")].filter(
+          (element) => !head.contains(element) && !foot.contains(element),
+        );
+        const topicAt = controls.findIndex((element) => element.getAttribute("aria-controls") !== null && element.textContent?.includes("ERP"));
+        const last = controls.length - 1;
+        const target = which === "top" ? controls[topicAt]! : controls[last]!;
+        const from = which === "top" ? controls[topicAt + 1]! : controls[last - 1]!;
+        popup.scrollTop = 0;
+        const box = target.getBoundingClientRect();
+        if (which === "top") popup.scrollTop = box.top - head.getBoundingClientRect().bottom + 10;
+        else popup.scrollTop = box.bottom - foot.getBoundingClientRect().top - 10;
+        const after = target.getBoundingClientRect();
+        target.setAttribute("data-probe-target", "");
+        from.focus({ preventScroll: true });
+        const covered =
+          which === "top" ? head.getBoundingClientRect().bottom - after.top : after.bottom - foot.getBoundingClientRect().top;
+        return { covered: Math.round(covered), fromFocused: document.activeElement === from };
+      }, edge);
+      // 擺好了：目標真的被蓋住 10px、焦點在旁邊那一個上，這條才有測到。
+      expect(placed).toEqual({ covered: 10, fromFocused: true });
+      await page.keyboard.press(key);
+      const target = sheet.locator("[data-probe-target]");
+      await expect(target).toBeFocused();
+      const hiddenBy = await sheet.evaluate((popup, which) => {
+        const bars = [...popup.querySelectorAll<HTMLElement>("*")].filter((element) => getComputedStyle(element).position === "sticky");
+        const box = document.activeElement!.getBoundingClientRect();
+        return which === "top"
+          ? Math.round(bars[0]!.getBoundingClientRect().bottom - box.top)
+          : Math.round(box.bottom - bars[bars.length - 1]!.getBoundingClientRect().top);
+      }, edge);
+      expect(hiddenBy).toBeLessThanOrEqual(0);
+    });
+  }
 });
 
 for (const width of [1440, 1000, 500]) {

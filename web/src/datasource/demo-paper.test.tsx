@@ -213,8 +213,15 @@ const MEMBER_ONLY = [
   "paper:paper.library.added",
   "paper:paper.library.remove",
   "paper:paper.summary.reported",
-  "paper:paper.state.failed",
 ];
+/**
+ * 「沒有產生成功」那一行：成員版的 paper.state.failed 和示範站的 demo.paper.failed 現在同字（55 條第 31 條），
+ * 用字分不出來，改看那一行標的 key（data-text-key，見 parts.tsx 的 useFailedText）。
+ */
+const MEMBER_FAILED_KEY = 'data-text-key="paper:paper.state.failed"';
+const DEMO_FAILED_KEY = 'data-text-key="demo:demo.paper.failed"';
+/** 放進正規表示式用：key 裡的「.」要跳脫，不然會對到任何字。 */
+const DEMO_FAILED_KEY_PATTERN = DEMO_FAILED_KEY.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 /**
  * 成員版論文頁設計稿上有、之後的 Story 才做的字（修正分類、回報錯誤、我的 PDF、找相似論文、引用、頁尾……；
  * design-compare 的 --expect-missing 清單 paper.txt，同一份）。示範站現在一個都不會有：成員才有的那幾個永遠不會有，
@@ -233,6 +240,11 @@ function matchesLine(paragraph: string, line: string): boolean {
 function expectNoMemberFeatures(html: string) {
   expect(LATER_OR_MEMBER_ONLY.length).toBeGreaterThan(5);
   for (const key of MEMBER_ONLY) expect(html, key).not.toContain(t(key));
+  expect(html).not.toContain(MEMBER_FAILED_KEY);
+  // 兩句之後又不同字時，照原本用字比對（直接寫 t(...)、沒標 key 的也抓得到）。
+  if (t("paper:paper.state.failed") !== t("demo:demo.paper.failed")) {
+    expect(html).not.toContain(t("paper:paper.state.failed"));
+  }
   const paragraphs = [...html.matchAll(/>([^<]+)</g)].map((match) => match[1]!.replace(/\s+/g, "")).filter((text) => text !== "");
   expect(paragraphs.length).toBeGreaterThan(5);
   for (const line of LATER_OR_MEMBER_ONLY) {
@@ -271,7 +283,12 @@ describe("demo paper page", () => {
     expect(html).toContain('data-demo-paper="noAbstract"');
     expect(html).toContain(t("paper:paper.noAbstract.message"));
     expect(html).toContain(t("paper:paper.noAbstract.publisher"));
-    expect(html).toContain(t("paper:paper.model.noAbstract"));
+    // 研究模型那一塊的那一行（不看整頁的字：「沒有摘要」和書目上的標記同字）。
+    const model = html.slice(html.indexOf('data-block="research_model"'));
+    expect(model).toMatch(/^data-block="research_model" data-block-state="no_input"/);
+    expect(model.slice(0, model.indexOf("</section>"))).toMatch(
+      new RegExp(`<div data-block-state="no_input"[^>]*>${t("paper:paper.model.noAbstract")}</div>`),
+    );
     expect(html).toContain(t("paper:paper.biblio.noAbstract"));
     // 只根據標題的分類（範例這一篇是標題分類）。
     expect(html).toContain(t("paper:paper.classification.titleOnly"));
@@ -320,9 +337,31 @@ describe("demo paper page", () => {
     const { html, raw } = await render(12);
     expect(raw.full?.zh_summary.state).toBe("failed");
     expect(html).toContain(`>${t("demo:demo.paper.failed")}<`);
-    expect(html).not.toContain(t("paper:paper.state.failed"));
+    const summary = html.slice(html.indexOf('data-block="zh_summary"'));
+    expect(summary.slice(0, summary.indexOf("</section>"))).toMatch(new RegExp(`${DEMO_FAILED_KEY_PATTERN}[^>]*>${t("demo:demo.paper.failed")}<`));
+    expect(html).not.toContain(MEMBER_FAILED_KEY);
     expect(html).toContain('data-block="zh_summary" data-block-state="failed"');
     expectNoMemberFeatures(html);
+  });
+
+  it("research model not generated successfully: that line is tagged with the demo key", async () => {
+    // 範例沒有研究模型 failed 的那一篇：拿第 1 篇，只把研究模型改成 failed。
+    const id = byNumber(1).biblio.biblio.id;
+    const paper = (await loadPaper(id, changePaper(id, (raw) => {
+      (raw.full as Json).research_model = { state: "failed", value: null, provenance: null };
+    })))!;
+    const index = await loadDemoPaperIndex(await loadDemoManifest(fixtureFetch()), fixtureFetch());
+    const html = renderToStaticMarkup(
+      <RouterContextProvider router={router}>
+        <DemoPaperPage paper={paper} names={index.names} />
+      </RouterContextProvider>,
+    );
+    const model = html.slice(html.indexOf('data-block="research_model"'));
+    expect(model).toMatch(/^data-block="research_model" data-block-state="failed"/);
+    expect(model.slice(0, model.indexOf("</section>"))).toMatch(
+      new RegExp(`${DEMO_FAILED_KEY_PATTERN}[^>]*>${t("demo:demo.paper.failed")}<`),
+    );
+    expect(html).not.toContain(MEMBER_FAILED_KEY);
   });
 
   it("no design yet (Kevin 2026-11-25): pending uses the member sentence, failed classification is the label plus the line, null classification is hidden", async () => {
@@ -344,7 +383,9 @@ describe("demo paper page", () => {
     expect(failedLine).toMatch(/^data-block="classification" data-block-state="failed"/);
     expect(failedLine).toContain(`>${t("paper:paper.classification.label")}<`);
     expect(failedLine).toContain(`>${t("demo:demo.paper.failed")}<`);
-    expect(failed.html).not.toContain(t("paper:paper.state.failed"));
+    // 分類那一行（「分類」＋這一句）標的是示範站的 key。
+    expect(failedLine).toMatch(new RegExp(`^data-block="classification" data-block-state="failed" ${DEMO_FAILED_KEY_PATTERN}`));
+    expect(failed.html).not.toContain(MEMBER_FAILED_KEY);
 
     const hidden = await render(9);
     expect(hidden.raw.biblio.classification).toBeNull();
