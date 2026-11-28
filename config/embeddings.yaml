@@ -52,15 +52,17 @@ lock_timeout_seconds: 2
 # 其他 worker 占用中（還沒回應）的估計，再加上這次嘗試，換成 neurons 超過
 # daily_free_neurons × stop_at_ratio 就不送、停下、記警告、不算失敗，留到下一次續跑。
 # Workers AI 的向量回應沒有用量欄位，「今天的用量」是 api_call 記的自己估的 token。
-# 停在 90% 留下的 10% 只在「實際 token ≤ 估計 × 1 ÷ 0.9（約 1.11 倍）」時擋得住超額：
-# 實際 token 比估計多出 11% 以上，就可能用超過免費額度。所以 20 篇試跑後要先校正下面的除數。
+# 背景向量化（每週更新、回填）停在 80%，留兩成給搜尋的查詢向量；搜尋可以用到 100%
+# （Story 4.1，Kevin 2026-11-27 決定）。
+# 搜尋用到 100% 時，估計的誤差沒有餘裕：實際 token 比估計多，就可能用超過免費額度。
+# 所以 20 篇試跑後要先校正下面的除數。
 quota:
   # 價格頁：Workers AI 每天免費 10,000 neurons。
   daily_free_neurons: 10000
   # 價格頁表格：這個模型 1,075 neurons／百萬 input token（$0.012／百萬 input token）。
   neurons_per_million_input_tokens: 1075
-  # 到每日免費額度的幾成就停（字串，避免浮點數失真）。
-  stop_at_ratio: "0.9"
+  # 背景向量化到每日免費額度的幾成就停（字串，避免浮點數失真）；搜尋不看這個數字，用到 100%。
+  stop_at_ratio: "0.8"
   verified_on: 2026-11-15
   source_url: https://developers.cloudflare.com/workers-ai/platform/pricing/
 

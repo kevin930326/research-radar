@@ -105,6 +105,12 @@ class ErrorCode(StrEnum):
     # 占用額度時等額度鎖超過 lock_timeout：這一批不送（已取得資格的 run 改 failed），其他論文照做
     EMBED_QUOTA_LOCK_TIMEOUT = "embed_quota_lock_timeout"
 
+    # 檢索（`radar/services/retrieval.py`，Story 4.1、ADR-0005）：搜尋要把查詢轉成向量，下面兩種
+    # 情況不降級成只用關鍵字，回固定的代碼（api 的錯誤回應用它）
+    SEARCH_QUOTA_EXHAUSTED = "search_quota_exhausted"  # Workers AI 今天的額度用完了（沒有送出）
+    # Workers AI 連不上或回了錯（重試用完、設定錯、回應不對、等額度鎖逾時）
+    SEARCH_EMBEDDING_UNAVAILABLE = "search_embedding_unavailable"
+
     # Batch 送出（`radar/services/llm_batches.py`，Story 2.9、ADR-0041）
     # 送出前重建請求，和規劃時記的 run 鍵對不上（摘要、prompt 版本、模型或設定版本變了，或論文
     # 沒了）：那筆 run 改 failed、不送（`derivation_run.failure_reason`）；整批都對不上時批次

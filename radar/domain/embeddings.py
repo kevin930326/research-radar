@@ -378,6 +378,37 @@ class EmbeddingQuotaReachedError(Exception):
         super().__init__("今天的估計用量加上這次嘗試會超過停下的比例")
 
 
+class EmbeddingCallOutcome(StrEnum):
+    """`api_call.outcome`：一次查詢向量（`embed_query`）嘗試的結果（遷移 0023、ADR-0005 的
+    「2026-11 實作更新」）。背景向量化（`embed_documents`）不記（NULL）。"""
+
+    SUCCEEDED = "succeeded"  # 回了 2xx
+    UNREACHABLE = "unreachable"  # 沒有回應（連線錯誤、逾時），或 408、429、5xx
+    REJECTED = "rejected"  # 其他 4xx（設定錯、請求不合法）
+    QUOTA_EXHAUSTED = "quota_exhausted"  # 今天的額度放不下，沒有送出
+    # 沒有送出的其他失敗：等額度鎖逾時、adapter 第一次送出前就停下（總時限已到）等（審查 H2）。
+    NOT_SENT = "not_sent"
+
+
+# 沒有送出的結果代碼：沒有狀態碼、估計 token 是 0。
+_UNSENT_OUTCOMES: Final = frozenset(
+    {EmbeddingCallOutcome.QUOTA_EXHAUSTED, EmbeddingCallOutcome.NOT_SENT}
+)
+
+# adapter 會重試的狀態碼（`adapters/workers_ai` 的 `RETRY_STATUSES` 加上 5xx）：當成「連不上」。
+_UNREACHABLE_STATUSES: Final = frozenset({408, 429})
+
+
+def embedding_call_outcome(http_status: int | None) -> EmbeddingCallOutcome:
+    """送出的一次嘗試的結果代碼：沒有回應、408、429、5xx 是 `unreachable`；2xx 是 `succeeded`；
+    其他是 `rejected`。"""
+    if http_status is None or http_status in _UNREACHABLE_STATUSES or http_status >= 500:
+        return EmbeddingCallOutcome.UNREACHABLE
+    if 200 <= http_status < 300:
+        return EmbeddingCallOutcome.SUCCEEDED
+    return EmbeddingCallOutcome.REJECTED
+
+
 @dataclass(frozen=True, slots=True)
 class EmbeddingApiCall:
     """一次向量化 HTTP 嘗試的紀錄（`api_call`，`source`＝`workers_ai`）。
@@ -385,16 +416,25 @@ class EmbeddingApiCall:
     - `http_status`：這次嘗試的狀態碼；沒有回應（連線錯誤、逾時）是 None。
     - `estimated_input_tokens`：自己估的 token（Workers AI 不回報用量）；失敗也照記。
     - `cost_usd` 一律記 0：在免費額度內，用量到設定的比例就停（ADR-0040）。
+    - `outcome`：查詢向量的結果代碼（`EmbeddingCallOutcome`）；背景向量化是 None。
+      `quota_exhausted` 與 `not_sent` 是沒有送出：`http_status` 一定是 None、估計 token 一定是 0。
     """
 
     operation: str
     http_status: int | None
     estimated_input_tokens: int
     called_at: datetime
+    outcome: EmbeddingCallOutcome | None = None
 
     def __post_init__(self) -> None:
         if self.operation not in (EMBED_DOCUMENTS_OPERATION, EMBED_QUERY_OPERATION):
             raise ValueError(f"不認得的操作：{self.operation!r}")
+        if self.outcome is not None:
+            object.__setattr__(self, "outcome", EmbeddingCallOutcome(self.outcome))
+        if self.outcome in _UNSENT_OUTCOMES and (
+            self.http_status is not None or self.estimated_input_tokens != 0
+        ):
+            raise ValueError(f"{self.outcome} 是沒有送出：http_status 要是 None、估計 token 要是 0")
         if self.http_status is not None and (
             type(self.http_status) is not int or not 100 <= self.http_status <= 599
         ):
@@ -458,6 +498,14 @@ class StoredEmbedding:
     vector: tuple[float, ...]
     input_sha256: str
     run_id: uuid.UUID
+
+
+@dataclass(frozen=True, slots=True)
+class VisiblePaperEmbedding:
+    """看得到的一篇論文與它在某個模型的向量（找相似論文的起點，Story 4.1）；沒有向量是 None。"""
+
+    paper_id: uuid.UUID
+    embedding: StoredEmbedding | None
 
 
 @dataclass(frozen=True, slots=True)
