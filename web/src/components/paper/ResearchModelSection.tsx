@@ -13,6 +13,7 @@ import {
   SectionHeading,
   badgeProvenance,
   useFailedText,
+  type FailedText,
 } from "./parts";
 
 // 研究模型（EXPERIENCE.md 畫面 8 第 4 點；設計稿 paper.html「正常狀態」的第三塊）：
@@ -139,18 +140,24 @@ export function ResearchModelSection({ block, firstBadge }: ResearchModelSection
   // 有內容但一個構面都沒有，和 empty 一樣是「摘要沒有寫出假設」。
   const noConstructs = block.state === "ready" && !withoutProvenance && (block.value?.constructs.length ?? 0) === 0;
   let line: string | null;
+  // 用到「沒有產生成功」那一句時，順便記下它的 key（畫在那一行的 data-text-key）。
+  let lineKey: FailedText["key"] | undefined;
+  const failedLine = (): string => {
+    lineKey = failedText.key;
+    return failedText.text;
+  };
   switch (block.state) {
     case "ready":
-      line = withoutProvenance ? failedText : noConstructs ? t("paper.model.empty") : null;
+      line = withoutProvenance ? failedLine() : noConstructs ? t("paper.model.empty") : null;
       break;
     case "empty":
-      line = withoutProvenance ? failedText : t("paper.model.empty");
+      line = withoutProvenance ? failedLine() : t("paper.model.empty");
       break;
     case "no_input":
       line = t("paper.model.noAbstract");
       break;
     case "failed":
-      line = failedText;
+      line = failedLine();
       break;
     case "pending_interactive":
     case "pending_batch":
@@ -181,7 +188,11 @@ export function ResearchModelSection({ block, firstBadge }: ResearchModelSection
         ) : (
           heading
         )}
-        <BlockLine state={block.state} provenance={withoutProvenance ? "missing" : undefined}>
+        <BlockLine
+          state={block.state}
+          provenance={withoutProvenance ? "missing" : undefined}
+          textKey={lineKey}
+        >
           {line}
         </BlockLine>
       </section>

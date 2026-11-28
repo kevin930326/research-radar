@@ -64,8 +64,14 @@ const LATER_OR_MEMBER_ONLY = readFileSync(fileURLToPath(new URL("../../docs/ux/r
 
 /** 成員才有的功能（State Patterns「全站共用」的「示範站的後端功能」：不存在，不顯示入口）。 */
 async function expectNoMemberFeatures(page: Page): Promise<void> {
-  for (const key of ["paper:paper.library.heading", "paper:paper.library.add", "paper:paper.summary.reported", "paper:paper.state.failed"]) {
+  for (const key of ["paper:paper.library.heading", "paper:paper.library.add", "paper:paper.summary.reported"]) {
     await expect(page.getByText(text(key)), key).toHaveCount(0);
+  }
+  // 「沒有產生成功」：成員版與示範站現在同字（55 條第 31 條），改看那一行標的 key（parts.tsx 的 useFailedText）。
+  await expect(page.locator("[data-text-key='paper:paper.state.failed']")).toHaveCount(0);
+  // 兩句之後又不同字時，照原本用字比對（直接寫 t(...)、沒標 key 的也抓得到）。
+  if (text("paper:paper.state.failed") !== text("demo:demo.paper.failed")) {
+    await expect(page.getByText(text("paper:paper.state.failed"))).toHaveCount(0);
   }
   expect(LATER_OR_MEMBER_ONLY.length).toBeGreaterThan(5);
   // 畫面上每一段字（文字節點，去掉空白）；清單一行一段，行尾「…」只比開頭（和比對工具相同的比法）。
@@ -142,7 +148,11 @@ test.describe("demo paper page", () => {
     await openPaper(page, 12);
     await expect(page.locator("[data-block='zh_summary']")).toHaveAttribute("data-block-state", "failed");
     await expect(page.locator("[data-block='zh_summary']")).toContainText(text("demo:demo.paper.failed"));
-    await expect(page.getByText(text("paper:paper.state.failed"))).toHaveCount(0);
+    // 兩站同字，用 key 分辨：那一行是示範站的 demo.paper.failed，整頁沒有成員版的 paper.state.failed。
+    await expect(page.locator("[data-block='zh_summary'] [data-text-key='demo:demo.paper.failed']")).toHaveText(
+      text("demo:demo.paper.failed"),
+    );
+    await expect(page.locator("[data-text-key='paper:paper.state.failed']")).toHaveCount(0);
   });
 
   test("classification tags go to the paper list with that one condition", async ({ page }) => {
