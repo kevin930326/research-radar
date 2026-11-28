@@ -6,7 +6,6 @@ import { useTranslation } from "react-i18next";
 
 import { DataDateBar } from "../components/DataDateBar";
 import { NewTabNote } from "../components/ExternalArrow";
-import { PaperTitle } from "../components/PaperText";
 import { ClassificationTagLink, UnclassifiedTag } from "../components/paper/PaperBiblio";
 import { FilterMenu, type ClearTarget } from "../components/search/FilterMenus";
 import { JournalOptions, MatchSwitch, MethodOptions, TopicOptions, YearOptions, hasMatchSwitch } from "../components/search/FilterLists";
@@ -22,7 +21,7 @@ import {
 } from "../components/search/filters";
 import { AnyMatchLink, ConditionTag, ErrorBar, More } from "../components/search/ListParts";
 import { FilterSheet, type FilterSection } from "../components/search/MobileFilters";
-import { OpenFullText } from "../components/search/PaperRows";
+import { OpenFullText, RowTitle } from "../components/search/PaperRows";
 import { CrossIcon, FilterOption, NoticeIcon, formatYears } from "../components/search/parts";
 import { datasource } from "../datasource";
 import type { DemoPaperRow } from "../datasource/types";
@@ -58,12 +57,11 @@ import {
 //   本週新增、期刊、主題、方法、年份、有摘要、有完整內容）。
 // - 篩選列：標題關鍵字（輸入就套用）、期刊、年份、主題、方法四個選單（和找論文共用的選單與選項）、
 //   「有摘要」「有完整內容」；從連結帶進來的「本週新增」是可以移除的條件標籤。篩選都寫進網址（AD-21）。
-// - 每列：標題、期刊 · 年份、AI 整理＋主題與方法的標籤、「● 有完整內容」或「○ 只有書目」、開啟全文（DOI）。
+// - 每列：標題（連到示範站的論文頁、同一個視窗；和成員版找論文的列同一個零件 RowTitle）、期刊 · 年份、AI 整理＋主題與方法的標籤、「● 有完整內容」或「○ 只有書目」、開啟全文（DOI）。
 //   一次顯示 manifest 設定的篇數（50），最下面「再載入 50 篇」（「目前顯示幾篇」寫進網址）。
 // - 載入中：8 列骨架，篩選列照樣可以改；錯誤：「沒有載入成功」＋「重新整理」；
 //   篩到 0 篇：「沒有符合的論文」＋「清除篩選」。
 // 和設計稿、EXPERIENCE.md 不同的地方（理由與要 Kevin 決定的，寫在決定紀錄 3.14-decisions.md）：
-// - 標題不是連結：示範站的論文頁（Story 3.9）還沒做（AR-67）。
 // - 期刊顯示全名（EXPERIENCE.md 決定第 92 項；匯出的分類表也只有全名，沒有縮寫）；選單裡的期刊同找論文只有全名。
 // - 手機的論文列「開啟全文」靠右（決定第 94 項）。
 // - 「AI 整理」是不能點的字（設計稿的樣子），不是論文頁那種可以點開說明的標章。
@@ -554,10 +552,7 @@ function DemoPaperRowItem({ row, names }: { row: DemoPaperRow; names: DisplayNam
       className="group border-t border-hairline py-[22px] split:flex split:items-start split:justify-between split:gap-12 split:py-6"
     >
       <div className="min-w-[0px] split:max-w-reading-width split:flex-1">
-        {/* 標題不是連結：示範站的論文頁（Story 3.9）還沒做（AR-67）。 */}
-        <PaperTitle as="h3" size="row" wrap="pretty" className="max-split:text-s20">
-          {row.title}
-        </PaperTitle>
+        <RowTitle id={row.id} title={row.title} />
         <div className="mt-2 split:mt-[10px] split:flex split:flex-wrap split:items-center split:gap-x-[20px] split:gap-y-2">
           <RowMeta row={row} names={names} />
           <RowTags row={row} names={names} />

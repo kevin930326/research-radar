@@ -131,11 +131,15 @@ test.describe("demo paper list", () => {
     await expect(rows(page)).toHaveCount(TOTAL);
   });
 
-  test("row titles are not links yet; open full text goes to the DOI; tags filter the list", async ({ page }) => {
+  test("each row title links to that paper; open full text goes to the DOI; tags filter the list", async ({ page }) => {
     await open(page);
     await expect(rows(page)).toHaveCount(PAGE_SIZE);
-    // 論文頁（Story 3.9）還沒做（AR-67）：標題不是連結。
-    await expect(page.locator("[data-paper-row] h3 a")).toHaveCount(0);
+    // 每一列的標題都是連到那一篇論文頁（/papers/<那一列的 ID>）的連結（epic-3l D9）。先確認比到的列數（不能空跑）。
+    const titleLinks = await rows(page).evaluateAll((items) =>
+      items.map((item) => ({ id: item.getAttribute("data-paper-row"), href: item.querySelector("h3 a")?.getAttribute("href") ?? null })),
+    );
+    expect(titleLinks).toHaveLength(PAGE_SIZE);
+    for (const { id, href } of titleLinks) expect(href).toBe(`/papers/${id}`);
     // 開啟全文的連結和分片裡後端寫的 doi_url 一樣、開新分頁。只比畫面上有的列；先確認比到的篇數（不能空跑）。
     const onPage = new Set(await rows(page).evaluateAll((items) => items.map((item) => item.getAttribute("data-paper-row")!)));
     const checked = SHARD.filter((paper) => onPage.has(paper.biblio.biblio.id));
