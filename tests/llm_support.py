@@ -16,12 +16,14 @@ from typing import Any
 
 import psycopg
 
-from radar.adapters.fake import FakeLlmProvider
+from radar.adapters.fake import FakeEmbeddingProvider, FakeLlmProvider
 from radar.config import (
     load_budget_config,
     load_context_values,
     load_domain_config,
+    load_embedding_config,
     load_models_config,
+    load_retrieval_config,
     load_taxonomy,
     load_trend_config,
 )
@@ -44,7 +46,11 @@ from radar.domain.pricing import ModelsConfig
 from radar.domain.prompts import PROMPT_FILE_PATTERN, parse_prompt_file
 from radar.domain.scope import ScopeSettings
 from radar.entrypoints.api.library import LibraryRoutes, build_library_routes
-from radar.entrypoints.api.paper_list import PaperListRoutes, build_paper_list_routes
+from radar.entrypoints.api.paper_list import (
+    PaperListRoutes,
+    PaperSearchSetup,
+    build_paper_list_routes,
+)
 from radar.entrypoints.api.papers import PaperRoutes, build_paper_routes
 from radar.repo.db import Database
 from radar.repo.papers import upsert_by_external_id
@@ -245,14 +251,42 @@ def library_routes(database: Database) -> LibraryRoutes:
     return build_library_routes(database, paper_page_setup().journals)
 
 
-def paper_list_routes(database: Database) -> PaperListRoutes:
+def paper_search_setup(
+    provider: Any = None, *, now: datetime = datetime(2026, 11, 18, 12, 0, tzinfo=UTC)
+) -> PaperSearchSetup:
+    """搜尋與找相似論文的設定（Story 4.1 PR B）：檢索與向量化的設定用真的 `config/`；provider
+    預設是假的（`FakeEmbeddingProvider`，設定的模型與維度），不呼叫真的 Workers AI。"""
+    environ = {"RADAR_CONFIG_DIR": str(ROOT / "config")}
+    embedding = load_embedding_config(environ)
+    return PaperSearchSetup(
+        embedding=embedding,
+        retrieval=load_retrieval_config(environ),
+        cloud_policy=CloudPolicy(),
+        provider=(
+            FakeEmbeddingProvider(dimensions=embedding.dimensions, model_id=embedding.model_id)
+            if provider is None
+            else provider
+        ),
+        clock=lambda: now,
+    )
+
+
+def paper_list_routes(
+    database: Database, *, search: PaperSearchSetup | None = None
+) -> PaperListRoutes:
     """和正式的 `main()` 同一個組法的找論文清單與計數方塊路由（期刊、分類表與趨勢設定用真的
-    `config/`，Story 3.13、3.15）。"""
+    `config/`，Story 3.13、3.15）；搜尋的設定沒給時用 `paper_search_setup()`（Story 4.1 PR B）。"""
     setup = paper_page_setup()
     params = build_trend_params(
         load_trend_config({"RADAR_CONFIG_DIR": str(ROOT / "config")}), setup.journals
     )
-    return build_paper_list_routes(database, setup.journals, setup.taxonomy, params)
+    return build_paper_list_routes(
+        database,
+        setup.journals,
+        setup.taxonomy,
+        params,
+        paper_search_setup() if search is None else search,
+    )
 
 
 def execute(db: TestDatabase, sql: str, *params: object) -> list[tuple[Any, ...]]:
