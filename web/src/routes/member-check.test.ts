@@ -1,8 +1,8 @@
 // 找論文切回視窗時的確認（PR #114 收尾，epic-3l PR C）：確認中途丟例外時，等著的加入／移出不能永遠停在「送出中」（G5）；
 // focus 與 visibilitychange 一起來時只確認一次（S4）；同一次切回只確認一次、離開再回來才是新的一次（X3）；確認不會 reject（X4）；
 // 認出換人之後清快取失敗也當成換了人（X1）。不用畫面：直接呼叫切回視窗時跑的那個函式（memberCheckOnReturn）。
-import { QueryClient, QueryObserver } from "@tanstack/react-query";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { QueryClient, QueryObserver, onlineManager } from "@tanstack/react-query";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { datasource } from "../datasource";
 import type { LibrarySource, PaperList } from "../datasource/types";
@@ -10,7 +10,7 @@ import { toApiParams } from "../pages/search-filters";
 import { sendLibraryChange } from "./library-change";
 import { memberCheckOnReturn } from "./member";
 import { filtersKey, paperListKey } from "./paper-queries";
-import { meQuery, pendingMemberCheck } from "./session";
+import { meQuery, memberGeneration, pendingMemberCheck } from "./session";
 
 const A = { member_id: "00000000-0000-4000-8000-00000000000a", display_name: "Test Member A" };
 const B = { member_id: "00000000-0000-4000-8000-00000000000b", display_name: "Test Member B" };
@@ -263,5 +263,195 @@ describe("checking the member when coming back to the window (#114 follow-up)", 
     await Promise.all([confirm("visible", false), confirm("focus")]);
     expect(me).toHaveBeenCalledTimes(1);
     stop();
+  });
+});
+
+describe("the previous check is paused while offline (epic-3n C-5)", () => {
+  // 讓出一次給瀏覽器的事件迴圈：真的 focus／visibilitychange、點擊都是在這種空檔進來的（不是等固定的時間）。
+  const nextEvent = () => new Promise<void>((done) => setTimeout(done, 0));
+  // 每條測試結束一定會做的收尾（斷言失敗也一樣）：停掉暫留列的訂閱、解除 QueryClient 的掛載、連線狀態還原成開始時的樣子。
+  let cleanups: (() => void)[] = [];
+  let wasOnline = true;
+  beforeEach(() => {
+    wasOnline = onlineManager.isOnline();
+  });
+  afterEach(() => {
+    for (const cleanup of cleanups.reverse()) cleanup();
+    cleanups = [];
+    onlineManager.setOnline(wasOnline);
+    vi.restoreAllMocks();
+  });
+  function mountedClient(): QueryClient {
+    const queryClient = new QueryClient();
+    queryClient.mount();
+    queryClient.setQueryData(meQuery.queryKey, A);
+    const stop = holdRow(queryClient);
+    cleanups.push(() => {
+      stop();
+      void queryClient.cancelQueries();
+      queryClient.unmount();
+    });
+    return queryClient;
+  }
+
+  it("C-5: another member is found after coming back online: an add clicked during the second return is not sent", async () => {
+    const queryClient = mountedClient();
+    vi.spyOn(datasource.session!, "me").mockResolvedValue(B);
+    const swap = vi.fn();
+    const { confirm, leave } = memberCheckOnReturn(queryClient, { swap, toLogin: () => {}, reload: () => {} });
+    // 離線：第一次確認的「我是誰」被暫停（不是「還在路上」）。
+    onlineManager.setOnline(false);
+    const first = confirm("visible");
+    await nextEvent();
+    expect(queryClient.getQueryState(meQuery.queryKey)?.fetchStatus).toBe("paused");
+    // 切走再切回：第二次確認等著第一次。
+    leave();
+    const second = confirm("visible");
+    await nextEvent();
+    const source = addSource();
+    const sent = sendLibraryChange(queryClient, source, PAPER, "add", () => {}, { expectedMemberId: A.member_id });
+    await nextEvent();
+    onlineManager.setOnline(true);
+    await Promise.all([first, second]);
+    // 修之前：第二次再問一次，快取已經是乙，判成「同一個人」，這筆加入帶甲送出（add 被呼叫 1 次）。
+    expect(await sent).toBe("failed");
+    expect(source.add).not.toHaveBeenCalled();
+    expect(swap).toHaveBeenCalledTimes(1);
+    expect(memberGeneration(queryClient)).toBe(1);
+  });
+
+  it("C-5: the sign-in expired while offline: back to the sign-in page once, and the waiting add is not sent", async () => {
+    const queryClient = mountedClient();
+    const me = vi.spyOn(datasource.session!, "me").mockResolvedValue(null);
+    const toLogin = vi.fn();
+    const { confirm, leave } = memberCheckOnReturn(queryClient, { swap: () => {}, toLogin, reload: () => {} });
+    onlineManager.setOnline(false);
+    const first = confirm("visible");
+    await nextEvent();
+    leave();
+    const second = confirm("visible");
+    await nextEvent();
+    const source = addSource();
+    const sent = sendLibraryChange(queryClient, source, PAPER, "add", () => {}, { expectedMemberId: A.member_id });
+    await nextEvent();
+    onlineManager.setOnline(true);
+    await Promise.all([first, second]);
+    expect(await sent).toBe("failed");
+    expect(source.add).not.toHaveBeenCalled();
+    // 修之前：第二次再問一次（me 2 次），又回登入頁一次（toLogin 2 次）。
+    expect(me).toHaveBeenCalledTimes(1);
+    expect(toLogin).toHaveBeenCalledTimes(1);
+  });
+
+  it("the sign-in expired and clearing the cache failed once: the second return still goes to the sign-in page, the add is not sent", async () => {
+    const queryClient = mountedClient();
+    const me = vi.spyOn(datasource.session!, "me").mockResolvedValue(null);
+    // 第一次清快取失敗（同 G5），之後正常。
+    vi.spyOn(queryClient, "cancelQueries").mockRejectedValueOnce(new Error("cancel failed"));
+    const toLogin = vi.fn();
+    const { confirm, leave } = memberCheckOnReturn(queryClient, { swap: () => {}, toLogin, reload: () => {} });
+    onlineManager.setOnline(false);
+    const first = confirm("visible");
+    await nextEvent();
+    leave();
+    const second = confirm("visible");
+    await nextEvent();
+    const source = addSource();
+    const sent = sendLibraryChange(queryClient, source, PAPER, "add", () => {}, { expectedMemberId: A.member_id });
+    await nextEvent();
+    onlineManager.setOnline(true);
+    await Promise.all([first, second]);
+    expect(await sent).toBe("failed");
+    expect(source.add).not.toHaveBeenCalled();
+    // 沿用「換了人」但上一次沒走到回登入頁：這一次再問、回登入頁一次（只沿用不重做時是 0 次）。
+    expect(me).toHaveBeenCalledTimes(2);
+    expect(toLogin).toHaveBeenCalledTimes(1);
+  });
+
+  it("a third return while the first check's request is out again (the second is only waiting): the first check's add is not sent", async () => {
+    const queryClient = mountedClient();
+    let answerFirst: (member: typeof B) => void = () => {};
+    vi.spyOn(datasource.session!, "me")
+      .mockReturnValueOnce(new Promise((done) => (answerFirst = done)))
+      .mockResolvedValue(B);
+    const swap = vi.fn();
+    const { confirm, leave } = memberCheckOnReturn(queryClient, { swap, toLogin: () => {}, reload: () => {} });
+    onlineManager.setOnline(false);
+    const first = confirm("visible");
+    await nextEvent();
+    // 第一次確認還沒有結果時按的加入：等的是第一次。
+    const source = addSource();
+    const sent = sendLibraryChange(queryClient, source, PAPER, "add", () => {}, { expectedMemberId: A.member_id });
+    await nextEvent();
+    leave();
+    const second = confirm("visible");
+    await nextEvent();
+    // 恢復連線：第一次的請求重新送出、還在路上；這時又切走再切回。
+    onlineManager.setOnline(true);
+    await nextEvent();
+    expect(queryClient.getQueryState(meQuery.queryKey)?.fetchStatus).toBe("fetching");
+    leave();
+    const third = confirm("visible");
+    await nextEvent();
+    answerFirst(B);
+    await Promise.all([first, second, third]);
+    // 修之前：第三次以為路上的請求是第二次的，取消它；第一次因此問不到（unknown），等著它的加入帶甲送出。
+    expect(source.add).not.toHaveBeenCalled();
+    expect(await sent).toBe("failed");
+    expect(swap).toHaveBeenCalledTimes(1);
+  });
+
+  it("the first check's request never comes back after going online: a third return takes over, the waiting add is not sent and gets an answer", async () => {
+    const queryClient = mountedClient();
+    vi.spyOn(datasource.session!, "me")
+      .mockReturnValueOnce(new Promise<never>(() => {}))
+      .mockResolvedValue(B);
+    const swap = vi.fn();
+    const { confirm, leave } = memberCheckOnReturn(queryClient, { swap, toLogin: () => {}, reload: () => {} });
+    onlineManager.setOnline(false);
+    const first = confirm("visible");
+    await nextEvent();
+    const source = addSource();
+    const sent = sendLibraryChange(queryClient, source, PAPER, "add", () => {}, { expectedMemberId: A.member_id });
+    await nextEvent();
+    leave();
+    const second = confirm("visible");
+    await nextEvent();
+    // 恢復連線：第一次的請求重新送出，之後一直不回來。
+    onlineManager.setOnline(true);
+    await nextEvent();
+    expect(queryClient.getQueryState(meQuery.queryKey)?.fetchStatus).toBe("fetching");
+    leave();
+    const third = confirm("visible");
+    // 修之前（75f0a3e）：第三次只等第二次、第二次等第一次，全部永遠沒有結果（這一行等不到，測試逾時）。
+    await Promise.all([first, second, third]);
+    expect(await sent).toBe("failed");
+    expect(source.add).not.toHaveBeenCalled();
+    expect(swap).toHaveBeenCalledTimes(1);
+  });
+
+  it("the sign-in expired while offline and the window came back three times: back to the sign-in page once", async () => {
+    const queryClient = mountedClient();
+    const me = vi.spyOn(datasource.session!, "me").mockResolvedValue(null);
+    const toLogin = vi.fn();
+    const { confirm, leave } = memberCheckOnReturn(queryClient, { swap: () => {}, toLogin, reload: () => {} });
+    onlineManager.setOnline(false);
+    const checks = [confirm("visible")];
+    for (let again = 0; again < 2; again += 1) {
+      await nextEvent();
+      leave();
+      checks.push(confirm("visible"));
+    }
+    await nextEvent();
+    const source = addSource();
+    const sent = sendLibraryChange(queryClient, source, PAPER, "add", () => {}, { expectedMemberId: A.member_id });
+    await nextEvent();
+    onlineManager.setOnline(true);
+    await Promise.all(checks);
+    expect(await sent).toBe("failed");
+    expect(source.add).not.toHaveBeenCalled();
+    // 修之前：第三次看到第二次「沒處理過」，又問一次、又回登入頁一次（me 2 次、toLogin 2 次）。
+    expect(me).toHaveBeenCalledTimes(1);
+    expect(toLogin).toHaveBeenCalledTimes(1);
   });
 });
