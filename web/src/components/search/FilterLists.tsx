@@ -71,26 +71,33 @@ export function JournalOptions({ state, size }: { state: FilterState; size: Opti
   );
 }
 
-/** 主題：每一個主題，最後隔一條髮線是「未分類」。 */
-export function TopicOptions({ state, size }: { state: FilterState; size: OptionSize }) {
+/**
+ * 主題：每一個主題，最後隔一條髮線是「未分類」（桌機選單與手機滿版都有這條髮線：設計稿 filter-match-mode.html 的 optsOf
+ * 桌機、手機同一段，上外距 4px、上內距 4px）。
+ * twoColumns：示範站桌機的主題選單排成兩欄（設計稿 filter-match-mode.html 示範站桌機、papers-demo.html：
+ * columns: 2、欄距 0，每個選項不從中間斷開），「未分類」在兩欄下面、整列寬。
+ */
+export function TopicOptions({ state, size, twoColumns = false }: { state: FilterState; size: OptionSize; twoColumns?: boolean }) {
   const { t } = useTranslation("paper");
   const name = useId();
   const selected = new Set(state.params.topic?.split(",") ?? []);
   const toggle = (key: string) => () => state.update((current) => ({ ...current, topic: toggleKey(current.topic, key) }));
   return (
     <>
-      {(state.names?.topics ?? []).map((topic) => (
-        <FilterOption
-          key={topic.key}
-          type="checkbox"
-          name={name}
-          size={size}
-          checked={selected.has(topic.key)}
-          onChange={toggle(topic.key)}
-          label={topic.name}
-        />
-      ))}
-      <div className={size === "menu" ? "mt-1 border-t border-hairline pt-1" : ""}>
+      <div className={twoColumns ? "columns-2 gap-x-[0px] [&>*]:break-inside-avoid" : undefined}>
+        {(state.names?.topics ?? []).map((topic) => (
+          <FilterOption
+            key={topic.key}
+            type="checkbox"
+            name={name}
+            size={size}
+            checked={selected.has(topic.key)}
+            onChange={toggle(topic.key)}
+            label={topic.name}
+          />
+        ))}
+      </div>
+      <div className="mt-1 border-t border-hairline pt-1">
         <FilterOption
           type="checkbox"
           name={name}
