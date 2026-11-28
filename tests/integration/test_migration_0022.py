@@ -69,7 +69,7 @@ def test_downgrade_to_0021_drops_the_table_and_upgrade_restores_it(db: TestDatab
 
     migrate(db)
 
-    assert db.revisions() == {"0022"}
+    assert db.revisions() == {"0023"}
     tables, indexes = _tables_and_indexes(db)
     assert "demo_export" in tables
     assert IN_PROGRESS_INDEX in indexes
