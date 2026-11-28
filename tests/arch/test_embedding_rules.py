@@ -128,7 +128,7 @@ def _public_functions() -> list[tuple[str, inspect.Signature]]:
 
 def test_every_vector_query_requires_model_id_as_a_keyword_without_default() -> None:
     functions = _public_functions()
-    assert [name for name, _ in functions] == ["search_paper_vectors"]
+    assert [name for name, _ in functions] == ["search_paper_vectors", "search_papers"]
     for name, signature in functions:
         parameter = signature.parameters.get("model_id")
         assert parameter is not None, f"{name} 沒有 model_id"

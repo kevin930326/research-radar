@@ -189,7 +189,8 @@ def build_paper_source(settings: Settings, openalex_config: OpenAlexConfig) -> O
 def build_embedding_provider(
     settings: Settings, embedding_config: EmbeddingConfig
 ) -> WorkersAiEmbeddingProvider:
-    """Cloudflare Workers AI 的 `EmbeddingProvider`（模型、維度、端點來自 embeddings.yaml）。
+    """Cloudflare Workers AI 的 `EmbeddingProvider`（模型、維度、端點、查詢向量的時限來自
+    embeddings.yaml）。
 
     用完要 `close()`（或用 `with`）。不連線。
 
@@ -229,6 +230,9 @@ def build_embedding_provider(
         model_id=embedding_config.model_id,
         dimensions=embedding_config.dimensions,
         query_instruction=embedding_config.query_instruction,
+        # 搜尋的查詢向量用較短的時限與重試（embeddings.yaml 的 query_request；沒設定時
+        # 和 api 一樣）。
+        query_api=embedding_config.query_api,
     )
 
 

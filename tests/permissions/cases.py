@@ -10,9 +10,15 @@
   查得到。
 - 不碰任何成員資料、或只回呼叫者自己的資料：寫 `exempt="理由"` 與 `status=成員 B 打它的預期狀態碼`；
   登記的函式照樣要寫（金絲雀測試用，狀態碼不是預期的就失敗）。
+
+同一個端點換一組參數就走另一條讀資料的路（例如 `GET /api/v1/papers` 的 `q`、`similar_to`）時，在
+`PARAMETER_CASES` 另外登記（名稱 → 用例）；它們和登記表跑同一套換人與金絲雀測試
+（`tests/integration/test_permissions.py`）。
 """
 
 import uuid
+from collections.abc import Mapping
+from typing import Final
 
 from radar.domain.judgments import ActorRole, classification_fix
 from radar.domain.library import AddedVia
@@ -22,9 +28,12 @@ from radar.repo.judgments import create_judgment_event
 from radar.repo.library import create_library_item
 from radar.services.library import remove_library_item
 from tests.integration.test_effective_views import insert_classification, insert_header
-from tests.llm_support import create_hidden_paper, execute
+from tests.integration.test_retrieval import put_vector
+from tests.llm_support import create_hidden_paper, create_paper, execute
 from tests.permissions.framework import (
     CANARY,
+    Endpoint,
+    EndpointCase,
     EndpointRegistry,
     EndpointRequest,
     PermissionContext,
@@ -260,11 +269,8 @@ def _restore_library_item(ctx: PermissionContext) -> EndpointRequest:
 # --- 找論文清單（Story 3.13）---------------------------------------------------------------------
 
 
-@REGISTRY.case("GET", "/api/v1/papers")
-def _paper_list(ctx: PermissionContext) -> EndpointRequest:
-    # A 的私人論文（標題有金絲雀）在 A 的文獻庫：A 的 `personal` 清單有它；B 的 `personal` 是空清單
-    # （total 0、沒有下一頁）。發佈一個快照：空清單的 `snapshot` 要是物件（框架不收 null）。
-    _private_paper_in_owner_library(ctx)
+def _publish_a_snapshot(ctx: PermissionContext) -> None:
+    """發佈一個快照：空清單的 `snapshot` 要是物件（框架不收 null）。"""
     test_database = ctx.extras["test_database"]
     ((run_id,),) = execute(
         test_database, "INSERT INTO weekly_run (status) VALUES ('published') RETURNING id"
@@ -275,4 +281,77 @@ def _paper_list(ctx: PermissionContext) -> EndpointRequest:
         " VALUES (1, %s, 'published', '2026-11-16T02:30:00Z')",
         run_id,
     )
+
+
+@REGISTRY.case("GET", "/api/v1/papers")
+def _paper_list(ctx: PermissionContext) -> EndpointRequest:
+    # A 的私人論文（標題有金絲雀）在 A 的文獻庫：A 的 `personal` 清單有它；B 的 `personal` 是空清單
+    # （total 0、沒有下一頁）。
+    _private_paper_in_owner_library(ctx)
+    _publish_a_snapshot(ctx)
     return EndpointRequest(query={"scope": "personal"})
+
+
+# --- 找論文清單的搜尋與找相似論文（Story 4.1 PR B）------------------------------------------------
+
+_PAPERS = Endpoint("GET", "/api/v1/papers")
+# 向量的模型與維度：測試的 app 用真的 `config/embeddings.yaml`（遷移 0015 登記了這個模型）。
+_MODEL = "@cf/qwen/qwen3-embedding-0.6b"
+_DIMENSIONS = 1024
+
+
+def _unit_vector(step: int) -> list[float]:
+    """測試自己編的向量：第一維是 1、第二維是 0.05 × `step`（step 越大越不像 step 0）。"""
+    return [1.0, 0.05 * step] + [0.0] * (_DIMENSIONS - 2)
+
+
+def _paper_search(ctx: PermissionContext) -> EndpointRequest:
+    # 一句話搜尋 A 的文獻庫（`personal`）：A 的私人論文標題有 hidden 與金絲雀，全文檢索腿找得到；
+    # B 的 `personal` 是空清單（total 0），也不會在日誌或回應裡看到金絲雀。查詢向量用假的 provider。
+    # B 自己的文獻庫也放一篇和查詢無關的論文（沒有向量、字也對不上；審查 M8）：真的走了搜尋，B 才是
+    # 空清單；`q` 被忽略、退回舊清單時，B 會拿到自己那一篇，換人測試就失敗。
+    _private_paper_in_owner_library(ctx)
+    database = ctx.extras["database"]
+    unrelated = create_hidden_paper(
+        database,
+        doi="10.9/other-unrelated",
+        openalex_id="W987654323",
+        title="Governance of shared ledgers",
+        abstract="We survey ledger governance.",
+    )
+    with database.transaction() as connection:
+        item = create_library_item(
+            connection,
+            SystemViewer(),
+            owner_id=uuid.UUID(ctx.other.member_id),
+            paper_id=unrelated,
+            added_via=AddedVia.UPLOAD,
+        )
+    assert item is not None
+    _publish_a_snapshot(ctx)
+    return EndpointRequest(query={"q": "hidden paper", "scope": "personal"})
+
+
+def _paper_similar(ctx: PermissionContext) -> EndpointRequest:
+    # 找相似論文的起點是 A 的私人論文（只在 A 的文獻庫，標題有金絲雀）：B 看不到起點，和不存在一樣
+    # 404；A 在 `lab` 找得到一篇全實驗室看得到的相似論文。用 `lab` 而不是 `personal`：起點的可見條件
+    # 漏掉時，B 會拿到那篇相似論文（不是空清單），換人測試才抓得到（`personal` 時 B 的文獻庫是空的，
+    # 漏掉也只是空清單）。不呼叫 provider。
+    anchor = _private_paper_in_owner_library(ctx)
+    neighbour = create_paper(
+        ctx.extras["database"],
+        doi="10.9/lab-neighbour",
+        openalex_id="W987654322",
+        title="A lab-visible neighbour paper",
+    )
+    test_database = ctx.extras["test_database"]
+    put_vector(test_database, anchor, _unit_vector(0), model=_MODEL)
+    put_vector(test_database, neighbour, _unit_vector(1), model=_MODEL)
+    _publish_a_snapshot(ctx)
+    return EndpointRequest(query={"similar_to": str(anchor), "scope": "lab"})
+
+
+PARAMETER_CASES: Final[Mapping[str, EndpointCase]] = {
+    "GET /api/v1/papers?q": EndpointCase(_PAPERS, _paper_search),
+    "GET /api/v1/papers?similar_to": EndpointCase(_PAPERS, _paper_similar),
+}

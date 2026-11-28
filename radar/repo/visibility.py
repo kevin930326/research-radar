@@ -15,7 +15,9 @@ _ALIAS = re.compile(r"[a-z_][a-z0-9_]{0,62}")
 _COUNTED_ALIAS = "visible_counted"
 # `MemberViewer` 的 EXISTS 子查詢裡 `library_item` 的別名；外面的別名同樣不能和它相同。
 _LIBRARY_ALIAS = "visible_library"
-_SUBQUERY_ALIASES = frozenset({_COUNTED_ALIAS, _LIBRARY_ALIAS})
+# `visible_demo_papers` 的 EXISTS 子查詢裡 `demo_full_paper` 的別名。
+_DEMO_ALIAS = "visible_demo"
+_SUBQUERY_ALIASES = frozenset({_COUNTED_ALIAS, _LIBRARY_ALIAS, _DEMO_ALIAS})
 
 
 def _member_literal(member_id: uuid.UUID) -> str:
@@ -80,6 +82,31 @@ def visible_lab_papers(viewer: Viewer, *, alias: str) -> str:
     """
     visible = visible_papers(viewer, alias=alias)  # 別名與讀者身分在這裡檢查
     return f'("{alias}".lab_visible AND {visible})'
+
+
+def visible_demo_papers(viewer: Viewer, *, alias: str) -> str:
+    """示範站有完整內容的論文（view `demo_full_paper`）的 SQL 條件：檢索的 `demo` 範圍（Story 4.1、
+    ADR-0005 第 2 點）。`alias` 是查詢裡 `paper` 表的名稱或別名。
+
+    **只給 `PublicViewer`**（示範站產生器）：成員與系統工作不組查詢、直接丟錯（型別檢查之外的
+    執行時防線）。回的條件再接上 `visible_papers(viewer)`（`demo_full_paper` 本身就在
+    `counted_paper` 裡，所以和訪客看得到的論文一致）。
+
+    Raises:
+        ValueError: `alias` 不是小寫識別字，或和可見條件子查詢裡的別名相同。
+        TypeError: `viewer` 不是 `PublicViewer`。
+    """
+    _checked_alias(alias)
+    if alias in _SUBQUERY_ALIASES:
+        raise ValueError(f"別名不能是 {alias!r}（可見條件的子查詢用了這個名稱）")
+    if not isinstance(viewer, PublicViewer):
+        raise TypeError(f"demo 範圍只給 PublicViewer（現在是 {type(viewer).__name__}）")
+    visible = visible_papers(viewer, alias=alias)
+    return (
+        f"(EXISTS (SELECT 1 FROM demo_full_paper AS {_DEMO_ALIAS}"
+        f' WHERE {_DEMO_ALIAS}.id = "{alias}".id)'
+        f" AND {visible})"
+    )
 
 
 def visible_in_own_library(viewer: Viewer, *, alias: str = "paper") -> str:

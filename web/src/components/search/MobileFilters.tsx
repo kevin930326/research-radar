@@ -1,6 +1,6 @@
 import { Dialog } from "@base-ui/react/dialog";
 import { Link } from "@tanstack/react-router";
-import { useId, useRef, useState, type ReactNode } from "react";
+import { useCallback, useId, useRef, useState, type FocusEvent, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 
 import { DESKTOP_QUERY, useCloseAcrossBreakpoint } from "../../hooks/use-close-across-breakpoint";
@@ -107,6 +107,48 @@ export function FilterSheet({ count, total, sections, extra, clear, children, ro
   const [section, setSection] = useState<string | null>(firstKey);
   const closedByBreakpoint = useRef(false);
   const popupRef = useRef<HTMLDivElement>(null);
+  const headRef = useRef<HTMLDivElement>(null);
+  const footRef = useRef<HTMLDivElement>(null);
+  // 頂部與底部那一列固定在捲動區的上下兩端；用 Tab 移動時，瀏覽器只把焦點捲進「捲動區」裡，不知道上下各黏著一條，
+  // 選項會被捲到它們底下看不到（WCAG 2.4.11、ADR-0037；epic-3l PR E 審查 Y1）。捲動留白（scroll-padding）等於這兩條
+  // 實際的高度：量出來的，不是寫死的值（底部那一列有「任一個／同時符合」時會變高），高度變了就重量。
+  const attachPopup = useCallback((popup: HTMLDivElement | null) => {
+    popupRef.current = popup;
+    const head = headRef.current;
+    const foot = footRef.current;
+    // 單元測試的環境（jsdom）沒有 ResizeObserver。
+    if (popup === null || head === null || foot === null || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(() => {
+      popup.style.scrollPaddingTop = `${head.offsetHeight}px`;
+      popup.style.scrollPaddingBottom = `${foot.offsetHeight}px`;
+    });
+    observer.observe(head);
+    observer.observe(foot);
+    return () => {
+      observer.disconnect();
+      popupRef.current = null;
+    };
+  }, []);
+  // firefox 只在焦點完全看不到時才照捲動留白捲動：焦點落在上半部（或下半部）一部分被固定那一列蓋住的元件上時，它不捲
+  //（epic-3l PR E 的 CI、epic-3n PR A 在 firefox 重現）。所以焦點一進來就自己量：被蓋住多少，捲動區就往回（或往下）捲多少。
+  // focus 事件比瀏覽器自己把焦點捲進來還早，所以三種引擎都是這段先捲；瀏覽器接著照捲動留白檢查，已經看得到就不再捲。
+  // 只看鍵盤的焦點（見下面）。
+  const keepFocusInView = (event: FocusEvent<HTMLDivElement>) => {
+    const popup = event.currentTarget;
+    const head = headRef.current;
+    const foot = footRef.current;
+    const target = event.target;
+    // 捲動區自己拿到焦點（例如焦點所在的元件被拆掉時）不算：它的上緣永遠在頂部列底下，量了會白白往上捲。
+    if (head === null || foot === null || target === popup || head.contains(target) || foot.contains(target)) return;
+    // 只管鍵盤移過來的焦點：用滑鼠或手指點的時候，瀏覽器（Mac 的 Safari、webkit）在按下那一刻就給焦點，這時一捲，
+    // 放開時元件已經不在指頭底下，點擊就落空（epic-3n PR A 在本機 webkit 量到）。點的那一個本來就在看得到的地方。
+    if (!target.matches(":focus-visible")) return;
+    const box = target.getBoundingClientRect();
+    const top = head.getBoundingClientRect().bottom;
+    const bottom = foot.getBoundingClientRect().top;
+    if (box.top < top) popup.scrollTop -= top - box.top;
+    else if (box.bottom > bottom) popup.scrollTop += box.bottom - bottom;
+  };
   const bodyId = useId();
   const firstSectionRef = useRef<HTMLButtonElement>(null);
   const focusFirst = () => firstSectionRef.current?.focus();
@@ -137,7 +179,8 @@ export function FilterSheet({ count, total, sections, extra, clear, children, ro
       </div>
       <Dialog.Portal>
         <Dialog.Popup
-          ref={popupRef}
+          ref={attachPopup}
+          onFocus={keepFocusInView}
           finalFocus={() => {
             // 關閉動畫（0.25 秒）結束時才還焦點。
             // 焦點已經移到別處（關的同時點了或聚焦在別的東西上）就留在那裡，不拉回「篩選」（同 FilterMenus.tsx 的 finalFocus，
@@ -155,7 +198,12 @@ export function FilterSheet({ count, total, sections, extra, clear, children, ro
           className="fixed inset-[0px] z-10 overflow-y-auto bg-background leading-normal tracking-0 text-text-primary transition-transform duration-250 data-[ending-style]:translate-y-full data-[starting-style]:translate-y-full split:hidden"
         >
           <div className="mx-auto flex min-h-full w-full max-w-[430px] flex-col">
-            <div className="flex items-center justify-between border-b border-hairline py-[10px] pr-2 pl-[20px]">
+            {/* 頂部（「篩選」與關閉）固定在上面，捲動時只有中間的選項動（底部那一列本來就固定；epic-3k 量到、epic-3l PR E 修）。
+                z-10：選項是 relative，排在後面會畫到固定的頂部上面。 */}
+            <div
+              ref={headRef}
+              className="sticky top-[0px] z-10 flex items-center justify-between border-b border-hairline bg-background py-[10px] pr-2 pl-[20px]"
+            >
               <Dialog.Title className="font-title-zh text-section-title-zh text-s22 leading-normal text-text-primary">
                 {t("search.mobile.filter")}
               </Dialog.Title>
@@ -189,7 +237,7 @@ export function FilterSheet({ count, total, sections, extra, clear, children, ro
               );
             })}
             {extra}
-            <div className="sticky bottom-[0px] mt-auto border-t border-hairline bg-background">
+            <div ref={footRef} className="sticky bottom-[0px] mt-auto border-t border-hairline bg-background">
               {footer}
               <div className="flex items-center justify-between gap-4 px-[20px] py-[14px]">
               {count > 0 ? (

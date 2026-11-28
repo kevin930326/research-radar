@@ -935,15 +935,25 @@ export type listPapersResponse200 = {
   status: 200
 }
 
+export type listPapersResponse404 = {
+  data: ProblemDetails
+  status: 404
+}
+
+export type listPapersResponse503 = {
+  data: ProblemDetails
+  status: 503
+}
+
 export type listPapersResponseDefault = {
   data: ProblemDetails
-  status: Exclude<HTTPStatusCodes, 200>
+  status: Exclude<HTTPStatusCodes, 200 | 404 | 503>
 }
 
 export type listPapersResponseSuccess = (listPapersResponse200) & {
   headers: Headers;
 };
-export type listPapersResponseError = (listPapersResponseDefault) & {
+export type listPapersResponseError = (listPapersResponse404 | listPapersResponse503 | listPapersResponseDefault) & {
   headers: Headers;
 };
 
@@ -978,6 +988,11 @@ export const getListPapersUrl = (params?: ListPapersParams,) => {
  * 「且」；`cursor` 是上一頁的 `next_cursor`。條件不合法
  * 422，沒登入 401；`X-Radar-Expected-Member` 和登入的成員不同 409 `member_changed`、格式
  * 不對 400 `expected_member_invalid`（每一列含 `in_my_library`，ADR-0055）。
+ *
+ * `q`（一句話搜尋）或 `similar_to`（找和這篇相似的論文，不含它自己）有其中一個時照相關度排，
+ * 篩選與範圍照常；兩個都給 422。`q` 不收的字 422；`similar_to` 的論文不存在或看不到 404；
+ * Workers AI 今天的額度用完 503 `search_quota_exhausted`、連不上 503
+ * `search_embedding_unavailable`（都不降級成只用關鍵字）。
  * @summary List Papers
  */
 export const listPapers = async (params?: ListPapersParams, options?: RequestInit): Promise<listPapersResponse> => {

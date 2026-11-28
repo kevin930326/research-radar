@@ -123,7 +123,7 @@ def test_upgrade_on_existing_rows_starts_them_not_eligible(db: TestDatabase) -> 
 
     migrate(db)
 
-    assert db.revisions() == {"0022"}
+    assert db.revisions() == {"0024"}
     [new_values] = execute(
         db,
         "SELECT primary_license, publisher_ids, publisher_names, demo_eligible"
@@ -161,7 +161,7 @@ def test_downgrade_to_0020_and_upgrade_again_keeps_the_paper(db: TestDatabase) -
 
     migrate(db)
 
-    assert db.revisions() == {"0022"}
+    assert db.revisions() == {"0024"}
     assert set(NEW_COLUMNS) <= _paper_columns(db)
     [new_values] = execute(
         db,

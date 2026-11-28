@@ -644,6 +644,34 @@ test.describe("search: filters", () => {
     await expect(page.locator("[data-mobile-filter]")).toBeFocused();
   });
 
+  test("desktop: focus moved elsewhere while a filter menu closes at phone width stays there, not handed to the phone filter button", async ({ page }) => {
+    // epic-3n C-4：跨寬度關上時也照「焦點已經移到別處就不搶」（FilterMenus.tsx 的 finalFocus，同手機滿版篩選的 X7）。
+    await openSearch(page, "?topic=e_commerce");
+    const topic = chip(page, "search:search.filter.topic");
+    await topic.click();
+    await expect(page.getByRole("checkbox", { name: ECOMMERCE })).toBeVisible();
+    await crossWidthAndFocus(page, topic, PHONE, "header a");
+    await expect(page.getByRole("checkbox", { name: ECOMMERCE })).toHaveCount(0);
+    await expect(page.locator("header a").first()).toBeFocused();
+    await expect(page.locator("header a").first()).toBeVisible();
+  });
+
+  test("desktop: focus back on the menu's own chip while it closes at phone width is still handed to the phone filter button", async ({ page }) => {
+    // epic-3n PR A 審查（盲審、邊界）：桌機選單不是模態的，焦點回到自己的標籤時選單還開著；縮到手機寬度標籤就藏起來，
+    // 焦點不能留在那裡，要交給「篩選」。三種引擎都會在標籤藏起來時先把焦點移到 body，finalFocus 照常交出去（探針量過）；
+    // 這條守住結果，哪天「焦點在別處就不搶」的判斷改壞了會紅。
+    await openSearch(page, "?topic=e_commerce");
+    const topic = chip(page, "search:search.filter.topic");
+    await topic.click();
+    await expect(page.getByRole("checkbox", { name: ECOMMERCE })).toBeVisible();
+    await topic.focus();
+    await expect(page.getByRole("checkbox", { name: ECOMMERCE })).toBeVisible();
+    await page.setViewportSize(PHONE);
+    await expect(page.getByRole("checkbox", { name: ECOMMERCE })).toHaveCount(0);
+    await expect(page.locator("[data-mobile-filter]")).toBeFocused();
+    await expect(page.locator("[data-mobile-filter]")).toBeVisible();
+  });
+
   test("desktop: clearing after a custom year range shows no limit and the default boxes again", async ({ page }) => {
     // 確認審查 N1 的桌機版：年份選單裡自訂後，按頁面上的「清除篩選」，再打開年份選單是「不限」與預設年份。
     const thisYear = taipeiYear();
@@ -1133,6 +1161,25 @@ test.describe("search: any or all topics (Story 3.20)", () => {
     await expect(rows(page)).toHaveCount(ANY_TOTAL);
     await expect(page.locator("h1")).toBeFocused();
   });
+});
+
+// 篩選選單的外框（epic-3l PR E）：和示範站同一個選單元件。找論文的主題選單照設計稿是 260px 一欄（不改兩欄），
+// 一樣從標籤下方展開、底色不透明。
+test("desktop: the topic menu opens below its chip in one 260px column with an opaque background", async ({ page }) => {
+  await openSearch(page, "?topic=erp");
+  const topicChip = chip(page, "search:search.filter.topic");
+  await topicChip.click();
+  const menu = page.getByRole("dialog");
+  await expect(menu).toBeVisible();
+  await page.evaluate(() => Promise.all(document.getAnimations().map((animation) => animation.finished.catch(() => undefined))));
+  const menuBox = (await menu.boundingBox())!;
+  const chipBox = (await topicChip.locator(":scope > span").boundingBox())!;
+  expect(Math.round(menuBox.y - chipBox.y)).toBe(40);
+  expect(Math.round(menuBox.width)).toBe(260);
+  const lefts = await menu.locator("label").evaluateAll((labels) => [...new Set(labels.map((label) => Math.round(label.getBoundingClientRect().x)))]);
+  expect(lefts).toHaveLength(1);
+  const color = await menu.evaluate((element) => getComputedStyle(element).backgroundColor);
+  expect(color).toBe("rgb(5, 6, 9)");
 });
 
 for (const width of [1440, 1000, 500]) {

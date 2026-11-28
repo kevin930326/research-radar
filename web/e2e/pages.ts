@@ -37,8 +37,9 @@ export function demoPaperId(number: number): string {
 /**
  * 示範站的論文頁（Story 3.9）：範例匯出裡版面不同的幾篇。有完整內容（1）、授權允許但沒有摘要（2）、只有書目（3）、
  * 中文重點沒有產生成功（12）、示範站可用但摘要不公開、分類是 null（9，沒有設計稿）。
+ * 57、53、49 是示範站論文清單預設排序的第 1～3 列：清單的標題連到論文頁（epic-3l D9），站內連結檢查點標題會到這幾篇。
  */
-export const DEMO_PAPER_PAGES = [1, 2, 3, 12, 9].map((number) => `/papers/${demoPaperId(number)}`);
+export const DEMO_PAPER_PAGES = [1, 2, 3, 12, 9, 57, 53, 49].map((number) => `/papers/${demoPaperId(number)}`);
 
 /**
  * 選單打開、「任一個／同時符合」切換出現的狀態（Story 3.20）：網址上的條件已經選了兩個以上，打開後才看得到切換，

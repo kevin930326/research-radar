@@ -9,7 +9,8 @@ ADR-0040，Story 2.8）。
   同一篇論文不同模型的向量各一列、並存。
 - 向量的相似度查詢不在這裡：只在 `repo/retrieval.py`（AD-11）。
 - 寫入一律用 `text()` SQL；函式收呼叫端開好的交易連線，不 commit。讀取函式第一個參數是 `viewer`，
-  只給系統工作（`visible_to_system_only`）。
+  只給系統工作（`visible_to_system_only`）；唯一的例外是找相似論文的起點
+  `find_visible_paper_embedding`（任何讀者身分，接 `visible_papers`，Story 4.1）。
 """
 
 import uuid
@@ -42,12 +43,13 @@ from radar.domain.embeddings import (
     EmbeddingCandidate,
     NewEmbedding,
     StoredEmbedding,
+    VisiblePaperEmbedding,
     halfvec_literal,
     parse_halfvec,
 )
 from radar.domain.papers import AbstractSource, PaperOrigin
 from radar.domain.processing import ProcessingFacts
-from radar.domain.viewer import SystemViewer
+from radar.domain.viewer import SystemViewer, Viewer
 from radar.repo.models import Base
 from radar.repo.visibility import visible_papers, visible_to_system_only
 
@@ -304,6 +306,45 @@ def find_paper_embedding(
         input_sha256=row["input_sha256"],
         run_id=row["run_id"],
     )
+
+
+def find_visible_paper_embedding(
+    viewer: Viewer, connection: Connection, paper_id: uuid.UUID, *, model_id: str
+) -> VisiblePaperEmbedding | None:
+    """`viewer` 看得到、沒有被排除的這篇論文，與它在 `model_id` 的向量（找相似論文的起點，
+    Story 4.1、ADR-0005 第 7 點）。論文不存在、看不到、被排除都回 None（同一條路，不透露論文
+    存在）；看得到但沒有這個模型的向量時，`embedding` 是 None。一定要指定 `model_id`（AD-12）。
+
+    `find_paper_embedding` 只給系統工作、不看可見範圍與排除；成員的請求一律走這一個，所以成員不能拿
+    看不到的論文的向量去找相似論文。
+    """
+    visible = visible_papers(viewer, alias="paper")
+    row = (
+        connection.execute(
+            text(
+                "SELECT paper.id AS paper_id, e.item_id, e.model_id, e.vector::text AS vector,"
+                " e.input_sha256, e.run_id"
+                " FROM paper LEFT JOIN embedding AS e ON e.item_type = :item_type"
+                " AND e.item_id = paper.id AND e.model_id = :model_id"
+                f" WHERE {visible} AND paper.excluded_reason IS NULL AND paper.id = :paper_id"
+            ),
+            {"item_type": PAPER_ITEM_TYPE, "paper_id": paper_id, "model_id": model_id},
+        )
+        .mappings()
+        .one_or_none()
+    )
+    if row is None:
+        return None
+    embedding = None
+    if row["item_id"] is not None:
+        embedding = StoredEmbedding(
+            item_id=row["item_id"],
+            model_id=row["model_id"],
+            vector=parse_halfvec(row["vector"]),
+            input_sha256=row["input_sha256"],
+            run_id=row["run_id"],
+        )
+    return VisiblePaperEmbedding(paper_id=row["paper_id"], embedding=embedding)
 
 
 # --- 寫入 ---------------------------------------------------------------------------------

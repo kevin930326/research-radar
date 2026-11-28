@@ -76,13 +76,17 @@ export function ZhSummarySection({ block, firstBadge, report }: ZhSummarySection
     case "empty":
       body =
         block.provenance === null ? (
-          <BlockLine state={block.state} provenance="missing">
-            {failedText}
+          <BlockLine state={block.state} provenance="missing" textKey={failedText.key}>
+            {failedText.text}
           </BlockLine>
         ) : null;
       break;
     case "failed":
-      body = <BlockLine state={block.state}>{failedText}</BlockLine>;
+      body = (
+        <BlockLine state={block.state} textKey={failedText.key}>
+          {failedText.text}
+        </BlockLine>
+      );
       break;
     case "pending_interactive":
     case "pending_batch":

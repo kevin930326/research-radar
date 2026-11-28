@@ -17,6 +17,7 @@ import radar.repo.audit  # audit_event
 import radar.repo.deleted_records  # deleted_record
 import radar.repo.demo_exports  # demo_export
 import radar.repo.embeddings  # embedding_model、embedding
+import radar.repo.evaluation  # eval_query、eval_query_relevant、eval_run
 import radar.repo.ingest_staging  # ingest_staging
 import radar.repo.judgments  # judgment_event
 import radar.repo.library  # library_item
@@ -25,6 +26,7 @@ import radar.repo.llm_ledger  # derivation_run、llm_call
 import radar.repo.members  # member、allowed_email
 import radar.repo.papers  # paper、external_id、paper_abstract、paper_keyword
 import radar.repo.raw_fetches  # raw_fetch
+import radar.repo.retrieval  # paper_search_document
 import radar.repo.sessions  # session
 import radar.repo.snapshots  # snapshot
 import radar.repo.weekly_runs  # noqa: F401  # weekly_run、weekly_run_journal

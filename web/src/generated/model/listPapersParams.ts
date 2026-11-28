@@ -18,4 +18,6 @@ export type ListPapersParams = {
   topic_match?: MatchMode;
   method_match?: MatchMode;
   cursor?: string | null;
+  q?: string | null;
+  similar_to?: string | null;
 };

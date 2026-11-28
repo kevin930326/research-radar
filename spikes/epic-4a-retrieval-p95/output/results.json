@@ -1,0 +1,66 @@
+{
+  "papers": 10000,
+  "dimensions": 1024,
+  "library_items": 500,
+  "runs": 200,
+  "fill_seconds": 18.2,
+  "config": {
+    "vector_min_similarity": "0.2",
+    "leg_limit": 100,
+    "rrf_k": 60,
+    "page_size": 20,
+    "qa_paper_count": 12,
+    "query_max_length": 500
+  },
+  "search_tracked": {
+    "median_total": 150.0,
+    "median_vector_hits_on_page": 10.0,
+    "p50_ms": 14.4,
+    "p95_ms": 16.6,
+    "max_ms": 18.7
+  },
+  "similar_tracked": {
+    "median_total": 49.0,
+    "median_vector_hits_on_page": 20.0,
+    "p50_ms": 6.3,
+    "p95_ms": 7.7,
+    "max_ms": 9.5
+  },
+  "search_lab": {
+    "median_total": 150.0,
+    "median_vector_hits_on_page": 10.0,
+    "p50_ms": 14.4,
+    "p95_ms": 16.3,
+    "max_ms": 18.1
+  },
+  "similar_lab": {
+    "median_total": 49.0,
+    "median_vector_hits_on_page": 20.0,
+    "p50_ms": 5.7,
+    "p95_ms": 7.0,
+    "max_ms": 8.5
+  },
+  "search_personal": {
+    "median_total": 102.0,
+    "median_vector_hits_on_page": 3.0,
+    "p50_ms": 10.8,
+    "p95_ms": 14.2,
+    "max_ms": 30.3
+  },
+  "similar_personal": {
+    "median_total": 2.0,
+    "median_vector_hits_on_page": 2.0,
+    "p50_ms": 5.5,
+    "p95_ms": 6.9,
+    "max_ms": 8.0
+  },
+  "search_tracked_with_year_filter": {
+    "median_total": 110.0,
+    "median_vector_hits_on_page": 10.0,
+    "p50_ms": 18.3,
+    "p95_ms": 21.5,
+    "max_ms": 96.3
+  },
+  "postgres": "PostgreSQL 18.7 (Debian 18.7-1.pgdg13+2) on aarch64-unknown-linux-gnu, compiled by gcc (Debian 14.2.0-19) 14.2.0, 64-bit",
+  "pgvector": "0.8.7"
+}
