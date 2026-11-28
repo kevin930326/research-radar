@@ -105,7 +105,7 @@ def test_downgrade_to_0018_drops_tables_and_upgrade_restores_them(db: TestDataba
 
     migrate(db)
 
-    assert db.revisions() == {"0023"}
+    assert db.revisions() == {"0024"}
     assert _relations(db) >= set(TABLES)
     for table in TABLES:
         assert _app(db, f"SELECT count(*) FROM {table}") == [(0,)]
